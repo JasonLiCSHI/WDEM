@@ -128,10 +128,12 @@ public sealed class LegacySourceProcessExecutorAdapterTests
   }
 
   [Theory]
-  [InlineData(ProcessFailureKind.TimedOut, "Process execution timed out.", true)]
-  [InlineData(ProcessFailureKind.OutputDrainFailed, "Process output collection failed.", true)]
-  [InlineData(ProcessFailureKind.PostStartFailed, "Process completion could not be verified.", false)]
-  public async Task ExecuteAsync_PostStartFailurePreservesEvidenceAndMapsSafeError(
+  [InlineData(false, ProcessFailureKind.StartFailed, "Process could not be started.", false)]
+  [InlineData(true, ProcessFailureKind.TimedOut, "Process execution timed out.", true)]
+  [InlineData(true, ProcessFailureKind.OutputDrainFailed, "Process output collection failed.", true)]
+  [InlineData(true, ProcessFailureKind.PostStartFailed, "Process completion could not be verified.", false)]
+  public async Task ExecuteAsync_FailurePreservesEvidenceAndMapsSafeError(
+      bool started,
       ProcessFailureKind failureKind,
       string expectedSummary,
       bool expectedRetryable)
@@ -139,7 +141,7 @@ public sealed class LegacySourceProcessExecutorAdapterTests
     var legacy = new RecordingProcessRunner
     {
       Handler = (_, _, _, _, _) => Task.FromResult(
-          new ProcessRunResult(true, 23, ["safe-output"], ["safe-error"])
+          new ProcessRunResult(started, 23, ["safe-output"], ["safe-error"])
           {
             FailureKind = failureKind,
             FailureMessage = "secret implementation detail"
@@ -152,12 +154,13 @@ public sealed class LegacySourceProcessExecutorAdapterTests
         null,
         CancellationToken.None);
 
-    Assert.True(result.Started);
+    Assert.Equal(started, result.Started);
     Assert.Equal(23, result.ExitCode);
     Assert.Equal(["safe-output"], result.StandardOutput);
     Assert.Equal(["safe-error"], result.StandardError);
     Assert.NotNull(result.Error);
     Assert.Equal(expectedSummary, result.Error.Summary);
+    Assert.Equal(23, result.Error.ProcessExitCode);
     Assert.Equal(expectedRetryable, result.Error.IsRetryable);
     Assert.DoesNotContain("secret", result.Error.Detail, StringComparison.OrdinalIgnoreCase);
   }

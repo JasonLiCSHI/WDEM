@@ -43,7 +43,8 @@ public sealed class LegacySourceProcessExecutorAdapter(IProcessRunner legacy) : 
           "Process could not be started.",
           "The requested external process could not be started.")
       {
-        IsRetryable = false
+        IsRetryable = false,
+        ProcessExitCode = result.ExitCode
       };
     }
 
@@ -55,21 +56,24 @@ public sealed class LegacySourceProcessExecutorAdapter(IProcessRunner legacy) : 
           "Process execution timed out.",
           "The external process exceeded its execution time limit.")
       {
-        IsRetryable = true
+        IsRetryable = true,
+        ProcessExitCode = result.ExitCode
       },
       Wdem.LegacySource.Models.ProcessFailureKind.OutputDrainFailed => new StructuredError(
           WdemErrorCode.ProviderError,
           "Process output collection failed.",
           "The process exited, but its output could not be completely collected.")
       {
-        IsRetryable = true
+        IsRetryable = true,
+        ProcessExitCode = result.ExitCode
       },
       _ => new StructuredError(
           WdemErrorCode.ProviderError,
           "Process completion could not be verified.",
           "The process started, but its final completion state could not be verified.")
       {
-        IsRetryable = false
+        IsRetryable = false,
+        ProcessExitCode = result.ExitCode
       }
     };
   }

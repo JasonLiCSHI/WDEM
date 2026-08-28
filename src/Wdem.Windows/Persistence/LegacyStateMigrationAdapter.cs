@@ -487,7 +487,7 @@ public sealed class LegacyStateMigrationAdapter
         value.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ||
         !string.Equals(StepNameRedactor.Redact(value), value, StringComparison.Ordinal) ||
         HasKnownCredentialPrefix(value) ||
-        ContainsSensitiveKeyFragment(value) ||
+        HasExplicitCompoundCredentialKey(value) ||
         LooksLikeHighEntropyCredential(value))
     {
       return false;
@@ -522,16 +522,17 @@ public sealed class LegacyStateMigrationAdapter
       value.StartsWith("AKIA", StringComparison.OrdinalIgnoreCase) ||
       value.StartsWith("ASIA", StringComparison.OrdinalIgnoreCase);
 
-  private static bool ContainsSensitiveKeyFragment(string value)
+  private static bool HasExplicitCompoundCredentialKey(string value)
   {
     var normalized = new string(value
         .Where(char.IsLetterOrDigit)
         .Select(char.ToLowerInvariant)
         .ToArray());
-    return normalized.Contains("token", StringComparison.Ordinal) ||
-        normalized.Contains("secret", StringComparison.Ordinal) ||
-        normalized.Contains("password", StringComparison.Ordinal) ||
+    return normalized.Contains("accesstoken", StringComparison.Ordinal) ||
+        normalized.Contains("authtoken", StringComparison.Ordinal) ||
+        normalized.Contains("clienttoken", StringComparison.Ordinal) ||
         normalized.Contains("apikey", StringComparison.Ordinal) ||
+        normalized.Contains("clientsecret", StringComparison.Ordinal) ||
         normalized.Contains("credential", StringComparison.Ordinal) ||
         normalized.Contains("authorization", StringComparison.Ordinal) ||
         normalized.Contains("accesskey", StringComparison.Ordinal) ||
@@ -540,29 +541,44 @@ public sealed class LegacyStateMigrationAdapter
 
   private static bool LooksLikeHighEntropyCredential(string value)
   {
-    if (value.Any(char.IsWhiteSpace))
+    if (value.Length < 20 ||
+        !value.All(char.IsLetterOrDigit) ||
+        !value.Any(char.IsUpper) ||
+        !value.Any(char.IsLower) ||
+        !value.Any(char.IsDigit))
     {
       return false;
     }
 
-    var tokenCharacters = value.Where(char.IsLetterOrDigit).ToArray();
-    if (tokenCharacters.Length < 20 ||
-        tokenCharacters.Length < value.Length * 0.9 ||
-        !tokenCharacters.Any(char.IsLetter) ||
-        !tokenCharacters.Any(char.IsDigit))
+    var characterClassTransitions = 0;
+    var digitRuns = 0;
+    var previousClass = CharacterClass(value[0]);
+    if (previousClass == 2)
     {
-      return false;
+      digitRuns++;
     }
 
-    var entropy = tokenCharacters
-        .GroupBy(character => character)
-        .Sum(group =>
+    for (var index = 1; index < value.Length; index++)
+    {
+      var currentClass = CharacterClass(value[index]);
+      if (currentClass != previousClass)
+      {
+        characterClassTransitions++;
+        if (currentClass == 2)
         {
-          var probability = (double)group.Count() / tokenCharacters.Length;
-          return -probability * Math.Log2(probability);
-        });
-    return entropy >= 3.5;
+          digitRuns++;
+        }
+      }
+
+      previousClass = currentClass;
+    }
+
+    return characterClassTransitions >= 8 && digitRuns >= 3;
   }
+
+  private static int CharacterClass(char value) => char.IsUpper(value)
+      ? 0
+      : char.IsLower(value) ? 1 : 2;
 
   private async Task WriteMarkerAtomicallyAsync(
       LegacyMigrationMarker marker,

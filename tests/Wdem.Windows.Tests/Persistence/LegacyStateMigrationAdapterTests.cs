@@ -302,6 +302,54 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     }
   }
 
+  [Fact]
+  public async Task MigrateAsync_PreservesLegitimateProductAndPackageLabels()
+  {
+    var legitimateLabels = new[]
+    {
+      "1Password",
+      "Microsoft.VisualStudio.2022.BuildTools",
+      "VisualStudioBuildTools2022"
+    };
+    WriteLegacy("state.json", JsonSerializer.Serialize(legitimateLabels));
+
+    var result = await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.Equal(legitimateLabels, result.ImportedStepNames);
+  }
+
+  [Fact]
+  public async Task MigrateAsync_ValidMarkerWithLegitimateLabelsIsNotQuarantined()
+  {
+    var markerDirectory = Path.Combine(_root, "WDEM");
+    Directory.CreateDirectory(markerDirectory);
+    var markerPath = Path.Combine(markerDirectory, "migration-v1.json");
+    await File.WriteAllTextAsync(markerPath, """
+        {
+          "schemaVersion": 1,
+          "recordKind": "legacy-step-name-reference",
+          "sourceProduct": "WinHome",
+          "importedAtUtc": "2026-08-29T00:00:00Z",
+          "importedStepNames": [
+            "1Password",
+            "Microsoft.VisualStudio.2022.BuildTools",
+            "VisualStudioBuildTools2022"
+          ]
+        }
+        """);
+    WriteLegacy("state.json", "[\"must-not-import\"]");
+
+    var result = await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.False(result.MigrationPerformed);
+    Assert.Empty(Directory.EnumerateFiles(
+        markerDirectory,
+        "migration-v1.invalid-*.json"));
+    Assert.Contains("1Password", await File.ReadAllTextAsync(markerPath));
+  }
+
   private sealed class RecordingFinalPathResolver(string finalPath) :
       ILegacyFileFinalPathResolver
   {
