@@ -14,8 +14,8 @@ namespace Wdem.Windows.Persistence;
 
 public sealed class JsonExecutionRunStore : IExecutionRunStore
 {
-  private const int SharingViolation = 32;
-  private const int LockViolation = 33;
+  private const int SharingViolationHResult = unchecked((int)0x80070020);
+  private const int LockViolationHResult = unchecked((int)0x80070021);
   private const int MaximumLogPageSize = 1000;
   private const int LogIndexRecordSize = sizeof(long) * 3;
   private static readonly TimeSpan MaximumClaimClockSkew = TimeSpan.FromMinutes(5);
@@ -176,11 +176,8 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
     }
   }
 
-  private static bool IsRecoveryLockBusy(IOException exception)
-  {
-    var nativeErrorCode = exception.HResult & 0xFFFF;
-    return nativeErrorCode is SharingViolation or LockViolation;
-  }
+  private static bool IsRecoveryLockBusy(IOException exception) =>
+      exception.HResult is SharingViolationHResult or LockViolationHResult;
 
   private static IAsyncDisposable OpenRecoveryLock(string lockPath) =>
       new FileStream(

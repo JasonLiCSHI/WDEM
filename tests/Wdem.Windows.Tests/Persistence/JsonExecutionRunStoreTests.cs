@@ -53,6 +53,28 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Theory]
+  [InlineData(unchecked((int)0x80040020))]
+  [InlineData(unchecked((int)0x80040021))]
+  public async Task TryAcquireRecoveryOperationAsync_PropagatesBusyLowWordFromOtherFacility(
+      int hresult)
+  {
+    var runId = Guid.NewGuid();
+    var expected = new IOException("interface failure", hresult);
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        _ => throw expected);
+
+    var actual = await Assert.ThrowsAsync<IOException>(
+        () => store.TryAcquireRecoveryOperationAsync(runId, CancellationToken.None));
+
+    Assert.Same(expected, actual);
+    var diagnostic = Assert.Single(store.Diagnostics);
+    Assert.Contains(runId.ToString("D"), diagnostic.Detail, StringComparison.Ordinal);
+    Assert.Contains(expected.Message, diagnostic.Detail, StringComparison.Ordinal);
+  }
+
+  [Theory]
   [InlineData(unchecked((int)0x80070020))]
   [InlineData(unchecked((int)0x80070021))]
   public async Task TryAcquireRecoveryOperationAsync_ReturnsBusyForSharingAndLockViolations(
