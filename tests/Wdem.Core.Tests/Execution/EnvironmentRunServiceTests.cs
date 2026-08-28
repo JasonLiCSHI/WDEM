@@ -54,6 +54,29 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task InspectAsync_InvalidProfilePathPersistsCatalogFailureWithoutThrowing()
+  {
+    const string invalidPath = "invalid\0profile.yaml";
+    var provider = new ScriptedProvider(Missing("git"));
+    var catalog = new DirectoryProfileCatalog(
+        Path.GetTempPath(),
+        new ResourceProviderRegistry([provider]));
+    var (service, store) = CreateService(provider, catalog: catalog);
+
+    var run = await service.InspectAsync(
+        new RunRequest(
+            invalidPath,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)),
+        CancellationToken.None);
+
+    Assert.Equal(ExecutionState.Completed, run.State);
+    Assert.Equal(ExecutionOutcome.Failed, run.Outcome);
+    Assert.Equal(invalidPath, run.ProfileSourcePath);
+    Assert.Equal(WdemErrorCode.ProfileError, Assert.Single(run.Plan!.Errors).Code);
+    Assert.Equal(run, await store.GetAsync(run.RunId, CancellationToken.None));
+  }
+
+  [Fact]
   public async Task InspectAsync_InvalidDagPreservesDependencyDiagnostics()
   {
     var provider = new ScriptedProvider(Missing("git"));
@@ -72,6 +95,41 @@ public sealed class EnvironmentRunServiceTests
     var error = Assert.Single(Assert.IsType<ExecutionPlan>(run.Plan).Errors);
     Assert.Equal(WdemErrorCode.DependencyError, error.Code);
     Assert.Contains("undefined resource 'missing'", error.Detail, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task InspectAsync_PreparationFailurePlanIdentityIsContentAddressed()
+  {
+    var error = new StructuredError(
+        WdemErrorCode.ProfileError,
+        "Profile validation failed.",
+        "The profile version is required.");
+    var provider = new ScriptedProvider(Missing("git"));
+    var catalog = new FixedProfileCatalog(new ProfileLoadResult
+    {
+      SourcePath = CanonicalProfilePath,
+      Errors = [error]
+    });
+    var (service, _) = CreateService(provider, catalog: catalog);
+
+    var first = (await service.InspectAsync(Request(), CancellationToken.None)).Plan!;
+    var second = (await service.InspectAsync(Request(), CancellationToken.None)).Plan!;
+    var changedCatalog = new FixedProfileCatalog(new ProfileLoadResult
+    {
+      SourcePath = CanonicalProfilePath,
+      Errors = [error with { Detail = "The profile id is required." }]
+    });
+    var (changedService, _) = CreateService(provider, catalog: changedCatalog);
+    var changed = (await changedService.InspectAsync(Request(), CancellationToken.None)).Plan!;
+
+    Assert.Equal(64, first.Fingerprint.Length);
+    Assert.Equal(first.Fingerprint, second.Fingerprint);
+    Assert.Equal(first.PlanId, second.PlanId);
+    Assert.Equal(
+        new Guid(Convert.FromHexString(first.Fingerprint).AsSpan(0, 16)),
+        first.PlanId);
+    Assert.NotEqual(first.Fingerprint, changed.Fingerprint);
+    Assert.NotEqual(first.PlanId, changed.PlanId);
   }
 
   [Fact]
@@ -247,6 +305,57 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task RunTransitions_FailedSaveLeavesCurrentAtLastPersistedSnapshot()
+  {
+    var initial = InterruptedRun() with
+    {
+      State = ExecutionState.Running,
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = new()
+        {
+          ResourceId = "git",
+          State = ExecutionState.Pending,
+          DetectedBefore = Missing("git")
+        }
+      }
+    };
+    var store = new InMemoryRunStore
+    {
+      SaveOperation = (_, _) => Task.FromException(
+          new InvalidOperationException("snapshot failed"))
+    };
+    await store.CreateAsync(initial, CancellationToken.None);
+    var transitionsType = typeof(EnvironmentRunService).GetNestedType(
+        "RunTransitions",
+        System.Reflection.BindingFlags.NonPublic)!;
+    var transitions = Activator.CreateInstance(
+        transitionsType,
+        System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.NonPublic,
+        binder: null,
+        args: [store, initial],
+        culture: null)!;
+    var setResource = transitionsType.GetMethod(
+        "SetResourceAsync",
+        System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.Public)!;
+    var save = Assert.IsAssignableFrom<Task>(setResource.Invoke(
+        transitions,
+        [new ResourceResult { ResourceId = "git", State = ExecutionState.Ready },
+         CancellationToken.None]));
+
+    var error = await Assert.ThrowsAsync<InvalidOperationException>(() => save);
+
+    Assert.Equal("snapshot failed", error.Message);
+    var current = Assert.IsType<ExecutionRun>(transitionsType.GetProperty("Current")!.GetValue(
+        transitions));
+    Assert.Same(initial, current);
+    Assert.Same(initial, await store.GetAsync(initial.RunId, CancellationToken.None));
+  }
+
+  [Fact]
   public async Task ApplyAsync_PersistsCancelledTerminalStateWithIndependentIoToken()
   {
     using var cancellation = new CancellationTokenSource();
@@ -298,26 +407,7 @@ public sealed class EnvironmentRunServiceTests
   {
     var provider = new ScriptedProvider(Satisfied("git", "2.52.1"));
     var (service, store) = CreateService(provider);
-    var completedAt = DateTimeOffset.UtcNow;
-    var pendingRestart = FailedRun("git") with
-    {
-      State = ExecutionState.Completed,
-      Outcome = ExecutionOutcome.Succeeded,
-      EndedAtUtc = completedAt,
-      RestartRequirements = [RestartPolicy.RestartRequired],
-      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
-      {
-        ["git"] = new()
-        {
-          ResourceId = "git",
-          State = ExecutionState.Completed,
-          Outcome = ExecutionOutcome.Succeeded,
-          FinalCompliance = ComplianceStatus.Satisfied,
-          EndedAtUtc = completedAt,
-          RestartRequirement = RestartPolicy.RestartRequired
-        }
-      }
-    };
+    var pendingRestart = RestartPendingRun();
     await store.CreateAsync(pendingRestart, CancellationToken.None);
 
     var candidates = await service.FindRecoveryCandidatesAsync(CancellationToken.None);
@@ -325,6 +415,84 @@ public sealed class EnvironmentRunServiceTests
     var candidate = Assert.Single(candidates);
     Assert.Equal(pendingRestart.RunId, candidate.RunId);
     Assert.Equal(["git"], candidate.PendingResourceIds);
+  }
+
+  [Fact]
+  public async Task FindRecoveryCandidatesAsync_CompletedRunListsOnlyPendingRestartResources()
+  {
+    var provider = new ScriptedProvider(Satisfied("git", "2.52.1"));
+    var (service, store) = CreateService(provider);
+    var pendingRestart = RestartPendingRun();
+    var unrelatedFailure = FailedRun("broken").ResourceResults["broken"];
+    await store.CreateAsync(pendingRestart with
+    {
+      ResourceResults = pendingRestart.ResourceResults
+          .Append(new KeyValuePair<string, ResourceResult>("broken", unrelatedFailure))
+          .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase)
+    }, CancellationToken.None);
+
+    var candidates = await service.FindRecoveryCandidatesAsync(CancellationToken.None);
+
+    var candidate = Assert.Single(candidates);
+    Assert.Equal(["git"], candidate.PendingResourceIds);
+  }
+
+  [Fact]
+  public async Task RecoverAsync_SuccessAcknowledgesPriorRestartCandidate()
+  {
+    var provider = new ScriptedProvider(Satisfied("git", "2.52.1"));
+    var (service, store) = CreateService(provider);
+    var pendingRestart = RestartPendingRun();
+    await store.CreateAsync(pendingRestart, CancellationToken.None);
+
+    var recovered = await service.RecoverAsync(
+        pendingRestart.RunId,
+        CancellationToken.None);
+    var candidates = await service.FindRecoveryCandidatesAsync(CancellationToken.None);
+    var persistedPrior = await store.GetAsync(pendingRestart.RunId, CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.Succeeded, recovered.Outcome);
+    Assert.DoesNotContain(candidates, candidate => candidate.RunId == pendingRestart.RunId);
+    Assert.Equal(
+        RestartPolicy.RestartRequired,
+        persistedPrior!.ResourceResults["git"].RestartRequirement);
+    Assert.Equal([RestartPolicy.RestartRequired], persistedPrior.RestartRequirements);
+  }
+
+  [Theory]
+  [InlineData(ApplyOutcome.Failed)]
+  [InlineData(ApplyOutcome.Cancelled)]
+  public async Task RecoverAsync_UnsuccessfulAttemptKeepsPriorRestartCandidate(
+      ApplyOutcome applyOutcome)
+  {
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyResult = new ResourceApplyResult
+      {
+        ResourceId = "git",
+        Outcome = applyOutcome,
+        Error = applyOutcome == ApplyOutcome.Failed
+            ? ProviderError("git", "apply failed")
+            : null
+      }
+    };
+    var (service, store) = CreateService(provider);
+    var pendingRestart = RestartPendingRun();
+    await store.CreateAsync(pendingRestart, CancellationToken.None);
+
+    var recovered = await service.RecoverAsync(
+        pendingRestart.RunId,
+        CancellationToken.None);
+    var candidates = await service.FindRecoveryCandidatesAsync(CancellationToken.None);
+    var persistedPrior = await store.GetAsync(pendingRestart.RunId, CancellationToken.None);
+
+    Assert.Contains(candidates, candidate => candidate.RunId == pendingRestart.RunId);
+    Assert.Empty(persistedPrior!.AcknowledgedRestartResourceIds);
+    Assert.Equal(
+        applyOutcome == ApplyOutcome.Cancelled
+            ? ExecutionOutcome.Cancelled
+            : ExecutionOutcome.Failed,
+        recovered.Outcome);
   }
 
   [Fact]
@@ -393,6 +561,26 @@ public sealed class EnvironmentRunServiceTests
     Assert.Equal(ExecutionState.Completed, abandoned.State);
     Assert.Equal(ExecutionOutcome.Cancelled, abandoned.Outcome);
     Assert.Equal(0, provider.ApplyCalls);
+  }
+
+  [Fact]
+  public async Task AbandonAsync_AcknowledgesCompletedRestartCandidateWithoutApplying()
+  {
+    var provider = new ScriptedProvider(Satisfied("git", "2.52.1"));
+    var (service, store) = CreateService(provider);
+    var pendingRestart = RestartPendingRun();
+    await store.CreateAsync(pendingRestart, CancellationToken.None);
+
+    await service.AbandonAsync(pendingRestart.RunId, CancellationToken.None);
+
+    var candidates = await service.FindRecoveryCandidatesAsync(CancellationToken.None);
+    var persisted = await store.GetAsync(pendingRestart.RunId, CancellationToken.None);
+    Assert.DoesNotContain(candidates, candidate => candidate.RunId == pendingRestart.RunId);
+    Assert.Equal(0, provider.ApplyCalls);
+    Assert.Equal(
+        RestartPolicy.RestartRequired,
+        persisted!.ResourceResults["git"].RestartRequirement);
+    Assert.Equal([RestartPolicy.RestartRequired], persisted.RestartRequirements);
   }
 
   private static (EnvironmentRunService Service, InMemoryRunStore Store) CreateService(
@@ -525,6 +713,30 @@ public sealed class EnvironmentRunServiceTests
       }
     }
   };
+
+  private static ExecutionRun RestartPendingRun()
+  {
+    var completedAt = DateTimeOffset.UtcNow;
+    return FailedRun("git") with
+    {
+      State = ExecutionState.Completed,
+      Outcome = ExecutionOutcome.Succeeded,
+      EndedAtUtc = completedAt,
+      RestartRequirements = [RestartPolicy.RestartRequired],
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = new()
+        {
+          ResourceId = "git",
+          State = ExecutionState.Completed,
+          Outcome = ExecutionOutcome.Succeeded,
+          FinalCompliance = ComplianceStatus.Satisfied,
+          EndedAtUtc = completedAt,
+          RestartRequirement = RestartPolicy.RestartRequired
+        }
+      }
+    };
+  }
 
   private static DetectedState Missing(string id) => new()
   {
@@ -727,6 +939,7 @@ public sealed class EnvironmentRunServiceTests
 
     public IReadOnlyList<StructuredError> Diagnostics => [];
     public List<ExecutionRun> SavedSnapshots { get; } = [];
+    public Func<ExecutionRun, CancellationToken, Task>? SaveOperation { get; init; }
 
     public Task CreateAsync(ExecutionRun run, CancellationToken cancellationToken)
     {
@@ -761,6 +974,11 @@ public sealed class EnvironmentRunServiceTests
     public Task SaveAsync(ExecutionRun run, CancellationToken cancellationToken)
     {
       cancellationToken.ThrowIfCancellationRequested();
+      if (SaveOperation is not null)
+      {
+        return SaveOperation(run, cancellationToken);
+      }
+
       _runs[run.RunId] = run;
       SavedSnapshots.Add(run);
       return Task.CompletedTask;

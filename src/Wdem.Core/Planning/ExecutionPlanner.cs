@@ -641,7 +641,7 @@ public sealed partial class ExecutionPlanner(
                   .Order(IdComparer)
                   .ThenBy(id => id, StringComparer.Ordinal)))));
 
-  private static ExecutionPlan CreatePlan(
+  internal static ExecutionPlan CreatePlan(
       string profileId,
       string profileVersion,
       IReadOnlyList<ResourceGraphLayer> layers,

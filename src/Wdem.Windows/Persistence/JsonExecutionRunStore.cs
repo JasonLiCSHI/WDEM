@@ -815,6 +815,9 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
     ValidateEnum(run.State, "run state");
     ValidateOptionalEnum(run.Outcome, "run outcome");
     ValidateElements(run.SelectedOptionalResourceIds, "selected optional resource identifiers");
+    ValidateElements(
+        run.AcknowledgedRestartResourceIds,
+        "acknowledged restart resource identifiers");
     ValidateElements(run.ResourceResults.Values, "resource results");
     ValidateElements(run.RestartReasons, "restart reasons");
     foreach (var restartRequirement in run.RestartRequirements)
@@ -1078,6 +1081,9 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
     ProfileId = _redactor.Redact(run.ProfileId),
     ProfileVersion = _redactor.Redact(run.ProfileVersion),
     SelectedOptionalResourceIds = run.SelectedOptionalResourceIds
+        .Select(_redactor.Redact)
+        .ToHashSet(StringComparer.OrdinalIgnoreCase),
+    AcknowledgedRestartResourceIds = run.AcknowledgedRestartResourceIds
         .Select(_redactor.Redact)
         .ToHashSet(StringComparer.OrdinalIgnoreCase),
     Machine = run.Machine with

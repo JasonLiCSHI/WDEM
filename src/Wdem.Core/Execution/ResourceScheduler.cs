@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using Wdem.Core.Planning;
 using Wdem.Core.Providers;
 using Wdem.Core.Runs;
@@ -44,9 +45,18 @@ public sealed class ResourceScheduler : IResourceScheduler
 
     if (cancellationToken.IsCancellationRequested)
     {
-      foreach (var resource in resources)
+      try
       {
-        results[resource.Definition.Id] = Cancelled(resource.Definition.Id);
+        foreach (var resource in resources)
+        {
+          var cancelled = Cancelled(resource.Definition.Id);
+          await NotifyTransitionAsync(transitionAsync, cancelled).ConfigureAwait(false);
+          results[resource.Definition.Id] = cancelled;
+        }
+      }
+      catch (TransitionObserverException exception)
+      {
+        ExceptionDispatchInfo.Capture(exception.Cause).Throw();
       }
 
       return Snapshot(results);
@@ -58,19 +68,22 @@ public sealed class ResourceScheduler : IResourceScheduler
         pair => pair.Key,
         pair => new SemaphoreSlim(pair.Value, pair.Value),
         StringComparer.OrdinalIgnoreCase);
+    using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+        cancellationToken);
+    var executionToken = executionCancellation.Token;
+    var running = new Dictionary<string, Task<CompletedExecution>>(
+        StringComparer.OrdinalIgnoreCase);
 
     try
     {
       var remaining = resources
           .Select(resource => resource.Definition.Id)
           .ToHashSet(StringComparer.OrdinalIgnoreCase);
-      var running = new Dictionary<string, Task<CompletedExecution>>(
-          StringComparer.OrdinalIgnoreCase);
       var rootFailures = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
       while (remaining.Count > 0 || running.Count > 0)
       {
-        if (cancellationToken.IsCancellationRequested)
+        if (executionToken.IsCancellationRequested)
         {
           await CompleteRemainingAsCancelledAsync(
               resources,
@@ -87,7 +100,7 @@ public sealed class ResourceScheduler : IResourceScheduler
               results,
               rootFailures,
               transitionAsync).ConfigureAwait(false);
-          if (cancellationToken.IsCancellationRequested)
+          if (executionToken.IsCancellationRequested)
           {
             await CompleteRemainingAsCancelledAsync(
                 resources,
@@ -103,7 +116,7 @@ public sealed class ResourceScheduler : IResourceScheduler
                 .ToArray();
             foreach (var resource in ready)
             {
-              if (cancellationToken.IsCancellationRequested)
+              if (executionToken.IsCancellationRequested)
               {
                 break;
               }
@@ -118,11 +131,11 @@ public sealed class ResourceScheduler : IResourceScheduler
                   executeAsync,
                   globalSemaphore,
                   providerSemaphores[scheduling.GroupsByResource[id]],
-                  cancellationToken,
+                  executionToken,
                   transitionAsync));
             }
 
-            if (cancellationToken.IsCancellationRequested)
+            if (executionToken.IsCancellationRequested)
             {
               await CompleteRemainingAsCancelledAsync(
                   resources,
@@ -173,6 +186,16 @@ public sealed class ResourceScheduler : IResourceScheduler
       }
 
       return Snapshot(results);
+    }
+    catch (Exception exception)
+    {
+      await CancelAndDrainAsync(executionCancellation, running.Values).ConfigureAwait(false);
+      if (exception is TransitionObserverException transitionException)
+      {
+        ExceptionDispatchInfo.Capture(transitionException.Cause).Throw();
+      }
+
+      throw;
     }
     finally
     {
@@ -361,6 +384,7 @@ public sealed class ResourceScheduler : IResourceScheduler
 
       startedAt = DateTimeOffset.UtcNow;
       await NotifyTransitionAsync(transitionAsync, Running(id, startedAt.Value)).ConfigureAwait(false);
+      cancellationToken.ThrowIfCancellationRequested();
       var returned = await executeAsync(resource, cancellationToken).ConfigureAwait(false);
       if (returned is null)
       {
@@ -399,6 +423,10 @@ public sealed class ResourceScheduler : IResourceScheduler
         EndedAtUtc = endedAt
       };
       return new CompletedExecution(id, result);
+    }
+    catch (TransitionObserverException)
+    {
+      throw;
     }
     catch (OperationCanceledException exception)
     {
@@ -455,7 +483,49 @@ public sealed class ResourceScheduler : IResourceScheduler
 
   private static Task NotifyTransitionAsync(
       Func<ResourceResult, Task>? transitionAsync,
-      ResourceResult result) => transitionAsync?.Invoke(result) ?? Task.CompletedTask;
+      ResourceResult result) => ObserveTransitionAsync(transitionAsync, result);
+
+  private static async Task ObserveTransitionAsync(
+      Func<ResourceResult, Task>? transitionAsync,
+      ResourceResult result)
+  {
+    if (transitionAsync is null)
+    {
+      return;
+    }
+
+    try
+    {
+      await transitionAsync(result).ConfigureAwait(false);
+    }
+    catch (Exception exception)
+    {
+      throw new TransitionObserverException(exception);
+    }
+  }
+
+  private static async Task CancelAndDrainAsync(
+      CancellationTokenSource cancellation,
+      IEnumerable<Task<CompletedExecution>> running)
+  {
+    try
+    {
+      await cancellation.CancelAsync().ConfigureAwait(false);
+    }
+    catch (Exception)
+    {
+      // The initiating exception remains the scheduler failure.
+    }
+
+    try
+    {
+      await Task.WhenAll(running).ConfigureAwait(false);
+    }
+    catch (Exception)
+    {
+      // Running work is drained before the initiating exception is rethrown.
+    }
+  }
 
   private static ResourceResult Blocked(string id, string failedDependency) => new()
   {
@@ -536,4 +606,11 @@ public sealed class ResourceScheduler : IResourceScheduler
       IReadOnlyDictionary<string, int> GroupLimits);
 
   private sealed record CompletedExecution(string ResourceId, ResourceResult Result);
+
+  private sealed class TransitionObserverException(Exception cause) : Exception(
+      "The resource transition observer failed.",
+      cause)
+  {
+    public Exception Cause { get; } = cause;
+  }
 }

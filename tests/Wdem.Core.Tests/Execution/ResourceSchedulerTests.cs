@@ -42,6 +42,155 @@ public sealed class ResourceSchedulerTests
         transitions);
   }
 
+  [Fact]
+  public async Task ExecuteAsync_ObserverFailureCancelsAndAwaitsRunningWorkBeforeThrowing()
+  {
+    using var cancellation = new CancellationTokenSource();
+    var firstStarted = NewGate();
+    var firstFinished = NewGate();
+    var invoked = new List<string>();
+
+    var execution = _scheduler.ExecuteAsync(
+        IndependentPlan("a", "b", "c"),
+        async (resource, token) =>
+        {
+          invoked.Add(resource.Definition.Id);
+          firstStarted.TrySetResult();
+          try
+          {
+            await Task.Delay(Timeout.InfiniteTimeSpan, token);
+          }
+          finally
+          {
+            firstFinished.TrySetResult();
+          }
+
+          return Result(resource.Definition.Id, ExecutionOutcome.Succeeded);
+        },
+        _ => new ProviderCapabilities { MaxConcurrentOperations = 3 },
+        maximumConcurrency: 3,
+        cancellation.Token,
+        transition => transition.ResourceId == "b" &&
+            transition.State == ExecutionState.Ready
+            ? Task.FromException(new InvalidOperationException("snapshot failed"))
+            : Task.CompletedTask);
+
+    try
+    {
+      var error = await Assert.ThrowsAsync<InvalidOperationException>(
+          () => execution.WaitAsync(TimeSpan.FromSeconds(5)));
+
+      Assert.Equal("snapshot failed", error.Message);
+      Assert.True(firstStarted.Task.IsCompleted);
+      Assert.True(firstFinished.Task.IsCompleted);
+      Assert.Equal(["a"], invoked);
+    }
+    finally
+    {
+      await cancellation.CancelAsync();
+      await firstFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_AlreadyCancelledReportsTerminalTransitionsBeforeReturning()
+  {
+    using var cancellation = new CancellationTokenSource();
+    await cancellation.CancelAsync();
+    var transitions = new List<ResourceResult>();
+
+    var result = await _scheduler.ExecuteAsync(
+        IndependentPlan("a", "b"),
+        (_, _) => throw new InvalidOperationException("No work should start."),
+        _ => new ProviderCapabilities(),
+        maximumConcurrency: 1,
+        cancellation.Token,
+        transition =>
+        {
+          transitions.Add(transition);
+          return Task.CompletedTask;
+        });
+
+    Assert.Equal(["a", "b"], transitions.Select(transition => transition.ResourceId));
+    Assert.All(transitions, transition =>
+    {
+      Assert.Equal(ExecutionState.Completed, transition.State);
+      Assert.Equal(ExecutionOutcome.Cancelled, transition.Outcome);
+    });
+    Assert.All(result.Results.Values, resourceResult =>
+        Assert.Equal(ExecutionOutcome.Cancelled, resourceResult.Outcome));
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_CancelledDuringRunningTransitionDoesNotInvokeDelegate()
+  {
+    using var cancellation = new CancellationTokenSource();
+    var runningObserved = NewGate();
+    var releaseRunningObserver = NewGate();
+    var transitions = new List<ResourceResult>();
+    var invoked = 0;
+
+    var execution = _scheduler.ExecuteAsync(
+        IndependentPlan("a"),
+        (resource, _) =>
+        {
+          Interlocked.Increment(ref invoked);
+          return Task.FromResult(Result(
+              resource.Definition.Id,
+              ExecutionOutcome.Succeeded));
+        },
+        _ => new ProviderCapabilities(),
+        maximumConcurrency: 1,
+        cancellation.Token,
+        async transition =>
+        {
+          transitions.Add(transition);
+          if (transition.State == ExecutionState.Running)
+          {
+            runningObserved.TrySetResult();
+            await releaseRunningObserver.Task;
+          }
+        });
+
+    await runningObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await cancellation.CancelAsync();
+    releaseRunningObserver.TrySetResult();
+    var result = await execution.WaitAsync(TimeSpan.FromSeconds(5));
+
+    Assert.Equal(0, invoked);
+    Assert.Equal(ExecutionOutcome.Cancelled, result.Results["a"].Outcome);
+    Assert.Contains(transitions, transition =>
+        transition.ResourceId == "a" &&
+        transition.State == ExecutionState.Completed &&
+        transition.Outcome == ExecutionOutcome.Cancelled);
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_RunningObserverFailureIsNotReportedAsProviderFailure()
+  {
+    var invoked = 0;
+
+    var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        _scheduler.ExecuteAsync(
+            IndependentPlan("a"),
+            (resource, _) =>
+            {
+              Interlocked.Increment(ref invoked);
+              return Task.FromResult(Result(
+                  resource.Definition.Id,
+                  ExecutionOutcome.Succeeded));
+            },
+            _ => new ProviderCapabilities(),
+            maximumConcurrency: 1,
+            CancellationToken.None,
+            transition => transition.State == ExecutionState.Running
+                ? Task.FromException(new InvalidOperationException("running snapshot failed"))
+                : Task.CompletedTask));
+
+    Assert.Equal("running snapshot failed", error.Message);
+    Assert.Equal(0, invoked);
+  }
+
   [Theory]
   [InlineData(0)]
   [InlineData(33)]

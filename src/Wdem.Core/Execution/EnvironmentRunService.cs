@@ -122,8 +122,18 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         prior.ProfileSourcePath,
         prior.SelectedOptionalResourceIds,
         RetriedFromRunId: prior.RunId);
-    return await ExecuteFreshAsync(request, RunMode.Apply, remaining, cancellationToken)
-        .ConfigureAwait(false);
+    var recovered = await ExecuteFreshAsync(
+        request,
+        RunMode.Apply,
+        remaining,
+        cancellationToken).ConfigureAwait(false);
+    if (recovered.State == ExecutionState.Completed &&
+        recovered.Outcome == ExecutionOutcome.Succeeded)
+    {
+      await AcknowledgeRestartResourcesAsync(prior, remaining).ConfigureAwait(false);
+    }
+
+    return recovered;
   }
 
   public async Task AbandonAsync(Guid priorRunId, CancellationToken cancellationToken)
@@ -131,6 +141,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     var prior = await GetRequiredRunAsync(priorRunId, cancellationToken).ConfigureAwait(false);
     if (prior.State == ExecutionState.Completed)
     {
+      await AcknowledgeRestartResourcesAsync(
+          prior,
+          PendingResourceIds(prior)).ConfigureAwait(false);
       return;
     }
 
@@ -194,7 +207,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           .ConfigureAwait(false);
     }
 
-    var sourcePath = Path.GetFullPath(loaded.SourcePath);
+    var sourcePath = CanonicalizeOrPreservePath(loaded.SourcePath);
     var profile = loaded.Profile;
     var graphResult = _graphBuilder.TryBuild(
         profile,
@@ -564,14 +577,15 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       CancellationToken cancellationToken)
   {
     var now = DateTimeOffset.UtcNow;
-    var planId = Guid.NewGuid();
+    var profileId = loaded.Profile?.Id ?? Path.GetFileNameWithoutExtension(request.ProfilePath);
+    var profileVersion = loaded.Profile?.Version ?? "unknown";
     var run = new ExecutionRun
     {
       RunId = Guid.NewGuid(),
       Mode = mode,
-      ProfileSourcePath = Path.GetFullPath(loaded.SourcePath),
-      ProfileId = loaded.Profile?.Id ?? Path.GetFileNameWithoutExtension(request.ProfilePath),
-      ProfileVersion = loaded.Profile?.Version ?? "unknown",
+      ProfileSourcePath = CanonicalizeOrPreservePath(loaded.SourcePath),
+      ProfileId = profileId,
+      ProfileVersion = profileVersion,
       SelectedOptionalResourceIds = request.SelectedOptionalResourceIds,
       StartedAtUtc = now,
       EndedAtUtc = now,
@@ -579,17 +593,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       Outcome = ExecutionOutcome.Failed,
       RetriedFromRunId = request.RetriedFromRunId,
       Machine = CurrentMachine(),
-      Plan = new ExecutionPlan
-      {
-        PlanId = planId,
-        Fingerprint = planId.ToString("N").ToUpperInvariant(),
-        ProfileId = loaded.Profile?.Id ?? Path.GetFileNameWithoutExtension(request.ProfilePath),
-        ProfileVersion = loaded.Profile?.Version ?? "unknown",
-        Layers = [],
-        Resources = [],
-        IsExecutable = false,
-        Errors = diagnostics
-      },
+      Plan = ExecutionPlanner.CreatePlan(profileId, profileVersion, [], [], diagnostics),
       ResourceResults = new Dictionary<string, ResourceResult>(IdComparer)
     };
     await _runStore.CreateAsync(run, cancellationToken).ConfigureAwait(false);
@@ -640,17 +644,34 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     return new ResourceGraph(nodes, layers);
   }
 
+  private static string CanonicalizeOrPreservePath(string path)
+  {
+    try
+    {
+      return Path.GetFullPath(path);
+    }
+    catch (Exception exception) when (
+        exception is ArgumentException or NotSupportedException or PathTooLongException)
+    {
+      return path;
+    }
+  }
+
   private static IReadOnlySet<string> PendingResourceIds(ExecutionRun run)
   {
     var ids = run.ResourceResults.Values
-        .Where(result => result.State != ExecutionState.Completed ||
-            result.Outcome is ExecutionOutcome.Failed or
-                ExecutionOutcome.Cancelled or
-                ExecutionOutcome.Skipped ||
-            result.RestartRequirement != RestartPolicy.NoRestart)
+        .Where(result => run.State != ExecutionState.Completed &&
+            (result.State != ExecutionState.Completed ||
+             result.Outcome is ExecutionOutcome.Failed or
+                 ExecutionOutcome.Cancelled or
+                 ExecutionOutcome.Skipped) ||
+            result.RestartRequirement != RestartPolicy.NoRestart &&
+            !run.AcknowledgedRestartResourceIds.Contains(result.ResourceId))
         .Select(result => result.ResourceId)
         .ToHashSet(IdComparer);
-    if (ids.Count == 0 && run.Plan is not null)
+    if (ids.Count == 0 &&
+        run.State != ExecutionState.Completed &&
+        run.Plan is not null)
     {
       foreach (var resource in run.Plan.Resources)
       {
@@ -662,6 +683,31 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     }
 
     return ids.ToFrozenSet(IdComparer);
+  }
+
+  private async Task AcknowledgeRestartResourcesAsync(
+      ExecutionRun run,
+      IReadOnlySet<string> resourceIds)
+  {
+    var acknowledged = run.AcknowledgedRestartResourceIds.ToHashSet(IdComparer);
+    foreach (var result in run.ResourceResults.Values)
+    {
+      if (resourceIds.Contains(result.ResourceId) &&
+          result.RestartRequirement != RestartPolicy.NoRestart)
+      {
+        acknowledged.Add(result.ResourceId);
+      }
+    }
+
+    if (acknowledged.SetEquals(run.AcknowledgedRestartResourceIds))
+    {
+      return;
+    }
+
+    await PersistTerminalAsync(run with
+    {
+      AcknowledgedRestartResourceIds = acknowledged
+    }).ConfigureAwait(false);
   }
 
   private static bool IsRecoverableState(ExecutionRun run) =>
@@ -806,8 +852,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
       try
       {
-        _current = _current with { State = ExecutionState.Running };
-        await store.SaveAsync(_current, cancellationToken).ConfigureAwait(false);
+        var next = _current with { State = ExecutionState.Running };
+        await store.SaveAsync(next, cancellationToken).ConfigureAwait(false);
+        _current = next;
       }
       finally
       {
@@ -831,8 +878,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         {
           DetectedBefore = result.DetectedBefore ?? previous?.DetectedBefore
         };
-        _current = _current with { ResourceResults = results };
-        await store.SaveAsync(_current, cancellationToken).ConfigureAwait(false);
+        var next = _current with { ResourceResults = results };
+        await store.SaveAsync(next, cancellationToken).ConfigureAwait(false);
+        _current = next;
       }
       finally
       {

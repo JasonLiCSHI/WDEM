@@ -14,6 +14,8 @@ public sealed record ExecutionRun
       new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase);
   private IReadOnlyList<RestartPolicy> _restartRequirements = [];
   private IReadOnlyList<string> _restartReasons = [];
+  private IReadOnlySet<string> _acknowledgedRestartResourceIds =
+      Array.Empty<string>().ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
   public required Guid RunId { get; init; }
   public required RunMode Mode { get; init; }
@@ -54,6 +56,14 @@ public sealed record ExecutionRun
     get => _restartReasons;
     init => _restartReasons = Array.AsReadOnly(
         (value ?? throw new ArgumentNullException(nameof(value))).ToArray());
+  }
+
+  public IReadOnlySet<string> AcknowledgedRestartResourceIds
+  {
+    get => _acknowledgedRestartResourceIds;
+    init => _acknowledgedRestartResourceIds = (
+        value ?? throw new ArgumentNullException(nameof(value)))
+        .ToFrozenSet(StringComparer.OrdinalIgnoreCase);
   }
 }
 

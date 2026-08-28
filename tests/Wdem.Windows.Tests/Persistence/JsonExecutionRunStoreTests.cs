@@ -328,6 +328,69 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task SaveAsync_PersistsRestartAcknowledgementAcrossStoreInstances()
+  {
+    var resource = SampleResourceResult() with
+    {
+      State = ExecutionState.Completed,
+      Outcome = ExecutionOutcome.Succeeded,
+      EndedAtUtc = DateTimeOffset.UtcNow,
+      RestartRequirement = RestartPolicy.RestartRequired
+    };
+    var run = SampleRun() with
+    {
+      State = ExecutionState.Completed,
+      Outcome = ExecutionOutcome.Succeeded,
+      EndedAtUtc = DateTimeOffset.UtcNow,
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = resource
+      },
+      RestartRequirements = [RestartPolicy.RestartRequired]
+    };
+    await _store.CreateAsync(run, CancellationToken.None);
+    var secondStore = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor());
+    var restored = (await secondStore.GetAsync(run.RunId, CancellationToken.None))!;
+
+    await secondStore.SaveAsync(restored with
+    {
+      AcknowledgedRestartResourceIds = new HashSet<string>(
+          ["git"],
+          StringComparer.OrdinalIgnoreCase)
+    }, CancellationToken.None);
+
+    var thirdStore = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor());
+    var acknowledged = (await thirdStore.GetAsync(run.RunId, CancellationToken.None))!;
+    Assert.Contains("git", acknowledged.AcknowledgedRestartResourceIds);
+    Assert.Equal([RestartPolicy.RestartRequired], acknowledged.RestartRequirements);
+    Assert.Equal(
+        RestartPolicy.RestartRequired,
+        acknowledged.ResourceResults["git"].RestartRequirement);
+  }
+
+  [Fact]
+  public async Task CreateAsync_RedactsAcknowledgedRestartResourceIds()
+  {
+    var run = SampleRun() with
+    {
+      AcknowledgedRestartResourceIds = new HashSet<string>(
+          ["token=restart-ack-secret"],
+          StringComparer.OrdinalIgnoreCase)
+    };
+
+    await _store.CreateAsync(run, CancellationToken.None);
+
+    var disk = await File.ReadAllTextAsync(_store.SnapshotPath(run.RunId));
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+    Assert.DoesNotContain("restart-ack-secret", disk, StringComparison.Ordinal);
+    Assert.Contains("token=***", restored!.AcknowledgedRestartResourceIds);
+  }
+
+  [Fact]
   public async Task SaveAsync_CoordinatesAcrossStoreInstances()
   {
     var run = SampleRun();
