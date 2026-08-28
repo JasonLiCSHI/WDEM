@@ -130,7 +130,14 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     if (recovered.State == ExecutionState.Completed &&
         recovered.Outcome == ExecutionOutcome.Succeeded)
     {
-      await AcknowledgeRestartResourcesAsync(prior, remaining).ConfigureAwait(false);
+      if (prior.State == ExecutionState.Completed)
+      {
+        await AcknowledgeRestartResourcesAsync(prior, remaining).ConfigureAwait(false);
+      }
+      else
+      {
+        await CompleteSupersededRunAsync(prior, recovered.RunId).ConfigureAwait(false);
+      }
     }
 
     return recovered;
@@ -167,13 +174,19 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
               }
             },
         IdComparer);
-    await _runStore.SaveAsync(prior with
+    var acknowledgedRestartResourceIds = prior.AcknowledgedRestartResourceIds
+        .Concat(prior.ResourceResults.Values
+            .Where(result => result.RestartRequirement != RestartPolicy.NoRestart)
+            .Select(result => result.ResourceId))
+        .ToHashSet(IdComparer);
+    await PersistTerminalAsync(prior with
     {
       State = ExecutionState.Completed,
       Outcome = ExecutionOutcome.Cancelled,
       EndedAtUtc = endedAt,
-      ResourceResults = results
-    }, cancellationToken).ConfigureAwait(false);
+      ResourceResults = results,
+      AcknowledgedRestartResourceIds = acknowledgedRestartResourceIds
+    }).ConfigureAwait(false);
   }
 
   private async Task<ExecutionRun> ExecuteFreshAsync(
@@ -707,6 +720,44 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     await PersistTerminalAsync(run with
     {
       AcknowledgedRestartResourceIds = acknowledged
+    }).ConfigureAwait(false);
+  }
+
+  private async Task CompleteSupersededRunAsync(ExecutionRun run, Guid replacementRunId)
+  {
+    var endedAt = DateTimeOffset.UtcNow;
+    var results = run.ResourceResults.ToDictionary(
+        pair => pair.Key,
+        pair => pair.Value.State == ExecutionState.Completed
+            ? pair.Value
+            : pair.Value with
+            {
+              State = ExecutionState.Completed,
+              Outcome = ExecutionOutcome.Cancelled,
+              EndedAtUtc = endedAt,
+              Error = new StructuredError(
+                  WdemErrorCode.CancellationError,
+                  "Execution continued in a recovery run.",
+                  $"Resource '{pair.Key}' was superseded by recovery run " +
+                      $"'{replacementRunId:D}'.")
+              {
+                ResourceId = pair.Key,
+                IsRetryable = false
+              }
+            },
+        IdComparer);
+    var acknowledgedRestartResourceIds = run.AcknowledgedRestartResourceIds
+        .Concat(run.ResourceResults.Values
+            .Where(result => result.RestartRequirement != RestartPolicy.NoRestart)
+            .Select(result => result.ResourceId))
+        .ToHashSet(IdComparer);
+    await PersistTerminalAsync(run with
+    {
+      State = ExecutionState.Completed,
+      Outcome = ExecutionOutcome.Cancelled,
+      EndedAtUtc = endedAt,
+      ResourceResults = results,
+      AcknowledgedRestartResourceIds = acknowledgedRestartResourceIds
     }).ConfigureAwait(false);
   }
 

@@ -403,6 +403,74 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task RecoverAsync_SuccessConsumesIncompletePriorAcrossServices()
+  {
+    var provider = new ScriptedProvider(Satisfied("git", "2.52.1"));
+    var sharedRuns = new Dictionary<Guid, ExecutionRun>();
+    var firstStore = new InMemoryRunStore(sharedRuns);
+    var (service, _) = CreateService(provider, store: firstStore);
+    var interrupted = InterruptedRun();
+    await firstStore.CreateAsync(interrupted, CancellationToken.None);
+
+    var recovered = await service.RecoverAsync(interrupted.RunId, CancellationToken.None);
+
+    var secondStore = new InMemoryRunStore(sharedRuns);
+    var (secondService, _) = CreateService(provider, store: secondStore);
+    var persistedPrior = await secondStore.GetAsync(interrupted.RunId, CancellationToken.None);
+    var candidates = await secondService.FindRecoveryCandidatesAsync(CancellationToken.None);
+    var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        secondService.RecoverAsync(interrupted.RunId, CancellationToken.None));
+    Assert.Equal(ExecutionOutcome.Succeeded, recovered.Outcome);
+    Assert.Equal(ExecutionState.Completed, persistedPrior!.State);
+    Assert.Equal(ExecutionOutcome.Cancelled, persistedPrior.Outcome);
+    Assert.NotNull(persistedPrior.EndedAtUtc);
+    Assert.False(persistedPrior.ResourceResults["git"].DetectedBefore!.Exists);
+    Assert.DoesNotContain(candidates, candidate => candidate.RunId == interrupted.RunId);
+    Assert.Contains("not eligible for recovery", error.Message, StringComparison.Ordinal);
+  }
+
+  [Theory]
+  [InlineData(ApplyOutcome.Failed)]
+  [InlineData(ApplyOutcome.Cancelled)]
+  public async Task RecoverAsync_UnsuccessfulAttemptKeepsIncompletePriorAcrossServices(
+      ApplyOutcome applyOutcome)
+  {
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyResult = new ResourceApplyResult
+      {
+        ResourceId = "git",
+        Outcome = applyOutcome,
+        Error = applyOutcome == ApplyOutcome.Failed
+            ? ProviderError("git", "apply failed")
+            : null
+      }
+    };
+    var sharedRuns = new Dictionary<Guid, ExecutionRun>();
+    var firstStore = new InMemoryRunStore(sharedRuns);
+    var (service, _) = CreateService(provider, store: firstStore);
+    var interrupted = InterruptedRun();
+    await firstStore.CreateAsync(interrupted, CancellationToken.None);
+
+    var recovered = await service.RecoverAsync(interrupted.RunId, CancellationToken.None);
+
+    var secondStore = new InMemoryRunStore(sharedRuns);
+    var (secondService, _) = CreateService(provider, store: secondStore);
+    var persistedPrior = await secondStore.GetAsync(interrupted.RunId, CancellationToken.None);
+    var candidates = await secondService.FindRecoveryCandidatesAsync(CancellationToken.None);
+    Assert.Equal(
+        applyOutcome == ApplyOutcome.Cancelled
+            ? ExecutionOutcome.Cancelled
+            : ExecutionOutcome.Failed,
+        recovered.Outcome);
+    Assert.Equal(ExecutionState.Running, persistedPrior!.State);
+    Assert.Null(persistedPrior.Outcome);
+    Assert.Null(persistedPrior.EndedAtUtc);
+    Assert.Empty(persistedPrior.AcknowledgedRestartResourceIds);
+    Assert.Contains(candidates, candidate => candidate.RunId == interrupted.RunId);
+  }
+
+  [Fact]
   public async Task FindRecoveryCandidatesAsync_IncludesCompletedRunWithPendingRestart()
   {
     var provider = new ScriptedProvider(Satisfied("git", "2.52.1"));
@@ -560,6 +628,29 @@ public sealed class EnvironmentRunServiceTests
     Assert.NotNull(abandoned);
     Assert.Equal(ExecutionState.Completed, abandoned.State);
     Assert.Equal(ExecutionOutcome.Cancelled, abandoned.Outcome);
+    Assert.Equal(0, provider.ApplyCalls);
+  }
+
+  [Fact]
+  public async Task AbandonAsync_IncompleteRestartRunIsNotRecoverableAcrossServices()
+  {
+    var provider = new ScriptedProvider(Missing("git"));
+    var sharedRuns = new Dictionary<Guid, ExecutionRun>();
+    var firstStore = new InMemoryRunStore(sharedRuns);
+    var (service, _) = CreateService(provider, store: firstStore);
+    var interrupted = IncompleteRestartRun();
+    await firstStore.CreateAsync(interrupted, CancellationToken.None);
+
+    await service.AbandonAsync(interrupted.RunId, CancellationToken.None);
+
+    var secondStore = new InMemoryRunStore(sharedRuns);
+    var (secondService, _) = CreateService(provider, store: secondStore);
+    var persisted = await secondStore.GetAsync(interrupted.RunId, CancellationToken.None);
+    var candidates = await secondService.FindRecoveryCandidatesAsync(CancellationToken.None);
+    Assert.Equal(ExecutionState.Completed, persisted!.State);
+    Assert.Equal(ExecutionOutcome.Cancelled, persisted.Outcome);
+    Assert.Contains("git", persisted.AcknowledgedRestartResourceIds);
+    Assert.DoesNotContain(candidates, candidate => candidate.RunId == interrupted.RunId);
     Assert.Equal(0, provider.ApplyCalls);
   }
 
@@ -733,6 +824,33 @@ public sealed class EnvironmentRunServiceTests
           FinalCompliance = ComplianceStatus.Satisfied,
           EndedAtUtc = completedAt,
           RestartRequirement = RestartPolicy.RestartRequired
+        }
+      }
+    };
+  }
+
+  private static ExecutionRun IncompleteRestartRun()
+  {
+    var completedAt = DateTimeOffset.UtcNow.AddSeconds(-1);
+    return InterruptedRun() with
+    {
+      RestartRequirements = [RestartPolicy.RestartRequired],
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = new()
+        {
+          ResourceId = "git",
+          State = ExecutionState.Completed,
+          Outcome = ExecutionOutcome.Succeeded,
+          FinalCompliance = ComplianceStatus.Satisfied,
+          EndedAtUtc = completedAt,
+          RestartRequirement = RestartPolicy.RestartRequired
+        },
+        ["pending"] = new()
+        {
+          ResourceId = "pending",
+          State = ExecutionState.Running,
+          DetectedBefore = Missing("pending")
         }
       }
     };
