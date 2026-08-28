@@ -84,6 +84,38 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task AppendLogAsync_PreservesBearerProtocolDiagnosticOnDisk()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    await _store.AppendLogAsync(
+        run.RunId,
+        SampleLog(1) with { Message = "Bearer RFC6750 support enabled" },
+        CancellationToken.None);
+
+    var disk = await File.ReadAllTextAsync(_store.LogPath(run.RunId));
+
+    Assert.Contains("Bearer RFC6750 support enabled", disk, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task AppendLogAsync_RedactsJwtAndPreservesSentencePeriodOnDisk()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    await _store.AppendLogAsync(
+        run.RunId,
+        SampleLog(1) with { Message = "Bearer abc.def.ghi." },
+        CancellationToken.None);
+
+    var disk = await File.ReadAllTextAsync(_store.LogPath(run.RunId));
+    var page = await _store.ReadLogPageAsync(run.RunId, 0, 10, CancellationToken.None);
+
+    Assert.DoesNotContain("abc.def.ghi", disk, StringComparison.Ordinal);
+    Assert.Equal("Bearer ***.", Assert.Single(page).Message);
+  }
+
+  [Fact]
   public async Task CreateAsync_WritesCamelCaseSnapshotAndNormalizesProgress()
   {
     var run = SampleRun() with

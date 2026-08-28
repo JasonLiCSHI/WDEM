@@ -26,11 +26,21 @@ public sealed class LogRedactorTests
   [InlineData("Bearer abc.def.ghi, retry scheduled", "Bearer ***, retry scheduled")]
   [InlineData("Bearer abc.def.ghi; provider healthy", "Bearer ***; provider healthy")]
   [InlineData("(Bearer abc.def.ghi) completed", "(Bearer ***) completed")]
+  [InlineData("Bearer abc.def.ghi.", "Bearer ***.")]
+  [InlineData("Bearer abcDEFghi+/=", "Bearer ***")]
   public void Redact_RemovesStandaloneBearerTokensWithoutConsumingFollowingText(
       string input,
       string expected)
   {
     Assert.Equal(expected, _redactor.Redact(input));
+  }
+
+  [Theory]
+  [InlineData("Bearer OAuth2 authentication enabled")]
+  [InlineData("Bearer RFC6750 support enabled")]
+  public void Redact_PreservesBearerProtocolDiagnostics(string input)
+  {
+    Assert.Equal(input, _redactor.Redact(input));
   }
 
   [Fact]

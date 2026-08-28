@@ -40,7 +40,7 @@ public sealed partial class LogRedactor
     var redacted = SecretBlockPattern().Replace(value, match =>
         $"-----BEGIN {match.Groups["type"].Value}-----\n***\n-----END {match.Groups["type"].Value}-----");
     redacted = AuthorizationBearerPattern().Replace(redacted, "${prefix}***");
-    redacted = StandaloneBearerPattern().Replace(redacted, "${prefix}***");
+    redacted = StandaloneBearerCandidatePattern().Replace(redacted, RedactStandaloneBearer);
     redacted = QuotedAssignmentPattern().Replace(
         redacted,
         "${prefix}${quote}***${quote}");
@@ -109,9 +109,9 @@ public sealed partial class LogRedactor
   private static partial Regex AuthorizationBearerPattern();
 
   [GeneratedRegex(
-      @"(?<prefix>\bbearer[ \t]+)(?:(?=[a-z0-9._~+/=-]{6,})(?=[a-z0-9._~+/=-]*(?:[0-9._~+/-]))[a-z0-9._~+/=-]+|[a-z]{16,})",
-      RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-  private static partial Regex StandaloneBearerPattern();
+      @"(?<prefix>\bbearer[ \t]+)(?<token>[a-z0-9._~+/=-]+)",
+      RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking)]
+  private static partial Regex StandaloneBearerCandidatePattern();
 
   [GeneratedRegex(
       "(?<prefix>(?<![a-z0-9_-])[\\\"']?(?:password|token|api[-_]?key|thumbprint)(?![a-z0-9_-])[\\\"']?\\s*[:=]\\s*)(?<quote>[\\\"'])(?:\\\\.|(?!\\k<quote>).)*?\\k<quote>",
@@ -127,4 +127,40 @@ public sealed partial class LogRedactor
       @"-----BEGIN (?<type>(?:[A-Z0-9 ]*PRIVATE KEY|CERTIFICATE))-----[\s\S]*?-----END \k<type>-----",
       RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
   private static partial Regex SecretBlockPattern();
+
+  private static string RedactStandaloneBearer(Match match)
+  {
+    var rawToken = match.Groups["token"].Value;
+    var token = rawToken.TrimEnd('.');
+    if (!LooksLikeStandaloneBearerToken(token))
+    {
+      return match.Value;
+    }
+
+    var trailingPeriods = rawToken[token.Length..];
+    return $"{match.Groups["prefix"].Value}***{trailingPeriods}";
+  }
+
+  private static bool LooksLikeStandaloneBearerToken(string token)
+  {
+    var jwtSegments = token.Split('.');
+    if (jwtSegments.Length >= 3 && jwtSegments.All(IsBase64UrlSegment))
+    {
+      return true;
+    }
+
+    var hasDigit = token.Any(char.IsAsciiDigit);
+    var strongTokenPunctuationKinds = token
+        .Where(character => character is '-' or '_' or '~' or '+' or '/' or '=')
+        .Distinct()
+        .Count();
+    var hasTokenFeatures = strongTokenPunctuationKinds >= 2
+        || (hasDigit && strongTokenPunctuationKinds == 1);
+    return (token.Length >= 12 && hasTokenFeatures)
+        || token.Length >= 24;
+  }
+
+  private static bool IsBase64UrlSegment(string segment) =>
+      segment.Length > 0
+      && segment.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
 }
