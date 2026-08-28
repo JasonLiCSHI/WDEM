@@ -151,14 +151,20 @@ internal static class ProviderLifecycleSupport
       string detail,
       IReadOnlyDictionary<string, string> evidence)
   {
-    var error = result.Error ?? new StructuredError(
-        WdemErrorCode.DetectionError,
-        summary,
-        detail)
-    {
-      ResourceId = resource.Id,
-      ProcessExitCode = result.ExitCode
-    };
+    var error = result.Error is null
+        ? new StructuredError(
+            WdemErrorCode.DetectionError,
+            summary,
+            detail)
+        {
+          ResourceId = resource.Id,
+          ProcessExitCode = result.ExitCode
+        }
+        : result.Error with
+        {
+          ResourceId = result.Error.ResourceId ?? resource.Id,
+          ProcessExitCode = result.Error.ProcessExitCode ?? result.ExitCode
+        };
     return new DetectedState
     {
       ResourceId = resource.Id,

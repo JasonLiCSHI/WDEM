@@ -115,7 +115,11 @@ public sealed class DotNetSdkProviderTests
     var state = await provider.DetectAsync(DotNetResource(), CancellationToken.None);
 
     Assert.Equal(DetectionOutcome.Failed, state.Outcome);
-    Assert.Same(processError, state.StructuredError);
+    Assert.NotSame(processError, state.StructuredError);
+    Assert.Equal(processError.Code, state.StructuredError!.Code);
+    Assert.Equal(processError.Detail, state.StructuredError.Detail);
+    Assert.Equal("dotnet-sdk", state.StructuredError.ResourceId);
+    Assert.Equal(0, state.StructuredError.ProcessExitCode);
   }
 
   [Fact]
@@ -134,7 +138,11 @@ public sealed class DotNetSdkProviderTests
     var state = await provider.DetectAsync(DotNetResource(), CancellationToken.None);
 
     Assert.Equal(DetectionOutcome.Failed, state.Outcome);
-    Assert.Same(processError, state.StructuredError);
+    Assert.NotSame(processError, state.StructuredError);
+    Assert.Equal(processError.Code, state.StructuredError!.Code);
+    Assert.Equal(processError.Detail, state.StructuredError.Detail);
+    Assert.Equal("dotnet-sdk", state.StructuredError.ResourceId);
+    Assert.Null(state.StructuredError.ProcessExitCode);
   }
 
   [Theory]

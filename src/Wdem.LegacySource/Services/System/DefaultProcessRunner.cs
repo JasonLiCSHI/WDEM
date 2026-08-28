@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using Wdem.LegacySource.Interfaces;
 using Wdem.LegacySource.Models;
@@ -403,10 +404,16 @@ namespace Wdem.LegacySource.Services.System
 
       return new ProcessRunResult(false, null, [], [])
       {
-        FailureKind = ProcessFailureKind.StartFailed,
+        FailureKind = IsExecutableNotFound(exception)
+            ? ProcessFailureKind.ExecutableNotFound
+            : ProcessFailureKind.StartFailed,
         FailureMessage = "Process could not be started."
       };
     }
+
+    private static bool IsExecutableNotFound(Exception? exception) =>
+        exception is FileNotFoundException ||
+        exception is Win32Exception { NativeErrorCode: 2 };
 
     private static async Task CaptureOutputAsync(
         StreamReader reader,

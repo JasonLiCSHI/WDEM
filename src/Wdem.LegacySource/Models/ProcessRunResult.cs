@@ -17,5 +17,6 @@ public enum ProcessFailureKind
   StartFailed,
   TimedOut,
   OutputDrainFailed,
-  PostStartFailed
+  PostStartFailed,
+  ExecutableNotFound
 }

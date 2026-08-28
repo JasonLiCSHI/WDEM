@@ -118,7 +118,7 @@ namespace Wdem.LegacySource.Tests.Services.System
       Assert.Null(result.ExitCode);
       Assert.Empty(result.StandardOutput);
       Assert.Empty(result.StandardError);
-      Assert.Equal(ProcessFailureKind.StartFailed, result.FailureKind);
+      Assert.Equal("ExecutableNotFound", result.FailureKind.ToString());
     }
 
     [Fact]

@@ -241,7 +241,11 @@ public sealed class WinGetPackageProviderTests
     var state = await provider.DetectAsync(PackageResource(), CancellationToken.None);
 
     Assert.Equal(DetectionOutcome.Failed, state.Outcome);
-    Assert.Same(processError, state.StructuredError);
+    Assert.NotSame(processError, state.StructuredError);
+    Assert.Equal(processError.Code, state.StructuredError!.Code);
+    Assert.Equal(processError.Detail, state.StructuredError.Detail);
+    Assert.Equal("git-package", state.StructuredError.ResourceId);
+    Assert.Equal(0, state.StructuredError.ProcessExitCode);
   }
 
   [Theory]

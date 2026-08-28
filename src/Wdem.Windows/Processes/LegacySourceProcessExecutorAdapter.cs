@@ -38,6 +38,12 @@ public sealed class LegacySourceProcessExecutorAdapter(IProcessRunner legacy) : 
   {
     if (!result.Started)
     {
+      if (result.FailureKind ==
+          Wdem.LegacySource.Models.ProcessFailureKind.ExecutableNotFound)
+      {
+        return null;
+      }
+
       return new StructuredError(
           WdemErrorCode.ProviderError,
           "Process could not be started.",

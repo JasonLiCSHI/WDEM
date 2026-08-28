@@ -85,7 +85,11 @@ public sealed class GitProviderTests
     var state = await provider.DetectAsync(GitResource(), CancellationToken.None);
 
     Assert.Equal(DetectionOutcome.Failed, state.Outcome);
-    Assert.Same(processError, state.StructuredError);
+    Assert.NotSame(processError, state.StructuredError);
+    Assert.Equal(processError.Code, state.StructuredError!.Code);
+    Assert.Equal(processError.Detail, state.StructuredError.Detail);
+    Assert.Equal("git", state.StructuredError.ResourceId);
+    Assert.Equal(0, state.StructuredError.ProcessExitCode);
   }
 
   [Fact]
@@ -103,7 +107,11 @@ public sealed class GitProviderTests
     var state = await provider.DetectAsync(GitResource(), CancellationToken.None);
 
     Assert.Equal(DetectionOutcome.Failed, state.Outcome);
-    Assert.Same(processError, state.StructuredError);
+    Assert.NotSame(processError, state.StructuredError);
+    Assert.Equal(processError.Code, state.StructuredError!.Code);
+    Assert.Equal(processError.Detail, state.StructuredError.Detail);
+    Assert.Equal("git", state.StructuredError.ResourceId);
+    Assert.Null(state.StructuredError.ProcessExitCode);
   }
 
   [Theory]
