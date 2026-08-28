@@ -8,11 +8,16 @@ using Wdem.Core.Resources;
 
 namespace Wdem.Core.Planning;
 
-public sealed class ExecutionPlanner(IResourceProviderRegistry providers) : IExecutionPlanner
+public sealed partial class ExecutionPlanner(IResourceProviderRegistry providers) : IExecutionPlanner
 {
   public const int MaxResourceCount = 10_000;
   public const int MaxStepsPerResource = 1_000;
   public const int MaxTotalStepCount = 100_000;
+  public const int MaxTextFieldByteCount = 4_096;
+  public const int MaxDiagnosticsPerResource = 100;
+  public const int MaxTotalProviderTextByteCount = 4 * 1024 * 1024;
+
+  private const int MaxStepIdLength = 128;
 
   private static readonly StringComparer IdComparer = StringComparer.OrdinalIgnoreCase;
   private readonly IResourceProviderRegistry _providers =
@@ -31,6 +36,12 @@ public sealed class ExecutionPlanner(IResourceProviderRegistry providers) : IExe
     ArgumentException.ThrowIfNullOrWhiteSpace(profileVersion);
     cancellationToken.ThrowIfCancellationRequested();
 
+    if (Utf8ByteCount(profileId) > MaxTextFieldByteCount ||
+        Utf8ByteCount(profileVersion) > MaxTextFieldByteCount)
+    {
+      throw new ArgumentException("Profile identity fields exceed the execution-plan size limit.");
+    }
+
     var graphError = ValidateGraph(graph);
     if (graphError is not null || graph.Nodes.Count > MaxResourceCount)
     {
@@ -48,8 +59,10 @@ public sealed class ExecutionPlanner(IResourceProviderRegistry providers) : IExe
     var planned = new List<PlannedResource>(graph.Nodes.Count);
     var plannedById = new Dictionary<string, PlannedResource>(IdComparer);
     var totalSteps = 0;
+    var totalProviderTextBytes = 0;
+    var canonicalLayers = CanonicalizeLayers(graph.TopologicalLayers);
 
-    foreach (var layer in graph.TopologicalLayers)
+    foreach (var layer in canonicalLayers)
     {
       foreach (var resourceId in layer.ResourceIds)
       {
@@ -60,7 +73,7 @@ public sealed class ExecutionPlanner(IResourceProviderRegistry providers) : IExe
             detectedStates,
             cancellationToken).ConfigureAwait(false);
 
-        var blockedBy = resolved.Definition.Dependencies
+        var blockedBy = item.Dependencies
             .Where(dependencyId => plannedById.TryGetValue(dependencyId, out var dependency) &&
                 dependency.Status is not PlannedResourceStatus.Ready and
                     not PlannedResourceStatus.AlreadySatisfied)
@@ -93,7 +106,17 @@ public sealed class ExecutionPlanner(IResourceProviderRegistry providers) : IExe
               resolved.Definition.Id,
               "The execution plan contains too many steps.",
               $"The plan exceeds the total limit of {MaxTotalStepCount} steps.");
-          item = Invalid(item, sizeError);
+          return CreatePlan(profileId, profileVersion, [], [], [sizeError]);
+        }
+
+        totalProviderTextBytes += MeasureProviderText(item);
+        if (totalProviderTextBytes > MaxTotalProviderTextByteCount)
+        {
+          var sizeError = ProviderError(
+              resolved.Definition.Id,
+              "The execution plan contains too much provider text.",
+              $"Provider text exceeds the {MaxTotalProviderTextByteCount}-byte plan limit.");
+          return CreatePlan(profileId, profileVersion, [], [], [sizeError]);
         }
 
         errors.AddRange(item.Diagnostics.Where(error => !errors.Contains(error)));
@@ -105,7 +128,7 @@ public sealed class ExecutionPlanner(IResourceProviderRegistry providers) : IExe
     return CreatePlan(
         profileId,
         profileVersion,
-        SnapshotLayers(graph.TopologicalLayers),
+        canonicalLayers,
         ReadOnly(planned),
         ReadOnly(errors));
   }
@@ -145,6 +168,63 @@ public sealed class ExecutionPlanner(IResourceProviderRegistry providers) : IExe
           PlannedResourceStatus.DetectionFailed);
     }
 
+    if (!IdComparer.Equals(detectedState.ResourceId, definition.Id))
+    {
+      return Failure(
+          resolved,
+          definition,
+          new StructuredError(
+              WdemErrorCode.DetectionError,
+              "Detected state does not match the resource.",
+              $"State for resource '{SanitizeVisible(detectedState.ResourceId)}' cannot plan resource '{definition.Id}'.")
+          {
+            ResourceId = definition.Id,
+            SuggestedAction = "Detect the resource again before creating a plan."
+          },
+          PlannedResourceStatus.DetectionFailed);
+    }
+
+    if (!Enum.IsDefined(detectedState.Outcome))
+    {
+      return Failure(resolved, definition, ProviderError(
+          definition.Id,
+          "Detected state contains an unknown outcome.",
+          "The provider returned an undefined detection outcome."));
+    }
+
+    if (detectedState.Outcome == DetectionOutcome.Succeeded &&
+        (detectedState.Error is not null || detectedState.StructuredError is not null))
+    {
+      return Failure(resolved, definition, ProviderError(
+          definition.Id,
+          "Successful detection contains an error.",
+          "A successful detected state cannot also contain error diagnostics."));
+    }
+
+    var detectedDiagnostics = new List<StructuredError>();
+    if (detectedState.StructuredError is not null)
+    {
+      if (!TryNormalizeDiagnostics(
+              definition,
+              [detectedState.StructuredError],
+              new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+              out var normalizedDetectedDiagnostics,
+              out var detectedDiagnosticError))
+      {
+        return Failure(resolved, definition, detectedDiagnosticError!);
+      }
+
+      detectedDiagnostics.AddRange(normalizedDetectedDiagnostics);
+    }
+
+    if (detectedState.Error is not null)
+    {
+      detectedDiagnostics.Add(DetectionStateError(
+          definition.Id,
+          detectedState.Outcome,
+          detectedState.Error));
+    }
+
     ProviderValidationResult validation;
     try
     {
@@ -172,12 +252,34 @@ public sealed class ExecutionPlanner(IResourceProviderRegistry providers) : IExe
 
     if (!validation.IsValid)
     {
-      var diagnostics = validation.StructuredErrors.Count > 0
-          ? validation.StructuredErrors
-          : validation.Errors.Select(error => ProviderError(
-              definition.Id,
-              "Provider validation rejected the resource.",
-              error)).ToArray();
+      IReadOnlyList<StructuredError> diagnostics;
+      if (validation.StructuredErrors.Count > 0)
+      {
+        if (!TryNormalizeDiagnostics(
+                definition,
+                validation.StructuredErrors,
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+                out diagnostics,
+                out var diagnosticError))
+        {
+          return Failure(resolved, definition, diagnosticError!);
+        }
+      }
+      else if (validation.Errors.Count > MaxDiagnosticsPerResource)
+      {
+        return Failure(resolved, definition, ProviderError(
+            definition.Id,
+            "Provider validation returned too many errors.",
+            $"The diagnostic limit is {MaxDiagnosticsPerResource} per resource."));
+      }
+      else
+      {
+        diagnostics = ReadOnly(validation.Errors.Select(error => ProviderError(
+            definition.Id,
+            "Provider validation rejected the resource.",
+            SanitizeVisible(error))));
+      }
+
       return Failure(resolved, definition, diagnostics, PlannedResourceStatus.Invalid);
     }
 
@@ -209,12 +311,60 @@ public sealed class ExecutionPlanner(IResourceProviderRegistry providers) : IExe
           $"Provider '{definition.Provider}' returned a null resource plan."));
     }
 
-    var plan = SnapshotPlan(resourcePlan);
-    var planError = ValidateProviderPlan(definition, plan);
+    var planError = ValidateProviderPlan(definition, detectedState, resourcePlan);
     if (planError is not null)
     {
-      return Invalid(CreatePlannedResource(resolved, definition, plan), planError);
+      var failureStatus = detectedState.Outcome switch
+      {
+        DetectionOutcome.Failed or DetectionOutcome.Cancelled =>
+            PlannedResourceStatus.DetectionFailed,
+        DetectionOutcome.Unsupported => PlannedResourceStatus.Unsupported,
+        _ => PlannedResourceStatus.Invalid
+      };
+      return Failure(resolved, definition, planError, failureStatus);
     }
+
+    var stepIds = resourcePlan.Steps.ToDictionary(
+        step => step.Id,
+        step => step.Id,
+        IdComparer);
+    if (!TryNormalizeDiagnostics(
+            definition,
+            resourcePlan.StructuredErrors,
+            stepIds,
+            out var normalizedDiagnostics,
+            out var malformedDiagnostic))
+    {
+      return Failure(resolved, definition, malformedDiagnostic!);
+    }
+
+    if (resourcePlan.Error is not null || normalizedDiagnostics.Count > 0)
+    {
+      var diagnostics = normalizedDiagnostics.ToList();
+      if (resourcePlan.Error is not null)
+      {
+        diagnostics.Add(ProviderError(
+            definition.Id,
+            "Provider planning reported an error.",
+            SanitizeVisible(resourcePlan.Error)));
+      }
+
+      if (resourcePlan.IsExecutable)
+      {
+        diagnostics.Add(ProviderError(
+            definition.Id,
+            "Provider returned errors with an executable plan.",
+            "A resource plan with errors or diagnostics cannot be executable."));
+      }
+
+      return Failure(
+          resolved,
+          definition,
+          diagnostics,
+          PlannedResourceStatus.Invalid);
+    }
+
+    var plan = SnapshotPlan(resourcePlan, normalizedDiagnostics);
 
     var status = plan.Compliance switch
     {
@@ -227,95 +377,21 @@ public sealed class ExecutionPlanner(IResourceProviderRegistry providers) : IExe
     if (status is PlannedResourceStatus.Unsupported or PlannedResourceStatus.DetectionFailed ||
         !plan.IsExecutable)
     {
-      var diagnostics = plan.StructuredErrors.Count > 0
-          ? plan.StructuredErrors
-          : [ProviderError(
-              definition.Id,
-              status == PlannedResourceStatus.DetectionFailed
-                  ? "Detection did not produce a plannable state."
-                  : "The provider cannot produce an executable plan.",
-              plan.Error ?? $"Resource '{definition.Id}' has compliance status '{plan.Compliance}'.")];
+      IReadOnlyList<StructuredError> diagnostics = detectedDiagnostics.Count > 0
+          ? ReadOnly(detectedDiagnostics)
+          : status is PlannedResourceStatus.Unsupported or PlannedResourceStatus.DetectionFailed
+              ? [DetectionStateError(
+                  definition.Id,
+                  detectedState.Outcome,
+                  $"Resource '{definition.Id}' has detection outcome '{detectedState.Outcome}'.")]
+              : [ProviderError(
+                  definition.Id,
+                  "The provider cannot produce an executable plan.",
+                  $"Resource '{definition.Id}' has compliance status '{plan.Compliance}'.")];
       item = item with { Diagnostics = ReadOnly(diagnostics) };
     }
 
     return item;
-  }
-
-  private static StructuredError? ValidateProviderPlan(
-      ResourceDefinition definition,
-      ResourcePlan plan)
-  {
-    var expectedFingerprint = ResourceDefinitionFingerprint.Create(definition);
-    if (!IdComparer.Equals(plan.ResourceId, definition.Id) ||
-        !IdComparer.Equals(plan.ResourceType, definition.Type) ||
-        !IdComparer.Equals(plan.ProviderName, definition.Provider) ||
-        !string.Equals(
-            plan.DesiredStateFingerprint,
-            expectedFingerprint,
-            StringComparison.Ordinal))
-    {
-      return ProviderError(
-          definition.Id,
-          "Provider plan identity does not match the requested resource.",
-          "The provider returned a different resource id, type, provider, or desired-state fingerprint.");
-    }
-
-    if (plan.Steps.Count > MaxStepsPerResource)
-    {
-      return ProviderError(
-          definition.Id,
-          "Provider plan contains too many steps.",
-          $"Resource '{definition.Id}' has {plan.Steps.Count} steps; the limit is {MaxStepsPerResource}.");
-    }
-
-    var stepIds = new HashSet<string>(IdComparer);
-    foreach (var step in plan.Steps)
-    {
-      if (string.IsNullOrWhiteSpace(step.Id) || string.IsNullOrWhiteSpace(step.Description))
-      {
-        return ProviderError(
-            definition.Id,
-            "Provider plan contains a malformed step.",
-            "Every step must have a non-empty id and description.");
-      }
-
-      if (!stepIds.Add(step.Id))
-      {
-        return ProviderError(
-            definition.Id,
-            "Provider plan contains duplicate step ids.",
-            $"Duplicate step id '{step.Id}' occurs for resource '{definition.Id}'.");
-      }
-    }
-
-    var remediable = plan.Compliance is ComplianceStatus.Missing or
-        ComplianceStatus.VersionMismatch or ComplianceStatus.ConfigurationMismatch;
-    var modifyingSteps = plan.Steps.Where(step => step.Action != PlanAction.None).ToArray();
-    if (!remediable && modifyingSteps.Length > 0)
-    {
-      return ProviderError(
-          definition.Id,
-          "Provider plan modifies a non-remediable resource state.",
-          $"Compliance status '{plan.Compliance}' cannot contain modifying steps.");
-    }
-
-    if (remediable && plan.IsExecutable && modifyingSteps.Length == 0)
-    {
-      return ProviderError(
-          definition.Id,
-          "Provider plan has no remediation steps.",
-          $"Executable status '{plan.Compliance}' requires at least one modifying step.");
-    }
-
-    if (plan.Compliance == ComplianceStatus.Satisfied && !plan.IsExecutable)
-    {
-      return ProviderError(
-          definition.Id,
-          "Provider marked a satisfied resource as non-executable.",
-          "Satisfied resources must be executable without applying changes.");
-    }
-
-    return null;
   }
 
   private static PlannedResource CreatePlannedResource(
@@ -323,16 +399,19 @@ public sealed class ExecutionPlanner(IResourceProviderRegistry providers) : IExe
       ResourceDefinition definition,
       ResourcePlan plan)
   {
-    var requiresElevation = definition.PrivilegeRequirement == PrivilegeRequirement.Administrator ||
-        plan.Steps.Any(step => step.PrivilegeRequirement == PrivilegeRequirement.Administrator);
-    var isDestructive = plan.Steps.Any(step => step.IsDestructive);
-    var restartPolicy = plan.Steps
+    var modifyingSteps = plan.Steps
+        .Where(step => step.Action != PlanAction.None)
+        .ToArray();
+    var requiresElevation = modifyingSteps.Any(
+        step => step.PrivilegeRequirement == PrivilegeRequirement.Administrator);
+    var isDestructive = modifyingSteps.Any(step => step.IsDestructive);
+    var restartPolicy = modifyingSteps
         .Select(step => step.RestartPolicy)
-        .Append(definition.RestartPolicy)
+        .Append(RestartPolicy.NoRestart)
         .Max();
-    var reason = plan.Steps
+    var reason = modifyingSteps
         .Select(step => step.Reason)
-        .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? plan.Error;
+        .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
     var risk = isDestructive
         ? PlanRisk.Destructive
         : requiresElevation
@@ -392,16 +471,12 @@ public sealed class ExecutionPlanner(IResourceProviderRegistry providers) : IExe
     };
   }
 
-  private static PlannedResource Invalid(PlannedResource item, StructuredError error) => item with
-  {
-    Status = PlannedResourceStatus.Invalid,
-    Diagnostics = ReadOnly(item.Diagnostics.Append(error))
-  };
-
   private static ResourceDefinition SnapshotDefinition(ResourceDefinition definition) =>
       definition with
       {
-        Dependencies = ReadOnly(definition.Dependencies),
+        Dependencies = ReadOnly(definition.Dependencies
+            .Order(IdComparer)
+            .ThenBy(id => id, StringComparer.Ordinal)),
         Parameters = definition.Parameters.ToFrozenDictionary(
             pair => pair.Key,
             pair => pair.Value,
@@ -430,94 +505,26 @@ public sealed class ExecutionPlanner(IResourceProviderRegistry providers) : IExe
         normalized.EndsWith("secret", StringComparison.Ordinal);
   }
 
-  private static ResourcePlan SnapshotPlan(ResourcePlan plan) => plan with
-  {
-    Steps = ReadOnly(plan.Steps.Select(step => step with { })),
-    StructuredErrors = ReadOnly(plan.StructuredErrors)
-  };
+  private static ResourcePlan SnapshotPlan(
+      ResourcePlan plan,
+      IReadOnlyList<StructuredError> diagnostics) => plan with
+      {
+        Error = null,
+        Steps = ReadOnly(plan.Steps.Select(step => step with
+        {
+          Description = SanitizeVisible(step.Description),
+          Reason = step.Reason is null ? null : SanitizeVisible(step.Reason)
+        })),
+        StructuredErrors = diagnostics
+      };
 
-  private static IReadOnlyList<ResourceGraphLayer> SnapshotLayers(
+  private static IReadOnlyList<ResourceGraphLayer> CanonicalizeLayers(
       IEnumerable<ResourceGraphLayer> layers) => ReadOnly(layers.Select(layer =>
-          new ResourceGraphLayer(layer.Index, ReadOnly(layer.ResourceIds))));
-
-  private static StructuredError? ValidateGraph(ResourceGraph graph)
-  {
-    if (graph.Nodes.Count == 0 || graph.TopologicalLayers.Count == 0)
-    {
-      return new StructuredError(
-          WdemErrorCode.DependencyError,
-          "The resource graph has no executable layers.",
-          "Select at least one acyclic resource before creating an execution plan.");
-    }
-
-    var seen = new HashSet<string>(IdComparer);
-    var completed = new HashSet<string>(IdComparer);
-    for (var index = 0; index < graph.TopologicalLayers.Count; index++)
-    {
-      var layer = graph.TopologicalLayers[index];
-      if (layer.Index != index || layer.ResourceIds.Count == 0)
-      {
-        return MalformedGraph("Graph layer indices must be contiguous and layers cannot be empty.");
-      }
-
-      var current = new HashSet<string>(layer.ResourceIds, IdComparer);
-      foreach (var id in layer.ResourceIds)
-      {
-        if (!graph.Nodes.TryGetValue(id, out var node) || !seen.Add(id))
-        {
-          return MalformedGraph($"Resource '{id}' is missing from the graph or occurs in multiple layers.");
-        }
-
-        if (node.Definition.Dependencies.Any(dependency =>
-                !graph.Nodes.ContainsKey(dependency) ||
-                (!completed.Contains(dependency) && !current.Contains(dependency))))
-        {
-          return MalformedGraph($"Resource '{id}' has a missing or incorrectly ordered dependency.");
-        }
-
-        if (node.Definition.Dependencies.Any(current.Contains))
-        {
-          return MalformedGraph($"Resource '{id}' depends on a resource in the same graph layer.");
-        }
-      }
-
-      completed.UnionWith(current);
-    }
-
-    return seen.Count == graph.Nodes.Count
-        ? null
-        : MalformedGraph("Not every graph resource occurs in a topological layer.");
-  }
-
-  private static StructuredError MalformedGraph(string detail) => new(
-      WdemErrorCode.DependencyError,
-      "The resource graph is not a valid topological plan.",
-      detail)
-  {
-    SuggestedAction = "Rebuild the resource graph and create a new plan."
-  };
-
-  private static StructuredError ProviderException(
-      string resourceId,
-      string summary,
-      Exception exception) => new(
-          WdemErrorCode.ProviderError,
-          summary,
-          exception.Message)
-      {
-        ResourceId = resourceId,
-        UnderlyingException = exception,
-        SuggestedAction = "Review provider diagnostics and create a new plan."
-      };
-
-  private static StructuredError ProviderError(
-      string resourceId,
-      string summary,
-      string detail) => new(WdemErrorCode.ProviderError, summary, detail)
-      {
-        ResourceId = resourceId,
-        SuggestedAction = "Review provider diagnostics and create a new plan."
-      };
+          new ResourceGraphLayer(
+              layer.Index,
+              ReadOnly(layer.ResourceIds
+                  .Order(IdComparer)
+                  .ThenBy(id => id, StringComparer.Ordinal)))));
 
   private static ExecutionPlan CreatePlan(
       string profileId,

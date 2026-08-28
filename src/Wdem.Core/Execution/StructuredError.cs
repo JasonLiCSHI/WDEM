@@ -72,4 +72,27 @@ public sealed record StructuredError
         ? null
         : DiagnosticTextSanitizer.Sanitize(value);
   }
+
+  internal static StructuredError CreateSnapshot(
+      WdemErrorCode code,
+      string summary,
+      string detail,
+      string? resourceId,
+      string? stepId,
+      int? processExitCode,
+      string? logLocation,
+      string? suggestedAction,
+      bool isRetryable,
+      string? underlyingExceptionType,
+      string? underlyingExceptionMessage) => new(code, summary, detail)
+      {
+        ResourceId = resourceId,
+        StepId = stepId,
+        ProcessExitCode = processExitCode,
+        LogLocation = logLocation,
+        SuggestedAction = suggestedAction,
+        IsRetryable = isRetryable,
+        UnderlyingExceptionType = underlyingExceptionType,
+        UnderlyingExceptionMessage = underlyingExceptionMessage
+      };
 }
