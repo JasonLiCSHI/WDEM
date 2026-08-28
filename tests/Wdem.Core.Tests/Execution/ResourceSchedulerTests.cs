@@ -195,6 +195,52 @@ public sealed class ResourceSchedulerTests
   }
 
   [Fact]
+  public async Task ExecuteAsync_CompletedDependencyLaunchesDependentWhileUnrelatedWorkRuns()
+  {
+    var unrelatedStarted = NewGate();
+    var releaseUnrelated = NewGate();
+    var dependentStarted = NewGate();
+    var plan = Plan(
+        [Resource("a"), Resource("x")],
+        [Resource("b", ["a"])]);
+
+    var execution = _scheduler.ExecuteAsync(
+        plan,
+        async (resource, token) =>
+        {
+          switch (resource.Definition.Id)
+          {
+            case "a":
+              await unrelatedStarted.Task.WaitAsync(token);
+              break;
+            case "x":
+              unrelatedStarted.TrySetResult();
+              await releaseUnrelated.Task.WaitAsync(token);
+              break;
+            case "b":
+              dependentStarted.TrySetResult();
+              break;
+          }
+
+          return Result(resource.Definition.Id, ExecutionOutcome.Succeeded);
+        },
+        _ => new ProviderCapabilities { MaxConcurrentOperations = 3 },
+        maximumConcurrency: 3,
+        CancellationToken.None);
+
+    try
+    {
+      await dependentStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+      Assert.False(releaseUnrelated.Task.IsCompleted);
+    }
+    finally
+    {
+      releaseUnrelated.TrySetResult();
+      await execution.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+  }
+
+  [Fact]
   public async Task ExecuteAsync_CancellationStopsNewDelegatesAndCompletesUnstartedResources()
   {
     using var cancellation = new CancellationTokenSource();

@@ -63,63 +63,88 @@ public sealed class ResourceScheduler : IResourceScheduler
       var remaining = resources
           .Select(resource => resource.Definition.Id)
           .ToHashSet(StringComparer.OrdinalIgnoreCase);
+      var running = new Dictionary<string, Task<CompletedExecution>>(
+          StringComparer.OrdinalIgnoreCase);
       var rootFailures = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-      while (remaining.Count > 0)
+      while (remaining.Count > 0 || running.Count > 0)
       {
         if (cancellationToken.IsCancellationRequested)
         {
           CompleteRemainingAsCancelled(resources, remaining, results);
-          break;
         }
-
-        var madeProgress = BlockFailedDependents(
-            resources,
-            resourcesById,
-            remaining,
-            results,
-            rootFailures);
-        if (cancellationToken.IsCancellationRequested)
+        else
         {
-          CompleteRemainingAsCancelled(resources, remaining, results);
-          break;
-        }
-
-        var ready = resources
-            .Where(resource => remaining.Contains(resource.Definition.Id))
-            .Where(resource => DependenciesSucceeded(resource, results))
-            .ToArray();
-        if (ready.Length == 0)
-        {
-          if (madeProgress)
+          var madeProgress = BlockFailedDependents(
+              resources,
+              resourcesById,
+              remaining,
+              results,
+              rootFailures);
+          if (cancellationToken.IsCancellationRequested)
           {
-            continue;
+            CompleteRemainingAsCancelled(resources, remaining, results);
           }
+          else
+          {
+            var ready = resources
+                .Where(resource => remaining.Contains(resource.Definition.Id))
+                .Where(resource => DependenciesSucceeded(resource, results))
+                .ToArray();
+            foreach (var resource in ready)
+            {
+              if (cancellationToken.IsCancellationRequested)
+              {
+                break;
+              }
 
-          BlockUnsatisfiedResources(resources, remaining, results, rootFailures);
-          break;
+              var id = resource.Definition.Id;
+              results[id] = Ready(id);
+              remaining.Remove(id);
+              running.Add(id, ExecuteOneAsync(
+                  resource,
+                  executeAsync,
+                  globalSemaphore,
+                  providerSemaphores[scheduling.GroupsByResource[id]],
+                  cancellationToken));
+            }
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+              CompleteRemainingAsCancelled(resources, remaining, results);
+            }
+            else if (ready.Length == 0 && running.Count == 0 && remaining.Count > 0)
+            {
+              if (madeProgress)
+              {
+                continue;
+              }
+
+              BlockUnsatisfiedResources(resources, remaining, results, rootFailures);
+              break;
+            }
+          }
         }
 
-        foreach (var resource in ready)
+        if (running.Count == 0)
         {
-          results[resource.Definition.Id] = Ready(resource.Definition.Id);
+          continue;
         }
 
-        var executions = ready.Select(resource => ExecuteOneAsync(
-            resource,
-            executeAsync,
-            globalSemaphore,
-            providerSemaphores[scheduling.GroupsByResource[resource.Definition.Id]],
-            cancellationToken));
-        var completed = await Task.WhenAll(executions).ConfigureAwait(false);
+        await Task.WhenAny(running.Values).ConfigureAwait(false);
+        var completedIds = resources
+            .Select(resource => resource.Definition.Id)
+            .Where(id => running.TryGetValue(id, out var execution) && execution.IsCompleted)
+            .ToArray();
 
-        foreach (var execution in completed)
+        foreach (var id in completedIds)
         {
-          results[execution.ResourceId] = execution.Result;
-          remaining.Remove(execution.ResourceId);
+          var execution = await running[id].ConfigureAwait(false);
+          running.Remove(id);
+          results[id] = execution.Result;
           if (IsBlockingOutcome(execution.Result.Outcome))
           {
-            rootFailures[execution.ResourceId] = execution.ResourceId;
+            rootFailures[id] = id;
           }
         }
       }
