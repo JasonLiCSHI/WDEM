@@ -25,6 +25,9 @@ public sealed class WdemCliBuilderTests
 
     Assert.Equal(0, exitCode);
     Assert.Equal("inspect", handler.Command);
+    Assert.Equal(
+        Path.GetFullPath(@"profiles\csharp-developer.yaml"),
+        handler.Request!.ProfilePath);
     Assert.Contains("resharper", handler.Request!.SelectedOptionalResourceIds);
     Assert.True(handler.Json);
   }
@@ -269,13 +272,18 @@ public sealed class WdemCliBuilderTests
     Assert.True(store.ListCalled);
   }
 
-  [Fact]
-  public async Task CommandHandler_ProfileOrPlanValidationFailureReturnsTwo()
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task CommandHandler_ProfileOrPlanValidationFailureReturnsTwo(bool json)
   {
     var error = new StructuredError(
         WdemErrorCode.ProfileError,
-        "Profile validation failed.",
-        "The profile is invalid.");
+        "Profile validation failed: password=validation-summary-secret.",
+        "The profile is invalid.")
+    {
+      ResourceId = "token=validation-resource-secret"
+    };
     var run = CompletedRun(ExecutionOutcome.Failed) with
     {
       Plan = new ExecutionPlan
@@ -299,14 +307,17 @@ public sealed class WdemCliBuilderTests
 
     var exitCode = await handler.ApplyAsync(
         new RunRequest(Path.GetFullPath("developer.yaml"), new HashSet<string>()),
-        true,
+        json,
         CancellationToken.None);
 
     Assert.Equal(2, exitCode);
-    var events = output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
-        .Select(line => JsonSerializer.Deserialize<RunEvent>(line))
-        .ToArray();
-    Assert.Contains(events, runEvent => runEvent?.Error?.Code == WdemErrorCode.ProfileError);
+    Assert.DoesNotContain("validation-summary-secret", output.ToString());
+    Assert.DoesNotContain("validation-resource-secret", output.ToString());
+    if (json)
+    {
+      var events = DeserializeEvents(output);
+      Assert.Contains(events, runEvent => runEvent.Error?.Code == WdemErrorCode.ProfileError);
+    }
   }
 
   [Fact]
@@ -353,8 +364,37 @@ public sealed class WdemCliBuilderTests
     Assert.Equal(130, await handler.ApplyAsync(Request(), false, CancellationToken.None));
   }
 
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task CommandHandler_CancelledOperationWritesRedactedEvent(bool json)
+  {
+    var error = new StringWriter();
+    var service = new StubEnvironmentRunService
+    {
+      Result = CompletedRun(ExecutionOutcome.Succeeded),
+      Failure = new OperationCanceledException("password=cancel-secret")
+    };
+    var handler = new WdemCommandHandler(
+        service,
+        new StubExecutionRunStore(),
+        new StringWriter(),
+        error);
+
+    var exitCode = await handler.ApplyAsync(Request(), json, CancellationToken.None);
+
+    Assert.Equal(130, exitCode);
+    Assert.DoesNotContain("cancel-secret", error.ToString());
+    Assert.NotEmpty(error.ToString());
+    if (json)
+    {
+      var runEvent = Assert.Single(DeserializeEvents(error));
+      Assert.Equal(WdemErrorCode.CancellationError, runEvent.Error?.Code);
+    }
+  }
+
   [Fact]
-  public async Task CommandHandler_ValidationExceptionReturnsTwo()
+  public async Task CommandHandler_UnknownArgumentExceptionReturnsOne()
   {
     var service = new StubEnvironmentRunService
     {
@@ -364,22 +404,136 @@ public sealed class WdemCliBuilderTests
 
     var exitCode = await Handler(service).ApplyAsync(Request(), false, CancellationToken.None);
 
-    Assert.Equal(2, exitCode);
+    Assert.Equal(1, exitCode);
   }
 
-  [Fact]
-  public async Task CommandHandler_UnexpectedHostExceptionReturnsOne()
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task CommandHandler_UnexpectedHostExceptionReturnsOneAndWritesRedactedEvent(
+      bool json)
   {
+    var error = new StringWriter();
     var service = new StubEnvironmentRunService
     {
       Result = CompletedRun(ExecutionOutcome.Succeeded),
-      Failure = new InvalidOperationException("Host failure.")
+      Failure = new InvalidOperationException("token=unexpected-host-secret")
     };
+    var handler = new WdemCommandHandler(
+        service,
+        new StubExecutionRunStore(),
+        new StringWriter(),
+        error);
 
-    var exitCode = await Handler(service).ApplyAsync(Request(), false, CancellationToken.None);
+    var exitCode = await handler.ApplyAsync(Request(), json, CancellationToken.None);
 
     Assert.Equal(1, exitCode);
+    Assert.DoesNotContain("unexpected-host-secret", error.ToString());
+    if (json)
+    {
+      var runEvent = Assert.Single(DeserializeEvents(error));
+      Assert.Equal(WdemErrorCode.ProviderError, runEvent.Error?.Code);
+    }
   }
+
+  [Fact]
+  public async Task CommandHandler_NonValidationPlanDiagnosticReturnsThree()
+  {
+    var run = CompletedRun(ExecutionOutcome.Failed) with
+    {
+      Plan = new ExecutionPlan
+      {
+        PlanId = Guid.Parse("b1694f20-cb2e-449e-b9d3-8c11fd700d56"),
+        Fingerprint = "provider-failure-plan",
+        ProfileId = "developer",
+        ProfileVersion = "1.0.0",
+        Layers = [],
+        Resources = [],
+        IsExecutable = true,
+        Errors =
+        [
+          new StructuredError(
+              WdemErrorCode.ProviderError,
+              "Provider failure.",
+              "The provider failed while preparing the run.")
+        ]
+      }
+    };
+
+    Assert.Equal(3, await InvokeApplyAsync(run));
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task CommandHandler_RunEventOutputRedactsMessagesAndNestedErrors(bool json)
+  {
+    var output = new StringWriter();
+    var run = CompletedRun(
+        ExecutionOutcome.Succeeded,
+        new ResourceResult
+        {
+          ResourceId = "token=resource-id-secret",
+          State = ExecutionState.Completed,
+          Outcome = ExecutionOutcome.Succeeded,
+          Message = "password=resource-message-secret",
+          Error = new StructuredError(
+              WdemErrorCode.ProviderError,
+              "Provider diagnostic.",
+              "Provider detail.")
+          {
+            LogLocation = "token=nested-error-secret"
+          }
+        });
+    var handler = new WdemCommandHandler(
+        new StubEnvironmentRunService { Result = run },
+        new StubExecutionRunStore(),
+        output,
+        new StringWriter());
+
+    var exitCode = await handler.ApplyAsync(Request(), json, CancellationToken.None);
+
+    Assert.Equal(0, exitCode);
+    Assert.DoesNotContain("resource-id-secret", output.ToString());
+    Assert.DoesNotContain("resource-message-secret", output.ToString());
+    Assert.DoesNotContain("nested-error-secret", output.ToString());
+    if (json)
+    {
+      var resourceEvent = Assert.Single(
+          DeserializeEvents(output),
+          runEvent => runEvent.Kind == RunEventKind.ResourceStateChanged);
+      Assert.NotNull(resourceEvent.Error);
+      Assert.DoesNotContain("nested-error-secret", resourceEvent.Error.LogLocation);
+    }
+  }
+
+  [Fact]
+  public async Task CommandHandler_RunsListWritesRedactedJsonRunEvents()
+  {
+    var output = new StringWriter();
+    var run = CompletedRun(ExecutionOutcome.Succeeded) with
+    {
+      ProfileId = "password=list-profile-secret"
+    };
+    var handler = new WdemCommandHandler(
+        new StubEnvironmentRunService { Result = run },
+        new StubExecutionRunStore { Runs = [run] },
+        output,
+        new StringWriter());
+
+    var exitCode = await handler.ListRunsAsync(true, CancellationToken.None);
+
+    Assert.Equal(0, exitCode);
+    Assert.DoesNotContain("list-profile-secret", output.ToString());
+    var runEvent = Assert.Single(DeserializeEvents(output));
+    Assert.Equal(RunEventKind.RunStateChanged, runEvent.Kind);
+  }
+
+  private static RunEvent[] DeserializeEvents(StringWriter writer) =>
+      writer.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+          .Select(line => JsonSerializer.Deserialize<RunEvent>(line))
+          .OfType<RunEvent>()
+          .ToArray();
 
   private static RunRequest Request() => new(
       Path.GetFullPath("developer.yaml"),

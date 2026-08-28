@@ -12,17 +12,20 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
   private readonly IExecutionRunStore _runStore;
   private readonly TextWriter _output;
   private readonly TextWriter _error;
+  private readonly LogRedactor _redactor;
 
   public WdemCommandHandler(
       IEnvironmentRunService environmentRuns,
       IExecutionRunStore runStore,
       TextWriter? output = null,
-      TextWriter? error = null)
+      TextWriter? error = null,
+      LogRedactor? redactor = null)
   {
     _environmentRuns = environmentRuns ?? throw new ArgumentNullException(nameof(environmentRuns));
     _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
     _output = output ?? Console.Out;
     _error = error ?? Console.Error;
+    _redactor = redactor ?? new LogRedactor();
   }
 
   public static async Task<WdemCommandHandler> CreateAsync(
@@ -81,21 +84,28 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
       var runs = await _runStore.ListAsync(cancellationToken).ConfigureAwait(false);
       foreach (var run in runs.OrderByDescending(run => run.StartedAtUtc))
       {
-        await _output.WriteLineAsync(json
-            ? JsonSerializer.Serialize(run)
-            : $"{run.RunId:D} {run.Mode} {run.State} {run.Outcome} {run.ProfileId}")
-            .ConfigureAwait(false);
+        await WriteEventAsync(new RunEvent(
+            run.RunId,
+            1,
+            run.EndedAtUtc ?? run.StartedAtUtc,
+            RunEventKind.RunStateChanged,
+            null,
+            null,
+            null,
+            $"{run.Mode} {run.State} {run.Outcome} {run.ProfileId}",
+            null), json).ConfigureAwait(false);
       }
 
       return 0;
     }
-    catch (OperationCanceledException)
+    catch (OperationCanceledException exception)
     {
+      await WriteExceptionAsync(exception, json, cancelled: true).ConfigureAwait(false);
       return 130;
     }
     catch (Exception exception)
     {
-      await _error.WriteLineAsync(exception.Message).ConfigureAwait(false);
+      await WriteExceptionAsync(exception, json, cancelled: false).ConfigureAwait(false);
       return 1;
     }
   }
@@ -110,18 +120,14 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
       await WriteRunEventsAsync(run, json).ConfigureAwait(false);
       return ExitCode(run);
     }
-    catch (OperationCanceledException)
+    catch (OperationCanceledException exception)
     {
+      await WriteExceptionAsync(exception, json, cancelled: true).ConfigureAwait(false);
       return 130;
-    }
-    catch (ArgumentException exception)
-    {
-      await _error.WriteLineAsync(exception.Message).ConfigureAwait(false);
-      return 2;
     }
     catch (Exception exception)
     {
-      await _error.WriteLineAsync(exception.Message).ConfigureAwait(false);
+      await WriteExceptionAsync(exception, json, cancelled: false).ConfigureAwait(false);
       return 1;
     }
   }
@@ -172,9 +178,58 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
         null), json).ConfigureAwait(false);
   }
 
-  private Task WriteEventAsync(RunEvent runEvent, bool json) => json
-      ? _output.WriteLineAsync(JsonSerializer.Serialize(runEvent))
-      : _output.WriteLineAsync(FormatEvent(runEvent));
+  private Task WriteEventAsync(
+      RunEvent runEvent,
+      bool json,
+      TextWriter? writer = null)
+  {
+    var redacted = _redactor.Redact(runEvent);
+    return (writer ?? _output).WriteLineAsync(json
+        ? JsonSerializer.Serialize(redacted)
+        : FormatEvent(redacted));
+  }
+
+  private Task WriteExceptionAsync(
+      Exception exception,
+      bool json,
+      bool cancelled) => WriteExceptionEventAsync(
+          exception,
+          json,
+          cancelled,
+          _error,
+          _redactor);
+
+  internal static Task WriteExceptionEventAsync(
+      Exception exception,
+      bool json,
+      bool cancelled,
+      TextWriter writer,
+      LogRedactor? redactor = null)
+  {
+    ArgumentNullException.ThrowIfNull(exception);
+    ArgumentNullException.ThrowIfNull(writer);
+    var error = new StructuredError(
+        cancelled ? WdemErrorCode.CancellationError : WdemErrorCode.ProviderError,
+        cancelled ? "Operation cancelled." : "Unexpected host error.",
+        exception.Message)
+    {
+      IsRetryable = false,
+      UnderlyingException = exception
+    };
+    var runEvent = (redactor ?? new LogRedactor()).Redact(new RunEvent(
+        Guid.Empty,
+        1,
+        DateTimeOffset.UtcNow,
+        RunEventKind.Log,
+        null,
+        null,
+        null,
+        exception.Message,
+        error));
+    return writer.WriteLineAsync(json
+        ? JsonSerializer.Serialize(runEvent)
+        : FormatEvent(runEvent));
+  }
 
   private static string FormatEvent(RunEvent runEvent)
   {
@@ -189,7 +244,9 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
       return 130;
     }
 
-    if (run.Plan is { IsExecutable: false } || run.Plan?.Errors.Count > 0)
+    if (run.Plan is { IsExecutable: false } ||
+        run.Plan?.Errors.Any(error =>
+            error.Code is WdemErrorCode.ProfileError or WdemErrorCode.DependencyError) == true)
     {
       return 2;
     }

@@ -7,12 +7,21 @@ try
   var handler = await WdemCommandHandler.CreateAsync(profilesDirectory);
   return await WdemCliBuilder.Build(handler).Parse(args).InvokeAsync();
 }
-catch (OperationCanceledException)
+catch (OperationCanceledException exception)
 {
+  await WdemCommandHandler.WriteExceptionEventAsync(
+      exception,
+      args.Contains("--json", StringComparer.Ordinal),
+      cancelled: true,
+      Console.Error);
   return 130;
 }
 catch (Exception exception)
 {
-  await Console.Error.WriteLineAsync(exception.Message);
+  await WdemCommandHandler.WriteExceptionEventAsync(
+      exception,
+      args.Contains("--json", StringComparer.Ordinal),
+      cancelled: false,
+      Console.Error);
   return 1;
 }
