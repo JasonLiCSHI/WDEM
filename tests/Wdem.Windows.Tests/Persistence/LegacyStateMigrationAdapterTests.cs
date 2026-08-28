@@ -90,6 +90,56 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     Assert.Empty(result.ImportedStepNames);
   }
 
+  [Fact]
+  public async Task MigrateAsync_TransientInaccessibleMarkerStateFailsWithoutSideEffects()
+  {
+    WriteLegacy("state.json", "[\"late-step\"]");
+    var legacyPath = Path.Combine(_root, "WinHome", "state.json");
+    var resolver = new RecordingFinalPathResolver(legacyPath);
+    var adapter = new LegacyStateMigrationAdapter(
+        _root,
+        resolver,
+        SystemLegacyMigrationFileOperations.Instance,
+        WindowsMigrationMarkerFinalPathResolver.Instance,
+        new FixedMigrationPathEntryProbe(MigrationPathEntryState.Inaccessible));
+
+    await Assert.ThrowsAsync<IOException>(() =>
+        adapter.MigrateAsync(CancellationToken.None));
+
+    Assert.False(resolver.ObservedOpenReadableStream);
+    Assert.False(File.Exists(Path.Combine(_root, "WDEM", "migration-v1.json")));
+    Assert.False(File.Exists(Path.Combine(_root, "WDEM", ".migration-v1.gate")));
+
+    var recovered = await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.True(recovered.MigrationPerformed);
+    Assert.Equal(["late-step"], recovered.ImportedStepNames);
+  }
+
+  [Fact]
+  public async Task MigrateAsync_PersistentInaccessibleMarkerStateNeverReportsSuccess()
+  {
+    WriteLegacy("state.json", "[\"must-not-import\"]");
+    var resolver = new RecordingFinalPathResolver(
+        Path.Combine(_root, "WinHome", "state.json"));
+    var adapter = new LegacyStateMigrationAdapter(
+        _root,
+        resolver,
+        SystemLegacyMigrationFileOperations.Instance,
+        WindowsMigrationMarkerFinalPathResolver.Instance,
+        new FixedMigrationPathEntryProbe(MigrationPathEntryState.Inaccessible));
+
+    await Assert.ThrowsAsync<IOException>(() =>
+        adapter.MigrateAsync(CancellationToken.None));
+    await Assert.ThrowsAsync<IOException>(() =>
+        adapter.MigrateAsync(CancellationToken.None));
+
+    Assert.False(resolver.ObservedOpenReadableStream);
+    Assert.False(File.Exists(Path.Combine(_root, "WDEM", "migration-v1.json")));
+    Assert.False(File.Exists(Path.Combine(_root, "WDEM", ".migration-v1.gate")));
+  }
+
   [Theory]
   [InlineData("")]
   [InlineData("{")]
@@ -115,13 +165,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     Assert.Single(Directory.EnumerateFiles(
         markerDirectory,
         "migration-v1.invalid-*.json"));
-    var repairedMarker = await File.ReadAllTextAsync(markerPath);
-    using var marker = JsonDocument.Parse(repairedMarker);
-    Assert.Equal(1, marker.RootElement.GetProperty("schemaVersion").GetInt32());
-    Assert.Equal(
-        "legacy-step-name-reference",
-        marker.RootElement.GetProperty("recordKind").GetString());
-    Assert.Empty(marker.RootElement.GetProperty("importedStepNames").EnumerateArray());
+    Assert.Equal(invalidMarker, await File.ReadAllTextAsync(markerPath));
 
     var secondResolver = new RecordingFinalPathResolver(legacyPath);
     var second = await new LegacyStateMigrationAdapter(_root, secondResolver)
@@ -130,14 +174,12 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     Assert.False(second.MigrationPerformed);
     Assert.Empty(second.ImportedStepNames);
     Assert.False(secondResolver.ObservedOpenReadableStream);
-    Assert.Equal(repairedMarker, await File.ReadAllTextAsync(markerPath));
+    Assert.Equal(invalidMarker, await File.ReadAllTextAsync(markerPath));
   }
 
   [Theory]
   [InlineData(MigrationFailureStage.QuarantineCopy, false)]
   [InlineData(MigrationFailureStage.QuarantineCopy, true)]
-  [InlineData(MigrationFailureStage.SentinelReplace, false)]
-  [InlineData(MigrationFailureStage.SentinelReplace, true)]
   public async Task MigrateAsync_InvalidMarkerFailureAlwaysLeavesPermanentGate(
       MigrationFailureStage failureStage,
       bool cancel)
@@ -182,8 +224,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     Assert.False(second.MigrationPerformed);
     Assert.Empty(second.ImportedStepNames);
     Assert.False(secondResolver.ObservedOpenReadableStream);
-    using var marker = JsonDocument.Parse(await File.ReadAllTextAsync(markerPath));
-    Assert.Empty(marker.RootElement.GetProperty("importedStepNames").EnumerateArray());
+    Assert.Equal(invalidMarker, await File.ReadAllTextAsync(markerPath));
   }
 
   [Fact]
@@ -219,7 +260,31 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
   }
 
   [Fact]
-  public async Task MigrateAsync_InvalidCommitConflictRepairsGateWithoutRereadingLegacy()
+  public async Task MigrateAsync_ValidWinnerHandleRejectsMutationDuringSnapshot()
+  {
+    WriteLegacy("state.json", "[\"local-step-a\"]");
+    var markerPath = Path.Combine(_root, "WDEM", "migration-v1.json");
+    var markerResolver = new MutationAttemptingMarkerFinalPathResolver(
+        CreateMarkerJson(["mutated-step-c"]));
+    var adapter = new LegacyStateMigrationAdapter(
+        _root,
+        new RecordingFinalPathResolver(Path.Combine(_root, "WinHome", "state.json")),
+        new CompetingMigrationFileOperations(CreateMarkerJson(["winner-step-b"])),
+        markerResolver);
+
+    var result = await adapter.MigrateAsync(CancellationToken.None);
+
+    Assert.False(result.MigrationPerformed);
+    Assert.Equal(["winner-step-b"], result.ImportedStepNames);
+    Assert.True(markerResolver.DeleteRejected);
+    Assert.True(markerResolver.ReplaceRejected);
+    var persistedMarker = await File.ReadAllTextAsync(markerPath);
+    Assert.Contains("winner-step-b", persistedMarker, StringComparison.Ordinal);
+    Assert.DoesNotContain("mutated-step-c", persistedMarker, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task MigrateAsync_InvalidCommitConflictPreservesGateWithoutRereadingLegacy()
   {
     WriteLegacy("state.json", "[\"local-step-a\"]");
     var markerPath = Path.Combine(_root, "WDEM", "migration-v1.json");
@@ -235,10 +300,10 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     Assert.False(result.MigrationPerformed);
     Assert.Empty(result.ImportedStepNames);
     Assert.Equal(1, firstResolver.OpenReadableStreamCount);
-    using (var marker = JsonDocument.Parse(await File.ReadAllTextAsync(markerPath)))
-    {
-      Assert.Empty(marker.RootElement.GetProperty("importedStepNames").EnumerateArray());
-    }
+    Assert.Equal("{", await File.ReadAllTextAsync(markerPath));
+    Assert.Single(Directory.EnumerateFiles(
+        Path.GetDirectoryName(markerPath)!,
+        "migration-v1.invalid-*.json"));
 
     var secondResolver = new RecordingFinalPathResolver(
         Path.Combine(_root, "WinHome", "state.json"));
@@ -247,10 +312,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
 
     Assert.False(second.MigrationPerformed);
     Assert.False(secondResolver.ObservedOpenReadableStream);
-    Assert.DoesNotContain(
-        "local-step-a",
-        await File.ReadAllTextAsync(markerPath),
-        StringComparison.Ordinal);
+    Assert.Equal("{", await File.ReadAllTextAsync(markerPath));
   }
 
   [Fact]
@@ -300,8 +362,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
         operations).MigrateAsync(CancellationToken.None);
 
     Assert.False(result.MigrationPerformed);
-    Assert.Equal(["winner-step-b"], result.ImportedStepNames);
-    Assert.False(operations.ReplaceCalled);
+    Assert.Empty(result.ImportedStepNames);
     var persistedMarker = await File.ReadAllTextAsync(markerPath);
     Assert.Contains("winner-step-b", persistedMarker, StringComparison.Ordinal);
     Assert.DoesNotContain("must-not-import", persistedMarker, StringComparison.Ordinal);
@@ -903,14 +964,15 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     var markerDirectory = Path.Combine(_root, "WDEM");
     Directory.CreateDirectory(markerDirectory);
     var markerPath = Path.Combine(markerDirectory, "migration-v1.json");
-    await File.WriteAllTextAsync(markerPath, JsonSerializer.Serialize(new
+    var invalidMarker = JsonSerializer.Serialize(new
     {
       schemaVersion = 1,
       recordKind = "legacy-step-name-reference",
       sourceProduct = "WinHome",
       importedAtUtc = "2026-08-29T00:00:00Z",
       importedStepNames = new[] { credential }
-    }));
+    });
+    await File.WriteAllTextAsync(markerPath, invalidMarker);
     WriteLegacy("state.json", "[\"recovered-step\"]");
     var legacyPath = Path.Combine(_root, "WinHome", "state.json");
     var resolver = new RecordingFinalPathResolver(legacyPath);
@@ -924,11 +986,12 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     Assert.Single(Directory.EnumerateFiles(
         markerDirectory,
         "migration-v1.invalid-*.json"));
-    var repairedMarker = await File.ReadAllTextAsync(markerPath);
-    Assert.DoesNotContain(credential, repairedMarker, StringComparison.Ordinal);
-    Assert.DoesNotContain("recovered-step", repairedMarker, StringComparison.Ordinal);
-    using var marker = JsonDocument.Parse(repairedMarker);
-    Assert.Empty(marker.RootElement.GetProperty("importedStepNames").EnumerateArray());
+    Assert.Equal(invalidMarker, await File.ReadAllTextAsync(markerPath));
+    Assert.Equal(
+        invalidMarker,
+        await File.ReadAllTextAsync(Directory.EnumerateFiles(
+            markerDirectory,
+            "migration-v1.invalid-*.json").Single()));
   }
 
   [Fact]
@@ -988,10 +1051,15 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     }
   }
 
+  private sealed class FixedMigrationPathEntryProbe(MigrationPathEntryState state) :
+      IMigrationPathEntryProbe
+  {
+    public MigrationPathEntryState Probe(string path) => state;
+  }
+
   public enum MigrationFailureStage
   {
-    QuarantineCopy,
-    SentinelReplace
+    QuarantineCopy
   }
 
   private sealed class FaultInjectingMigrationFileOperations(
@@ -1011,12 +1079,6 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
 
     public void CommitNewMarker(string temporaryPath, string markerPath) =>
         File.Move(temporaryPath, markerPath, overwrite: false);
-
-    public void ReplaceMarker(string temporaryPath, string markerPath)
-    {
-      ThrowIfRequested(MigrationFailureStage.SentinelReplace);
-      File.Move(temporaryPath, markerPath, overwrite: true);
-    }
 
     private void ThrowIfRequested(MigrationFailureStage currentStage)
     {
@@ -1045,9 +1107,6 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
       File.WriteAllText(markerPath, winnerMarker);
       throw new IOException("Injected marker commit conflict.");
     }
-
-    public void ReplaceMarker(string temporaryPath, string markerPath) =>
-        File.Move(temporaryPath, markerPath, overwrite: true);
   }
 
   private sealed class DisappearingWinnerMigrationFileOperations :
@@ -1070,16 +1129,11 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
 
       File.Move(temporaryPath, markerPath, overwrite: false);
     }
-
-    public void ReplaceMarker(string temporaryPath, string markerPath) =>
-        File.Move(temporaryPath, markerPath, overwrite: true);
   }
 
   private sealed class WinnerDuringQuarantineMigrationFileOperations(
       string winnerMarker) : ILegacyMigrationFileOperations
   {
-    public bool ReplaceCalled { get; private set; }
-
     public void CommitQuarantine(string temporaryPath, string quarantinePath)
     {
       File.Move(temporaryPath, quarantinePath, overwrite: false);
@@ -1090,12 +1144,6 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
 
     public void CommitNewMarker(string temporaryPath, string markerPath) =>
         File.Move(temporaryPath, markerPath, overwrite: false);
-
-    public void ReplaceMarker(string temporaryPath, string markerPath)
-    {
-      ReplaceCalled = true;
-      File.Move(temporaryPath, markerPath, overwrite: true);
-    }
   }
 
   private sealed class TrackingMigrationFileOperations : ILegacyMigrationFileOperations
@@ -1110,9 +1158,6 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
 
     public void CommitNewMarker(string temporaryPath, string markerPath) =>
         File.Move(temporaryPath, markerPath, overwrite: false);
-
-    public void ReplaceMarker(string temporaryPath, string markerPath) =>
-        File.Move(temporaryPath, markerPath, overwrite: true);
   }
 
   private sealed class AlwaysFailingMarkerCommitOperations :
@@ -1123,9 +1168,6 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
 
     public void CommitNewMarker(string temporaryPath, string markerPath) =>
         throw new IOException("Injected persistent marker commit failure.");
-
-    public void ReplaceMarker(string temporaryPath, string markerPath) =>
-        File.Move(temporaryPath, markerPath, overwrite: true);
   }
 
   private sealed class RecordingMarkerFinalPathResolver(string finalPath) :
@@ -1137,6 +1179,44 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     {
       ObservedOpenReadableStream = stream.CanRead && !stream.SafeFileHandle.IsClosed;
       return finalPath;
+    }
+  }
+
+  private sealed class MutationAttemptingMarkerFinalPathResolver(
+      string replacementMarker) : IMigrationMarkerFinalPathResolver
+  {
+    public bool DeleteRejected { get; private set; }
+    public bool ReplaceRejected { get; private set; }
+
+    public string ResolveFinalPath(FileStream stream, string requestedPath)
+    {
+      var replacementPath = $"{requestedPath}.{Guid.NewGuid():N}.replacement";
+      File.WriteAllText(replacementPath, replacementMarker);
+      try
+      {
+        File.Delete(requestedPath);
+      }
+      catch (Exception exception) when (
+          exception is IOException or UnauthorizedAccessException)
+      {
+        DeleteRejected = true;
+      }
+
+      try
+      {
+        File.Move(replacementPath, requestedPath, overwrite: true);
+      }
+      catch (Exception exception) when (
+          exception is IOException or UnauthorizedAccessException)
+      {
+        ReplaceRejected = true;
+      }
+      finally
+      {
+        File.Delete(replacementPath);
+      }
+
+      return Path.GetFullPath(requestedPath);
     }
   }
 

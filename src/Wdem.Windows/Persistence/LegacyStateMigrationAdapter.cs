@@ -1,7 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -24,12 +23,23 @@ internal interface ILegacyMigrationFileOperations
 {
   void CommitQuarantine(string temporaryPath, string quarantinePath);
   void CommitNewMarker(string temporaryPath, string markerPath);
-  void ReplaceMarker(string temporaryPath, string markerPath);
 }
 
 internal interface IMigrationMarkerFinalPathResolver
 {
   string ResolveFinalPath(FileStream stream, string requestedPath);
+}
+
+internal enum MigrationPathEntryState
+{
+  Absent,
+  Present,
+  Inaccessible
+}
+
+internal interface IMigrationPathEntryProbe
+{
+  MigrationPathEntryState Probe(string path);
 }
 
 public sealed class LegacyStateMigrationAdapter
@@ -92,6 +102,7 @@ public sealed class LegacyStateMigrationAdapter
   private readonly ILegacyFileFinalPathResolver _finalPathResolver;
   private readonly ILegacyMigrationFileOperations _fileOperations;
   private readonly IMigrationMarkerFinalPathResolver _markerFinalPathResolver;
+  private readonly IMigrationPathEntryProbe _pathEntryProbe;
 
   public LegacyStateMigrationAdapter()
       : this(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData))
@@ -110,7 +121,8 @@ public sealed class LegacyStateMigrationAdapter
           localApplicationData,
           finalPathResolver,
           SystemLegacyMigrationFileOperations.Instance,
-          WindowsMigrationMarkerFinalPathResolver.Instance)
+          WindowsMigrationMarkerFinalPathResolver.Instance,
+          SystemMigrationPathEntryProbe.Instance)
   {
   }
 
@@ -122,7 +134,8 @@ public sealed class LegacyStateMigrationAdapter
           localApplicationData,
           finalPathResolver,
           fileOperations,
-          WindowsMigrationMarkerFinalPathResolver.Instance)
+          WindowsMigrationMarkerFinalPathResolver.Instance,
+          SystemMigrationPathEntryProbe.Instance)
   {
   }
 
@@ -131,6 +144,21 @@ public sealed class LegacyStateMigrationAdapter
       ILegacyFileFinalPathResolver finalPathResolver,
       ILegacyMigrationFileOperations fileOperations,
       IMigrationMarkerFinalPathResolver markerFinalPathResolver)
+      : this(
+          localApplicationData,
+          finalPathResolver,
+          fileOperations,
+          markerFinalPathResolver,
+          SystemMigrationPathEntryProbe.Instance)
+  {
+  }
+
+  internal LegacyStateMigrationAdapter(
+      string localApplicationData,
+      ILegacyFileFinalPathResolver finalPathResolver,
+      ILegacyMigrationFileOperations fileOperations,
+      IMigrationMarkerFinalPathResolver markerFinalPathResolver,
+      IMigrationPathEntryProbe pathEntryProbe)
   {
     ArgumentException.ThrowIfNullOrWhiteSpace(localApplicationData);
     _finalPathResolver = finalPathResolver ??
@@ -139,6 +167,8 @@ public sealed class LegacyStateMigrationAdapter
         throw new ArgumentNullException(nameof(fileOperations));
     _markerFinalPathResolver = markerFinalPathResolver ??
         throw new ArgumentNullException(nameof(markerFinalPathResolver));
+    _pathEntryProbe = pathEntryProbe ??
+        throw new ArgumentNullException(nameof(pathEntryProbe));
     var localRoot = Path.GetFullPath(localApplicationData);
     _legacyDirectory = Path.Combine(localRoot, "WinHome");
     _markerDirectory = Path.Combine(localRoot, "WDEM");
@@ -156,11 +186,21 @@ public sealed class LegacyStateMigrationAdapter
         .ConfigureAwait(false);
     try
     {
-      var markerExists = PathEntryExists(_markerPath);
-      var gateExists = PathEntryExists(_gatePath);
-      if (markerExists)
+      var markerState = _pathEntryProbe.Probe(_markerPath);
+      if (markerState == MigrationPathEntryState.Inaccessible)
       {
-        if (!gateExists)
+        throw CreateInaccessiblePathException(_markerPath);
+      }
+
+      var gateState = _pathEntryProbe.Probe(_gatePath);
+      if (gateState == MigrationPathEntryState.Inaccessible)
+      {
+        throw CreateInaccessiblePathException(_gatePath);
+      }
+
+      if (markerState == MigrationPathEntryState.Present)
+      {
+        if (gateState == MigrationPathEntryState.Absent)
         {
           await CreatePersistentGateAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -170,7 +210,7 @@ public sealed class LegacyStateMigrationAdapter
             cancellationToken).ConfigureAwait(false);
       }
 
-      if (gateExists)
+      if (gateState == MigrationPathEntryState.Present)
       {
         return await CommitSentinelFromGateAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -216,9 +256,19 @@ public sealed class LegacyStateMigrationAdapter
       stream.Flush(flushToDisk: true);
       return true;
     }
-    catch (IOException) when (PathEntryExists(_gatePath))
+    catch (IOException exception)
     {
-      return false;
+      switch (_pathEntryProbe.Probe(_gatePath))
+      {
+        case MigrationPathEntryState.Present:
+          return false;
+        case MigrationPathEntryState.Inaccessible:
+          throw CreateInaccessiblePathException(_gatePath, exception);
+        case MigrationPathEntryState.Absent:
+        default:
+          ExceptionDispatchInfo.Capture(exception).Throw();
+          throw;
+      }
     }
   }
 
@@ -232,18 +282,20 @@ public sealed class LegacyStateMigrationAdapter
     {
       var writeResult = await WriteMarkerAtomicallyAsync(
           marker,
-          MarkerWriteMode.CreateNew,
           cancellationToken).ConfigureAwait(false);
       if (writeResult.Outcome == MarkerWriteOutcome.Written)
       {
         return new LegacyStateMigrationResult(true, importedStepNames, _markerPath);
       }
 
-      if (PathEntryExists(_markerPath))
+      switch (_pathEntryProbe.Probe(_markerPath))
       {
-        return await ResolveExistingMarkerAsync(
-            includePersistedNames: true,
-            cancellationToken).ConfigureAwait(false);
+        case MigrationPathEntryState.Present:
+          return await ResolveExistingMarkerAsync(
+              includePersistedNames: true,
+              cancellationToken).ConfigureAwait(false);
+        case MigrationPathEntryState.Inaccessible:
+          throw CreateInaccessiblePathException(_markerPath);
       }
 
       lastFailure = writeResult;
@@ -261,18 +313,20 @@ public sealed class LegacyStateMigrationAdapter
     {
       var writeResult = await WriteMarkerAtomicallyAsync(
           CreateMarker(Array.AsReadOnly(Array.Empty<string>())),
-          MarkerWriteMode.CreateNew,
           cancellationToken).ConfigureAwait(false);
       if (writeResult.Outcome == MarkerWriteOutcome.Written)
       {
         return NotPerformed();
       }
 
-      if (PathEntryExists(_markerPath))
+      switch (_pathEntryProbe.Probe(_markerPath))
       {
-        return await ResolveExistingMarkerAsync(
-            includePersistedNames: true,
-            cancellationToken).ConfigureAwait(false);
+        case MigrationPathEntryState.Present:
+          return await ResolveExistingMarkerAsync(
+              includePersistedNames: true,
+              cancellationToken).ConfigureAwait(false);
+        case MigrationPathEntryState.Inaccessible:
+          throw CreateInaccessiblePathException(_markerPath);
       }
 
       lastFailure = writeResult;
@@ -327,9 +381,12 @@ public sealed class LegacyStateMigrationAdapter
   private async Task<MarkerReadResult> ReadMarkerAsync(
       CancellationToken cancellationToken)
   {
-    if (!PathEntryExists(_markerPath))
+    switch (_pathEntryProbe.Probe(_markerPath))
     {
-      return MarkerReadResult.Missing;
+      case MigrationPathEntryState.Absent:
+        return MarkerReadResult.Missing;
+      case MigrationPathEntryState.Inaccessible:
+        throw CreateInaccessiblePathException(_markerPath);
     }
 
     byte[] markerBytes;
@@ -344,7 +401,7 @@ public sealed class LegacyStateMigrationAdapter
           _markerPath,
           FileMode.Open,
           FileAccess.Read,
-          FileShare.Read | FileShare.Delete,
+          FileShare.Read,
           4096,
           FileOptions.Asynchronous | FileOptions.SequentialScan);
       var finalPath = _markerFinalPathResolver.ResolveFinalPath(stream, _markerPath);
@@ -371,7 +428,6 @@ public sealed class LegacyStateMigrationAdapter
       return MarkerReadResult.Unreadable;
     }
 
-    var fingerprint = SHA256.HashData(markerBytes);
     try
     {
       using var document = JsonDocument.Parse(
@@ -402,7 +458,7 @@ public sealed class LegacyStateMigrationAdapter
           importedNames.ValueKind != JsonValueKind.Array ||
           importedNames.GetArrayLength() > MaximumImportedStepNames)
       {
-        return MarkerReadResult.Invalid(markerBytes, fingerprint);
+        return MarkerReadResult.Invalid(markerBytes);
       }
 
       var names = new List<string>(importedNames.GetArrayLength());
@@ -413,20 +469,17 @@ public sealed class LegacyStateMigrationAdapter
             !IsSafeMigratedName(name, LegacyNameSource.PersistedMarker) ||
             !string.Equals(name, name.Trim(), StringComparison.Ordinal))
         {
-          return MarkerReadResult.Invalid(markerBytes, fingerprint);
+          return MarkerReadResult.Invalid(markerBytes);
         }
 
         names.Add(name);
       }
 
-      return MarkerReadResult.Valid(
-          Array.AsReadOnly(names.ToArray()),
-          markerBytes,
-          fingerprint);
+      return MarkerReadResult.Valid(Array.AsReadOnly(names.ToArray()));
     }
     catch (JsonException)
     {
-      return MarkerReadResult.Invalid(markerBytes, fingerprint);
+      return MarkerReadResult.Invalid(markerBytes);
     }
   }
 
@@ -452,53 +505,8 @@ public sealed class LegacyStateMigrationAdapter
       return NotPerformed();
     }
 
-    return await RepairInvalidMarkerAsync(marker, cancellationToken)
+    await WriteQuarantineAtomicallyAsync(marker.RawBytes!, cancellationToken)
         .ConfigureAwait(false);
-  }
-
-  private async Task<LegacyStateMigrationResult> RepairInvalidMarkerAsync(
-      MarkerReadResult originalMarker,
-      CancellationToken cancellationToken)
-  {
-    var marker = originalMarker;
-    for (var attempt = 0; attempt < 3; attempt++)
-    {
-      await WriteQuarantineAtomicallyAsync(
-          marker.RawBytes!,
-          cancellationToken).ConfigureAwait(false);
-      var currentMarker = await ReadMarkerAsync(cancellationToken).ConfigureAwait(false);
-      if (currentMarker.State == MarkerReadState.Valid)
-      {
-        return NotPerformed(currentMarker.ImportedStepNames);
-      }
-
-      if (currentMarker.State == MarkerReadState.Missing)
-      {
-        return await CommitSentinelFromGateAsync(cancellationToken)
-            .ConfigureAwait(false);
-      }
-
-      if (currentMarker.State != MarkerReadState.Invalid)
-      {
-        return NotPerformed();
-      }
-
-      if (!CryptographicOperations.FixedTimeEquals(
-              marker.Fingerprint!,
-              currentMarker.Fingerprint!))
-      {
-        marker = currentMarker;
-        continue;
-      }
-
-      var writeResult = await WriteMarkerAtomicallyAsync(
-          CreateMarker(Array.AsReadOnly(Array.Empty<string>())),
-          MarkerWriteMode.ReplaceExisting,
-          cancellationToken).ConfigureAwait(false);
-      ThrowIfMarkerWriteFailed(writeResult);
-      return NotPerformed();
-    }
-
     return NotPerformed();
   }
 
@@ -689,39 +697,11 @@ public sealed class LegacyStateMigrationAdapter
     }
   }
 
-  private static bool PathEntryExists(string path)
-  {
-    try
-    {
-      var directory = Path.GetDirectoryName(path);
-      var fileName = Path.GetFileName(path);
-      if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
-      {
-        return false;
-      }
-
-      return Directory.EnumerateFileSystemEntries(
-              directory,
-              fileName,
-              SearchOption.TopDirectoryOnly)
-          .Any(entry => string.Equals(
-              Path.GetFileName(entry),
-              fileName,
-              StringComparison.OrdinalIgnoreCase));
-    }
-    catch (DirectoryNotFoundException)
-    {
-      return false;
-    }
-    catch (IOException)
-    {
-      return true;
-    }
-    catch (UnauthorizedAccessException)
-    {
-      return true;
-    }
-  }
+  private static IOException CreateInaccessiblePathException(
+      string path,
+      Exception? innerException = null) => new(
+      $"The migration path state for '{Path.GetFileName(path)}' could not be inspected safely.",
+      innerException);
 
   private static void ExtractNames(
       JsonElement root,
@@ -1138,7 +1118,6 @@ public sealed class LegacyStateMigrationAdapter
 
   private async Task<MarkerWriteResult> WriteMarkerAtomicallyAsync(
       LegacyMigrationMarker marker,
-      MarkerWriteMode mode,
       CancellationToken cancellationToken)
   {
     var markerBytes = JsonSerializer.SerializeToUtf8Bytes(marker, MarkerJsonOptions);
@@ -1165,19 +1144,24 @@ public sealed class LegacyStateMigrationAdapter
         stream.Flush(flushToDisk: true);
       }
 
-      if (mode == MarkerWriteMode.ReplaceExisting)
+      try
       {
-        _fileOperations.ReplaceMarker(temporaryPath, _markerPath);
+        _fileOperations.CommitNewMarker(temporaryPath, _markerPath);
       }
-      else
+      catch (IOException exception)
       {
-        try
+        switch (_pathEntryProbe.Probe(_markerPath))
         {
-          _fileOperations.CommitNewMarker(temporaryPath, _markerPath);
-        }
-        catch (IOException) when (PathEntryExists(_markerPath))
-        {
-          return new MarkerWriteResult(MarkerWriteOutcome.Existing);
+          case MigrationPathEntryState.Present:
+            return new MarkerWriteResult(MarkerWriteOutcome.Existing);
+          case MigrationPathEntryState.Inaccessible:
+            return new MarkerWriteResult(
+                MarkerWriteOutcome.Failed,
+                CreateInaccessiblePathException(_markerPath, exception));
+          case MigrationPathEntryState.Absent:
+          default:
+            ExceptionDispatchInfo.Capture(exception).Throw();
+            throw;
         }
       }
 
@@ -1260,8 +1244,7 @@ public sealed class LegacyStateMigrationAdapter
   private sealed record MarkerReadResult(
       MarkerReadState State,
       IReadOnlyList<string> ImportedStepNames,
-      byte[]? RawBytes = null,
-      byte[]? Fingerprint = null)
+      byte[]? RawBytes = null)
   {
     public static MarkerReadResult Missing { get; } = Empty(MarkerReadState.Missing);
     public static MarkerReadResult Oversized { get; } = Empty(
@@ -1271,20 +1254,14 @@ public sealed class LegacyStateMigrationAdapter
     public static MarkerReadResult Unreadable { get; } = Empty(
         MarkerReadState.Unreadable);
 
-    public static MarkerReadResult Invalid(byte[] bytes, byte[] fingerprint) => new(
+    public static MarkerReadResult Invalid(byte[] bytes) => new(
         MarkerReadState.Invalid,
         Array.AsReadOnly(Array.Empty<string>()),
-        bytes,
-        fingerprint);
+        bytes);
 
-    public static MarkerReadResult Valid(
-        IReadOnlyList<string> names,
-        byte[] bytes,
-        byte[] fingerprint) => new(
+    public static MarkerReadResult Valid(IReadOnlyList<string> names) => new(
         MarkerReadState.Valid,
-        names,
-        bytes,
-        fingerprint);
+        names);
 
     private static MarkerReadResult Empty(MarkerReadState state) => new(
         state,
@@ -1294,12 +1271,6 @@ public sealed class LegacyStateMigrationAdapter
   private sealed record MarkerWriteResult(
       MarkerWriteOutcome Outcome,
       Exception? Failure = null);
-
-  private enum MarkerWriteMode
-  {
-    CreateNew,
-    ReplaceExisting
-  }
 
   private enum MarkerReadState
   {
@@ -1329,9 +1300,6 @@ internal sealed class SystemLegacyMigrationFileOperations :
 
   public void CommitNewMarker(string temporaryPath, string markerPath) =>
       File.Move(temporaryPath, markerPath, overwrite: false);
-
-  public void ReplaceMarker(string temporaryPath, string markerPath) =>
-      File.Move(temporaryPath, markerPath, overwrite: true);
 }
 
 internal sealed class WindowsMigrationMarkerFinalPathResolver :
@@ -1341,6 +1309,47 @@ internal sealed class WindowsMigrationMarkerFinalPathResolver :
 
   public string ResolveFinalPath(FileStream stream, string requestedPath) =>
       WindowsLegacyFileFinalPathResolver.Instance.ResolveFinalPath(stream, requestedPath);
+}
+
+internal sealed class SystemMigrationPathEntryProbe : IMigrationPathEntryProbe
+{
+  public static readonly SystemMigrationPathEntryProbe Instance = new();
+
+  public MigrationPathEntryState Probe(string path)
+  {
+    try
+    {
+      var directory = Path.GetDirectoryName(path);
+      var fileName = Path.GetFileName(path);
+      if (string.IsNullOrEmpty(directory))
+      {
+        return MigrationPathEntryState.Absent;
+      }
+
+      return Directory.EnumerateFileSystemEntries(
+              directory,
+              fileName,
+              SearchOption.TopDirectoryOnly)
+          .Any(entry => string.Equals(
+              Path.GetFileName(entry),
+              fileName,
+              StringComparison.OrdinalIgnoreCase))
+          ? MigrationPathEntryState.Present
+          : MigrationPathEntryState.Absent;
+    }
+    catch (DirectoryNotFoundException)
+    {
+      return MigrationPathEntryState.Absent;
+    }
+    catch (IOException)
+    {
+      return MigrationPathEntryState.Inaccessible;
+    }
+    catch (UnauthorizedAccessException)
+    {
+      return MigrationPathEntryState.Inaccessible;
+    }
+  }
 }
 
 internal sealed class WindowsLegacyFileFinalPathResolver : ILegacyFileFinalPathResolver
