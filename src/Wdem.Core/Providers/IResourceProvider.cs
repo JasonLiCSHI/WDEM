@@ -4,6 +4,7 @@ namespace Wdem.Core.Providers;
 
 public interface IResourceProvider
 {
+  // ResourceType and ProviderName form the case-insensitive registry identity.
   string ResourceType { get; }
   string ProviderName { get; }
   ProviderCapabilities Capabilities { get; }

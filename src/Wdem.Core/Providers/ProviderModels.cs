@@ -1,5 +1,7 @@
 using System.Text.Json.Serialization;
+using Wdem.Core.Execution;
 using Wdem.Core.Resources;
+using Wdem.Core.Versions;
 
 namespace Wdem.Core.Providers;
 
@@ -7,7 +9,8 @@ public enum DetectionOutcome
 {
   Succeeded,
   Failed,
-  Unsupported
+  Unsupported,
+  Cancelled
 }
 
 public enum ComplianceStatus
@@ -29,20 +32,12 @@ public enum PlanAction
   Upgrade
 }
 
-public enum ProviderLogLevel
-{
-  Trace,
-  Debug,
-  Info,
-  Warning,
-  Error
-}
-
 public enum ApplyOutcome
 {
   Succeeded,
   Cancelled,
-  NotRequired
+  NotRequired,
+  Failed
 }
 
 public sealed record ProviderCapabilities
@@ -57,14 +52,25 @@ public sealed record ProviderCapabilities
 
 public sealed record ProviderValidationResult
 {
-  public required IReadOnlyList<string> Errors { get; init; }
-  public bool IsValid => Errors.Count == 0;
+  public IReadOnlyList<string> Errors { get; init; } = Array.Empty<string>();
+  public IReadOnlyList<StructuredError> StructuredErrors { get; init; } =
+      Array.Empty<StructuredError>();
+  public bool IsValid => (Errors?.Count ?? 0) == 0 && (StructuredErrors?.Count ?? 0) == 0;
 
   public static ProviderValidationResult Valid { get; } =
       new() { Errors = Array.Empty<string>() };
 
   public static ProviderValidationResult Invalid(params string[] errors) =>
       new() { Errors = errors };
+
+  public static ProviderValidationResult Invalid(
+      StructuredError error,
+      params StructuredError[] additionalErrors) =>
+      new()
+      {
+        Errors = Array.Empty<string>(),
+        StructuredErrors = [error, .. additionalErrors]
+      };
 }
 
 public sealed record DetectedState
@@ -73,9 +79,14 @@ public sealed record DetectedState
   public required DetectionOutcome Outcome { get; init; }
   public bool Exists { get; init; }
   public string? Version { get; init; }
+  public IReadOnlyList<SemanticVersion> InstalledVersions { get; init; } =
+      Array.Empty<SemanticVersion>();
+  public string? ConfigurationHash { get; init; }
+  public DateTimeOffset DetectedAtUtc { get; init; } = DateTimeOffset.UtcNow;
   public IReadOnlyDictionary<string, string> Evidence { get; init; } =
       new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
   public string? Error { get; init; }
+  public StructuredError? StructuredError { get; init; }
 }
 
 public sealed record PlanStep
@@ -97,32 +108,116 @@ public sealed record ResourcePlan
   public required bool IsExecutable { get; init; }
   public IReadOnlyList<PlanStep> Steps { get; init; } = Array.Empty<PlanStep>();
   public string? Error { get; init; }
+  public IReadOnlyList<StructuredError> StructuredErrors { get; init; } =
+      Array.Empty<StructuredError>();
   public bool RequiresApply => Steps.Count > 0;
 }
 
-public sealed record ProviderProgress(string Stage, double Percent, string Message)
+public sealed record ProviderProgress
 {
+  private string _stage = string.Empty;
+  private double _percent;
+  private string _message = string.Empty;
+  private string? _stepId;
+
   [JsonConstructor]
   public ProviderProgress(
       string stage,
       double percent,
       string message,
-      string? stepId,
+      string? stepId = null,
       ProviderLogLevel logLevel = ProviderLogLevel.Info)
-      : this(stage, percent, message)
   {
+    Stage = stage;
+    Percent = percent;
+    Message = message;
     StepId = stepId;
     LogLevel = logLevel;
   }
 
-  public string? StepId { get; init; }
+  public string Stage
+  {
+    get => _stage;
+    init => _stage = DiagnosticTextSanitizer.Sanitize(
+        value ?? throw new ArgumentNullException(nameof(value)));
+  }
+
+  public double Percent
+  {
+    get => _percent;
+    init => _percent = NormalizeProgress(value);
+  }
+
+  public string Message
+  {
+    get => _message;
+    init => _message = DiagnosticTextSanitizer.Sanitize(
+        value ?? throw new ArgumentNullException(nameof(value)));
+  }
+
+  public string? StepId
+  {
+    get => _stepId;
+    init => _stepId = value is null ? null : DiagnosticTextSanitizer.Sanitize(value);
+  }
+
   public ProviderLogLevel LogLevel { get; init; } = ProviderLogLevel.Info;
+
+  public void Deconstruct(out string stage, out double percent, out string message)
+  {
+    stage = Stage;
+    percent = Percent;
+    message = Message;
+  }
+
+  private static double NormalizeProgress(double progress)
+  {
+    if (double.IsNaN(progress) || double.IsNegativeInfinity(progress))
+    {
+      return 0;
+    }
+
+    if (double.IsPositiveInfinity(progress))
+    {
+      return 1;
+    }
+
+    return Math.Clamp(progress, 0, 1);
+  }
 }
 
 public sealed record ResourceApplyResult
 {
   public required string ResourceId { get; init; }
   public required ApplyOutcome Outcome { get; init; }
+  public StructuredError? Error { get; init; }
+  public IReadOnlyList<ProviderStepResult> StepResults { get; init; } =
+      Array.Empty<ProviderStepResult>();
+}
+
+public sealed record ProviderStepResult
+{
+  private double _progress;
+  private string? _message;
+
+  public required string StepId { get; init; }
+  public required PlanAction Action { get; init; }
+  public double Progress
+  {
+    get => _progress;
+    init => _progress = double.IsNaN(value) || double.IsNegativeInfinity(value)
+        ? 0
+        : double.IsPositiveInfinity(value) ? 1 : Math.Clamp(value, 0, 1);
+  }
+
+  public int? ProcessExitCode { get; init; }
+  public string? Message
+  {
+    get => _message;
+    init => _message = value is null ? null : DiagnosticTextSanitizer.Sanitize(value);
+  }
+
+  public StructuredError? Error { get; init; }
 }
 
 public sealed record VerificationResult

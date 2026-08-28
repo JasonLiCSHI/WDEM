@@ -12,6 +12,7 @@ public interface IResourceProviderRegistry
 public sealed class ResourceProviderRegistry : IResourceProviderRegistry
 {
   private readonly Dictionary<string, IResourceProvider> _providers;
+  private readonly IReadOnlyCollection<IResourceProvider> _providerSnapshot;
 
   public ResourceProviderRegistry(IEnumerable<IResourceProvider> providers)
   {
@@ -29,9 +30,11 @@ public sealed class ResourceProviderRegistry : IResourceProviderRegistry
             $"Provider '{provider.ProviderName}' is already registered for resource type '{provider.ResourceType}'.");
       }
     }
+
+    _providerSnapshot = Array.AsReadOnly(_providers.Values.ToArray());
   }
 
-  public IReadOnlyCollection<IResourceProvider> Providers => _providers.Values;
+  public IReadOnlyCollection<IResourceProvider> Providers => _providerSnapshot;
 
   public bool TryGet(string resourceType, string providerName, out IResourceProvider? provider) =>
       _providers.TryGetValue(CreateKey(resourceType, providerName), out provider);

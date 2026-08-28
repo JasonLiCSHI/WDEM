@@ -1,3 +1,4 @@
+using Wdem.Core.Execution;
 using Wdem.Core.Providers;
 using Wdem.Core.Resources;
 using Wdem.LegacySource.Interfaces;
@@ -96,10 +97,22 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
           $"{string.Join(", ", unknownParameters)}.");
     }
 
-    return ValueTask.FromResult(
-        errors.Count == 0
-            ? ProviderValidationResult.Valid
-            : ProviderValidationResult.Invalid(errors.ToArray()));
+    if (errors.Count == 0)
+    {
+      return ValueTask.FromResult(ProviderValidationResult.Valid);
+    }
+
+    return ValueTask.FromResult(new ProviderValidationResult
+    {
+      Errors = errors.ToArray(),
+      StructuredErrors = errors.Select(error => new StructuredError(
+          WdemErrorCode.ProviderError,
+          "Legacy provider validation failed.",
+          error)
+      {
+        ResourceId = resource.Id
+      }).ToArray()
+    });
   }
 
   public async ValueTask<DetectedState> DetectAsync(
@@ -113,34 +126,70 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
       {
         ResourceId = resource.Id,
         Outcome = DetectionOutcome.Failed,
-        Error = string.Join(" ", validation.Errors)
+        Error = string.Join(" ", validation.Errors),
+        StructuredError = validation.StructuredErrors.FirstOrDefault()
       };
     }
 
-    if (!_packageManager.IsAvailable())
+    try
     {
+      if (!_packageManager.IsAvailable())
+      {
+        var error = new StructuredError(
+            WdemErrorCode.DetectionError,
+            "Package manager is unavailable.",
+            $"Package manager '{ProviderName}' is not available.")
+        {
+          ResourceId = resource.Id,
+          IsRetryable = true
+        };
+        return new DetectedState
+        {
+          ResourceId = resource.Id,
+          Outcome = DetectionOutcome.Failed,
+          Error = error.Detail,
+          StructuredError = error
+        };
+      }
+
+      var packageId = resource.Parameters[PackageIdParameter]!;
+      var installed = _packageManager.IsInstalled(packageId);
+
+      return new DetectedState
+      {
+        ResourceId = resource.Id,
+        Outcome = DetectionOutcome.Succeeded,
+        Exists = installed,
+        Evidence = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+          ["provider"] = ProviderName,
+          [PackageIdParameter] = packageId
+        }
+      };
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      throw;
+    }
+    catch (Exception exception)
+    {
+      var error = new StructuredError(
+          WdemErrorCode.DetectionError,
+          "Package detection failed.",
+          exception.Message)
+      {
+        ResourceId = resource.Id,
+        UnderlyingException = exception,
+        IsRetryable = true
+      };
       return new DetectedState
       {
         ResourceId = resource.Id,
         Outcome = DetectionOutcome.Failed,
-        Error = $"Package manager '{ProviderName}' is not available."
+        Error = error.Detail,
+        StructuredError = error
       };
     }
-
-    var packageId = resource.Parameters[PackageIdParameter]!;
-    var installed = _packageManager.IsInstalled(packageId);
-
-    return new DetectedState
-    {
-      ResourceId = resource.Id,
-      Outcome = DetectionOutcome.Succeeded,
-      Exists = installed,
-      Evidence = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-      {
-        ["provider"] = ProviderName,
-        [PackageIdParameter] = packageId
-      }
-    };
   }
 
   public async ValueTask<ResourcePlan> PlanAsync(
@@ -167,17 +216,31 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
 
     if (currentState.Outcome != DetectionOutcome.Succeeded)
     {
+      var compliance = currentState.Outcome == DetectionOutcome.Unsupported
+          ? ComplianceStatus.Unsupported
+          : ComplianceStatus.DetectionFailed;
+      var fallbackCode = currentState.Outcome == DetectionOutcome.Cancelled
+          ? WdemErrorCode.CancellationError
+          : currentState.Outcome == DetectionOutcome.Unsupported
+              ? WdemErrorCode.ProviderError
+              : WdemErrorCode.DetectionError;
+      var structuredError = currentState.StructuredError ?? new StructuredError(
+          fallbackCode,
+          "Package detection did not succeed.",
+          currentState.Error ?? "The resource could not be detected.")
+      {
+        ResourceId = resource.Id
+      };
       return new ResourcePlan
       {
         ResourceId = resource.Id,
         ResourceType = resource.Type,
         ProviderName = resource.Provider,
         DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(resource),
-        Compliance = currentState.Outcome == DetectionOutcome.Unsupported
-            ? ComplianceStatus.Unsupported
-            : ComplianceStatus.DetectionFailed,
+        Compliance = compliance,
         IsExecutable = false,
-        Error = currentState.Error ?? "The resource could not be detected."
+        Error = currentState.Error ?? "The resource could not be detected.",
+        StructuredErrors = [structuredError]
       };
     }
 
@@ -270,7 +333,12 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
     }
 
     var packageId = resource.Parameters[PackageIdParameter]!;
-    progress?.Report(new ProviderProgress("Apply", 0, $"Installing {packageId} with {ProviderName}."));
+    var step = plan.Steps[0];
+    progress?.Report(new ProviderProgress(
+        "Apply",
+        0,
+        $"Installing {packageId} with {ProviderName}.",
+        step.Id));
 
     var package = new AppConfig
     {
@@ -282,28 +350,93 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
     };
     var packageProgress = progress is null
         ? null
-        : new Progress<string>(message =>
-            progress.Report(new ProviderProgress("Apply", 0.5, message)));
+        : new ForwardingProgress<string>(message =>
+            progress.Report(new ProviderProgress("Apply", 0.5, message, step.Id)));
 
     try
     {
       await _packageManager.InstallAsync(package, packageProgress, cancellationToken);
+      cancellationToken.ThrowIfCancellationRequested();
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
+      var error = new StructuredError(
+          WdemErrorCode.CancellationError,
+          "Package installation was cancelled.",
+          $"Installation of resource '{resource.Id}' was cancelled.")
+      {
+        ResourceId = resource.Id,
+        StepId = step.Id
+      };
       return new ResourceApplyResult
       {
         ResourceId = resource.Id,
-        Outcome = ApplyOutcome.Cancelled
+        Outcome = ApplyOutcome.Cancelled,
+        Error = error,
+        StepResults =
+        [
+          new ProviderStepResult
+          {
+            StepId = step.Id,
+            Action = step.Action,
+            Progress = 0,
+            Message = "Installation was cancelled.",
+            Error = error
+          }
+        ]
+      };
+    }
+    catch (Exception exception)
+    {
+      var error = new StructuredError(
+          WdemErrorCode.InstallationError,
+          "Package installation failed.",
+          exception.Message)
+      {
+        ResourceId = resource.Id,
+        StepId = step.Id,
+        UnderlyingException = exception,
+        IsRetryable = true
+      };
+      return new ResourceApplyResult
+      {
+        ResourceId = resource.Id,
+        Outcome = ApplyOutcome.Failed,
+        Error = error,
+        StepResults =
+        [
+          new ProviderStepResult
+          {
+            StepId = step.Id,
+            Action = step.Action,
+            Progress = 0,
+            Message = "Installation failed.",
+            Error = error
+          }
+        ]
       };
     }
 
-    progress?.Report(new ProviderProgress("Apply", 1, $"Installed {packageId} with {ProviderName}."));
+    progress?.Report(new ProviderProgress(
+        "Apply",
+        1,
+        $"Installed {packageId} with {ProviderName}.",
+        step.Id));
 
     return new ResourceApplyResult
     {
       ResourceId = resource.Id,
-      Outcome = ApplyOutcome.Succeeded
+      Outcome = ApplyOutcome.Succeeded,
+      StepResults =
+      [
+        new ProviderStepResult
+        {
+          StepId = step.Id,
+          Action = step.Action,
+          Progress = 1,
+          Message = "Installation completed."
+        }
+      ]
     };
   }
 
@@ -316,6 +449,7 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
     {
       DetectionOutcome.Unsupported => ComplianceStatus.Unsupported,
       DetectionOutcome.Failed => ComplianceStatus.DetectionFailed,
+      DetectionOutcome.Cancelled => ComplianceStatus.DetectionFailed,
       _ when detectedState.Exists => ComplianceStatus.Satisfied,
       _ => ComplianceStatus.Missing
     };
@@ -350,15 +484,30 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
   private static string? GetOptionalParameter(ResourceDefinition resource, string name) =>
       resource.Parameters.TryGetValue(name, out var value) ? value : null;
 
-  private static ResourcePlan CreateBlockedPlan(ResourceDefinition resource, string error) =>
-      new()
-      {
-        ResourceId = resource.Id,
-        ResourceType = resource.Type,
-        ProviderName = resource.Provider,
-        DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(resource),
-        Compliance = ComplianceStatus.DetectionFailed,
-        IsExecutable = false,
-        Error = error
-      };
+  private static ResourcePlan CreateBlockedPlan(ResourceDefinition resource, string error)
+  {
+    var structuredError = new StructuredError(
+        WdemErrorCode.ProviderError,
+        "Legacy provider cannot plan this resource.",
+        error)
+    {
+      ResourceId = resource.Id
+    };
+    return new ResourcePlan
+    {
+      ResourceId = resource.Id,
+      ResourceType = resource.Type,
+      ProviderName = resource.Provider,
+      DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(resource),
+      Compliance = ComplianceStatus.DetectionFailed,
+      IsExecutable = false,
+      Error = error,
+      StructuredErrors = [structuredError]
+    };
+  }
+
+  private sealed class ForwardingProgress<T>(Action<T> report) : IProgress<T>
+  {
+    public void Report(T value) => report(value);
+  }
 }
