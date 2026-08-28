@@ -352,6 +352,16 @@ internal sealed class ProfileValidator(IResourceProviderRegistry providerRegistr
       {
         throw;
       }
+      catch (ArgumentException exception)
+      {
+        errors.Add(ProfileErrorFactory.FromException(
+            sourcePath,
+            "The resource provider violated the validation contract.",
+            "Provider validation contract violation:",
+            resourcePointer,
+            exception));
+        continue;
+      }
       catch (Exception exception)
       {
         errors.Add(ProfileErrorFactory.FromException(

@@ -126,27 +126,47 @@ public sealed class ComplianceEvaluatorTests
     Assert.Equal(ComplianceStatus.Satisfied, result.Status);
   }
 
-  [Theory]
-  [InlineData("ABCDEF012345", ComplianceStatus.Satisfied)]
-  [InlineData("different", ComplianceStatus.ConfigurationMismatch)]
-  [InlineData(null, ComplianceStatus.ConfigurationMismatch)]
-  public void Evaluate_MapsExpectedConfigurationHash(
-      string? actualHash,
-      ComplianceStatus expected)
+  [Fact]
+  public void Evaluate_ConfigurationHashComparison_IsCaseInsensitive()
   {
-    var resource = GitResource() with
-    {
-      Parameters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
-      {
-        ["expectedSha256"] = "abcdef012345"
-      }
-    };
+    var expectedHash = new string('a', 64);
+    var resource = ResourceWithExpectedHash(expectedHash);
     var state = State(exists: true, version: "2.52.1") with
     {
-      ConfigurationHash = actualHash
+      ConfigurationHash = expectedHash.ToUpperInvariant()
     };
 
-    Assert.Equal(expected, _evaluator.Evaluate(resource, state).Status);
+    Assert.Equal(ComplianceStatus.Satisfied, _evaluator.Evaluate(resource, state).Status);
+  }
+
+  [Theory]
+  [InlineData("")]
+  [InlineData("   ")]
+  [InlineData("abc123")]
+  [InlineData("gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg")]
+  public void Evaluate_InvalidDeclaredSha256_IsConfigurationMismatch(string expectedHash)
+  {
+    var result = _evaluator.Evaluate(
+        ResourceWithExpectedHash(expectedHash),
+        State(exists: true, version: "2.52.1") with { ConfigurationHash = new string('a', 64) });
+
+    Assert.Equal(ComplianceStatus.ConfigurationMismatch, result.Status);
+    Assert.Equal(WdemErrorCode.ConfigurationError, result.Error!.Code);
+  }
+
+  [Theory]
+  [InlineData(null)]
+  [InlineData("")]
+  [InlineData("abc123")]
+  [InlineData("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")]
+  public void Evaluate_InvalidDetectedSha256_IsConfigurationMismatch(string? actualHash)
+  {
+    var result = _evaluator.Evaluate(
+        ResourceWithExpectedHash(new string('a', 64)),
+        State(exists: true, version: "2.52.1") with { ConfigurationHash = actualHash });
+
+    Assert.Equal(ComplianceStatus.ConfigurationMismatch, result.Status);
+    Assert.Equal(WdemErrorCode.ConfigurationError, result.Error!.Code);
   }
 
   [Fact]
@@ -226,6 +246,15 @@ public sealed class ComplianceEvaluatorTests
     Provider = "winget",
     VersionConstraint = ">=2.50 <3.0"
   };
+
+  private static ResourceDefinition ResourceWithExpectedHash(string? expectedHash) =>
+      GitResource() with
+      {
+        Parameters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+        {
+          ["expectedSha256"] = expectedHash
+        }
+      };
 
   private static DetectedState State(bool exists, string? version) => new()
   {

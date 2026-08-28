@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using Wdem.Core.Execution;
 using Wdem.Core.Providers;
 using Wdem.Core.Resources;
@@ -76,11 +77,9 @@ public sealed class ComplianceEvaluator : IComplianceEvaluator
     }
 
     if (desired.Parameters.TryGetValue("expectedSha256", out var expectedHash) &&
-        !string.IsNullOrWhiteSpace(expectedHash) &&
-        !string.Equals(
-            expectedHash.Trim(),
-            current.ConfigurationHash?.Trim(),
-            StringComparison.OrdinalIgnoreCase))
+        (!TryDecodeSha256(expectedHash, out var expectedBytes) ||
+         !TryDecodeSha256(current.ConfigurationHash, out var actualBytes) ||
+         !CryptographicOperations.FixedTimeEquals(expectedBytes, actualBytes)))
     {
       return new ComplianceResult(
           ComplianceStatus.ConfigurationMismatch,
@@ -98,6 +97,39 @@ public sealed class ComplianceEvaluator : IComplianceEvaluator
         ComplianceStatus.Satisfied,
         $"Resource '{desired.Id}' satisfies the desired state.");
   }
+
+  private static bool TryDecodeSha256(string? value, out byte[] bytes)
+  {
+    bytes = Array.Empty<byte>();
+    if (value is null || value.Length != 64)
+    {
+      return false;
+    }
+
+    var decoded = new byte[32];
+    for (var index = 0; index < decoded.Length; index++)
+    {
+      var high = DecodeHex(value[index * 2]);
+      var low = DecodeHex(value[(index * 2) + 1]);
+      if (high < 0 || low < 0)
+      {
+        return false;
+      }
+
+      decoded[index] = (byte)((high << 4) | low);
+    }
+
+    bytes = decoded;
+    return true;
+  }
+
+  private static int DecodeHex(char value) => value switch
+  {
+    >= '0' and <= '9' => value - '0',
+    >= 'a' and <= 'f' => value - 'a' + 10,
+    >= 'A' and <= 'F' => value - 'A' + 10,
+    _ => -1
+  };
 
   private static ComplianceResult? EvaluateVersion(
       ResourceDefinition desired,

@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Text.Json.Serialization;
 using Wdem.Core.Execution;
 using Wdem.Core.Resources;
@@ -52,10 +53,23 @@ public sealed record ProviderCapabilities
 
 public sealed record ProviderValidationResult
 {
-  public IReadOnlyList<string> Errors { get; init; } = Array.Empty<string>();
-  public IReadOnlyList<StructuredError> StructuredErrors { get; init; } =
-      Array.Empty<StructuredError>();
-  public bool IsValid => (Errors?.Count ?? 0) == 0 && (StructuredErrors?.Count ?? 0) == 0;
+  private IReadOnlyList<string> _errors = ProviderCollectionSnapshot.EmptyList<string>();
+  private IReadOnlyList<StructuredError> _structuredErrors =
+      ProviderCollectionSnapshot.EmptyList<StructuredError>();
+
+  public IReadOnlyList<string> Errors
+  {
+    get => _errors;
+    init => _errors = ProviderCollectionSnapshot.List(value);
+  }
+
+  public IReadOnlyList<StructuredError> StructuredErrors
+  {
+    get => _structuredErrors;
+    init => _structuredErrors = ProviderCollectionSnapshot.List(value);
+  }
+
+  public bool IsValid => Errors.Count == 0 && StructuredErrors.Count == 0;
 
   public static ProviderValidationResult Valid { get; } =
       new() { Errors = Array.Empty<string>() };
@@ -75,16 +89,27 @@ public sealed record ProviderValidationResult
 
 public sealed record DetectedState
 {
+  private IReadOnlyList<SemanticVersion> _installedVersions =
+      ProviderCollectionSnapshot.EmptyList<SemanticVersion>();
+  private IReadOnlyDictionary<string, string> _evidence =
+      ProviderCollectionSnapshot.EmptyDictionary();
+
   public required string ResourceId { get; init; }
   public required DetectionOutcome Outcome { get; init; }
   public bool Exists { get; init; }
   public string? Version { get; init; }
-  public IReadOnlyList<SemanticVersion> InstalledVersions { get; init; } =
-      Array.Empty<SemanticVersion>();
+  public IReadOnlyList<SemanticVersion> InstalledVersions
+  {
+    get => _installedVersions;
+    init => _installedVersions = ProviderCollectionSnapshot.List(value);
+  }
   public string? ConfigurationHash { get; init; }
   public DateTimeOffset DetectedAtUtc { get; init; } = DateTimeOffset.UtcNow;
-  public IReadOnlyDictionary<string, string> Evidence { get; init; } =
-      new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+  public IReadOnlyDictionary<string, string> Evidence
+  {
+    get => _evidence;
+    init => _evidence = ProviderCollectionSnapshot.Dictionary(value);
+  }
   public string? Error { get; init; }
   public StructuredError? StructuredError { get; init; }
 }
@@ -100,16 +125,27 @@ public sealed record PlanStep
 
 public sealed record ResourcePlan
 {
+  private IReadOnlyList<PlanStep> _steps = ProviderCollectionSnapshot.EmptyList<PlanStep>();
+  private IReadOnlyList<StructuredError> _structuredErrors =
+      ProviderCollectionSnapshot.EmptyList<StructuredError>();
+
   public required string ResourceId { get; init; }
   public required string ResourceType { get; init; }
   public required string ProviderName { get; init; }
   public required string DesiredStateFingerprint { get; init; }
   public required ComplianceStatus Compliance { get; init; }
   public required bool IsExecutable { get; init; }
-  public IReadOnlyList<PlanStep> Steps { get; init; } = Array.Empty<PlanStep>();
+  public IReadOnlyList<PlanStep> Steps
+  {
+    get => _steps;
+    init => _steps = ProviderCollectionSnapshot.List(value);
+  }
   public string? Error { get; init; }
-  public IReadOnlyList<StructuredError> StructuredErrors { get; init; } =
-      Array.Empty<StructuredError>();
+  public IReadOnlyList<StructuredError> StructuredErrors
+  {
+    get => _structuredErrors;
+    init => _structuredErrors = ProviderCollectionSnapshot.List(value);
+  }
   public bool RequiresApply => Steps.Count > 0;
 }
 
@@ -188,11 +224,25 @@ public sealed record ProviderProgress
 
 public sealed record ResourceApplyResult
 {
+  private IReadOnlyList<ProviderStepResult> _stepResults =
+      ProviderCollectionSnapshot.EmptyList<ProviderStepResult>();
+  private IReadOnlyList<StructuredError> _diagnostics =
+      ProviderCollectionSnapshot.EmptyList<StructuredError>();
+
   public required string ResourceId { get; init; }
   public required ApplyOutcome Outcome { get; init; }
   public StructuredError? Error { get; init; }
-  public IReadOnlyList<ProviderStepResult> StepResults { get; init; } =
-      Array.Empty<ProviderStepResult>();
+  public IReadOnlyList<ProviderStepResult> StepResults
+  {
+    get => _stepResults;
+    init => _stepResults = ProviderCollectionSnapshot.List(value);
+  }
+
+  public IReadOnlyList<StructuredError> Diagnostics
+  {
+    get => _diagnostics;
+    init => _diagnostics = ProviderCollectionSnapshot.List(value);
+  }
 }
 
 public sealed record ProviderStepResult
@@ -226,4 +276,44 @@ public sealed record VerificationResult
   public required ComplianceStatus Compliance { get; init; }
   public required DetectedState DetectedState { get; init; }
   public string? Message { get; init; }
+}
+
+internal static class ProviderCollectionSnapshot
+{
+  public static IReadOnlyList<T> EmptyList<T>() => Array.AsReadOnly(Array.Empty<T>());
+
+  public static IReadOnlyList<T> List<T>(IReadOnlyList<T>? values)
+  {
+    ArgumentNullException.ThrowIfNull(values);
+
+    var snapshot = values.ToArray();
+    if (snapshot.Any(value => value is null))
+    {
+      throw new ArgumentException("Provider model collections cannot contain null elements.", nameof(values));
+    }
+
+    return Array.AsReadOnly(snapshot);
+  }
+
+  public static IReadOnlyDictionary<string, string> EmptyDictionary() =>
+      new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase).ToFrozenDictionary(
+          StringComparer.OrdinalIgnoreCase);
+
+  public static IReadOnlyDictionary<string, string> Dictionary(
+      IReadOnlyDictionary<string, string>? values)
+  {
+    ArgumentNullException.ThrowIfNull(values);
+    var snapshot = values.ToArray();
+    if (snapshot.Any(pair => pair.Key is null || pair.Value is null))
+    {
+      throw new ArgumentException(
+          "Provider model dictionaries cannot contain null keys or values.",
+          nameof(values));
+    }
+
+    return snapshot.ToFrozenDictionary(
+        pair => pair.Key,
+        pair => pair.Value,
+        StringComparer.OrdinalIgnoreCase);
+  }
 }

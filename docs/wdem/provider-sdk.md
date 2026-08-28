@@ -34,7 +34,7 @@ ValueTask<VerificationResult> VerifyAsync(
 The host calls these operations in order:
 
 1. `ValidateAsync` rejects unknown, missing, unsafe, or unsupported parameters before any machine access.
-2. `DetectAsync` observes the machine without modifying it. A missing executable or package is a successful detection with `Exists == false`; inability to inspect is `Failed`, cancellation is `Cancelled`, and an unsupported platform or resource is `Unsupported`.
+2. `DetectAsync` observes the machine without modifying it. A missing executable or package is a successful detection with `Exists == false`; inability to inspect is `Failed`, and an unsupported platform or resource is `Unsupported`. Cancellation requested through the supplied token propagates as `OperationCanceledException`.
 3. The host performs centralized compliance evaluation. Providers supply evidence; an installer exit code never proves compliance.
 4. `PlanAsync` creates deterministic steps from the desired resource and detected state. It must not modify the machine. Plans retain `ResourceId`, `ResourceType`, `ProviderName`, and `DesiredStateFingerprint` so stale or substituted plans can be rejected.
 5. `ApplyAsync` executes only an executable, matching plan. It reports each completed or failed operation through `ProviderStepResult` and observes the cancellation token.
@@ -71,7 +71,7 @@ Provider-facing failures must include `StructuredError`. The diagnostic identifi
 
 Compatibility string fields (`DetectedState.Error`, `ProviderValidationResult.Errors`, and `ResourcePlan.Error`) remain available during migration. New providers should populate structured diagnostics; `ProviderValidationResult.IsValid` is false when either error collection is non-empty.
 
-Cancellation requested by the supplied token should normally propagate as `OperationCanceledException` from validation, detection, and planning. Apply operations that have begun return `ApplyOutcome.Cancelled` with a `CancellationError` and per-step error metadata when they can safely translate the cancellation.
+Cancellation requested by the supplied token propagates as `OperationCanceledException` from validation, detection, and planning. `DetectionOutcome.Cancelled` is reserved for providers that are translating an already materialized, persisted, or externally reported state; centralized compliance maps that outcome to a detection failure with cancellation diagnostics. Apply operations that have begun may return `ApplyOutcome.Cancelled` with a `CancellationError` and per-step error metadata when they can safely translate the cancellation.
 
 ## Legacy package adapter
 

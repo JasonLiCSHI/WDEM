@@ -23,11 +23,23 @@ public sealed class ResourceProviderRegistry : IResourceProviderRegistry
     {
       ArgumentNullException.ThrowIfNull(provider);
 
-      var key = CreateKey(provider.ResourceType, provider.ProviderName);
+      var resourceType = provider.ResourceType;
+      var providerName = provider.ProviderName;
+      var capabilities = provider.Capabilities;
+      var key = CreateKey(resourceType, providerName);
+      ArgumentNullException.ThrowIfNull(capabilities);
+      if (capabilities.MaxConcurrentOperations <= 0)
+      {
+        throw new ArgumentOutOfRangeException(
+            nameof(provider),
+            capabilities.MaxConcurrentOperations,
+            "Provider maximum concurrency must be greater than zero.");
+      }
+
       if (!_providers.TryAdd(key, provider))
       {
         throw new InvalidOperationException(
-            $"Provider '{provider.ProviderName}' is already registered for resource type '{provider.ResourceType}'.");
+            $"Provider '{providerName}' is already registered for resource type '{resourceType}'.");
       }
     }
 

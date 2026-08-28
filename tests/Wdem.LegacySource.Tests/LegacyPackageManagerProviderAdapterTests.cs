@@ -50,6 +50,7 @@ public sealed class LegacyPackageManagerProviderAdapterTests
     Assert.Contains(result.Errors, error => error.Contains("versions", StringComparison.Ordinal));
     Assert.Contains(result.Errors, error => error.Contains("source", StringComparison.Ordinal));
     Assert.Contains(result.Errors, error => error.Contains("installer parameters", StringComparison.Ordinal));
+    Assert.Equal(result.Errors.Count, result.StructuredErrors.Count);
   }
 
   [Fact]
@@ -268,8 +269,9 @@ public sealed class LegacyPackageManagerProviderAdapterTests
             It.IsAny<AppConfig>(),
             It.IsAny<IProgress<string>?>(),
             cancellation.Token))
-        .Returns(async () =>
+        .Returns<AppConfig, IProgress<string>?, CancellationToken>(async (_, progress, _) =>
         {
+          progress?.Report("halfway");
           cancellation.Cancel();
           await Task.Delay(Timeout.InfiniteTimeSpan, cancellation.Token);
         });
@@ -280,6 +282,7 @@ public sealed class LegacyPackageManagerProviderAdapterTests
     Assert.Equal(WdemErrorCode.CancellationError, result.Error!.Code);
     var step = Assert.Single(result.StepResults);
     Assert.Equal("git:install", step.StepId);
+    Assert.Equal(0.5, step.Progress);
     Assert.Equal(WdemErrorCode.CancellationError, step.Error!.Code);
   }
 
@@ -299,14 +302,20 @@ public sealed class LegacyPackageManagerProviderAdapterTests
             It.IsAny<AppConfig>(),
             It.IsAny<IProgress<string>?>(),
             CancellationToken.None))
-        .ThrowsAsync(new InvalidOperationException("api_key=super-secret rejected"));
+        .Returns<AppConfig, IProgress<string>?, CancellationToken>((_, progress, _) =>
+        {
+          progress?.Report("halfway");
+          throw new InvalidOperationException("api_key=super-secret rejected");
+        });
 
     var result = await adapter.ApplyAsync(resource, plan, null, CancellationToken.None);
 
     Assert.Equal(ApplyOutcome.Failed, result.Outcome);
     Assert.Equal(WdemErrorCode.InstallationError, result.Error!.Code);
     Assert.DoesNotContain("super-secret", result.Error.Detail, StringComparison.Ordinal);
-    Assert.Equal(WdemErrorCode.InstallationError, Assert.Single(result.StepResults).Error!.Code);
+    var step = Assert.Single(result.StepResults);
+    Assert.Equal(0.5, step.Progress);
+    Assert.Equal(WdemErrorCode.InstallationError, step.Error!.Code);
   }
 
   [Fact]
@@ -369,6 +378,60 @@ public sealed class LegacyPackageManagerProviderAdapterTests
     Assert.Contains(reports, report => report.StepId == "git:install");
   }
 
+  [Theory]
+  [InlineData(ProgressFailurePoint.BeforeInstall)]
+  [InlineData(ProgressFailurePoint.DuringInstall)]
+  [InlineData(ProgressFailurePoint.AfterInstall)]
+  public async Task ApplyAsync_ObserverFailure_DoesNotChangeSuccessfulOperation(
+      ProgressFailurePoint failurePoint)
+  {
+    var adapter = CreateAdapter();
+    var resource = CreateResource();
+    var plan = await adapter.PlanAsync(resource, new DetectedState
+    {
+      ResourceId = resource.Id,
+      Outcome = DetectionOutcome.Succeeded,
+      Exists = false
+    }, CancellationToken.None);
+    _packageManager
+        .Setup(manager => manager.InstallAsync(
+            It.IsAny<AppConfig>(),
+            It.IsAny<IProgress<string>?>(),
+            CancellationToken.None))
+        .Returns<AppConfig, IProgress<string>?, CancellationToken>((_, progress, _) =>
+        {
+          progress?.Report("halfway");
+          return Task.CompletedTask;
+        });
+    var observer = new ImmediateProgress<ProviderProgress>(report =>
+    {
+      var shouldThrow = failurePoint switch
+      {
+        ProgressFailurePoint.BeforeInstall => report.Percent == 0,
+        ProgressFailurePoint.DuringInstall => report.Percent == 0.5,
+        ProgressFailurePoint.AfterInstall => report.Percent == 1,
+        _ => false
+      };
+      if (shouldThrow)
+      {
+        throw new InvalidOperationException("token=super-secret observer failed");
+      }
+    });
+
+    var result = await adapter.ApplyAsync(resource, plan, observer, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
+    Assert.Null(result.Error);
+    var diagnostic = Assert.Single(result.Diagnostics);
+    Assert.Equal(WdemErrorCode.ProviderError, diagnostic.Code);
+    Assert.DoesNotContain("super-secret", diagnostic.Detail, StringComparison.Ordinal);
+    Assert.Equal(1, Assert.Single(result.StepResults).Progress);
+    _packageManager.Verify(manager => manager.InstallAsync(
+        It.IsAny<AppConfig>(),
+        It.IsAny<IProgress<string>?>(),
+        CancellationToken.None), Times.Once);
+  }
+
   private LegacyPackageManagerProviderAdapter CreateAdapter() =>
       new("winget", _packageManager.Object);
 
@@ -389,5 +452,12 @@ public sealed class LegacyPackageManagerProviderAdapterTests
   private sealed class ImmediateProgress<T>(Action<T> report) : IProgress<T>
   {
     public void Report(T value) => report(value);
+  }
+
+  public enum ProgressFailurePoint
+  {
+    BeforeInstall,
+    DuringInstall,
+    AfterInstall
   }
 }

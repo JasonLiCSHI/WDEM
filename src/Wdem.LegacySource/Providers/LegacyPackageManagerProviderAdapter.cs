@@ -204,7 +204,10 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
     var validation = await ValidateAsync(resource, cancellationToken);
     if (!validation.IsValid)
     {
-      return CreateBlockedPlan(resource, string.Join(" ", validation.Errors));
+      return CreateBlockedPlan(
+          resource,
+          string.Join(" ", validation.Errors),
+          validation.StructuredErrors);
     }
 
     if (!string.Equals(currentState.ResourceId, resource.Id, StringComparison.OrdinalIgnoreCase))
@@ -334,11 +337,8 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
 
     var packageId = resource.Parameters[PackageIdParameter]!;
     var step = plan.Steps[0];
-    progress?.Report(new ProviderProgress(
-        "Apply",
-        0,
-        $"Installing {packageId} with {ProviderName}.",
-        step.Id));
+    var safeProgress = new SafeProgressReporter(progress, resource.Id, step.Id);
+    safeProgress.Report(0, $"Installing {packageId} with {ProviderName}.");
 
     var package = new AppConfig
     {
@@ -348,10 +348,8 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
       ResourceId = resource.Id,
       DependsOn = resource.Dependencies.ToList()
     };
-    var packageProgress = progress is null
-        ? null
-        : new ForwardingProgress<string>(message =>
-            progress.Report(new ProviderProgress("Apply", 0.5, message, step.Id)));
+    var packageProgress = new ForwardingProgress<string>(message =>
+        safeProgress.Report(0.5, message));
 
     try
     {
@@ -373,13 +371,14 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
         ResourceId = resource.Id,
         Outcome = ApplyOutcome.Cancelled,
         Error = error,
+        Diagnostics = safeProgress.Diagnostics,
         StepResults =
         [
           new ProviderStepResult
           {
             StepId = step.Id,
             Action = step.Action,
-            Progress = 0,
+            Progress = safeProgress.LastProgress,
             Message = "Installation was cancelled.",
             Error = error
           }
@@ -403,13 +402,14 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
         ResourceId = resource.Id,
         Outcome = ApplyOutcome.Failed,
         Error = error,
+        Diagnostics = safeProgress.Diagnostics,
         StepResults =
         [
           new ProviderStepResult
           {
             StepId = step.Id,
             Action = step.Action,
-            Progress = 0,
+            Progress = safeProgress.LastProgress,
             Message = "Installation failed.",
             Error = error
           }
@@ -417,16 +417,13 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
       };
     }
 
-    progress?.Report(new ProviderProgress(
-        "Apply",
-        1,
-        $"Installed {packageId} with {ProviderName}.",
-        step.Id));
+    safeProgress.Report(1, $"Installed {packageId} with {ProviderName}.");
 
     return new ResourceApplyResult
     {
       ResourceId = resource.Id,
       Outcome = ApplyOutcome.Succeeded,
+      Diagnostics = safeProgress.Diagnostics,
       StepResults =
       [
         new ProviderStepResult
@@ -484,7 +481,10 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
   private static string? GetOptionalParameter(ResourceDefinition resource, string name) =>
       resource.Parameters.TryGetValue(name, out var value) ? value : null;
 
-  private static ResourcePlan CreateBlockedPlan(ResourceDefinition resource, string error)
+  private static ResourcePlan CreateBlockedPlan(
+      ResourceDefinition resource,
+      string error,
+      IReadOnlyList<StructuredError>? structuredErrors = null)
   {
     var structuredError = new StructuredError(
         WdemErrorCode.ProviderError,
@@ -502,8 +502,82 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
       Compliance = ComplianceStatus.DetectionFailed,
       IsExecutable = false,
       Error = error,
-      StructuredErrors = [structuredError]
+      StructuredErrors = structuredErrors is { Count: > 0 }
+          ? structuredErrors
+          : [structuredError]
     };
+  }
+
+  private sealed class SafeProgressReporter(
+      IProgress<ProviderProgress>? observer,
+      string resourceId,
+      string stepId)
+  {
+    private readonly object _gate = new();
+    private readonly List<StructuredError> _diagnostics = [];
+    private double _lastProgress;
+
+    public double LastProgress
+    {
+      get
+      {
+        lock (_gate)
+        {
+          return _lastProgress;
+        }
+      }
+    }
+
+    public IReadOnlyList<StructuredError> Diagnostics
+    {
+      get
+      {
+        lock (_gate)
+        {
+          return Array.AsReadOnly(_diagnostics.ToArray());
+        }
+      }
+    }
+
+    public void Report(double percent, string? message)
+    {
+      var report = new ProviderProgress(
+          "Apply",
+          percent,
+          message ?? string.Empty,
+          stepId);
+      lock (_gate)
+      {
+        _lastProgress = report.Percent;
+      }
+
+      if (observer is null)
+      {
+        return;
+      }
+
+      try
+      {
+        observer.Report(report);
+      }
+      catch (Exception exception)
+      {
+        var diagnostic = new StructuredError(
+            WdemErrorCode.ProviderError,
+            "Progress observer failed.",
+            exception.Message)
+        {
+          ResourceId = resourceId,
+          StepId = stepId,
+          UnderlyingException = exception,
+          IsRetryable = false
+        };
+        lock (_gate)
+        {
+          _diagnostics.Add(diagnostic);
+        }
+      }
+    }
   }
 
   private sealed class ForwardingProgress<T>(Action<T> report) : IProgress<T>

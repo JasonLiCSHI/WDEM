@@ -60,6 +60,22 @@ public sealed class ResourceDefinitionTests
   }
 
   [Fact]
+  public void ProviderRegistry_RejectsInvalidProviderDescriptors()
+  {
+    Assert.Throws<ArgumentNullException>(() => new ResourceProviderRegistry(
+        [new InvalidDescriptorProvider(capabilities: null)]));
+    Assert.Throws<ArgumentOutOfRangeException>(() => new ResourceProviderRegistry(
+        [new InvalidDescriptorProvider(capabilities: new ProviderCapabilities
+        {
+          MaxConcurrentOperations = 0
+        })]));
+    Assert.Throws<ArgumentException>(() => new ResourceProviderRegistry(
+        [new InvalidDescriptorProvider(resourceType: "")]));
+    Assert.Throws<ArgumentException>(() => new ResourceProviderRegistry(
+        [new InvalidDescriptorProvider(providerName: " ")]));
+  }
+
+  [Fact]
   public void ProviderValidation_IsInvalidForEitherDiagnosticRepresentation()
   {
     var structuredError = new StructuredError(
@@ -105,6 +121,133 @@ public sealed class ResourceDefinitionTests
     Assert.Empty(apply.StepResults);
     Assert.Null(apply.Error);
     Assert.Empty(plan.StructuredErrors);
+  }
+
+  [Fact]
+  public void ProviderModels_SnapshotCallerOwnedCollections()
+  {
+    var legacyErrors = new List<string> { "first" };
+    var structuredErrors = new List<StructuredError>
+    {
+      new(WdemErrorCode.ProviderError, "first", "first")
+    };
+    var versions = new List<SemanticVersion> { new(10, 0, 100) };
+    var evidence = new Dictionary<string, string> { ["path"] = "original" };
+    var steps = new List<PlanStep> { Step("git:install") };
+    var stepResults = new List<ProviderStepResult>
+    {
+      new() { StepId = "git:install", Action = PlanAction.Install }
+    };
+    var validation = new ProviderValidationResult
+    {
+      Errors = legacyErrors,
+      StructuredErrors = structuredErrors
+    };
+    var state = new DetectedState
+    {
+      ResourceId = "git",
+      Outcome = DetectionOutcome.Succeeded,
+      InstalledVersions = versions,
+      Evidence = evidence
+    };
+    var plan = Plan(steps, structuredErrors);
+    var apply = new ResourceApplyResult
+    {
+      ResourceId = "git",
+      Outcome = ApplyOutcome.Succeeded,
+      StepResults = stepResults,
+      Diagnostics = structuredErrors
+    };
+
+    legacyErrors[0] = "mutated";
+    structuredErrors.Clear();
+    versions[0] = new SemanticVersion(1, 0, 0);
+    evidence["path"] = "mutated";
+    steps.Clear();
+    stepResults.Clear();
+
+    Assert.Equal("first", Assert.Single(validation.Errors));
+    Assert.Single(validation.StructuredErrors);
+    Assert.Equal(new SemanticVersion(10, 0, 100), Assert.Single(state.InstalledVersions));
+    Assert.Equal("original", state.Evidence["path"]);
+    Assert.Single(plan.Steps);
+    Assert.Single(plan.StructuredErrors);
+    Assert.Single(apply.StepResults);
+    Assert.Single(apply.Diagnostics);
+  }
+
+  [Fact]
+  public void ProviderModelCollections_CannotBeMutatedThroughConcreteInterfaces()
+  {
+    var error = new StructuredError(WdemErrorCode.ProviderError, "error", "error");
+    var validation = new ProviderValidationResult
+    {
+      Errors = ["error"],
+      StructuredErrors = [error]
+    };
+    var state = new DetectedState
+    {
+      ResourceId = "git",
+      Outcome = DetectionOutcome.Succeeded,
+      InstalledVersions = [new SemanticVersion(10, 0, 100)],
+      Evidence = new Dictionary<string, string> { ["path"] = "git.exe" }
+    };
+    var plan = Plan([Step("git:install")], [error]);
+    var apply = new ResourceApplyResult
+    {
+      ResourceId = "git",
+      Outcome = ApplyOutcome.Succeeded,
+      StepResults = [new ProviderStepResult
+      {
+        StepId = "git:install",
+        Action = PlanAction.Install
+      }],
+      Diagnostics = [error]
+    };
+
+    AssertReadOnlyList(validation.Errors, "injected");
+    AssertReadOnlyList(validation.StructuredErrors, error);
+    AssertReadOnlyList(state.InstalledVersions, new SemanticVersion(1, 0, 0));
+    AssertReadOnlyDictionary(state.Evidence, "injected", "value");
+    AssertReadOnlyList(plan.Steps, Step("injected"));
+    AssertReadOnlyList(plan.StructuredErrors, error);
+    AssertReadOnlyList(apply.StepResults, new ProviderStepResult
+    {
+      StepId = "injected",
+      Action = PlanAction.None
+    });
+    AssertReadOnlyList(apply.Diagnostics, error);
+  }
+
+  [Fact]
+  public void ProviderModels_RejectNullCollectionsAndElements()
+  {
+    var error = new StructuredError(WdemErrorCode.ProviderError, "error", "error");
+
+    Assert.Throws<ArgumentNullException>(() => new ProviderValidationResult { Errors = null! });
+    Assert.Throws<ArgumentException>(() => new ProviderValidationResult { Errors = [null!] });
+    Assert.Throws<ArgumentNullException>(() => new ProviderValidationResult
+    {
+      StructuredErrors = null!
+    });
+    Assert.Throws<ArgumentException>(() => new ProviderValidationResult
+    {
+      StructuredErrors = [null!]
+    });
+    Assert.Throws<ArgumentNullException>(() => new DetectedState
+    {
+      ResourceId = "git",
+      Outcome = DetectionOutcome.Succeeded,
+      InstalledVersions = null!
+    });
+    Assert.Throws<ArgumentNullException>(() => Plan(null!, [error]));
+    Assert.Throws<ArgumentException>(() => Plan([null!], [error]));
+    Assert.Throws<ArgumentNullException>(() => new ResourceApplyResult
+    {
+      ResourceId = "git",
+      Outcome = ApplyOutcome.Succeeded,
+      StepResults = null!
+    });
   }
 
   [Theory]
@@ -218,5 +361,73 @@ public sealed class ResourceDefinitionTests
         ResourceDefinition resource,
         CancellationToken cancellationToken) =>
         throw new NotSupportedException();
+  }
+
+  private sealed class InvalidDescriptorProvider(
+      string? resourceType = "package",
+      string? providerName = "invalid",
+      ProviderCapabilities? capabilities = null) : IResourceProvider
+  {
+    public string ResourceType { get; } = resourceType!;
+    public string ProviderName { get; } = providerName!;
+    public ProviderCapabilities Capabilities { get; } = capabilities!;
+
+    public ValueTask<ProviderValidationResult> ValidateAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+    public ValueTask<DetectedState> DetectAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+    public ValueTask<ResourcePlan> PlanAsync(
+        ResourceDefinition resource,
+        DetectedState currentState,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+    public ValueTask<ResourceApplyResult> ApplyAsync(
+        ResourceDefinition resource,
+        ResourcePlan plan,
+        IProgress<ProviderProgress>? progress,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+    public ValueTask<VerificationResult> VerifyAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+  }
+
+  private static PlanStep Step(string id) => new()
+  {
+    Id = id,
+    Description = id,
+    Action = PlanAction.Install,
+    PrivilegeRequirement = PrivilegeRequirement.CurrentUser,
+    RestartPolicy = RestartPolicy.NoRestart
+  };
+
+  private static ResourcePlan Plan(
+      IReadOnlyList<PlanStep> steps,
+      IReadOnlyList<StructuredError> errors) => new()
+      {
+        ResourceId = "git",
+        ResourceType = "package",
+        ProviderName = "winget",
+        DesiredStateFingerprint = "fingerprint",
+        Compliance = ComplianceStatus.Missing,
+        IsExecutable = true,
+        Steps = steps,
+        StructuredErrors = errors
+      };
+
+  private static void AssertReadOnlyList<T>(IReadOnlyList<T> values, T injected)
+  {
+    var list = Assert.IsAssignableFrom<IList<T>>(values);
+    Assert.Throws<NotSupportedException>(() => list.Add(injected));
+    Assert.Throws<NotSupportedException>(() => list[0] = injected);
+  }
+
+  private static void AssertReadOnlyDictionary<TKey, TValue>(
+      IReadOnlyDictionary<TKey, TValue> values,
+      TKey key,
+      TValue value) where TKey : notnull
+  {
+    var dictionary = Assert.IsAssignableFrom<IDictionary<TKey, TValue>>(values);
+    Assert.Throws<NotSupportedException>(() => dictionary.Add(key, value));
   }
 }
