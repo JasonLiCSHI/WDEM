@@ -189,6 +189,74 @@ public sealed class ExecutionPlannerTests
   }
 
   [Fact]
+  public async Task CreateAsync_MixedValidationDiagnostics_AreMergedAndDeduplicated()
+  {
+    var provider = new StubProvider(validation: resource => new ProviderValidationResult
+    {
+      Errors = ["shared failure", "legacy-only failure", "legacy-only failure"],
+      StructuredErrors =
+      [
+        new StructuredError(
+            WdemErrorCode.ConfigurationError,
+            "Structured validation failed.",
+            "shared failure")
+        {
+          ResourceId = resource.Id
+        },
+        new StructuredError(
+            WdemErrorCode.ProviderError,
+            "Structured validation failed.",
+            "structured-only failure")
+        {
+          ResourceId = resource.Id
+        }
+      ]
+    });
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Equal(3, plan.Errors.Count);
+    Assert.Single(plan.Errors, error => error.Detail == "shared failure");
+    Assert.Single(plan.Errors, error => error.Detail == "structured-only failure");
+    Assert.Single(plan.Errors, error => error.Detail == "legacy-only failure");
+    Assert.Equal(0, provider.PlanCalls);
+  }
+
+  [Fact]
+  public async Task CreateAsync_CombinedValidationDiagnostics_EnforceSingleLimit()
+  {
+    var provider = new StubProvider(validation: resource => new ProviderValidationResult
+    {
+      Errors = Enumerable.Range(0, 60).Select(index => $"legacy-{index}").ToArray(),
+      StructuredErrors = Enumerable.Range(0, 60).Select(index => new StructuredError(
+          WdemErrorCode.ConfigurationError,
+          "Structured validation failed.",
+          $"structured-{index}")
+      {
+        ResourceId = resource.Id
+      }).ToArray()
+    });
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    var error = Assert.Single(plan.Errors);
+    Assert.Equal(WdemErrorCode.ProviderError, error.Code);
+    Assert.Contains("limit", error.Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.Equal(0, provider.PlanCalls);
+  }
+
+  [Fact]
   public async Task CreateAsync_SecretParameters_AreAvailableToProviderButRedactedFromPlan()
   {
     string? providerValue = null;
@@ -495,6 +563,73 @@ public sealed class ExecutionPlannerTests
     Assert.Equal(0, provider.PlanCalls);
   }
 
+  [Fact]
+  public async Task CreateAsync_CaseSensitiveDetectedStateDictionary_IsNormalized()
+  {
+    var provider = new StubProvider();
+    var states = new Dictionary<string, DetectedState>(StringComparer.Ordinal)
+    {
+      ["GIT"] = State("git", false)
+    };
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        states,
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.True(plan.IsExecutable);
+    Assert.Equal(PlannedResourceStatus.Ready, Assert.Single(plan.Resources).Status);
+    Assert.Equal(1, provider.PlanCalls);
+  }
+
+  [Fact]
+  public async Task CreateAsync_CaseInsensitiveDuplicateDetectedStateKeys_AreRejected()
+  {
+    var provider = new StubProvider();
+    var states = new Dictionary<string, DetectedState>(StringComparer.Ordinal)
+    {
+      ["git"] = State("git", false),
+      ["GIT"] = State("GIT", false)
+    };
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        states,
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Empty(plan.Resources);
+    Assert.Contains("duplicate", Assert.Single(plan.Errors).Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.Equal(0, provider.PlanCalls);
+  }
+
+  [Fact]
+  public async Task CreateAsync_AnyDetectedStateKeyValueIdentityMismatch_IsRejectedAtBoundary()
+  {
+    var provider = new StubProvider();
+    var states = new Dictionary<string, DetectedState>(StringComparer.Ordinal)
+    {
+      ["git"] = State("git", false),
+      ["unrelated-key"] = State("different-resource", false)
+    };
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        states,
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Empty(plan.Resources);
+    Assert.Contains("identity", Assert.Single(plan.Errors).Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.Equal(0, provider.PlanCalls);
+  }
+
   [Theory]
   [InlineData(DetectionOutcome.Failed, ComplianceStatus.Missing, PlannedResourceStatus.DetectionFailed)]
   [InlineData(DetectionOutcome.Cancelled, ComplianceStatus.Satisfied, PlannedResourceStatus.DetectionFailed)]
@@ -652,6 +787,121 @@ public sealed class ExecutionPlannerTests
     Assert.Equal(PlannedResourceStatus.Invalid, plan.Resources[0].Status);
     Assert.False(plan.Resources[0].ResourcePlan.IsExecutable);
     Assert.Equal(PlannedResourceStatus.Blocked, plan.Resources[1].Status);
+  }
+
+  [Theory]
+  [InlineData(
+      DetectionOutcome.Failed,
+      ComplianceStatus.DetectionFailed,
+      PlannedResourceStatus.DetectionFailed,
+      WdemErrorCode.DetectionError)]
+  [InlineData(
+      DetectionOutcome.Unsupported,
+      ComplianceStatus.Unsupported,
+      PlannedResourceStatus.Unsupported,
+      WdemErrorCode.ProviderError)]
+  public async Task CreateAsync_NonExecutableTerminalPlanWithErrors_PreservesStatusAndDiagnostics(
+      DetectionOutcome outcome,
+      ComplianceStatus compliance,
+      PlannedResourceStatus expectedStatus,
+      WdemErrorCode errorCode)
+  {
+    var sourceDiagnostic = new StructuredError(
+        errorCode,
+        "Detection did not succeed.",
+        "token=terminal-secret unavailable")
+    {
+      ResourceId = "runtime"
+    };
+    var provider = new StubProvider(plan: (resource, _) => resource.Id == "runtime"
+        ? ValidPlan(resource, compliance) with
+        {
+          IsExecutable = false,
+          Error = "token=terminal-secret unavailable",
+          StructuredErrors = [sourceDiagnostic]
+        }
+        : ValidPlan(resource, ComplianceStatus.Missing, Step("install")));
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(
+            [Resource("runtime")],
+            [Resource("tool", dependencies: ["runtime"])]),
+        States(
+            State("runtime", false) with { Outcome = outcome },
+            State("tool", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    var terminal = plan.Resources[0];
+    Assert.Equal(expectedStatus, terminal.Status);
+    Assert.Equal(compliance, terminal.ResourcePlan.Compliance);
+    Assert.False(terminal.ResourcePlan.IsExecutable);
+    var diagnostic = Assert.Single(terminal.Diagnostics);
+    Assert.Equal(errorCode, diagnostic.Code);
+    Assert.NotSame(sourceDiagnostic, diagnostic);
+    Assert.DoesNotContain("terminal-secret", diagnostic.Detail, StringComparison.Ordinal);
+    Assert.Equal(PlannedResourceStatus.Blocked, plan.Resources[1].Status);
+    Assert.Equal(["runtime"], plan.Resources[1].BlockedBy);
+  }
+
+  [Fact]
+  public async Task CreateAsync_ExecutableTerminalPlanWithErrors_IsMalformedAndInvalid()
+  {
+    var provider = new StubProvider(plan: (resource, _) => ValidPlan(
+        resource,
+        ComplianceStatus.DetectionFailed) with
+    {
+      IsExecutable = true,
+      Error = "detection failed",
+      StructuredErrors =
+      [
+        new StructuredError(
+            WdemErrorCode.DetectionError,
+            "Detection failed.",
+            "detection failed")
+        {
+          ResourceId = resource.Id
+        }
+      ]
+    });
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false) with { Outcome = DetectionOutcome.Failed }),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Equal(PlannedResourceStatus.Invalid, Assert.Single(plan.Resources).Status);
+    Assert.Contains(
+        plan.Errors,
+        error => error.Detail.Contains("executable", StringComparison.OrdinalIgnoreCase));
+  }
+
+  [Fact]
+  public async Task CreateAsync_NonExecutableRemediablePlanWithErrors_RemainsInvalid()
+  {
+    var provider = new StubProvider(plan: (resource, _) => ValidPlan(
+        resource,
+        ComplianceStatus.Missing) with
+    {
+      IsExecutable = false,
+      Error = "source unavailable"
+    });
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Equal(PlannedResourceStatus.Invalid, Assert.Single(plan.Resources).Status);
+    Assert.Contains(plan.Errors, error => error.Detail == "source unavailable");
   }
 
   [Fact]

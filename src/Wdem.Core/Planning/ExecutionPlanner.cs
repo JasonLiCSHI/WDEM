@@ -42,6 +42,19 @@ public sealed partial class ExecutionPlanner(IResourceProviderRegistry providers
       throw new ArgumentException("Profile identity fields exceed the execution-plan size limit.");
     }
 
+    if (!TrySnapshotDetectedStates(
+            detectedStates,
+            out var detectedStateSnapshot,
+            out var detectedStateCollectionError))
+    {
+      return CreatePlan(
+          profileId,
+          profileVersion,
+          [],
+          [],
+          [detectedStateCollectionError!]);
+    }
+
     var graphError = ValidateGraph(graph);
     if (graphError is not null || graph.Nodes.Count > MaxResourceCount)
     {
@@ -70,7 +83,7 @@ public sealed partial class ExecutionPlanner(IResourceProviderRegistry providers
         var resolved = graph.Nodes[resourceId];
         var item = await PlanResourceAsync(
             resolved,
-            detectedStates,
+            detectedStateSnapshot,
             cancellationToken).ConfigureAwait(false);
 
         var blockedBy = item.Dependencies
@@ -252,32 +265,13 @@ public sealed partial class ExecutionPlanner(IResourceProviderRegistry providers
 
     if (!validation.IsValid)
     {
-      IReadOnlyList<StructuredError> diagnostics;
-      if (validation.StructuredErrors.Count > 0)
+      if (!TryNormalizeValidationDiagnostics(
+              definition,
+              validation,
+              out var diagnostics,
+              out var diagnosticError))
       {
-        if (!TryNormalizeDiagnostics(
-                definition,
-                validation.StructuredErrors,
-                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
-                out diagnostics,
-                out var diagnosticError))
-        {
-          return Failure(resolved, definition, diagnosticError!);
-        }
-      }
-      else if (validation.Errors.Count > MaxDiagnosticsPerResource)
-      {
-        return Failure(resolved, definition, ProviderError(
-            definition.Id,
-            "Provider validation returned too many errors.",
-            $"The diagnostic limit is {MaxDiagnosticsPerResource} per resource."));
-      }
-      else
-      {
-        diagnostics = ReadOnly(validation.Errors.Select(error => ProviderError(
-            definition.Id,
-            "Provider validation rejected the resource.",
-            SanitizeVisible(error))));
+        return Failure(resolved, definition, diagnosticError!);
       }
 
       return Failure(resolved, definition, diagnostics, PlannedResourceStatus.Invalid);
@@ -314,13 +308,17 @@ public sealed partial class ExecutionPlanner(IResourceProviderRegistry providers
     var planError = ValidateProviderPlan(definition, detectedState, resourcePlan);
     if (planError is not null)
     {
-      var failureStatus = detectedState.Outcome switch
-      {
-        DetectionOutcome.Failed or DetectionOutcome.Cancelled =>
-            PlannedResourceStatus.DetectionFailed,
-        DetectionOutcome.Unsupported => PlannedResourceStatus.Unsupported,
-        _ => PlannedResourceStatus.Invalid
-      };
+      var hasReportedErrors = resourcePlan.Error is not null ||
+          resourcePlan.StructuredErrors.Count > 0;
+      var failureStatus = resourcePlan.IsExecutable && hasReportedErrors
+          ? PlannedResourceStatus.Invalid
+          : detectedState.Outcome switch
+          {
+            DetectionOutcome.Failed or DetectionOutcome.Cancelled =>
+                PlannedResourceStatus.DetectionFailed,
+            DetectionOutcome.Unsupported => PlannedResourceStatus.Unsupported,
+            _ => PlannedResourceStatus.Invalid
+          };
       return Failure(resolved, definition, planError, failureStatus);
     }
 
@@ -338,33 +336,61 @@ public sealed partial class ExecutionPlanner(IResourceProviderRegistry providers
       return Failure(resolved, definition, malformedDiagnostic!);
     }
 
-    if (resourcePlan.Error is not null || normalizedDiagnostics.Count > 0)
+    var reportedDiagnostics = normalizedDiagnostics.ToList();
+    if (resourcePlan.Error is not null)
     {
-      var diagnostics = normalizedDiagnostics.ToList();
-      if (resourcePlan.Error is not null)
+      var sanitizedError = SanitizeVisible(resourcePlan.Error);
+      if (!reportedDiagnostics.Any(
+              diagnostic => string.Equals(
+                  diagnostic.Detail,
+                  sanitizedError,
+                  StringComparison.Ordinal)))
       {
-        diagnostics.Add(ProviderError(
+        if (reportedDiagnostics.Count >= MaxDiagnosticsPerResource)
+        {
+          return Failure(resolved, definition, ProviderError(
+              definition.Id,
+              "Provider planning returned too many diagnostics.",
+              $"The diagnostic limit is {MaxDiagnosticsPerResource} per resource."));
+        }
+
+        reportedDiagnostics.Add(ProviderError(
             definition.Id,
             "Provider planning reported an error.",
-            SanitizeVisible(resourcePlan.Error)));
+            sanitizedError));
       }
+    }
 
+    if (reportedDiagnostics.Count > 0 &&
+        (resourcePlan.IsExecutable ||
+         resourcePlan.Compliance is not ComplianceStatus.DetectionFailed and
+             not ComplianceStatus.Unsupported))
+    {
       if (resourcePlan.IsExecutable)
       {
-        diagnostics.Add(ProviderError(
+        var malformedError = ProviderError(
             definition.Id,
             "Provider returned errors with an executable plan.",
-            "A resource plan with errors or diagnostics cannot be executable."));
+            "A resource plan with errors or diagnostics cannot be executable.");
+        if (reportedDiagnostics.Count < MaxDiagnosticsPerResource)
+        {
+          reportedDiagnostics.Add(malformedError);
+        }
+        else
+        {
+          reportedDiagnostics[^1] = malformedError;
+        }
       }
 
       return Failure(
           resolved,
           definition,
-          diagnostics,
+          reportedDiagnostics,
           PlannedResourceStatus.Invalid);
     }
 
-    var plan = SnapshotPlan(resourcePlan, normalizedDiagnostics);
+    var planDiagnostics = ReadOnly(reportedDiagnostics);
+    var plan = SnapshotPlan(resourcePlan, planDiagnostics);
 
     var status = plan.Compliance switch
     {
@@ -377,7 +403,9 @@ public sealed partial class ExecutionPlanner(IResourceProviderRegistry providers
     if (status is PlannedResourceStatus.Unsupported or PlannedResourceStatus.DetectionFailed ||
         !plan.IsExecutable)
     {
-      IReadOnlyList<StructuredError> diagnostics = detectedDiagnostics.Count > 0
+      IReadOnlyList<StructuredError> diagnostics = planDiagnostics.Count > 0
+          ? planDiagnostics
+          : detectedDiagnostics.Count > 0
           ? ReadOnly(detectedDiagnostics)
           : status is PlannedResourceStatus.Unsupported or PlannedResourceStatus.DetectionFailed
               ? [DetectionStateError(

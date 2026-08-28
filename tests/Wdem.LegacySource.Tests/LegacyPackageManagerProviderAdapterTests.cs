@@ -1,5 +1,7 @@
 using Moq;
 using Wdem.Core.Execution;
+using Wdem.Core.Graph;
+using Wdem.Core.Planning;
 using Wdem.Core.Providers;
 using Wdem.Core.Resources;
 using Wdem.LegacySource.Interfaces;
@@ -145,6 +147,41 @@ public sealed class LegacyPackageManagerProviderAdapterTests
     Assert.Equal(ComplianceStatus.DetectionFailed, plan.Compliance);
     Assert.False(plan.IsExecutable);
     Assert.Equal(WdemErrorCode.DetectionError, Assert.Single(plan.StructuredErrors).Code);
+  }
+
+  [Fact]
+  public async Task UnavailableManager_PlannerPreservesDetectionFailedStatusAndDiagnostic()
+  {
+    var adapter = CreateAdapter();
+    var resource = CreateResource();
+    _packageManager.Setup(manager => manager.IsAvailable()).Returns(false);
+    var detected = await adapter.DetectAsync(resource, CancellationToken.None);
+    var graph = new ResourceGraph(
+        new Dictionary<string, ResolvedResource>(StringComparer.OrdinalIgnoreCase)
+        {
+          [resource.Id] = new(
+              resource,
+              ResourceOrigin.Required,
+              new HashSet<string>(StringComparer.OrdinalIgnoreCase))
+        },
+        [new ResourceGraphLayer(0, [resource.Id])]);
+    var planner = new ExecutionPlanner(new ResourceProviderRegistry([adapter]));
+
+    var executionPlan = await planner.CreateAsync(
+        graph,
+        new Dictionary<string, DetectedState>(StringComparer.OrdinalIgnoreCase)
+        {
+          [resource.Id] = detected
+        },
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(executionPlan.IsExecutable);
+    var planned = Assert.Single(executionPlan.Resources);
+    Assert.Equal(PlannedResourceStatus.DetectionFailed, planned.Status);
+    Assert.Equal(ComplianceStatus.DetectionFailed, planned.ResourcePlan.Compliance);
+    Assert.Equal(WdemErrorCode.DetectionError, Assert.Single(planned.Diagnostics).Code);
   }
 
   [Fact]

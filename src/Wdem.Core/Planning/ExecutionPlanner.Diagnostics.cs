@@ -7,6 +7,82 @@ namespace Wdem.Core.Planning;
 
 public sealed partial class ExecutionPlanner
 {
+  private static bool TryNormalizeValidationDiagnostics(
+      ResourceDefinition definition,
+      ProviderValidationResult validation,
+      out IReadOnlyList<StructuredError> normalized,
+      out StructuredError? contractError)
+  {
+    if (!TryNormalizeDiagnostics(
+            definition,
+            validation.StructuredErrors,
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+            out var structuredDiagnostics,
+            out contractError))
+    {
+      normalized = ReadOnly(Array.Empty<StructuredError>());
+      return false;
+    }
+
+    if (validation.Errors.Count > MaxDiagnosticsPerResource)
+    {
+      normalized = ReadOnly(Array.Empty<StructuredError>());
+      contractError = ProviderError(
+          definition.Id,
+          "Provider validation returned too many errors.",
+          $"The diagnostic limit is {MaxDiagnosticsPerResource} per resource.");
+      return false;
+    }
+
+    var merged = new List<StructuredError>(structuredDiagnostics.Count + validation.Errors.Count);
+    var seenDetails = new HashSet<string>(StringComparer.Ordinal);
+    foreach (var diagnostic in structuredDiagnostics)
+    {
+      if (seenDetails.Add(diagnostic.Detail))
+      {
+        merged.Add(diagnostic);
+      }
+    }
+
+    foreach (var error in validation.Errors)
+    {
+      if (string.IsNullOrWhiteSpace(error))
+      {
+        normalized = ReadOnly(Array.Empty<StructuredError>());
+        contractError = ProviderError(
+            definition.Id,
+            "Provider validation returned a malformed error.",
+            "Legacy validation errors must contain non-empty diagnostic text.");
+        return false;
+      }
+
+      var sanitized = SanitizeVisible(error);
+      if (!seenDetails.Add(sanitized))
+      {
+        continue;
+      }
+
+      if (merged.Count >= MaxDiagnosticsPerResource)
+      {
+        normalized = ReadOnly(Array.Empty<StructuredError>());
+        contractError = ProviderError(
+            definition.Id,
+            "Provider validation returned too many diagnostics.",
+            $"The combined diagnostic limit is {MaxDiagnosticsPerResource} per resource.");
+        return false;
+      }
+
+      merged.Add(ProviderError(
+          definition.Id,
+          "Provider validation rejected the resource.",
+          sanitized));
+    }
+
+    normalized = ReadOnly(merged);
+    contractError = null;
+    return true;
+  }
+
   private static bool TryNormalizeDiagnostics(
       ResourceDefinition definition,
       IReadOnlyList<StructuredError> diagnostics,

@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using Wdem.Core.Execution;
 using Wdem.Core.Graph;
 using Wdem.Core.Providers;
@@ -7,6 +8,59 @@ namespace Wdem.Core.Planning;
 
 public sealed partial class ExecutionPlanner
 {
+  private static bool TrySnapshotDetectedStates(
+      IReadOnlyDictionary<string, DetectedState> source,
+      out IReadOnlyDictionary<string, DetectedState> snapshot,
+      out StructuredError? contractError)
+  {
+    var states = new Dictionary<string, DetectedState>(IdComparer);
+    foreach (var pair in source)
+    {
+      if (string.IsNullOrWhiteSpace(pair.Key) || pair.Value is null)
+      {
+        snapshot = FrozenDictionary<string, DetectedState>.Empty;
+        contractError = new StructuredError(
+            WdemErrorCode.DetectionError,
+            "The detected-state collection is malformed.",
+            "Detected-state keys must be non-empty and values cannot be null.")
+        {
+          SuggestedAction = "Detect the selected resources again before creating a plan."
+        };
+        return false;
+      }
+
+      if (!IdComparer.Equals(pair.Key, pair.Value.ResourceId))
+      {
+        snapshot = FrozenDictionary<string, DetectedState>.Empty;
+        contractError = new StructuredError(
+            WdemErrorCode.DetectionError,
+            "The detected-state collection has an identity mismatch.",
+            $"State key '{SanitizeVisible(pair.Key)}' does not match its resource identity.")
+        {
+          SuggestedAction = "Detect the selected resources again before creating a plan."
+        };
+        return false;
+      }
+
+      if (!states.TryAdd(pair.Key, pair.Value))
+      {
+        snapshot = FrozenDictionary<string, DetectedState>.Empty;
+        contractError = new StructuredError(
+            WdemErrorCode.DetectionError,
+            "The detected-state collection contains a duplicate resource.",
+            $"Duplicate resource '{SanitizeVisible(pair.Key)}' occurs when compared case-insensitively.")
+        {
+          SuggestedAction = "Detect the selected resources again before creating a plan."
+        };
+        return false;
+      }
+    }
+
+    snapshot = states.ToFrozenDictionary(IdComparer);
+    contractError = null;
+    return true;
+  }
+
   private static StructuredError? ValidateProviderPlan(
       ResourceDefinition definition,
       DetectedState detectedState,
