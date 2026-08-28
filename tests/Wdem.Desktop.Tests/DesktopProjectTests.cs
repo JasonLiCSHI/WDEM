@@ -23,8 +23,11 @@ public sealed class DesktopProjectTests
     public void DesktopProjectEnablesWinUiWithoutWpf()
     {
         XDocument project = XDocument.Load(GetDesktopProjectPath());
+        string? useWinUi = project.Descendants("UseWinUI").SingleOrDefault()?.Value;
 
-        Assert.Equal("true", project.Descendants("UseWinUI").SingleOrDefault()?.Value);
+        Assert.True(
+            string.Equals("true", useWinUi, StringComparison.OrdinalIgnoreCase),
+            $"Expected UseWinUI to be true, but found '{useWinUi ?? "<missing>"}'.");
         Assert.Empty(project.Descendants("UseWPF"));
     }
 

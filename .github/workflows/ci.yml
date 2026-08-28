@@ -29,8 +29,8 @@ jobs:
     - name: Setup bun
       uses: oven-sh/setup-bun@v2
 
-    - name: Restore solution
-      run: dotnet restore Wdem.sln -p:EnableWindowsTargeting=true
+    - name: Restore cross-platform projects
+      run: dotnet restore tests/Wdem.Core.Tests/Wdem.Core.Tests.csproj
 
     - name: Check Python formatting
       run: |
@@ -40,8 +40,8 @@ jobs:
     - name: Check JS/TS formatting
       run: bun x prettier --check plugins/
 
-    - name: Build
-      run: dotnet build Wdem.sln --no-restore -p:EnableWindowsTargeting=true
+    - name: Build cross-platform projects
+      run: dotnet build tests/Wdem.Core.Tests/Wdem.Core.Tests.csproj --no-restore
 
   test:
     runs-on: windows-latest
@@ -55,6 +55,9 @@ jobs:
 
     - name: Restore dependencies
       run: dotnet restore Wdem.sln -p:EnableWindowsTargeting=true
+
+    - name: Build solution
+      run: dotnet build Wdem.sln --no-restore -p:EnableWindowsTargeting=true
 
     - name: Install uv and bun
       shell: pwsh
