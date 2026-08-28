@@ -69,6 +69,31 @@ namespace Wdem.LegacySource.Tests.Services.System
     }
 
     [Fact]
+    public async Task CheckForUpdatesAsync_UsesWdemReleaseApi()
+    {
+      string? requestUri = null;
+      var releaseJson = JsonSerializer.Serialize(new GitHubRelease { TagName = "v1.0.0" });
+      var handlerMock = new Mock<HttpMessageHandler>();
+      handlerMock.Protected()
+          .Setup<Task<HttpResponseMessage>>(
+              "SendAsync",
+              ItExpr.IsAny<HttpRequestMessage>(),
+              ItExpr.IsAny<CancellationToken>())
+          .Callback<HttpRequestMessage, CancellationToken>((request, _) => requestUri = request.RequestUri?.ToString())
+          .ReturnsAsync(new HttpResponseMessage
+          {
+            StatusCode = HttpStatusCode.OK,
+            Content = new StringContent(releaseJson)
+          });
+      using var httpClient = new HttpClient(handlerMock.Object);
+      var service = new UpdateService(_mockLogger.Object, _mockLifetime.Object, httpClient);
+
+      await service.CheckForUpdatesAsync("1.0.0");
+
+      Assert.Equal("https://api.github.com/repos/JasonLiCSHI/WDEM/releases/latest", requestUri);
+    }
+
+    [Fact]
     public async Task CheckForUpdatesAsync_WhenSameVersion_ReturnsFalse()
     {
       // Arrange
@@ -291,7 +316,7 @@ namespace Wdem.LegacySource.Tests.Services.System
                 ""assets"": [
                     {
                         ""name"": ""Wdem.LegacySource.exe"",
-                        ""browser_download_url"": ""https://github.com/DotDev262/Wdem.LegacySource/releases/download/v1.5.0/Wdem.LegacySource.exe""
+                        ""browser_download_url"": ""https://github.com/JasonLiCSHI/WDEM/releases/download/v1.5.0/Wdem.LegacySource.exe""
                     }
                 ]
             }";
@@ -306,7 +331,7 @@ namespace Wdem.LegacySource.Tests.Services.System
       Assert.Equal("Changelog...", release.Body);
       Assert.Single(release.Assets);
       Assert.Equal("Wdem.LegacySource.exe", release.Assets[0].Name);
-      Assert.Equal("https://github.com/DotDev262/Wdem.LegacySource/releases/download/v1.5.0/Wdem.LegacySource.exe", release.Assets[0].BrowserDownloadUrl);
+      Assert.Equal("https://github.com/JasonLiCSHI/WDEM/releases/download/v1.5.0/Wdem.LegacySource.exe", release.Assets[0].BrowserDownloadUrl);
     }
 
     [Fact]

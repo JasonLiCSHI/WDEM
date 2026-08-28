@@ -24,7 +24,9 @@ We employ a three-tier testing strategy:
 Run standard .NET unit tests locally. These have no system side effects.
 
 ```powershell
-dotnet test tests/Wdem.LegacySource.Tests/
+dotnet restore Wdem.sln -p:EnableWindowsTargeting=true
+dotnet build Wdem.sln --no-restore -p:EnableWindowsTargeting=true
+dotnet test Wdem.sln --no-build -p:EnableWindowsTargeting=true
 ```
 
 ### 2. Windows Sandbox ("Clean Room" Testing)
@@ -50,9 +52,9 @@ Windows desktop environment that starts in seconds.
 **Plugin-Only Integration Test:** For faster iteration when working on plugins:
 
 1.  Ensure the project is built (`dotnet publish`).
-2.  Launch the specialized sandbox:
+2.  Launch the specialized sandbox script:
     ```powershell
-    Invoke-Item testing/infrastructure/WDEM-Plugins.wsb
+    powershell -File testing/infrastructure/run-sandbox-plugins.ps1
     ```
 
 **Why use this?**

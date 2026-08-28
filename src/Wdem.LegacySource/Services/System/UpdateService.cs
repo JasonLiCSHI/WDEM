@@ -14,8 +14,8 @@ namespace Wdem.LegacySource.Services.System
     private readonly ILogger _logger;
     private readonly HttpClient _httpClient;
     private readonly IHostApplicationLifetime _lifetime;
-    private const string RepoOwner = "DotDev262";
-    private const string RepoName = "Wdem.LegacySource";
+    private const string RepoOwner = "JasonLiCSHI";
+    private const string RepoName = "WDEM";
     private const string CurrentExecutableName = "Wdem.LegacySource.exe";
 
     public UpdateService(ILogger logger, IHostApplicationLifetime lifetime, HttpClient? httpClient = null)

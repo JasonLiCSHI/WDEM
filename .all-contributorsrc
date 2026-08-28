@@ -1,6 +1,6 @@
 {
-  "projectName": "WDEM",
-  "projectOwner": "DotDev262",
+  "repoOwner": "JasonLiCSHI",
+  "repoName": "WDEM",
   "repoType": "github",
   "repoHost": "https://github.com",
   "files": [
@@ -22,7 +22,5 @@
       ]
     }
   ],
-  "contributorsPerLine": 7,
-  "projectName": "WDEM",
-  "projectOwner": "DotDev262"
+  "contributorsPerLine": 7
 }
