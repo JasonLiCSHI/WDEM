@@ -27,9 +27,35 @@ public sealed class LogRedactorTests
   [InlineData("passwd: legacy-value", "passwd: ***")]
   [InlineData("pwd='short-value'", "pwd='***'")]
   [InlineData("secret=generic-value", "secret=***")]
+  [InlineData("githubToken=github-value", "githubToken=***")]
+  [InlineData("databasePassword=db-value", "databasePassword=***")]
+  [InlineData("serviceSecret=service-value", "serviceSecret=***")]
+  [InlineData("api-key=api-value", "api-key=***")]
+  [InlineData("thumb_print=thumb-value", "thumb_print=***")]
   public void Redact_UsesDiagnosticSecretKeySemantics(string input, string expected)
   {
     Assert.Equal(expected, _redactor.Redact(input));
+  }
+
+  [Theory]
+  [InlineData("githubToken")]
+  [InlineData("databasePassword")]
+  [InlineData("serviceSecret")]
+  [InlineData("api-key")]
+  [InlineData("thumb_print")]
+  public void RedactNamedValue_RedactsNormalizedSensitiveKeys(string key)
+  {
+    Assert.Equal("***", _redactor.RedactNamedValue(key, "credential-value"));
+  }
+
+  [Theory]
+  [InlineData("tokenizer")]
+  [InlineData("passwordPolicy")]
+  [InlineData("secretary")]
+  [InlineData("monkey")]
+  public void RedactNamedValue_PreservesOrdinaryKeys(string key)
+  {
+    Assert.Equal("ordinary-value", _redactor.RedactNamedValue(key, "ordinary-value"));
   }
 
   [Theory]

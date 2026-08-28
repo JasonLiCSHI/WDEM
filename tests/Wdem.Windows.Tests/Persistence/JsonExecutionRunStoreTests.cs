@@ -551,7 +551,13 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
       {
         ["clientSecret"] = "hunter2",
         ["access_token"] = "abc123",
-        ["scope"] = "user"
+        ["githubToken"] = "github-credential",
+        ["databasePassword"] = "database-credential",
+        ["serviceSecret"] = "service-credential",
+        ["api-key"] = "api-credential",
+        ["thumb_print"] = "thumbprint-credential",
+        ["scope"] = "user",
+        ["passwordPolicy"] = "standard"
       }
     };
     var run = SampleRun() with
@@ -575,9 +581,20 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
 
     Assert.DoesNotContain("hunter2", disk, StringComparison.Ordinal);
     Assert.DoesNotContain("abc123", disk, StringComparison.Ordinal);
+    Assert.DoesNotContain("github-credential", disk, StringComparison.Ordinal);
+    Assert.DoesNotContain("database-credential", disk, StringComparison.Ordinal);
+    Assert.DoesNotContain("service-credential", disk, StringComparison.Ordinal);
+    Assert.DoesNotContain("api-credential", disk, StringComparison.Ordinal);
+    Assert.DoesNotContain("thumbprint-credential", disk, StringComparison.Ordinal);
     Assert.Equal("***", parameters["clientSecret"]);
     Assert.Equal("***", parameters["access_token"]);
+    Assert.Equal("***", parameters["githubToken"]);
+    Assert.Equal("***", parameters["databasePassword"]);
+    Assert.Equal("***", parameters["serviceSecret"]);
+    Assert.Equal("***", parameters["api-key"]);
+    Assert.Equal("***", parameters["thumb_print"]);
     Assert.Equal("user", parameters["scope"]);
+    Assert.Equal("standard", parameters["passwordPolicy"]);
   }
 
   [Fact]
