@@ -1,8 +1,9 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Audacity Plugin
 
 ## Overview
 
-This plugin manages Audacity configuration stored in `%APPDATA%\audacity\audacity.cfg`. Settings are merged into the existing configuration file, allowing Audacity preferences to be managed declaratively through WinHome.
+This plugin manages Audacity configuration stored in `%APPDATA%\audacity\audacity.cfg`. Settings are merged into the existing configuration file, allowing Audacity preferences to be managed declaratively through WDEM.
 
 ## Prerequisites
 
@@ -49,7 +50,7 @@ extensions:
 
 ## Verification Steps
 
-1. Apply your WinHome configuration.
+1. Apply your WDEM configuration.
 2. Open `%APPDATA%\audacity\audacity.cfg`.
 3. Verify the expected keys were added or updated.
 4. Launch Audacity and confirm the settings are reflected in Preferences.

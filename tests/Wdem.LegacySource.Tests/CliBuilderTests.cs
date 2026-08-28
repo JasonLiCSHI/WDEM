@@ -195,10 +195,10 @@ public class CliBuilderTests
   public async Task RootCommand_DefaultConfig_UsesEnvPath()
   {
     // Arrange
-    var original = Environment.GetEnvironmentVariable("WINHOME_CONFIG_PATH");
+    var original = Environment.GetEnvironmentVariable("WDEM_CONFIG_PATH");
     try
     {
-      Environment.SetEnvironmentVariable("WINHOME_CONFIG_PATH", "env-config.yaml");
+      Environment.SetEnvironmentVariable("WDEM_CONFIG_PATH", "env-config.yaml");
       FileInfo? capturedFile = null;
 
       var root = BuildRootCommand((file, _, _, _, _, _, _, _, _, _, _) =>
@@ -216,7 +216,36 @@ public class CliBuilderTests
     }
     finally
     {
-      Environment.SetEnvironmentVariable("WINHOME_CONFIG_PATH", original);
+      Environment.SetEnvironmentVariable("WDEM_CONFIG_PATH", original);
+    }
+  }
+
+  [Fact]
+  public async Task RootCommand_DefaultConfig_UsesLegacyEnvironmentAsMigrationFallback()
+  {
+    var originalWdem = Environment.GetEnvironmentVariable("WDEM_CONFIG_PATH");
+    var originalLegacy = Environment.GetEnvironmentVariable("WINHOME_CONFIG_PATH");
+    try
+    {
+      Environment.SetEnvironmentVariable("WDEM_CONFIG_PATH", null);
+      Environment.SetEnvironmentVariable("WINHOME_CONFIG_PATH", "legacy-config.yaml");
+      FileInfo? capturedFile = null;
+      var root = BuildRootCommand((file, _, _, _, _, _, _, _, _, _, _) =>
+      {
+        capturedFile = file;
+        return Task.FromResult(0);
+      });
+
+      var exitCode = await root.Parse(Array.Empty<string>()).InvokeAsync();
+
+      Assert.Equal(0, exitCode);
+      Assert.NotNull(capturedFile);
+      Assert.EndsWith($"{Path.DirectorySeparatorChar}legacy-config.yaml", capturedFile.FullName);
+    }
+    finally
+    {
+      Environment.SetEnvironmentVariable("WDEM_CONFIG_PATH", originalWdem);
+      Environment.SetEnvironmentVariable("WINHOME_CONFIG_PATH", originalLegacy);
     }
   }
 
@@ -224,10 +253,10 @@ public class CliBuilderTests
   public async Task RootCommand_DefaultConfig_FallsBackToConfigYaml()
   {
     // Arrange
-    var original = Environment.GetEnvironmentVariable("WINHOME_CONFIG_PATH");
+    var original = Environment.GetEnvironmentVariable("WDEM_CONFIG_PATH");
     try
     {
-      Environment.SetEnvironmentVariable("WINHOME_CONFIG_PATH", null);
+      Environment.SetEnvironmentVariable("WDEM_CONFIG_PATH", null);
       FileInfo? capturedFile = null;
 
       var root = BuildRootCommand((file, _, _, _, _, _, _, _, _, _, _) =>
@@ -245,7 +274,7 @@ public class CliBuilderTests
     }
     finally
     {
-      Environment.SetEnvironmentVariable("WINHOME_CONFIG_PATH", original);
+      Environment.SetEnvironmentVariable("WDEM_CONFIG_PATH", original);
     }
   }
 

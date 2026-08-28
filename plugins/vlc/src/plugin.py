@@ -4,7 +4,7 @@ VLC media player configuration provider plugin.
 Manages settings in %APPDATA%\\vlc\\vlcrc using a custom INI-like parser
 that preserves VLC's multi-value keys, unknown sections, and comments.
 
-Protocol: JSON over stdin/stdout (WinHome plugin architecture).
+Protocol: JSON over stdin/stdout (WDEM plugin architecture).
 """
 
 from __future__ import annotations

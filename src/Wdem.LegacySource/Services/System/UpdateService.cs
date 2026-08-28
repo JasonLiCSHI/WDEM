@@ -234,7 +234,9 @@ namespace Wdem.LegacySource.Services.System
       using var request = new HttpRequestMessage(HttpMethod.Get, url);
 
       // Authenticated requests get 5000/hr vs 60/hr for unauthenticated
-      string? token = Environment.GetEnvironmentVariable("WINHOME_GITHUB_TOKEN")
+      string? token = Environment.GetEnvironmentVariable("WDEM_GITHUB_TOKEN")
+                      // Migration fallback for existing local automation; not a WDEM contract.
+                      ?? Environment.GetEnvironmentVariable("WINHOME_GITHUB_TOKEN")
                       ?? Environment.GetEnvironmentVariable("GITHUB_TOKEN");
       if (!string.IsNullOrEmpty(token))
       {
@@ -279,7 +281,7 @@ namespace Wdem.LegacySource.Services.System
     /// <summary>Launches a PowerShell script that deletes the .old file and verifies the new executable is launchable.</summary>
     private void LaunchCleanupScript(string oldPath, string currentPath)
     {
-      string scriptPath = Path.Combine(Path.GetTempPath(), $"winhome-cleanup-{Guid.NewGuid():N}.ps1");
+      string scriptPath = Path.Combine(Path.GetTempPath(), $"wdem-cleanup-{Guid.NewGuid():N}.ps1");
 
       // Escape single quotes for PowerShell
       string escapedOldPath = oldPath.Replace("'", "''");

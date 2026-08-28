@@ -47,8 +47,8 @@ public static class ShellCompletionGenerator
     sb.AppendLine("# Usage:");
     sb.AppendLine("#   Wdem.LegacySource completion powershell | Out-String | Invoke-Expression");
     sb.AppendLine("#   # Or save to a file for persistence:");
-    sb.AppendLine("#   Wdem.LegacySource completion powershell > ~/winhome-completion.ps1");
-    sb.AppendLine("#   # and dot-source it in your profile: . ~/winhome-completion.ps1");
+    sb.AppendLine("#   wdem completion powershell > ~/wdem-completion.ps1");
+    sb.AppendLine("#   # and dot-source it in your profile: . ~/wdem-completion.ps1");
     sb.AppendLine();
 
     // Collect all completions from the command tree
@@ -86,13 +86,11 @@ public static class ShellCompletionGenerator
     scriptBlock.AppendLine("        )");
     scriptBlock.AppendLine("    }");
 
-    // Register for both Wdem.LegacySource and winhome for case-insensitive matching
-    sb.AppendLine("$_winhomeCompleter = {");
+    sb.AppendLine("$_wdemCompleter = {");
     sb.Append(scriptBlock);
     sb.AppendLine("}");
     sb.AppendLine();
-    sb.AppendLine("Register-ArgumentCompleter -Native -CommandName Wdem.LegacySource -ScriptBlock $_winhomeCompleter");
-    sb.AppendLine("Register-ArgumentCompleter -Native -CommandName winhome -ScriptBlock $_winhomeCompleter");
+    sb.AppendLine("Register-ArgumentCompleter -Native -CommandName wdem -ScriptBlock $_wdemCompleter");
 
     return sb.ToString();
   }
@@ -105,17 +103,17 @@ public static class ShellCompletionGenerator
     sb.AppendLine("# Add this to your ~/.bashrc or ~/.bash_profile to enable tab completion.");
     sb.AppendLine("#");
     sb.AppendLine("# Usage:");
-    sb.AppendLine("#   eval \"$(Wdem.LegacySource completion bash)\"");
+    sb.AppendLine("#   eval \"$(wdem completion bash)\"");
     sb.AppendLine("#   # Or save to a file for persistence:");
-    sb.AppendLine("#   Wdem.LegacySource completion bash > ~/.winhome-completion.bash");
-    sb.AppendLine("#   echo \"source ~/.winhome-completion.bash\" >> ~/.bashrc");
+    sb.AppendLine("#   wdem completion bash > ~/.wdem-completion.bash");
+    sb.AppendLine("#   echo \"source ~/.wdem-completion.bash\" >> ~/.bashrc");
     sb.AppendLine();
 
     // Collect all top-level options and subcommands
     var globalOptions = CollectOptions(rootCommand);
     var subcommands = CollectSubcommands(rootCommand);
 
-    sb.AppendLine("_winhome_completions() {");
+    sb.AppendLine("_wdem_completions() {");
     sb.AppendLine("    local cur prev words cword");
     sb.AppendLine("    _init_completion || return");
     sb.AppendLine();
@@ -183,8 +181,7 @@ public static class ShellCompletionGenerator
     sb.AppendLine("\" -- \"${cur}\"))");
     sb.AppendLine("}");
     sb.AppendLine();
-    sb.AppendLine("complete -F _winhome_completions Wdem.LegacySource");
-    sb.AppendLine("complete -F _winhome_completions winhome");
+    sb.AppendLine("complete -F _wdem_completions wdem");
 
     return sb.ToString();
   }

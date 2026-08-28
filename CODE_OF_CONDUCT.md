@@ -78,4 +78,4 @@ Community Impact Guidelines were inspired by [Mozilla's code of conduct enforcem
 [v2.1]: https://www.contributor-covenant.org/version/2/1/code_of_conduct.html
 [Mozilla CoC]: https://github.com/mozilla/tip-of-the-iceberg
 
-[INSERT EMAIL ADDRESS]: mailto:support@winhome.dev
+[INSERT EMAIL ADDRESS]: mailto:support@wdem.dev

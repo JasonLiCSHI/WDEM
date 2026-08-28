@@ -24,7 +24,7 @@ class TestPowershellPlugin(unittest.TestCase):
             "functions": {"touch": "New-Item -ItemType File $args[0]"},
         }
         script = plugin.generate_script(settings)
-        self.assertIn("# --- WinHome managed start ---", script)
+        self.assertIn("# --- WDEM managed start ---", script)
         self.assertIn("Set-Alias -Name 'g' -Value 'git' -Force", script)
         self.assertIn("function ll { ls -Force @args }", script)
         self.assertIn(
@@ -34,7 +34,7 @@ class TestPowershellPlugin(unittest.TestCase):
         self.assertIn("oh-my-posh init powershell --config 'catppuccin'", script)
         self.assertIn("Set-PSReadLineOption -EditMode 'Emacs'", script)
         self.assertIn("function touch {", script)
-        self.assertIn("# --- WinHome managed end ---", script)
+        self.assertIn("# --- WDEM managed end ---", script)
 
 
 if __name__ == "__main__":

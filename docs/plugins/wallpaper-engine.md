@@ -1,8 +1,9 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Wallpaper Engine Plugin
 
 ## Overview
 
-This plugin manages Wallpaper Engine's `config.json` file. Configuration values are merged into the existing JSON configuration, allowing Wallpaper Engine settings to be managed declaratively through WinHome.
+This plugin manages Wallpaper Engine's `config.json` file. Configuration values are merged into the existing JSON configuration, allowing Wallpaper Engine settings to be managed declaratively through WDEM.
 
 ## Prerequisites
 
@@ -59,7 +60,7 @@ extensions:
 
 ## Verification Steps
 
-1. Apply your WinHome configuration.
+1. Apply your WDEM configuration.
 2. Open the Wallpaper Engine configuration file.
 3. Verify the expected JSON values were added or updated.
 4. Launch Wallpaper Engine and confirm the settings are reflected in the application.

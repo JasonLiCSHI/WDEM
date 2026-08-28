@@ -6,12 +6,12 @@ import sys
 import tempfile
 
 HEADER_LINE = "#Requires AutoHotkey v2.0"
-SETTINGS_START = "; WinHome managed settings start"
-SETTINGS_END = "; WinHome managed settings end"
-HOTKEYS_START = "; WinHome managed hotkeys start"
-HOTKEYS_END = "; WinHome managed hotkeys end"
-HOTSTRINGS_START = "; WinHome managed hotstrings start"
-HOTSTRINGS_END = "; WinHome managed hotstrings end"
+SETTINGS_START = "; WDEM managed settings start"
+SETTINGS_END = "; WDEM managed settings end"
+HOTKEYS_START = "; WDEM managed hotkeys start"
+HOTKEYS_END = "; WDEM managed hotkeys end"
+HOTSTRINGS_START = "; WDEM managed hotstrings start"
+HOTSTRINGS_END = "; WDEM managed hotstrings end"
 
 
 def log(msg):

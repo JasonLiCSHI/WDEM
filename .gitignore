@@ -22,8 +22,8 @@
 *.snk
 *.DS_Store
 
-# WinHome Specific
-winhome.state.json
+# WDEM state
+.wdem-state.json
 config.yaml
 files/
 coverage/

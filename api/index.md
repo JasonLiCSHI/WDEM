@@ -1,4 +1,5 @@
-# WinHome API Reference
+# WDEM API Reference
 
-This section contains the automatically generated API documentation for the WinHome Project.
-Browse the namespaces using the sidebar.
+This API reference is generated from the current WDEM libraries:
+`Wdem.Core` and `Wdem.LegacySource`. Product host APIs will be documented when
+the corresponding hosts exist.

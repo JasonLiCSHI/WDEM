@@ -7,9 +7,9 @@ environment-management product under active development.
 
 The product boundary is being established around `Wdem.Core`. Source-derived
 implementation remains available during the transition as the
-`Wdem.LegacySource` library. WDEM does not publish `WinHome.exe` and does not
-make a long-term compatibility commitment for the legacy command-line
-interface.
+`Wdem.LegacySource` library. WDEM does not publish a product executable and
+does not make a long-term compatibility commitment for the transition
+command-line interface.
 
 ## Build and test
 
@@ -22,12 +22,18 @@ dotnet test Wdem.sln -p:EnableWindowsTargeting=true --no-build
 ## Configuration and state
 
 WDEM configuration is represented by `config.yaml`. The WDEM default state
-path is `wdem.state.json`; use the `WDEM_CONFIG_PATH` environment variable to
-select a configuration file:
+location is `%LOCALAPPDATA%\WDEM\.wdem-state.json`; use
+`WDEM_CONFIG_PATH` and `WDEM_STATE_PATH` to select configuration and state
+paths:
 
 ```powershell
 $env:WDEM_CONFIG_PATH = 'C:\WDEM\config.yaml'
+$env:WDEM_STATE_PATH = 'C:\WDEM\.wdem-state.json'
 ```
+
+`WINHOME_*` values are migration fallbacks only; legacy
+`%LOCALAPPDATA%\WinHome` state is read once and moved aside. Neither is a
+WDEM public interface.
 
 ## Source provenance
 

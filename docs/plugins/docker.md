@@ -1,11 +1,12 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Docker Plugin
 
 ## Overview
 
 Normally, if user need to change RAM, CPU, or auto-start settings in Docker, they need to open the
 Docker Desktop app and make changes in its UI(settings menu). This plugin saves the user from having
-to go into the app's UI. User can write all their Docker settings as code directly into WinHome's
-config.yaml file. When user need to run their WinHome, this plugin reads the settings from their
+to go into the app's UI. User can write all their Docker settings as code directly into WDEM's
+config.yaml file. When user need to run their WDEM, this plugin reads the settings from their
 config.yaml and silently adds them to the original Docker settings file
 (%APPDATA%\Docker\settings.json) stored in Windows in the background. The biggest advantage of this
 is that the entire system of the user and their Docker configurations are managed in one place (in a
@@ -75,7 +76,7 @@ extensions:
 - It supports dryRun mode — logs what would change in the config path without actually writing to
   disk.
 - The plugin deep-merges the provided settings with the existing `settings.json`.
-- Existing keys in the native file not mentioned in the WinHome config are safely preserved.
+- Existing keys in the native file not mentioned in the WDEM config are safely preserved.
 
 ## Verification Steps
 

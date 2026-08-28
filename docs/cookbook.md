@@ -1,6 +1,7 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # 🍳 Configuration Cookbook
 
-New to WinHome? Start here! This cookbook provides complete, production-ready `config.yaml`
+New to WDEM? Start here! This cookbook provides complete, production-ready `config.yaml`
 templates tailored for different use cases. You can copy these configurations, modify the fields
 (such as usernames and emails), and apply them directly to your system.
 
@@ -221,7 +222,7 @@ systemSettings:
   brightness: 100                 # Maximum brightness for clear visibility
   volume: 75                      # Set system sound level
   notification:
-    title: "WinHome Gaming Setup Applied"
+    title: "WDEM Gaming Setup Applied"
     message: "Launchers installed, mouse raw-input active, and performance tweaks applied!"
 ```
 

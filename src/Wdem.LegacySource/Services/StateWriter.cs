@@ -6,7 +6,7 @@ using Wdem.LegacySource.Models;
 
 namespace Wdem.LegacySource.Services
 {
-  /// <summary>Thread-safe writer for the .winhome-state.json manifest that tracks apply step results.</summary>
+  /// <summary>Thread-safe writer for the .wdem-state.json manifest that tracks apply step results.</summary>
   public class StateWriter
   {
     private readonly string _path;
@@ -14,13 +14,13 @@ namespace Wdem.LegacySource.Services
     private readonly JsonSerializerOptions _opts = new() { WriteIndented = true };
     private Dictionary<string, StepResult>? _cache;
 
-    /// <summary>Initializes the writer with an optional custom path. Defaults to %LOCALAPPDATA%/Wdem.LegacySource/.winhome-state.json.</summary>
+    /// <summary>Initializes the writer with an optional custom path. Defaults to %LOCALAPPDATA%/WDEM/.wdem-state.json.</summary>
     public StateWriter(string? path = null)
     {
       var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-      var winHomeDir = Path.Combine(appData, "Wdem.LegacySource");
+      var wdemDir = Path.Combine(appData, "WDEM");
 
-      _path = path ?? Path.Combine(winHomeDir, ".winhome-state.json");
+      _path = path ?? Path.Combine(wdemDir, ".wdem-state.json");
       _opts.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
     }
 

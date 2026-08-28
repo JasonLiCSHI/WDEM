@@ -57,7 +57,7 @@ namespace Wdem.LegacySource.Services.Plugins
       }
 
       // Inject Environment Variables if needed
-      startInfo.Environment["WINHOME_PLUGIN_NAME"] = plugin.Name;
+      startInfo.Environment["WDEM_PLUGIN_NAME"] = plugin.Name;
 
       using var process = new Process { StartInfo = startInfo };
       using var cts = new CancellationTokenSource(actualTimeout);

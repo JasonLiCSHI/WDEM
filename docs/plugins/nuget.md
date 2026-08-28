@@ -1,3 +1,4 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # NuGet Plugin
 
 ## Overview
@@ -30,7 +31,7 @@ The plugin accepts a top-level YAML object with these fields, all optional:
 | `maxHttpRequestsPerSource` | number | Sets the `maxHttpRequestsPerSource` key under `<config>`. |
 | `signatureValidationMode` | string | Sets the `signatureValidationMode` key under `<config>`. |
 
-The plugin also supports WinHome's `dryRun` apply option, which reports whether `NuGet.Config`
+The plugin also supports WDEM's `dryRun` apply option, which reports whether `NuGet.Config`
 would change without writing it.
 
 ## Usage Examples

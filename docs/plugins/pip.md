@@ -1,10 +1,11 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # pip plugin
 
 ## Description
 
 The `pip` plugin manages configuration for Python's package installer, pip. It writes settings to
 pip's global configuration file (`pip.ini` on Windows, `pip.conf` on Linux/macOS), allowing you to
-declaratively control pip's behaviour as part of your WinHome setup.
+declaratively control pip's behaviour as part of your WDEM setup.
 
 ## Prerequisites
 

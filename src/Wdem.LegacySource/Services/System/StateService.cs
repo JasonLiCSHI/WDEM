@@ -18,13 +18,14 @@ namespace Wdem.LegacySource.Services.System
       _logger = logger;
 
       var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-      var winHomeDir = Path.Combine(appData, "Wdem.LegacySource");
-      var envPath = Environment.GetEnvironmentVariable("WINHOME_STATE_PATH");
-      _stateFilePath = envPath ?? Path.Combine(winHomeDir, "state.json");
+      var wdemDir = Path.Combine(appData, "WDEM");
+      var envPath = Environment.GetEnvironmentVariable("WDEM_STATE_PATH");
+      _stateFilePath = envPath ?? Path.Combine(wdemDir, ".wdem-state.json");
 
-      if (!Directory.Exists(winHomeDir))
+      var stateDirectory = Path.GetDirectoryName(_stateFilePath);
+      if (!string.IsNullOrEmpty(stateDirectory) && !Directory.Exists(stateDirectory))
       {
-        Directory.CreateDirectory(winHomeDir);
+        Directory.CreateDirectory(stateDirectory);
       }
 
       _inMemoryState = LoadState();
@@ -34,14 +35,21 @@ namespace Wdem.LegacySource.Services.System
     private void MigrateLegacyState()
     {
       var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-      var winHomeDir = Path.Combine(appData, "Wdem.LegacySource");
-      var oldStepPath = Path.Combine(winHomeDir, ".winhome-state.json");
+      var legacyDirectory = Path.Combine(appData, "WinHome");
+      var oldStepPath = Path.Combine(legacyDirectory, ".winhome-state.json");
+      var oldStatePath = Path.Combine(legacyDirectory, "state.json");
       var cwdStatePath = Path.Combine(Directory.GetCurrentDirectory(), "winhome.state.json");
+      // Migration fallbacks are read once and moved aside; WDEM never writes these paths.
+      var legacyEnvStatePath = Environment.GetEnvironmentVariable("WINHOME_STATE_PATH");
 
       bool oldStepExists = File.Exists(oldStepPath);
+      bool oldStateExists = File.Exists(oldStatePath);
       bool oldCwdExists = File.Exists(cwdStatePath);
+      bool legacyEnvExists = !string.IsNullOrWhiteSpace(legacyEnvStatePath)
+          && !string.Equals(legacyEnvStatePath, _stateFilePath, StringComparison.OrdinalIgnoreCase)
+          && File.Exists(legacyEnvStatePath);
 
-      if (!oldStepExists && !oldCwdExists) return;
+      if (!oldStepExists && !oldStateExists && !oldCwdExists && !legacyEnvExists) return;
 
       lock (_sync)
       {
@@ -72,11 +80,75 @@ namespace Wdem.LegacySource.Services.System
           {
             var backupPath = cwdStatePath + $".backup.{Guid.NewGuid():N}";
             File.Move(cwdStatePath, backupPath);
-            _logger.LogInfo($"[State] Migrated legacy state from {cwdStatePath}, backed up to {backupPath}");
+            _logger.LogInfo($"[State] Read migration fallback state from {cwdStatePath}, backed up to {backupPath}");
           }
           catch (Exception ex)
           {
             _logger.LogWarning($"[State] Failed to back up legacy state: {ex.Message}");
+          }
+        }
+
+        if (legacyEnvExists)
+        {
+          try
+          {
+            var legacyEnvJson = File.ReadAllText(legacyEnvStatePath!);
+            var legacyState = JsonSerializer.Deserialize<StateData>(legacyEnvJson);
+            if (legacyState != null && legacyState.AppliedItems.Any())
+            {
+              foreach (var item in legacyState.AppliedItems)
+                merged.AppliedItems.Add(item);
+              foreach (var kv in legacyState.SystemSettingOriginals)
+                merged.SystemSettingOriginals.TryAdd(kv.Key, kv.Value);
+              changed = true;
+            }
+          }
+          catch (Exception)
+          {
+            /* Silently skip malformed migration fallback state. */
+          }
+
+          try
+          {
+            var backupPath = legacyEnvStatePath + $".migration-backup.{Guid.NewGuid():N}";
+            File.Move(legacyEnvStatePath!, backupPath);
+            _logger.LogInfo($"[State] Read migration fallback state from {legacyEnvStatePath}, backed up to {backupPath}");
+          }
+          catch (Exception ex)
+          {
+            _logger.LogWarning($"[State] Failed to back up migration fallback state: {ex.Message}");
+          }
+        }
+
+        if (oldStateExists)
+        {
+          try
+          {
+            var oldStateJson = File.ReadAllText(oldStatePath);
+            var oldState = JsonSerializer.Deserialize<StateData>(oldStateJson);
+            if (oldState != null && oldState.AppliedItems.Any())
+            {
+              foreach (var item in oldState.AppliedItems)
+                merged.AppliedItems.Add(item);
+              foreach (var kv in oldState.SystemSettingOriginals)
+                merged.SystemSettingOriginals.TryAdd(kv.Key, kv.Value);
+              changed = true;
+            }
+          }
+          catch (Exception)
+          {
+            /* Silently skip malformed migration fallback state. */
+          }
+
+          try
+          {
+            var backupPath = oldStatePath + $".migration-backup.{Guid.NewGuid():N}";
+            File.Move(oldStatePath, backupPath);
+            _logger.LogInfo($"[State] Read migration fallback state from {oldStatePath}, backed up to {backupPath}");
+          }
+          catch (Exception ex)
+          {
+            _logger.LogWarning($"[State] Failed to back up migration fallback state: {ex.Message}");
           }
         }
 
@@ -102,7 +174,7 @@ namespace Wdem.LegacySource.Services.System
           {
             var backupPath = oldStepPath + $".backup.{Guid.NewGuid():N}";
             File.Move(oldStepPath, backupPath);
-            _logger.LogInfo($"[State] Migrated legacy step state from {oldStepPath}, backed up to {backupPath}");
+            _logger.LogInfo($"[State] Read migration fallback step state from {oldStepPath}, backed up to {backupPath}");
           }
           catch (Exception ex)
           {

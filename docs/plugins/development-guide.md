@@ -1,23 +1,24 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Plugin Development Guide
 
-WinHome v1.2 introduces a **Process-Based Plugin Architecture**, allowing you to extend WinHome
+WDEM v1.2 introduces a **Process-Based Plugin Architecture**, allowing you to extend WDEM
 using any language (Python, JavaScript/TypeScript, Go, Rust, etc.).
 
 ## 1. How Plugins Work
 
-WinHome plugins are standalone folders located in `%LOCALAPPDATA%\WinHome\plugins`. When WinHome
+WDEM plugins are standalone folders located in `%LOCALAPPDATA%\WDEM\plugins`. When WDEM
 runs, it scans these folders for a `plugin.yaml` manifest.
 
-**Lazy Discovery:** To keep output clean, WinHome only logs the discovery of a plugin and ensures
+**Lazy Discovery:** To keep output clean, WDEM only logs the discovery of a plugin and ensures
 its runtime (Python/Bun) if it is actually referenced in the current `config.yaml` (either via
 `apps`, `extensions`, or a dedicated top-level section).
 
 Communication happens via **JSON over Standard I/O**:
 
-1.  WinHome spawns your plugin process.
-2.  WinHome writes a **Request** JSON object to your `stdin`.
+1.  WDEM spawns your plugin process.
+2.  WDEM writes a **Request** JSON object to your `stdin`.
 3.  Your plugin prints a **Response** JSON object to `stdout`.
-4.  Logs/Debug info should be printed to `stderr` (which WinHome captures and logs).
+4.  Logs/Debug info should be printed to `stderr` (which WDEM captures and logs).
 
 ## 2. The Manifest (`plugin.yaml`)
 
@@ -35,8 +36,8 @@ capabilities:
 
 ### Supported Types
 
-- `python`: Executed via `uv run --quiet <main>`. WinHome automatically manages the `uv` runtime.
-- `javascript` / `typescript`: Executed via `bun run <main>`. WinHome automatically manages the
+- `python`: Executed via `uv run --quiet <main>`. WDEM automatically manages the `uv` runtime.
+- `javascript` / `typescript`: Executed via `bun run <main>`. WDEM automatically manages the
   `bun` runtime.
 - `executable`: Executed directly. Useful for compiled binaries (Go, Rust, C#).
 

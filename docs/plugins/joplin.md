@@ -1,8 +1,9 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Joplin Plugin
 
 ## Overview
 
-This plugin manages the configuration of the Joplin desktop application stored in `%APPDATA%\joplin-desktop\settings.json`. Settings are merged directly into the existing JSON file, allowing Joplin preferences to be managed declaratively through WinHome.
+This plugin manages the configuration of the Joplin desktop application stored in `%APPDATA%\joplin-desktop\settings.json`. Settings are merged directly into the existing JSON file, allowing Joplin preferences to be managed declaratively through WDEM.
 
 ## Prerequisites
 
@@ -74,7 +75,7 @@ extensions:
 
 ## Verification Steps
 
-1. Apply your WinHome configuration.
+1. Apply your WDEM configuration.
 2. Open `%APPDATA%\joplin-desktop\settings.json`.
 3. Verify the expected keys were added or updated.
 4. Launch Joplin and confirm the settings are reflected in Tools > Options.

@@ -18,16 +18,16 @@ namespace Wdem.LegacySource.Tests.Services.System
 
     public StateServiceTests()
     {
-      _originalEnvPath = Environment.GetEnvironmentVariable("WINHOME_STATE_PATH");
+      _originalEnvPath = Environment.GetEnvironmentVariable("WDEM_STATE_PATH");
       _testDir = Path.Combine(Path.GetTempPath(), $"Wdem.LegacySourceStateTests_{Guid.NewGuid()}");
       Directory.CreateDirectory(_testDir);
-      _stateFilePath = Path.Combine(_testDir, "winhome.state.json");
+      _stateFilePath = Path.Combine(_testDir, ".wdem-state.json");
       _mockLogger = new Mock<ILogger>();
     }
 
     public void Dispose()
     {
-      Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", _originalEnvPath);
+      Environment.SetEnvironmentVariable("WDEM_STATE_PATH", _originalEnvPath);
       if (Directory.Exists(_testDir))
         Directory.Delete(_testDir, recursive: true);
     }
@@ -35,7 +35,7 @@ namespace Wdem.LegacySource.Tests.Services.System
     /// <summary>Creates a StateService pointing at the test-directory state file.</summary>
     private StateService CreateService()
     {
-      Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", _stateFilePath);
+      Environment.SetEnvironmentVariable("WDEM_STATE_PATH", _stateFilePath);
       return new StateService(_mockLogger.Object);
     }
 
@@ -81,6 +81,31 @@ namespace Wdem.LegacySource.Tests.Services.System
 
       Assert.Empty(state.AppliedItems);
       _mockLogger.Verify(l => l.LogWarning(It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public void LegacyStateEnvironment_IsReadOnceAsMigrationFallback()
+    {
+      var legacyStatePath = Path.Combine(_testDir, ".winhome-state.json");
+      var originalLegacyPath = Environment.GetEnvironmentVariable("WINHOME_STATE_PATH");
+      File.WriteAllText(legacyStatePath, JsonSerializer.Serialize(
+          new StateData { AppliedItems = new HashSet<string> { "legacy-package" } }));
+
+      try
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", legacyStatePath);
+
+        var state = CreateService().LoadState();
+
+        Assert.Contains("legacy-package", state.AppliedItems);
+        Assert.True(File.Exists(_stateFilePath));
+        Assert.False(File.Exists(legacyStatePath));
+        Assert.Single(Directory.GetFiles(_testDir, ".winhome-state.json.migration-backup.*"));
+      }
+      finally
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", originalLegacyPath);
+      }
     }
 
     // ── Corrupted JSON ─────────────────────────────────────────────────────────
@@ -142,7 +167,7 @@ namespace Wdem.LegacySource.Tests.Services.System
       svc.LoadState();
 
       // The original file should have been renamed to a .corrupted.<timestamp> file
-      var backups = Directory.GetFiles(_testDir, "winhome.state.json.corrupted.*");
+      var backups = Directory.GetFiles(_testDir, ".wdem-state.json.corrupted.*");
       Assert.Single(backups);
     }
 
@@ -175,7 +200,7 @@ namespace Wdem.LegacySource.Tests.Services.System
           l.LogWarning(It.Is<string>(msg =>
               msg.Contains("[State]") &&
               msg.Contains("corrupted") &&
-              msg.Contains("winhome.state.json"))),
+              msg.Contains(".wdem-state.json"))),
           Times.AtLeastOnce);
     }
 
@@ -239,7 +264,7 @@ namespace Wdem.LegacySource.Tests.Services.System
       var state = svc.LoadState();
 
       Assert.Empty(state.AppliedItems);
-      var backups = Directory.GetFiles(_testDir, "winhome.state.json.corrupted.*");
+      var backups = Directory.GetFiles(_testDir, ".wdem-state.json.corrupted.*");
       Assert.Single(backups);
     }
 

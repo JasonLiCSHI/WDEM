@@ -1,50 +1,19 @@
-# Build stage
+# WDEM solution validation image
 FROM mcr.microsoft.com/dotnet/sdk:10.0-windowsservercore-ltsc2022 AS build
 
 WORKDIR /src
 
-# Copy only project files first for better layer caching
-COPY src/*.csproj src/
-COPY tests/WinHome.Tests/*.csproj tests/WinHome.Tests/
+# Copy only project files first for better layer caching.
+COPY Wdem.sln ./
+COPY src/Wdem.Core/Wdem.Core.csproj src/Wdem.Core/
+COPY src/Wdem.LegacySource/Wdem.LegacySource.csproj src/Wdem.LegacySource/
+COPY tests/Wdem.Core.Tests/Wdem.Core.Tests.csproj tests/Wdem.Core.Tests/
+COPY tests/Wdem.LegacySource.Tests/Wdem.LegacySource.Tests.csproj tests/Wdem.LegacySource.Tests/
 
-# Restore dependencies
-RUN dotnet restore src/WinHome.csproj
+# Restore, build, and test the current solution. Product hosts are not available yet.
+RUN dotnet restore Wdem.sln
 
-# Copy remaining source code
 COPY src/ src/
 COPY tests/ tests/
-
-# Publish as self-contained executable
-RUN dotnet publish src/WinHome.csproj \
-    -c Release \
-    -o /app/publish \
-    --runtime win-x64 \
-    --self-contained true \
-    --no-restore \
-    /p:PublishSingleFile=true
-
-# Runtime stage
-FROM mcr.microsoft.com/windows/servercore:ltsc2022 AS final
-
-WORKDIR /app
-
-# Copy published application
-COPY --from=build /app/publish .
-
-# Copy test resources (from project root context)
-COPY test-data/ .
-COPY tests/ tests/
-COPY plugins/ plugins/
-COPY src/ src/
-COPY README.md .
-
-# Run as admin to allow tool to install dependencies
-USER ContainerAdministrator
-
-# Install Pester for testing
-RUN powershell -Command "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force; Install-Module -Name Pester -Force -SkipPublisherCheck"
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD powershell -Command ".\WinHome.exe --help" || exit 1
-
-ENTRYPOINT ["powershell", "-File", "run-test-container.ps1"]
+RUN dotnet build Wdem.sln -c Release --no-restore
+RUN dotnet test Wdem.sln -c Release --no-build

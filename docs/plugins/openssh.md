@@ -1,3 +1,4 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # OpenSSH Plugin
 
 ## Overview
@@ -10,7 +11,7 @@ files, ensuring that their secure connections are set up correctly.
 
 - **OpenSSH**: The OpenSSH client or server must be installed on user's system.
 - The SSH configuration file (typically `~/.ssh/config` or `/etc/ssh/sshd_config`) should exist and
-  be accessible by the user running WinHome.
+  be accessible by the user running WDEM.
 
 ## Configuration Schema
 

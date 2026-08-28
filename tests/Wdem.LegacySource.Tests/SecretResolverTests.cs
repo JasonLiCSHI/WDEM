@@ -20,16 +20,16 @@ namespace Wdem.LegacySource.Tests
     public void Resolve_Env_ReturnsEnvironmentVariable()
     {
       // Arrange
-      Environment.SetEnvironmentVariable("WINHOME_TEST_SECRET", "super-secret-value");
+      Environment.SetEnvironmentVariable("WDEM_TEST_SECRET", "super-secret-value");
 
       // Act
-      var result = _resolver.Resolve("{{ env:WINHOME_TEST_SECRET }}");
+      var result = _resolver.Resolve("{{ env:WDEM_TEST_SECRET }}");
 
       // Assert
       Assert.Equal("super-secret-value", result);
 
       // Cleanup
-      Environment.SetEnvironmentVariable("WINHOME_TEST_SECRET", null);
+      Environment.SetEnvironmentVariable("WDEM_TEST_SECRET", null);
     }
 
     [Fact]
@@ -97,11 +97,11 @@ namespace Wdem.LegacySource.Tests
     public void Resolve_Vault_ReturnsEmptyAndWarns_WhenCredentialNotFound()
     {
       // Act
-      var result = _resolver.Resolve("{{ vault:WINHOME_NONEXISTENT_CREDENTIAL_XYZ }}");
+      var result = _resolver.Resolve("{{ vault:WDEM_NONEXISTENT_CREDENTIAL_XYZ }}");
 
       // Assert: on Windows, missing credential returns empty; on non-Windows, also returns empty
       Assert.Equal(string.Empty, result);
-      _mockLogger.Verify(l => l.LogWarning(It.Is<string>(s => s.Contains("WINHOME_NONEXISTENT_CREDENTIAL_XYZ") || s.Contains("Windows"))), Times.Once);
+      _mockLogger.Verify(l => l.LogWarning(It.Is<string>(s => s.Contains("WDEM_NONEXISTENT_CREDENTIAL_XYZ") || s.Contains("Windows"))), Times.Once);
     }
 
     [Fact]
@@ -114,13 +114,13 @@ namespace Wdem.LegacySource.Tests
     }
 
     // Live vault test: store a credential first with:
-    //   cmdkey /add:WINHOME_TEST_VAULT /user:test /pass:vault-secret
+    //   cmdkey /add:WDEM_TEST_VAULT /user:test /pass:vault-secret
     // then remove it after:
-    //   cmdkey /delete:WINHOME_TEST_VAULT
+    //   cmdkey /delete:WDEM_TEST_VAULT
     [Fact(Skip = "Requires a real credential in Windows Credential Manager. Run manually after seeding with cmdkey.")]
     public void Resolve_Vault_ReturnsSecret_WhenCredentialExists()
     {
-      const string credName = "WINHOME_TEST_VAULT";
+      const string credName = "WDEM_TEST_VAULT";
       var result = _resolver.Resolve($"{{{{ vault:{credName} }}}}");
       Assert.Equal("vault-secret", result);
     }

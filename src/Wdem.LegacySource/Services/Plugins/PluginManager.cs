@@ -34,7 +34,7 @@ namespace Wdem.LegacySource.Services.Plugins
 
       _pluginsDir = pluginsDirectory ?? Path.Combine(
           Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-          "Wdem.LegacySource",
+          "WDEM",
           "plugins");
     }
 
@@ -157,8 +157,8 @@ namespace Wdem.LegacySource.Services.Plugins
         using var client = new HttpClient();
         client.DefaultRequestHeaders.UserAgent.ParseAdd("Wdem.LegacySource-CLI");
 
-        var zipUrl = "https://github.com/DotDev262/Wdem.LegacySource/archive/refs/heads/main.zip";
-        var tempZipPath = Path.Combine(Path.GetTempPath(), $"winhome-plugins-{Guid.NewGuid()}.zip");
+        var zipUrl = "https://github.com/JasonLiCSHI/WDEM/archive/refs/heads/main.zip";
+        var tempZipPath = Path.Combine(Path.GetTempPath(), $"wdem-plugins-{Guid.NewGuid()}.zip");
 
         using (var response = await client.GetAsync(zipUrl))
         {
@@ -169,10 +169,10 @@ namespace Wdem.LegacySource.Services.Plugins
           }
         }
 
-        var tempExtractPath = Path.Combine(Path.GetTempPath(), $"winhome-extract-{Guid.NewGuid()}");
+        var tempExtractPath = Path.Combine(Path.GetTempPath(), $"wdem-extract-{Guid.NewGuid()}");
         ZipFile.ExtractToDirectory(tempZipPath, tempExtractPath);
 
-        var extractedPluginsDir = Path.Combine(tempExtractPath, "Wdem.LegacySource-main", "plugins");
+        var extractedPluginsDir = Path.Combine(tempExtractPath, "WDEM-main", "plugins");
         if (Directory.Exists(extractedPluginsDir))
         {
           foreach (var dir in Directory.GetDirectories(extractedPluginsDir))

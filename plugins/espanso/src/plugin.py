@@ -1,5 +1,5 @@
 """
-Espanso plugin for WinHome.
+Espanso plugin for WDEM.
 
 Manages Espanso text expander configuration on Windows.
 Config location: %APPDATA%\\espanso\\match\\base.yml
@@ -22,7 +22,7 @@ from copy import deepcopy
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Logging — simple stderr helper, matching other WinHome plugins
+# Logging — simple stderr helper, matching other WDEM plugins
 # ---------------------------------------------------------------------------
 
 

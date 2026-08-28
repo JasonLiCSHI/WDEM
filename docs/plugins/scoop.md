@@ -1,10 +1,11 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # scoop plugin
 
 ## Description
 
 The `scoop` plugin manages configuration for [Scoop](https://scoop.sh), a command-line installer for
 Windows. It writes settings to Scoop's `config.json` file, allowing you to declaratively control
-Scoop's behaviour as part of your WinHome setup.
+Scoop's behaviour as part of your WDEM setup.
 
 ## Prerequisites
 

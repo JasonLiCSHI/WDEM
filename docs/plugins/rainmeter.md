@@ -1,3 +1,4 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Rainmeter Plugin
 
 ## Overview
@@ -38,7 +39,7 @@ Any section/key pair accepted by `Rainmeter.ini` can be used. The most common se
 The plugin isn't limited to `[Rainmeter]` — any other section name (e.g. a skin's own section like
 `Skin\MySkin\MyConfig`) is written the same way.
 
-The plugin also supports WinHome's `dryRun` apply option, which reports whether `Rainmeter.ini`
+The plugin also supports WDEM's `dryRun` apply option, which reports whether `Rainmeter.ini`
 would change without writing it.
 
 ## Usage Examples

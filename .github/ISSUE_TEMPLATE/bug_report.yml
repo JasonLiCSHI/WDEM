@@ -1,5 +1,5 @@
 name: Bug Report
-description: File a bug report to help us improve WinHome
+description: File a bug report to help us improve WDEM
 labels: ["bug"]
 body:
   - type: checkboxes
@@ -10,9 +10,9 @@ body:
       options:
         - label: I have searched existing issues for a duplicate.
           required: true
-        - label: I am using the latest version of WinHome.
+        - label: I am using the latest version of WDEM.
           required: true
-        - label: I have read the [Configuration Wiki](https://github.com/DotDev262/WinHome/blob/main/docs/config.md).
+        - label: I have read the [Configuration Wiki](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/config.md).
           required: true
   - type: markdown
     attributes:
@@ -32,7 +32,7 @@ body:
       label: Steps to Reproduce
       description: Steps to reproduce the behavior.
       placeholder: |
-        1. Run WinHome with config ...
+        1. Run WDEM with config ...
         2. ...
         3. ...
     validations:
@@ -55,7 +55,7 @@ body:
     id: logs
     attributes:
       label: Relevant Logs or Config
-      description: Please paste any relevant WinHome logs or your `config.yaml` (redact secrets!).
+      description: Please paste any relevant WDEM logs or your `config.yaml` (redact secrets!).
       render: yaml
   - type: textarea
     id: context

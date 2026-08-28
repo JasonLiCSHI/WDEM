@@ -1,10 +1,11 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Sublime Text Plugin
 
 ## Overview
 
 The Sublime Text plugin manages user preferences in Sublime Text by updating the `Preferences.sublime-settings` file.
 
-Settings defined in WinHome are merged into the existing Sublime Text configuration, preserving unrelated settings while updating managed values.
+Settings defined in WDEM are merged into the existing Sublime Text configuration, preserving unrelated settings while updating managed values.
 
 ## Prerequisites
 
@@ -68,6 +69,6 @@ and confirm the configured values are present.
 
 ## Notes / Caveats
 
-- Existing settings are preserved unless the same key is managed by WinHome.
+- Existing settings are preserved unless the same key is managed by WDEM.
 - New settings are merged into the current configuration.
 - Invalid JSON in the existing settings file may prevent settings from being read correctly.

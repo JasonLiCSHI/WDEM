@@ -1,6 +1,7 @@
-# Building Your First WinHome Plugin: A Step-by-Step Tutorial
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
+# Building Your First WDEM Plugin: A Step-by-Step Tutorial
 
-This tutorial walks you through building a WinHome plugin from scratch. By the end, you'll have a
+This tutorial walks you through building a WDEM plugin from scratch. By the end, you'll have a
 working plugin with tests, ready to submit.
 
 > **Prerequisites**: Basic knowledge of Python or JavaScript/TypeScript. No .NET or C# knowledge
@@ -24,22 +25,22 @@ working plugin with tests, ready to submit.
 
 ## 1. How Plugins Work
 
-WinHome uses a **process-based plugin architecture**. Instead of loading code directly, WinHome
+WDEM uses a **process-based plugin architecture**. Instead of loading code directly, WDEM
 spawns your plugin as a separate child process and communicates with it through standard
 input/output streams.
 
 This means:
 
 - Plugins can be written in **any language** (Python, JavaScript, Go, etc.)
-- A plugin crash **cannot** bring down WinHome
+- A plugin crash **cannot** bring down WDEM
 - No .NET knowledge is required
 
 The communication flow is simple:
 
 ```
-WinHome  ──(JSON request)──▶  Your Plugin (stdin)
-WinHome  ◀──(JSON response)─  Your Plugin (stdout)
-WinHome  ◀──(logs/debug)────  Your Plugin (stderr)
+WDEM  ──(JSON request)──▶  Your Plugin (stdin)
+WDEM  ◀──(JSON response)─  Your Plugin (stdout)
+WDEM  ◀──(logs/debug)────  Your Plugin (stderr)
 ```
 
 For a deeper look at the architecture, see
@@ -69,7 +70,7 @@ plugins as real-world examples.
 
 ## 3. The Manifest: `plugin.yaml`
 
-Every plugin needs a `plugin.yaml` in its root folder. This tells WinHome how to find and run your
+Every plugin needs a `plugin.yaml` in its root folder. This tells WDEM how to find and run your
 plugin.
 
 ```yaml
@@ -93,10 +94,10 @@ capabilities:
 
 ## 4. The JSON IPC Protocol
 
-When WinHome runs your plugin, it sends a single-line JSON object to your plugin's **stdin**. Your
+When WDEM runs your plugin, it sends a single-line JSON object to your plugin's **stdin**. Your
 plugin must respond with a single-line JSON object to **stdout**.
 
-### Request (WinHome → Plugin)
+### Request (WDEM → Plugin)
 
 ```json
 {
@@ -118,12 +119,12 @@ plugin must respond with a single-line JSON object to **stdout**.
 | `requestId` | Unique ID — your response must echo this back                                                     |
 | `command`   | What to do — currently `apply` is the primary command used by all plugins                         |
 | `args`      | Your plugin's config from the user's `config.yaml` (referred to as `config` in the protocol spec) |
-| `context`   | System info provided by WinHome, including `dryRun`, `osVersion`, and `isAdmin`                   |
+| `context`   | System info provided by WDEM, including `dryRun`, `osVersion`, and `isAdmin`                   |
 
 > **Note**: The protocol spec (`plugin_spec_v1.md`) refers to this field as `config`. The existing
 > plugins (obsidian, vscode) use `args`. Follow the existing plugins when building your own.
 
-### Response (Plugin → WinHome)
+### Response (Plugin → WDEM)
 
 ```json
 {
@@ -144,7 +145,7 @@ plugin must respond with a single-line JSON object to **stdout**.
 | `error`     | Error message string — only include this field if `success` is `false` |
 | `data`      | Optional result data                                                   |
 
-> **Important**: Write all logs and debug messages to **stderr**, never stdout. WinHome captures
+> **Important**: Write all logs and debug messages to **stderr**, never stdout. WDEM captures
 > stderr and pipes it to the main application log.
 
 ---
@@ -167,7 +168,7 @@ def main():
     context = request.get("context", {})
     dry_run = context.get("dryRun", False)
 
-    # Log to stderr — WinHome captures this
+    # Log to stderr — WDEM captures this
     sys.stderr.write(f"[hello-world] Received command: {command}\n")
 
     # 2. Build the response
@@ -185,7 +186,7 @@ def main():
         else:
             sys.stderr.write("[hello-world] Applying changes...\n")
             response["changed"] = True
-            response["data"] = {"status": "Hello from my first WinHome plugin!"}
+            response["data"] = {"status": "Hello from my first WDEM plugin!"}
     elif command == "check_installed":
         # Return whether the plugin's managed resource is already configured
         response["changed"] = False
@@ -231,7 +232,7 @@ process.stdin.on('end', () => {
   const { requestId, command, context = {} } = request;
   const dryRun = context.dryRun ?? false;
 
-  // Log to stderr — WinHome captures this
+  // Log to stderr — WDEM captures this
   process.stderr.write(`[hello-world-js] Received command: ${command}\n`);
 
   // 2. Build the response
@@ -249,7 +250,7 @@ process.stdin.on('end', () => {
     } else {
       process.stderr.write('[hello-world-js] Applying changes...\n');
       response.changed = true;
-      response.data = { status: 'Hello from my first WinHome plugin!' };
+      response.data = { status: 'Hello from my first WDEM plugin!' };
     }
   } else if (command === 'check_installed') {
     // Return whether the plugin's managed resource is already configured
@@ -387,7 +388,7 @@ app-settings:
 
 ## 8. Testing with pytest
 
-Now let's write tests for the `app-settings` plugin we built in Section 7. WinHome plugins are
+Now let's write tests for the `app-settings` plugin we built in Section 7. WDEM plugins are
 tested by running them as subprocesses and asserting their JSON responses — the same pattern used in
 the [`obsidian` tests](../../plugins/obsidian/test/test_obsidian.py). This approach works for any
 plugin regardless of language.

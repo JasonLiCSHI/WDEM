@@ -1,8 +1,8 @@
 {
-  "name": "winhome-vscode-plugin",
+  "name": "wdem-vscode-plugin",
   "version": "0.1.0",
   "type": "module",
-  "description": "VSCode plugin for WinHome",
+  "description": "VSCode plugin for WDEM",
   "main": "src/index.ts",
   "scripts": {
     "test": "vitest"

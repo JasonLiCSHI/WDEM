@@ -1,3 +1,4 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Scoop
 
 Installs packages using Scoop. Scoop is a command-line package manager for Windows that focuses on
@@ -21,7 +22,7 @@ packages at [scoop.sh](https://scoop.sh) or by running:
 scoop search <app-name>
 ```
 
-To install a single package using WinHome:
+To install a single package using WDEM:
 
 ```yaml
 scoop:
@@ -45,7 +46,7 @@ scoop:
 
 Scoop organizes packages into buckets. The default bucket covers common tools, but many packages
 live in extra buckets like `extras`, `games`, or `nerd-fonts`. You can add buckets manually before
-running WinHome:
+running WDEM:
 
 ```powershell
 scoop bucket add extras

@@ -1,3 +1,4 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Winget
 
 Installs packages using the `winget` command-line tool. Winget is Windows' official built-in package
@@ -21,7 +22,7 @@ searching on [winget.run](https://winget.run) or by running:
 winget search <app-name>
 ```
 
-To install a single package using WinHome, add it under the `winget` key in your `config.yaml`:
+To install a single package using WDEM, add it under the `winget` key in your `config.yaml`:
 
 ```yaml
 winget:
@@ -120,6 +121,6 @@ winget:
 
 - Make sure you are running the terminal as **Administrator**.
 
-**Issue: Package already installed but WinHome tries to reinstall**
+**Issue: Package already installed but WDEM tries to reinstall**
 
 - This is expected behavior. Winget will skip installation if the package is already up to date.

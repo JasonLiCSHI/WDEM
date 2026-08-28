@@ -1,3 +1,4 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Spotify Plugin
 
 ## Overview
@@ -18,8 +19,8 @@ The plugin accepts a top-level YAML object with one supported configuration fiel
 | ----- | ---- | ------- | ----------- |
 | `settings` | object | none | Spotify `prefs` keys and values to merge into the preferences file. |
 
-Supported settings are any key-value pairs accepted by Spotify's `prefs` file. WinHome preserves the
-key names exactly as provided and writes each value as a string. The plugin also supports WinHome's
+Supported settings are any key-value pairs accepted by Spotify's `prefs` file. WDEM preserves the
+key names exactly as provided and writes each value as a string. The plugin also supports WDEM's
 `dryRun` apply option, which reports whether the `prefs` file would change without writing it.
 
 ## Usage Examples

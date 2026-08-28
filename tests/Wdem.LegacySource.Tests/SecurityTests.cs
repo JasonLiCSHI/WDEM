@@ -27,7 +27,7 @@ namespace Wdem.LegacySource.Tests
 
       // Use a unique temp file for this test
       string tempStateFile = Path.GetTempFileName();
-      Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", tempStateFile);
+      Environment.SetEnvironmentVariable("WDEM_STATE_PATH", tempStateFile);
 
       try
       {
@@ -43,7 +43,7 @@ namespace Wdem.LegacySource.Tests
       finally
       {
         // Cleanup
-        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", null);
+        Environment.SetEnvironmentVariable("WDEM_STATE_PATH", null);
         if (File.Exists(tempStateFile)) File.Delete(tempStateFile);
       }
     }

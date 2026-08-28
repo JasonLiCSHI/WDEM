@@ -24,8 +24,8 @@ try {
 }
 
 # 2. Check for environment variable
-$envVar = [Environment]::GetEnvironmentVariable("WINHOME_TEST_GHA", "User")
-Assert-True ($envVar -eq "true"), "WINHOME_TEST_GHA environment variable should be set to 'true'"
+$envVar = [Environment]::GetEnvironmentVariable("WDEM_TEST_GHA", "User")
+Assert-True ($envVar -eq "true"), "WDEM_TEST_GHA environment variable should be set to 'true'"
 
 # 3. Check for dotfile
 $target = Join-Path $env:USERPROFILE "test-dotfile-gha.md"
@@ -34,7 +34,7 @@ $readmeContent = Get-Content -Path "README.md" -Raw
 Assert-True ($dotfileContent -eq $readmeContent), "Dotfile content should match README.md content"
 
 # 4. Check for registry tweak
-$regVal = Get-ItemPropertyValue -Path "HKCU:\Software\WinHomeGHA" -Name "GHATest" -ErrorAction SilentlyContinue
+$regVal = Get-ItemPropertyValue -Path "HKCU:\Software\WDEMGHA" -Name "GHATest" -ErrorAction SilentlyContinue
 Assert-True ($regVal -eq 456), "Registry tweak should be set"
 
 # 5. Check for system setting (show file extensions)
@@ -43,7 +43,7 @@ Assert-True ($hideFileExt -eq 0), "Show file extensions should be enabled (HideF
 
 # 6. Check for git config
 $gitName = git config --global user.name
-Assert-True ($gitName -eq "WinHome GHA"), "Git user name should be set"
+Assert-True ($gitName -eq "WDEM GHA"), "Git user name should be set"
 
 # 7. Check for starship config (plugin auto-download and configuration)
 $starshipPath = Join-Path $env:USERPROFILE ".config\starship.toml"
@@ -53,13 +53,13 @@ if (Test-Path $starshipPath) {
     Assert-True ($starshipContent -match "add_newline = false"), "Starship configuration should have add_newline = false"
 }
 
-# 8. Verify Scoop applications were auto-installed by WinHome
+# 8. Verify Scoop applications were auto-installed by WDEM
 Assert-True (Test-Path "C:\scoop\apps\bat"), "bat app directory should exist under Scoop"
 Assert-True (Test-Path "C:\scoop\apps\fzf"), "fzf app directory should exist under Scoop"
 Assert-True (Test-Path "C:\scoop\apps\ripgrep"), "ripgrep app directory should exist under Scoop"
 Assert-True (Test-Path "C:\scoop\apps\zoxide"), "zoxide app directory should exist under Scoop"
 
-# 9. Verify Chocolatey applications were auto-installed by WinHome
+# 9. Verify Chocolatey applications were auto-installed by WDEM
 Assert-True (Test-Path "C:\ProgramData\chocolatey\lib\neovim"), "Neovim app directory should exist under Chocolatey"
 
 exit $global:exitCode

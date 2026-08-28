@@ -28,7 +28,9 @@ public static class CliBuilder
     configOption.Description = "Path to the YAML configuration file";
     configOption.DefaultValueFactory = _ =>
     {
-      var configPath = Environment.GetEnvironmentVariable("WINHOME_CONFIG_PATH");
+      var configPath = Environment.GetEnvironmentVariable("WDEM_CONFIG_PATH");
+      // Migration fallback for installations configured before the WDEM rename.
+      configPath ??= Environment.GetEnvironmentVariable("WINHOME_CONFIG_PATH");
       return new FileInfo(string.IsNullOrEmpty(configPath) ? "config.yaml" : configPath);
     };
 

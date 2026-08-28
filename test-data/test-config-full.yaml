@@ -9,19 +9,19 @@ apps:
   - id: "tpope/vim-fugitive"
     manager: "vim"
 envVars:
-  - variable: "WINHOME_TEST"
+  - variable: "WDEM_TEST"
     value: "true"
     action: "set"
 registryTweaks:
-  - path: 'HKCU\Software\WinHomeTest'
+  - path: 'HKCU\Software\WDEMTest'
     name: "TestValue"
     value: 123
     type: "dword"
 systemSettings:
   show_file_extensions: true
 git:
-  userName: "WinHome Test"
-  userEmail: "test@winhome.local"
+  userName: "WDEM Test"
+  userEmail: "test@wdem.local"
   settings:
     init.defaultBranch: main
 extensions:

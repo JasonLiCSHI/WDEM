@@ -1,12 +1,13 @@
-# WinHome Plugin Architecture Specification
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
+# WDEM Plugin Architecture Specification
 
 ## 1. Architecture Overview
 
-To maintain the **single-file, dependency-free** nature of WinHome while allowing unlimited
+To maintain the **single-file, dependency-free** nature of WDEM while allowing unlimited
 extensibility, we are adopting a **Process-Based Plugin Architecture**.
 
 Instead of loading dynamic libraries (DLLs)—which is problematic for single-file .NET applications
-due to trimming and assembly isolation constraints—WinHome will execute plugins as **independent
+due to trimming and assembly isolation constraints—WDEM will execute plugins as **independent
 child processes**.
 
 ### Why IPC over Standard I/O?
@@ -21,7 +22,7 @@ child processes**.
 
 Communication occurs via **Inter-Process Communication (IPC)** using standard input/output streams.
 
-- **Transport**: The Host (`WinHome.exe`) spawns the Plugin (`winhome-provider-xyz.exe`) as a child
+- **Transport**: The Host (`the future WDEM product host`) spawns the Plugin (`wdem-provider-xyz.exe`) as a child
   process.
 - **Input (Stdin)**: The Host sends a single-line JSON object to the plugin's `StandardInput`.
 - **Output (Stdout)**: The Plugin responds by printing a single-line JSON object to
@@ -72,14 +73,14 @@ Read from the plugin's `stdout`.
 
 ## 4. Discovery Mechanism
 
-WinHome will scan for plugins at startup.
+WDEM will scan for plugins at startup.
 
-- **Location**: `%LOCALAPPDATA%\WinHome\plugins`
+- **Location**: `%LOCALAPPDATA%\WDEM\plugins`
 - **Naming Convention**:
-  - Executables: `winhome-provider-<name>.exe` (or `.bat`, `.cmd`, `.py` if associated).
-  - Manifests: `winhome-provider-<name>.yaml` (Optional, for metadata).
+  - Executables: `wdem-provider-<name>.exe` (or `.bat`, `.cmd`, `.py` if associated).
+  - Manifests: `wdem-provider-<name>.yaml` (Optional, for metadata).
 
-If the config file contains a key `docker:`, WinHome looks for `winhome-provider-docker`.
+If the config file contains a key `docker:`, WDEM looks for `wdem-provider-docker`.
 
 ## 5. Implementation Details (C#)
 
@@ -167,7 +168,7 @@ public class ProcessPluginRunner : IPlugin
 
 ## 6. Example Usage (Python Plugin)
 
-A simple Python script (`winhome-provider-test.py`) demonstrating the contract.
+A simple Python script (`wdem-provider-test.py`) demonstrating the contract.
 
 ```python
 import sys

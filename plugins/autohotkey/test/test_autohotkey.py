@@ -84,7 +84,7 @@ def test_apply_writes_new_script_with_ahk_v2_syntax(tmp_path):
                 "::email::": "john@example.com",
             },
             "settings": {
-                "icon_tip": "WinHome managed",
+                "icon_tip": "WDEM managed",
                 "persistent": True,
                 "detect_hidden_windows": "On",
             },
@@ -102,7 +102,7 @@ def test_apply_writes_new_script_with_ahk_v2_syntax(tmp_path):
     assert content.startswith("#Requires AutoHotkey v2.0")
     assert "Persistent" in content
     assert 'DetectHiddenWindows "On"' in content
-    assert 'TrayTip "WinHome managed"' in content
+    assert 'TrayTip "WDEM managed"' in content
     assert "#z::" in content
     assert 'Run "https://www.google.com"' in content
     assert "::btw::by the way" in content

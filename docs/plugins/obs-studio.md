@@ -1,8 +1,9 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # OBS Studio Plugin
 
 ## Overview
 
-This plugin manages OBS Studio configuration files stored in `%APPDATA%\obs-studio`. It allows users to configure general settings, video settings, audio settings, output settings, hotkeys, and profiles through WinHome.
+This plugin manages OBS Studio configuration files stored in `%APPDATA%\obs-studio`. It allows users to configure general settings, video settings, audio settings, output settings, hotkeys, and profiles through WDEM.
 
 ## Prerequisites
 
@@ -102,7 +103,7 @@ extensions:
 
 ## Verification Steps
 
-1. Apply your WinHome configuration.
+1. Apply your WDEM configuration.
 2. Open OBS Studio.
 3. Open Settings and verify the configured values.
 4. Confirm the expected values are present in `global.ini` or the selected profile's `basic.ini`.

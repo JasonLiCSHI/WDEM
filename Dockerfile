@@ -1,18 +1,22 @@
-# Stage 1: Build & Cross-Compile the Windows-Native binary on a Linux host
+# Stage 1: Build the current WDEM solution
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
-# Cache optimization: Copy project file and restore dependencies first
-COPY src/WinHome.csproj src/
-RUN dotnet restore src/WinHome.csproj
+# Cache optimization: Copy project files and restore dependencies first
+COPY Wdem.sln ./
+COPY src/Wdem.Core/Wdem.Core.csproj src/Wdem.Core/
+COPY src/Wdem.LegacySource/Wdem.LegacySource.csproj src/Wdem.LegacySource/
+COPY tests/Wdem.Core.Tests/Wdem.Core.Tests.csproj tests/Wdem.Core.Tests/
+COPY tests/Wdem.LegacySource.Tests/Wdem.LegacySource.Tests.csproj tests/Wdem.LegacySource.Tests/
+RUN dotnet restore Wdem.sln
 
-# Copy remaining source code and publish
+# Copy remaining source code and build the transition libraries
 COPY src/ src/
-RUN dotnet publish -c Release --no-restore -o /app -r win-x64 --self-contained true
+COPY tests/ tests/
+RUN dotnet build Wdem.sln -c Release --no-restore
 
 # Stage 2: Artifact Export Layer
-# WinHome is fundamentally a Windows-native CLI tool and cannot run on a Linux container kernel.
-# The compiled binary (win-x64) must be extracted and executed on native Windows environments.
-# This scratch stage serves cleanly as a build artifact container exporter, not a runtime service.
+# Product hosts are not present yet; this stage exports the validated build outputs.
 FROM scratch AS artifact
-COPY --from=build /app .
+COPY --from=build /src/src/Wdem.Core/bin/Release/ /artifacts/Wdem.Core/
+COPY --from=build /src/src/Wdem.LegacySource/bin/Release/ /artifacts/Wdem.LegacySource/

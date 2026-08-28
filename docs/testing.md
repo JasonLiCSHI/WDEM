@@ -1,6 +1,7 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Testing Guide
 
-This document outlines the testing strategy for WinHome. Because WinHome modifies system state
+This document outlines the testing strategy for WDEM. Because WDEM modifies system state
 (registry, packages, environment variables), testing requires strict isolation to prevent damaging
 the host machine and to ensure idempotency.
 
@@ -23,7 +24,7 @@ We employ a three-tier testing strategy:
 Run standard .NET unit tests locally. These have no system side effects.
 
 ```powershell
-dotnet test tests/WinHome.Tests/
+dotnet test tests/Wdem.LegacySource.Tests/
 ```
 
 ### 2. Windows Sandbox ("Clean Room" Testing)
@@ -51,7 +52,7 @@ Windows desktop environment that starts in seconds.
 1.  Ensure the project is built (`dotnet publish`).
 2.  Launch the specialized sandbox:
     ```powershell
-    Invoke-Item testing/infrastructure/WinHome-Plugins.wsb
+    Invoke-Item testing/infrastructure/WDEM-Plugins.wsb
     ```
 
 **Why use this?**
@@ -81,14 +82,14 @@ If you have Docker Desktop for Windows configured for **Windows Containers**:
 
 ```powershell
 # Build and Run from project root
-docker build -t winhome:test -f testing/infrastructure/Dockerfile .
-docker run winhome:test
+docker build -t wdem:test -f testing/infrastructure/Dockerfile .
+docker run wdem:test
 ```
 
 This executes the `test-data/run-test-container.ps1` script, which:
 
 1.  Installs a test configuration.
-2.  Runs WinHome.
+2.  Runs WDEM.
 3.  Executes the Pester verification suite.
 
 ---

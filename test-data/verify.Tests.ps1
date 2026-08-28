@@ -1,7 +1,7 @@
 # verify.Tests.ps1
 $ErrorActionPreference = "Stop"
 
-Describe "WinHome Integration Tests" {
+Describe "WDEM Integration Tests" {
 
     Context "Application Installation" {
 
@@ -56,10 +56,10 @@ Describe "WinHome Integration Tests" {
     }
 
     Context "Environment Configuration" {
-        It "Should set the WINHOME_TEST environment variable" {
-            $envVar = [Environment]::GetEnvironmentVariable("WINHOME_TEST", "User")
+        It "Should set the WDEM_TEST environment variable" {
+            $envVar = [Environment]::GetEnvironmentVariable("WDEM_TEST", "User")
             if ($null -eq $envVar) {
-                $envVar = [Environment]::GetEnvironmentVariable("WINHOME_TEST", "Machine")
+                $envVar = [Environment]::GetEnvironmentVariable("WDEM_TEST", "Machine")
             }
             $envVar | Should -Be "true"
         }
@@ -67,7 +67,7 @@ Describe "WinHome Integration Tests" {
 
     Context "Dotfiles" {
         It "Should sync the dotfile correctly" {
-            # The test-dotfile.md is expected to be in the current directory where winhome runs
+            # The test-dotfile.md is expected to be in the current directory where wdem runs
             $dotfileContent = Get-Content -Path "test-dotfile.md" -Raw
             $readmeContent = Get-Content -Path "README.md" -Raw
             $dotfileContent | Should -Be $readmeContent
@@ -76,7 +76,7 @@ Describe "WinHome Integration Tests" {
 
     Context "Registry Tweaks" {
         It "Should apply the registry tweak" {
-            $regVal = Get-ItemPropertyValue -Path "HKCU:\Software\WinHomeTest" -Name "TestValue" -ErrorAction SilentlyContinue
+            $regVal = Get-ItemPropertyValue -Path "HKCU:\Software\WDEMTest" -Name "TestValue" -ErrorAction SilentlyContinue
             $regVal | Should -Be 123
         }
 
@@ -107,7 +107,7 @@ Describe "WinHome Integration Tests" {
 
             if ((Test-Path $gitExec) -or $gitExec -eq "git") {
                 $gitName = & $gitExec config --global user.name
-                $gitName | Should -Be "WinHome Test"
+                $gitName | Should -Be "WDEM Test"
             } else {
                 Write-Warning "Git executable not found, skipping config check."
             }
@@ -123,7 +123,7 @@ Describe "WinHome Integration Tests" {
         }
 
         It "Should install Vim plugins" {
-            $pluginPath = Join-Path $env:LOCALAPPDATA "nvim-data\site\pack\winhome\start\vim-fugitive"
+            $pluginPath = Join-Path $env:LOCALAPPDATA "nvim-data\site\pack\wdem\start\vim-fugitive"
             Test-Path $pluginPath | Should -Be $true
             Test-Path (Join-Path $pluginPath ".git") | Should -Be $true
         }

@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-We only support the latest version of WinHome. Please ensure you are using the most recent release before reporting a security vulnerability.
+We only support the latest version of WDEM. Please ensure you are using the most recent release before reporting a security vulnerability.
 
 | Version | Supported |
 | ------- | --------- |
@@ -13,12 +13,12 @@ We only support the latest version of WinHome. Please ensure you are using the m
 
 ## Reporting a Vulnerability
 
-We take security seriously. If you discover a security vulnerability within WinHome, please do **not** disclose it publicly.
+We take security seriously. If you discover a security vulnerability within WDEM, please do **not** disclose it publicly.
 
 Please report vulnerabilities using one of the following methods:
 
-1. **Email**: Send a report to [security@winhome.dev](mailto:security@winhome.dev)
-2. **GitHub**: Use the [Private Vulnerability Reporting](https://github.com/DotDev262/WinHome/security/advisories/new) feature
+1. **Email**: Send a report to [security@wdem.dev](mailto:security@wdem.dev)
+2. **GitHub**: Use the [Private Vulnerability Reporting](https://github.com/JasonLiCSHI/WDEM/security/advisories/new) feature
 
 ### What to Include
 
@@ -37,13 +37,13 @@ To help us triage issues quickly, please include:
 - Progress updates will be shared during remediation
 - Disclosure timelines will be coordinated once a fix is available
 
-Thank you for helping keep WinHome secure. ❤️
+Thank you for helping keep WDEM secure. ❤️
 
 ---
 
 # RegistryGuard
 
-RegistryGuard is a protection mechanism that prevents unsafe registry modifications, especially when WinHome is executed with elevated SYSTEM privileges.
+RegistryGuard is a protection mechanism that prevents unsafe registry modifications, especially when WDEM is executed with elevated SYSTEM privileges.
 
 ### Why It Exists
 
@@ -64,7 +64,7 @@ Contributors can review the implementation in [`src/Infrastructure/Helpers/Regis
 
 # Secret Reference Syntax
 
-WinHome supports secure secret references directly inside `config.yaml`.
+WDEM supports secure secret references directly inside `config.yaml`.
 
 ## Environment Variables
 
@@ -106,13 +106,13 @@ envVars:
 
 Reads credentials securely from Windows Credential Manager.
 
-This is the only currently supported vault integration in WinHome.
+This is the only currently supported vault integration in WDEM.
 
 ---
 
 # Security Presets
 
-WinHome provides multiple security presets for different use cases.
+WDEM provides multiple security presets for different use cases.
 
 ## Baseline
 
@@ -181,7 +181,7 @@ Before modifying the registry:
 
 - Registry Editor (`regedit`)
 - PowerShell
-- WinHome presets and safety mechanisms
+- WDEM presets and safety mechanisms
 
 ---
 

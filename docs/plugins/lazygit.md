@@ -1,3 +1,4 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Lazygit Plugin
 
 ## Overview
@@ -6,11 +7,11 @@ Lazygit is a command-line tool that makes using Git easy. Normally, if someone w
 Lazygit theme, set a custom editor, or turn on a setting (like auto-fetch), they have to find the
 %APPDATA%\lazygit\config.yml file on their system and make changes to it.This plugin makes life
 easier for the user. With it, the user doesn't need to dig up a separate Lazygit file. The user can
-write all their Lazygit settings directly into WinHome's central config.yaml file (as code). When
-the user runs WinHome, this plugin reads those settings and safely merges them with the original
+write all their Lazygit settings directly into WDEM's central config.yaml file (as code). When
+the user runs WDEM, this plugin reads those settings and safely merges them with the original
 Lazygit config file, silently in the background, so that old settings are not corrupted.The biggest
 advantage: the user's entire system and Lazygit settings are no longer scattered, but are managed
-from one place (WinHome), in an absolutely clean way.
+from one place (WDEM), in an absolutely clean way.
 
 ## Prerequisites
 

@@ -103,7 +103,7 @@ public class ShellCompletionGeneratorTests
     var root = BuildTestRootCommand();
     var script = ShellCompletionGenerator.Generate(root, "BASH");
 
-    Assert.Contains("complete -F _winhome_completions Wdem.LegacySource", script);
+    Assert.Contains("complete -F _wdem_completions wdem", script);
   }
 
   [Fact]
@@ -129,13 +129,12 @@ public class ShellCompletionGeneratorTests
   }
 
   [Fact]
-  public void RealCli_PowerShell_RegistersBothCasings()
+  public void RealCli_PowerShell_RegistersWdemCommand()
   {
     var root = BuildRealRootCommand();
     var script = ShellCompletionGenerator.Generate(root, "powershell");
 
-    Assert.Contains("Register-ArgumentCompleter -Native -CommandName Wdem.LegacySource", script);
-    Assert.Contains("Register-ArgumentCompleter -Native -CommandName winhome", script);
+    Assert.Contains("Register-ArgumentCompleter -Native -CommandName wdem", script);
   }
 
   [Fact]
@@ -183,8 +182,7 @@ public class ShellCompletionGeneratorTests
     var root = BuildRealRootCommand();
     var script = ShellCompletionGenerator.Generate(root, "bash");
 
-    Assert.Contains("complete -F _winhome_completions Wdem.LegacySource", script);
-    Assert.Contains("complete -F _winhome_completions winhome", script);
+    Assert.Contains("complete -F _wdem_completions wdem", script);
   }
 
   [Fact]

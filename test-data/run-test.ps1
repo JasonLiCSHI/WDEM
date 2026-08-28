@@ -1,21 +1,10 @@
-# run-test.ps1
+$ErrorActionPreference = "Stop"
 
-# Run WinHome
-./WinHome.exe --config test-config.yaml --debug
-$winhomeExitCode = $LASTEXITCODE
-
-if ($winhomeExitCode -ne 0) {
-    Write-Error "WinHome.exe failed with exit code $winhomeExitCode"
-    exit $winhomeExitCode
+Push-Location (Split-Path -Parent $PSScriptRoot)
+try {
+    dotnet build Wdem.sln -c Release --no-restore
+    dotnet test Wdem.sln -c Release --no-build
 }
-
-# Run verification tests (Pester)
-Write-Host "Running Pester integration tests..."
-$pesterResult = Invoke-Pester -Path ./verify.Tests.ps1 -Output Detailed -PassThru
-
-if ($pesterResult.FailedCount -gt 0) {
-    Write-Error "Pester tests failed with $($pesterResult.FailedCount) errors."
-    exit 1
+finally {
+    Pop-Location
 }
-
-exit 0

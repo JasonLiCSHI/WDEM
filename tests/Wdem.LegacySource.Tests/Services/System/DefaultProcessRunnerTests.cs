@@ -161,7 +161,7 @@ namespace Wdem.LegacySource.Tests.Services.System
       var runner = new DefaultProcessRunner();
       var testDirectory = Path.Combine(
           Path.GetTempPath(),
-          $"winhome_job_test_{Guid.NewGuid():N}");
+          $"wdem_job_test_{Guid.NewGuid():N}");
       Directory.CreateDirectory(testDirectory);
       var markerPath = Path.Combine(testDirectory, "child-survived.txt");
       var childScript = Path.Combine(testDirectory, "child.cmd");

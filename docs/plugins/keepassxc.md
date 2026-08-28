@@ -1,3 +1,4 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # KeePassXC Plugin
 
 ## Overview
@@ -5,7 +6,7 @@
 KeePassXC is a very popular, secure, and offline password manager. All its settings (such as setting
 a dark theme, connecting to a browser, or how long it takes to lock the database) are saved in an
 INI file on Windows located at %APPDATA%\KeePassXC\keepassxc.ini. Users don't have to dig through
-and edit that .ini file every time. They can simply write their KeePassXC settings to WinHome's
+and edit that .ini file every time. They can simply write their KeePassXC settings to WDEM's
 central config.yaml.This plugin's Python code includes a custom INI parser. It reads the native .ini
 file and updates only the new settings, without preserving any previous comments (containing # or ;)
 or empty lines. If a new section (such as [GUI]) doesn't already exist, it automatically creates

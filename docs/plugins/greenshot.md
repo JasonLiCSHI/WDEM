@@ -1,3 +1,4 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Greenshot Plugin
 
 ## Overview
@@ -80,7 +81,7 @@ extensions:
 
 ## Verification Steps
 
-1. Apply your WinHome configuration.
+1. Apply your WDEM configuration.
 2. Verify that `%APPDATA%\Greenshot\Greenshot.ini` has been updated with the specified sections and values. You can run:
    ```powershell
    Get-Content "$env:APPDATA\Greenshot\Greenshot.ini"

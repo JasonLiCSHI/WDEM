@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: 💬 GitHub Discussions
-    url: https://github.com/DotDev262/WinHome/discussions
+    url: https://github.com/JasonLiCSHI/WDEM/discussions
     about: Please use discussions for questions or support.
   - name: 🌈 GSSOC 2026 Guidelines
-    url: https://github.com/DotDev262/WinHome/blob/main/CONTRIBUTING.md
+    url: https://github.com/JasonLiCSHI/WDEM/blob/main/CONTRIBUTING.md
     about: Read our contribution guide before opening an issue.

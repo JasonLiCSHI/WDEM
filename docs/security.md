@@ -1,6 +1,7 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Security Guide
 
-WinHome includes built-in security mechanisms and presets to help users safely optimize and
+WDEM includes built-in security mechanisms and presets to help users safely optimize and
 configure their systems.
 
 ---
@@ -8,7 +9,7 @@ configure their systems.
 ## RegistryGuard
 
 RegistryGuard is a protection mechanism that prevents unsafe registry modifications, particularly
-when WinHome is executed with elevated SYSTEM privileges.
+when WDEM is executed with elevated SYSTEM privileges.
 
 ### Why It Exists
 
@@ -28,7 +29,7 @@ RegistryGuard protects your system by:
 
 ## Secret Management Best Practices
 
-WinHome supports multiple approaches for handling sensitive values securely.
+WDEM supports multiple approaches for handling sensitive values securely.
 
 ### Environment Variables
 
@@ -76,13 +77,13 @@ envVars:
 
 Reads credentials securely from Windows Credential Manager.
 
-This is the only currently supported vault integration in WinHome.
+This is the only currently supported vault integration in WDEM.
 
 ---
 
 ## Security Presets
 
-WinHome provides multiple security presets for different use cases.
+WDEM provides multiple security presets for different use cases.
 
 ### Baseline
 
@@ -151,7 +152,7 @@ Before modifying the registry:
 
 - Registry Editor (`regedit`)
 - PowerShell
-- WinHome presets and safety mechanisms
+- WDEM presets and safety mechanisms
 
 ---
 

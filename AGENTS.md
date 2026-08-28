@@ -1,7 +1,7 @@
-# WinHome Session Progress
+# WDEM Session Progress
 
 ## Goal
-- Review, approve, and manage open PRs for WinHome; enforce one-issue-per-contributor; ensure PRs are merged with `gssoc:approved` label.
+- Review, approve, and manage open PRs for WDEM; enforce one-issue-per-contributor; ensure PRs are merged with `gssoc:approved` label.
 
 ## Constraints & Preferences
 - `git pull` after every merge
@@ -23,7 +23,7 @@
 - Before accepting/assigning any plugin feature request or issue, verify `plugins/<name>/` doesn't already exist on `main` — if it does, close as duplicate
 - Contributors with open PRs cannot receive new assignments
 - Partial/split submissions for a single issue are not accepted — full feature must be delivered in one PR
-- Repo homepage set to GitHub Pages: https://DotDev262.github.io/WinHome/
+- Repo homepage set to GitHub Pages: https://JasonLiCSHI.github.io/WDEM/
 
 ## Merged This Session
 - **#385** (Deno, @silentguyracer) — Closes #330.

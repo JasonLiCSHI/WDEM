@@ -5,22 +5,22 @@ apps:
   - id: neovim
     manager: chocolatey
 envVars:
-  - variable: "WINHOME_TEST_GHA"
+  - variable: "WDEM_TEST_GHA"
     value: "true"
     action: "set"
 dotfiles:
   - src: "README.md"
     target: "~/test-dotfile-gha.md"
 registryTweaks:
-  - path: 'HKCU\Software\WinHomeGHA'
+  - path: 'HKCU\Software\WDEMGHA'
     name: "GHATest"
     value: 456
     type: "dword"
 systemSettings:
   show_file_extensions: true
 git:
-  userName: "WinHome GHA"
-  userEmail: "gha@winhome.local"
+  userName: "WDEM GHA"
+  userEmail: "gha@wdem.local"
 extensions:
   starship:
     settings:

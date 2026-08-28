@@ -1,3 +1,4 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Espanso Plugin
 
 ## Overview
@@ -9,10 +10,10 @@ user's full email address. Normally, to create or edit these shortcuts, the user
 %APPDATA%\espanso\match\base.yml file in the system and make manual changes to it.This plugin makes
 the entire process extremely simple: The user doesn't have to dig through a separate Espanso
 configuration file. The user can write all their text shortcuts (matches) and variables
-(global_vars) directly into WinHome's central config.yml file. When WinHome runs, this plugin
+(global_vars) directly into WDEM's central config.yml file. When WDEM runs, this plugin
 silently merges those settings in the background and safely merges them with the original Espanso
 base.yml file. It merges smartly: If there are any old shortcuts already in the native file that the
-user hasn't written to the WinHome config, the plugin doesn't delete them; they remain intact.
+user hasn't written to the WDEM config, the plugin doesn't delete them; they remain intact.
 
 ## Prerequisites
 
@@ -75,7 +76,7 @@ extensions:
 
 - The plugin performs intelligent list merging: items in matches are updated if their trigger
   matches, and global_vars are updated if their name matches. Any existing items in the native
-  config not mentioned in user's WinHome config are safely preserved.
+  config not mentioned in user's WDEM config are safely preserved.
 - It features a built-in YAML parser and serializer, so it does not rely on external dependencies
   like PyYAML to read or write the base.yml file.
 - It supports dryRun mode — when it is enabled, it logs whether changes would be made without

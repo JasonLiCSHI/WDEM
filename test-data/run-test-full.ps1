@@ -1,16 +1,10 @@
-# run-test-full.ps1
+$ErrorActionPreference = "Stop"
 
-# Run WinHome
-./WinHome.exe --config test-config-full.yaml --debug
-$winhomeExitCode = $LASTEXITCODE
-
-if ($winhomeExitCode -ne 0) {
-    Write-Error "WinHome.exe failed with exit code $winhomeExitCode"
-    exit $winhomeExitCode
+Push-Location (Split-Path -Parent $PSScriptRoot)
+try {
+    dotnet build Wdem.sln -c Release --no-restore
+    dotnet test Wdem.sln -c Release --no-build
 }
-
-# Run verification script
-./verify-full.ps1
-$verifyExitCode = $LASTEXITCODE
-
-exit $verifyExitCode
+finally {
+    Pop-Location
+}

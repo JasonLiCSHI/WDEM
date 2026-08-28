@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Have a great idea for WinHome? We'd love to hear it!
+        Have a great idea for WDEM? We'd love to hear it!
   - type: textarea
     id: problem
     attributes:

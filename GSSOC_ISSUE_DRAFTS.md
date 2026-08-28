@@ -1,4 +1,4 @@
-# GSSOC 2026 Issue Drafts for WinHome
+# GSSOC 2026 Issue Drafts for WDEM
 
 This file contains the drafts for the issues we identified. You can copy-paste these into GitHub Issues or I can run the commands when you're ready.
 
@@ -71,7 +71,7 @@ Windows is full of applications that store configuration in various places (AppD
 - Choose a common Windows application (e.g., Discord, Steam, Spotify, Obsidian, etc.) that has a complex or hidden configuration.
 - Identify where it stores its settings (e.g., `%APPDATA%`, `%LOCALAPPDATA%`, or Registry).
 - Create a new plugin in `plugins/<app-name>/`.
-- Implement logic to manage these settings via WinHome's `config.yaml`.
+- Implement logic to manage these settings via WDEM's `config.yaml`.
 - Ensure the plugin is idempotent (doesn't overwrite changes if the state is already correct).
 
 ---

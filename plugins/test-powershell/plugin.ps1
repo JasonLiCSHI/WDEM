@@ -1,4 +1,4 @@
-# WinHome PowerShell Plugin Implementation
+# WDEM PowerShell Plugin Implementation
 # Implements the process-based JSON-over-Stdin/Stdout IPC protocol.
 
 # 1. Read input from standard input (stdin)
@@ -20,7 +20,7 @@ $requestId = $request.requestId
 $args = $request.args
 $context = $request.context
 
-# Log info to stderr (Host will capture and pipe to WinHome main logs)
+# Log info to stderr (Host will capture and pipe to WDEM main logs)
 [System.Console]::Error.WriteLine("[test-powershell] Received command '$command' with requestId '$requestId'")
 
 # 3. Setup Response Structure

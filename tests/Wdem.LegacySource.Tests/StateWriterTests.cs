@@ -11,7 +11,7 @@ namespace Wdem.LegacySource.Tests
     [Fact]
     public void Load_CorruptedFile_ShouldNotThrowAndReturnEmpty()
     {
-      var tmp = Path.Combine(Path.GetTempPath(), $"winhome_state_test_{Guid.NewGuid()}.json");
+      var tmp = Path.Combine(Path.GetTempPath(), $"wdem_state_test_{Guid.NewGuid()}.json");
       try
       {
         File.WriteAllText(tmp, "{ invalid json }");
@@ -31,7 +31,7 @@ namespace Wdem.LegacySource.Tests
     [Fact]
     public void RecordStep_ShouldWriteAndLoad()
     {
-      var tmp = Path.Combine(Path.GetTempPath(), $"winhome_state_test_{Guid.NewGuid()}.json");
+      var tmp = Path.Combine(Path.GetTempPath(), $"wdem_state_test_{Guid.NewGuid()}.json");
       try
       {
         var writer = new StateWriter(tmp);

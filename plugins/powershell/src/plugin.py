@@ -4,8 +4,8 @@ import shutil
 import sys
 from pathlib import Path
 
-MARKER_START = "# --- WinHome managed start ---"
-MARKER_END = "# --- WinHome managed end ---"
+MARKER_START = "# --- WDEM managed start ---"
+MARKER_END = "# --- WDEM managed end ---"
 
 
 def log(msg):

@@ -1,34 +1,21 @@
 ---
 _disableBreadcrumb: true
 ---
-<br />
-<div align="center">
-  <img src="https://raw.githubusercontent.com/DotDev262/WinHome/main/.github/banner.png" alt="WinHome Banner" width="80%">
-</div>
 
-# WinHome Documentation
+# WDEM documentation
 
-WinHome is a declarative, portable, idempotent **Infrastructure-as-Code tool for Windows**.
+WDEM is an independent Windows environment-management product under active
+development. The repository currently contains `Wdem.Core`, a
+`Wdem.LegacySource` transition library, and their test suites.
 
-### 🚀 [Get Started](docs/config.md) | 📘 [Configuration Reference](docs/config-reference.md)
+There is no public CLI, desktop host, executable download, or binary release
+yet. Product documentation and supported end-user workflows will be published
+when `Wdem.Cli` and `Wdem.Desktop` exist.
 
----
+## Developer entry points
 
-## What is WinHome?
-
-WinHome allows you to define your Windows environment in a simple `config.yaml` file and apply it to any machine. It handles:
-
-*   **Package Managers**: Winget, Scoop, Chocolatey
-*   **System Settings**: Registry tweaks, Windows Services, Scheduled Tasks
-*   **Developer Tools**: WSL Distros, Git Configuration, Dotfiles
-*   **Editor Setup**: VS Code Extensions/Settings, Neovim
-
----
-
-## Quick Install
-
-```powershell
-Invoke-WebRequest -Uri "https://github.com/DotDev262/WinHome/releases/latest/download/WinHome.exe" -OutFile "WinHome.exe"
-```
-
-[View the Source on GitHub](https://github.com/DotDev262/WinHome)
+- [Getting started for contributors](docs/getting-started.md)
+- [Cross-platform development](docs/cross-platform-dev.md)
+- [Build and test guidance](docs/testing.md)
+- [Source provenance](docs/wdem/source-provenance.md)
+- [Third-party notices](THIRD-PARTY-NOTICES.md)

@@ -51,7 +51,7 @@ class MockResponse:
 
 def make_request(url: str):
     """Make an HTTP request to the given URL with a user agent"""
-    if os.environ.get("WINHOME_TEST_MOCK_URLOPEN") == "1":
+    if os.environ.get("WDEM_TEST_MOCK_URLOPEN") == "1":
         if "community-plugins.json" in url:
             data = json.dumps([{"id": "obsidian-git", "repo": "mgmeyers/obsidian-git"}]).encode("utf-8")
             return MockResponse(data)
@@ -64,7 +64,7 @@ def make_request(url: str):
         else:
             return MockResponse(b"mock content")
 
-    req = urllib.request.Request(url, headers={"User-Agent": "WinHome-Environment-Manager/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "WDEM-Environment-Manager/1.0"})
     return urllib.request.urlopen(req)
 
 

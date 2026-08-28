@@ -1,5 +1,5 @@
 """
-Tests for the Espanso WinHome plugin.
+Tests for the Espanso WDEM plugin.
 
 Run with:  pytest test/test_espanso.py -v
 """
@@ -322,7 +322,7 @@ def test_protocol_dry_run_via_context(tmp_path, monkeypatch):
 
 
 def test_protocol_dry_run_top_level_ignored(tmp_path, monkeypatch):
-    """dry_run at top-level must NOT be honoured (WinHome sends context.dryRun)."""
+    """dry_run at top-level must NOT be honoured (WDEM sends context.dryRun)."""
     base_yml = tmp_path / "espanso" / "match" / "base.yml"
     monkeypatch.setattr(plugin, "get_base_yml_path", lambda: base_yml)
     run_main(

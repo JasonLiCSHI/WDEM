@@ -23,7 +23,7 @@ coverage/
 files/
 TestResults/
 config.yaml
-winhome.state.json
+.wdem-state.json
 *.snk
 *.trx
 *.cache

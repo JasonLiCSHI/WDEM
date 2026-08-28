@@ -1,3 +1,4 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Postman Plugin
 
 The `postman` plugin handles automated setup, workspace integration, and environment mapping configurations for the Postman API development ecosystem. It simplifies API development pipelines by managing underlying environment collections and workspace initialization variables directly through code.
@@ -57,7 +58,7 @@ To confirm that the Postman plugin has been initialized and is functioning corre
 
 1. Run the system diagnostics command tool string to audit active plugin configurations:
    ```bash
-   winhome doctor
+   wdem doctor
    ```
 2. Verify that the output print streams explicitly log a successful initialization handshake for the postman module component:
    ```text

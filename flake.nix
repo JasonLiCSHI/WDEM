@@ -1,5 +1,5 @@
 {
-  description = "WinHome development environment";
+  description = "WDEM development environment";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
@@ -29,7 +29,7 @@
       in
       {
         devShells.default = pkgs.mkShell {
-          name = "winhome-dev";
+          name = "wdem-dev";
           packages = with pkgs; [
             dotnetSdk
             bun
@@ -45,31 +45,23 @@
 
         apps = {
           build = mkApp (pkgs.writeShellApplication {
-            name = "winhome-build";
+            name = "wdem-build";
             text = ''
               export PATH="${dotnetSdk}/bin:$PATH"
-              exec dotnet build "$@"
+              exec dotnet build Wdem.sln "$@"
             '';
           });
 
           test = mkApp (pkgs.writeShellApplication {
-            name = "winhome-test";
+            name = "wdem-test";
             text = ''
               export PATH="${dotnetSdk}/bin:$PATH"
-              exec dotnet test "$@"
-            '';
-          });
-
-          run = mkApp (pkgs.writeShellApplication {
-            name = "winhome-run";
-            text = ''
-              export PATH="${dotnetSdk}/bin:$PATH"
-              exec dotnet run --project src/WinHome.csproj -- "$@"
+              exec dotnet test Wdem.sln "$@"
             '';
           });
 
           uv-sync = mkApp (pkgs.writeShellApplication {
-            name = "winhome-uv-sync";
+            name = "wdem-uv-sync";
             text = ''
               export PATH="${uvPkg}/bin:$PATH"
               if [ -f "requirements.txt" ]; then
@@ -84,10 +76,10 @@
         };
 
         defaultPackage = pkgs.writeShellApplication {
-          name = "winhome-build";
+          name = "wdem-build";
           text = ''
             export PATH="${dotnetSdk}/bin:$PATH"
-            exec dotnet build "$@"
+            exec dotnet build Wdem.sln "$@"
           '';
         };
       }

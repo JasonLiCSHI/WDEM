@@ -9,7 +9,7 @@ PLUGIN = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src", "p
 
 def run_plugin(payload: dict) -> dict:
     env = os.environ.copy()
-    env["WINHOME_TEST_MOCK_URLOPEN"] = "1"
+    env["WDEM_TEST_MOCK_URLOPEN"] = "1"
     result = subprocess.run(
         [sys.executable, PLUGIN],
         input=json.dumps(payload),

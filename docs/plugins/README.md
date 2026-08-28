@@ -1,7 +1,8 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 
 # Plugin Directory
 
-WinHome currently ships with 41 built-in plugins under `plugins/`. This page acts as a
+WDEM currently ships with 41 built-in plugins under `plugins/`. This page acts as a
 marketplace-style index for those plugins and a quick reference for how each one is enabled from
 `config.yaml`.
 
@@ -91,7 +92,7 @@ Deep-merges TOML settings into `%USERPROFILE%\.rustup\settings.toml`.
 
 | Name         | Brief description                                                           | Capabilities      | Docs                   |
 | ------------ | --------------------------------------------------------------------------- | ----------------- | ---------------------- |
-| `autohotkey` | Manages an AutoHotkey v2 bootstrap script and WinHome-owned settings block. | `config_provider` | [Details](#autohotkey) |
+| `autohotkey` | Manages an AutoHotkey v2 bootstrap script and WDEM-owned settings block. | `config_provider` | [Details](#autohotkey) |
 | `espanso`    | Manages Espanso text expansion rules in `base.yml`.                         | `config_provider` | [Details](#espanso)    |
 | `everything` | Manages Everything search application configuration.                        | `config_provider` | [Details](#everything) |
 | `flow-launcher` | Manages Flow Launcher desktop search settings in `Settings.json`.       | `config_provider` | [Details](#flow-launcher) |
@@ -121,7 +122,7 @@ Deep-merges TOML settings into `%USERPROFILE%\.rustup\settings.toml`.
 
 ## Enabling Plugins In `config.yaml`
 
-WinHome discovers plugin manifests from `plugins/`, but it only boots the runtime for plugins that
+WDEM discovers plugin manifests from `plugins/`, but it only boots the runtime for plugins that
 are actually referenced from `config.yaml`.
 
 By default, built-in plugins are enabled from the `extensions:` block:
@@ -296,7 +297,7 @@ See [full docs](./sublime-text.md).
 Config key: `extensions.vim` or top-level `vim`
 
 Generates `%LOCALAPPDATA%\nvim\init.lua` from `settings` and can install Git-based Neovim plugins
-under `%LOCALAPPDATA%\nvim-data\site\pack\winhome\start`.
+under `%LOCALAPPDATA%\nvim-data\site\pack\wdem\start`.
 
 <a id="vscode"></a>
 
@@ -356,7 +357,7 @@ Ensures a PowerShell profile contains the expected `oh-my-posh init` line for th
 
 Config key: `extensions.powershell`
 
-Generates a WinHome-managed profile block for aliases, modules, prompt settings, PSReadLine options,
+Generates a WDEM-managed profile block for aliases, modules, prompt settings, PSReadLine options,
 and custom functions.
 
 <a id="starship"></a>
@@ -515,7 +516,7 @@ Deep-merges TOML settings into `%USERPROFILE%\.rustup\settings.toml`.
 
 Config key: `extensions.autohotkey`
 
-Generates or updates an AutoHotkey v2 script with a WinHome-managed settings block and optional
+Generates or updates an AutoHotkey v2 script with a WDEM-managed settings block and optional
 custom script content.
 
 <a id="espanso"></a>
@@ -532,7 +533,7 @@ Merges Espanso config into `%APPDATA%\espanso\match\base.yml`.
 
 Config key: `extensions.everything`
 
-Manages supported Everything configuration settings through WinHome.
+Manages supported Everything configuration settings through WDEM.
 
 <a id="flow-launcher"></a>
 
@@ -590,7 +591,7 @@ For detailed information, see the [Wallpaper Engine Plugin Documentation](./wall
 
 Config key: `extensions.windows-explorer`
 
-Manages supported Windows Explorer settings and preferences through WinHome configuration.
+Manages supported Windows Explorer settings and preferences through WDEM configuration.
 
 <a id="windows-sandbox"></a>
 

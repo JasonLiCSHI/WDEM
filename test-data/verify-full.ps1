@@ -56,11 +56,11 @@ try {
 }
 
 # 2. Check for environment variable
-$envVar = [Environment]::GetEnvironmentVariable("WINHOME_TEST", "User")
+$envVar = [Environment]::GetEnvironmentVariable("WDEM_TEST", "User")
 if ($null -eq $envVar) {
-    $envVar = [Environment]::GetEnvironmentVariable("WINHOME_TEST", "Machine")
+    $envVar = [Environment]::GetEnvironmentVariable("WDEM_TEST", "Machine")
 }
-Assert-True ($envVar -eq "true"), "WINHOME_TEST environment variable should be set to 'true'"
+Assert-True ($envVar -eq "true"), "WDEM_TEST environment variable should be set to 'true'"
 
 # 3. Check for dotfile
 $dotfileContent = Get-Content -Path "test-dotfile.md" -Raw
@@ -68,7 +68,7 @@ $readmeContent = Get-Content -Path "README.md" -Raw
 Assert-True ($dotfileContent -eq $readmeContent), "Dotfile content should match README.md content"
 
 # 4. Check for registry tweak
-$regVal = Get-ItemPropertyValue -Path "HKCU:\Software\WinHomeTest" -Name "TestValue" -ErrorAction SilentlyContinue
+$regVal = Get-ItemPropertyValue -Path "HKCU:\Software\WDEMTest" -Name "TestValue" -ErrorAction SilentlyContinue
 Assert-True ($regVal -eq 123), "Registry tweak should be set"
 
 # 5. Check for system setting (show file extensions)
@@ -97,7 +97,7 @@ try {
     if ((Test-Path $gitExec) -or $gitExec -eq "git") {
         Write-Host "Using Git executable: $gitExec"
         $gitName = & $gitExec config --global user.name
-        Assert-True ($gitName -eq "WinHome Test"), "Git user name should be set"
+        Assert-True ($gitName -eq "WDEM Test"), "Git user name should be set"
     } else {
          Write-Host "Git executable not found, skipping config check."
     }

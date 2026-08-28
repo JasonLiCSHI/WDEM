@@ -648,7 +648,7 @@ namespace Wdem.LegacySource.Tests
       var config = new Configuration();
       config.Apps.Add(new AppConfig { Id = "SkipApp", Manager = "winget" });
       var mockLogger = new Mock<ILogger>();
-      var tmp = Path.Combine(Path.GetTempPath(), $"winhome_state_test_{Guid.NewGuid()}.json");
+      var tmp = Path.Combine(Path.GetTempPath(), $"wdem_state_test_{Guid.NewGuid()}.json");
       try
       {
         var stateWriter = new Wdem.LegacySource.Services.StateWriter(tmp);
@@ -688,7 +688,7 @@ namespace Wdem.LegacySource.Tests
       var config = new Configuration();
       config.Apps.Add(new AppConfig { Id = "InterruptedApp", Manager = "winget" });
       var mockLogger = new Mock<ILogger>();
-      var tmp = Path.Combine(Path.GetTempPath(), $"winhome_state_test_{Guid.NewGuid()}.json");
+      var tmp = Path.Combine(Path.GetTempPath(), $"wdem_state_test_{Guid.NewGuid()}.json");
       try
       {
         var stateWriter = new Wdem.LegacySource.Services.StateWriter(tmp);
@@ -728,7 +728,7 @@ namespace Wdem.LegacySource.Tests
       var config = new Configuration();
       config.Apps.Add(new AppConfig { Id = "ReapplyApp", Manager = "winget" });
       var mockLogger = new Mock<ILogger>();
-      var tmp = Path.Combine(Path.GetTempPath(), $"winhome_state_test_{Guid.NewGuid()}.json");
+      var tmp = Path.Combine(Path.GetTempPath(), $"wdem_state_test_{Guid.NewGuid()}.json");
       try
       {
         var stateWriter = new Wdem.LegacySource.Services.StateWriter(tmp);
@@ -764,7 +764,7 @@ namespace Wdem.LegacySource.Tests
         Mock<ILogger> logger,
         IResourceProviderRegistry? resourceProviders = null)
     {
-      var tmp = Path.Combine(Path.GetTempPath(), $"winhome_state_test_{Guid.NewGuid()}.json");
+      var tmp = Path.Combine(Path.GetTempPath(), $"wdem_state_test_{Guid.NewGuid()}.json");
       var stateWriter = new Wdem.LegacySource.Services.StateWriter(tmp);
       return new Engine(
           _managers,
@@ -789,7 +789,7 @@ namespace Wdem.LegacySource.Tests
     [Fact]
     public async Task RunAsync_Cleanup_RemovesStateWriterEntry_And_AllowsReapply_ForApp()
     {
-      var tmp = Path.Combine(Path.GetTempPath(), $"winhome_state_test_{Guid.NewGuid()}.json");
+      var tmp = Path.Combine(Path.GetTempPath(), $"wdem_state_test_{Guid.NewGuid()}.json");
       try
       {
         var stateWriter = new Wdem.LegacySource.Services.StateWriter(tmp);
@@ -845,7 +845,7 @@ namespace Wdem.LegacySource.Tests
     {
       if (!OperatingSystem.IsWindows()) return;
 
-      var tmp = Path.Combine(Path.GetTempPath(), $"winhome_state_test_{Guid.NewGuid()}.json");
+      var tmp = Path.Combine(Path.GetTempPath(), $"wdem_state_test_{Guid.NewGuid()}.json");
       try
       {
         var stateWriter = new Wdem.LegacySource.Services.StateWriter(tmp);

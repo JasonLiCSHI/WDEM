@@ -1,10 +1,11 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Flow Launcher Plugin
 
 ## Overview
 
 The Flow Launcher plugin manages settings for [Flow Launcher](https://www.flowlauncher.com/) — a
 desktop search utility for Windows. It reads and writes directly to the Flow Launcher
-`Settings.json` file, giving WinHome control over hotkeys, search options, plugin configuration,
+`Settings.json` file, giving WDEM control over hotkeys, search options, plugin configuration,
 and theme settings.
 
 ## Prerequisites
@@ -67,10 +68,10 @@ extensions:
 
 ## Verification Steps
 
-1. Run WinHome apply and confirm no errors:
+1. Run WDEM apply and confirm no errors:
 
    ```bash
-   winhome apply
+   wdem apply
    ```
 
 2. Open Flow Launcher (default hotkey) and verify the settings took effect.

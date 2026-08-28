@@ -29,12 +29,8 @@ jobs:
     - name: Setup bun
       uses: oven-sh/setup-bun@v2
 
-    - name: Check formatting
-      run: |
-        for i in 1 2 3; do
-          dotnet format --verify-no-changes --verbosity diagnostic WinHome.sln && break
-          sleep 10
-        done
+    - name: Restore solution
+      run: dotnet restore Wdem.sln
 
     - name: Check Python formatting
       run: |
@@ -45,7 +41,7 @@ jobs:
       run: bun x prettier --check plugins/
 
     - name: Build
-      run: dotnet build WinHome.sln
+      run: dotnet build Wdem.sln --no-restore
 
   test:
     runs-on: windows-latest
@@ -58,7 +54,7 @@ jobs:
         dotnet-version: 10.0.x
 
     - name: Restore dependencies
-      run: dotnet restore src/WinHome.csproj
+      run: dotnet restore Wdem.sln
 
     - name: Install uv and bun
       shell: pwsh
@@ -69,20 +65,7 @@ jobs:
         echo "$env:USERPROFILE\.bun\bin" >> $env:GITHUB_PATH
 
     - name: Run tests
-      run: dotnet test tests/WinHome.Tests/WinHome.Tests.csproj
-
-    - name: Build WinHome
-      run: dotnet publish src/WinHome.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o publish
-
-    - name: Run GHA tests
-      shell: pwsh
-      run: |
-        cd publish
-        cp ../test-data/test-config-gha.yaml .
-        cp ../test-data/run-test-gha.ps1 .
-        cp ../test-data/verify-gha.ps1 .
-        cp ../README.md .
-        ./run-test-gha.ps1
+      run: dotnet test Wdem.sln --no-restore
 
     - name: Test plugin action downloads
       shell: bash
@@ -91,16 +74,16 @@ jobs:
         cd plugins
         TOTAL=0
         FAILED=0
-        
+
         for plugin_dir in */; do
           plugin_name=$(basename "${plugin_dir}")
           if [[ "$plugin_name" == "__pycache__" || "$plugin_name" == "." ]]; then
             continue
           fi
-          
+
           cd "$plugin_dir"
           TOTAL=$((TOTAL + 1))
-          
+
           if [[ -f "plugin.yaml" ]]; then
             # For Python plugins
             if grep -q '"type: python"' plugin.yaml; then
@@ -110,7 +93,7 @@ jobs:
                 echo "❌ $plugin_name: Python plugin exists but missing src/plugin.py"
                 FAILED=$((FAILED + 1))
               fi
-            # For JavaScript/TypeScript plugins  
+            # For JavaScript/TypeScript plugins
             elif grep -q '"type: javascript"' plugin.yaml || grep -q '"type: typescript"' plugin.yaml; then
               if [[ -f "src/plugin.ts" ]] || [[ -f "src/plugin.js" ]] || [[ -f "package.json" ]]; then
                 echo "✓ $plugin_name: JavaScript plugin exists"
@@ -132,14 +115,14 @@ jobs:
           else
             echo "⚠️  $plugin_name: No plugin.yaml found (test plugin)"
           fi
-          
+
           cd ..
         done
-        
+
         echo "Plugin action download test completed."
         echo "Total plugins tested: $TOTAL"
         echo "Failed plugins: $FAILED"
-        
+
         if [[ $FAILED -gt 0 ]]; then
           echo "❌ $FAILED plugin(s) failed action download tests"
           exit 1

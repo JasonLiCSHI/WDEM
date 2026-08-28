@@ -1,6 +1,7 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Plugins & Extensions
 
-WinHome supports a powerful plugin system that allows for first-class configuration of tools like
+WDEM supports a powerful plugin system that allows for first-class configuration of tools like
 Vim and VSCode. These can be defined in their own top-level sections in `config.yaml`.
 
 ## Vim / Neovim
@@ -67,7 +68,7 @@ vscode:
     - `extensions`: Extensions specific to this profile.
     - `settings`: Settings specific to this profile.
 
-> **Note:** WinHome will automatically create the profile in VSCode if it doesn't exist by adding it
+> **Note:** WDEM will automatically create the profile in VSCode if it doesn't exist by adding it
 > to `storage.json`.
 
 ---
@@ -161,7 +162,7 @@ ohmyposh:
 ### Options
 
 - `profile`: Optional. The absolute path to the PowerShell profile script file. If not specified,
-  WinHome will automatically detect your profile path.
+  WDEM will automatically detect your profile path.
 - `settings`:
   - `theme`: The name or configuration path of the theme to apply.
 
@@ -183,7 +184,7 @@ extensions:
 
 ## Plugin Auto-Discovery & Download
 
-WinHome makes it seamless to use plugins without having to manually copy files:
-- **On-Demand Auto-Download**: If you define an extension or top-level plugin in your `config.yaml` that is not present in `%LOCALAPPDATA%\WinHome\plugins`, WinHome will automatically download the missing plugin from GitHub and extract it into your local directory at runtime.
-- **Auto-Installation of Target Apps**: By using the `-i` or `--auto-install-apps` CLI flag, WinHome will check if the target applications (e.g. VLC, chezmoi, or Git) for your active plugins are installed. If they are missing, it will automatically install them using their default package manager (such as `winget`, `scoop`, or `choco`) before applying your configuration.
+WDEM makes it seamless to use plugins without having to manually copy files:
+- **On-Demand Auto-Download**: If you define an extension or top-level plugin in your `config.yaml` that is not present in `%LOCALAPPDATA%\WDEM\plugins`, WDEM will automatically download the missing plugin from GitHub and extract it into your local directory at runtime.
+- **Auto-Installation of Target Apps**: By using the `-i` or `--auto-install-apps` CLI flag, WDEM will check if the target applications (e.g. VLC, chezmoi, or Git) for your active plugins are installed. If they are missing, it will automatically install them using their default package manager (such as `winget`, `scoop`, or `choco`) before applying your configuration.
 

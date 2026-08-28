@@ -1,3 +1,4 @@
+> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
 # Scheduled Tasks
 
 Configures Windows Task Scheduler to run automated tasks on your system.
@@ -77,7 +78,7 @@ scheduled_tasks:
 
 **Issue: Task not running**
 
-- Make sure WinHome is run as Administrator
+- Make sure WDEM is run as Administrator
 - Check if task is enabled in Task Scheduler
 - Open Task Scheduler to verify task exists
 
