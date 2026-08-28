@@ -28,6 +28,8 @@ public sealed class LogRedactorTests
   [InlineData("(Bearer abc.def.ghi) completed", "(Bearer ***) completed")]
   [InlineData("Bearer abc.def.ghi.", "Bearer ***.")]
   [InlineData("Bearer abcDEFghi+/=", "Bearer ***")]
+  [InlineData("Bearer abcdefghijklmnop", "Bearer ***")]
+  [InlineData("Bearer abcdefghijklmnopqrstuvw", "Bearer ***")]
   public void Redact_RemovesStandaloneBearerTokensWithoutConsumingFollowingText(
       string input,
       string expected)

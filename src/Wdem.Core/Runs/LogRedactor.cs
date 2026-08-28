@@ -156,8 +156,10 @@ public sealed partial class LogRedactor
         .Count();
     var hasTokenFeatures = strongTokenPunctuationKinds >= 2
         || (hasDigit && strongTokenPunctuationKinds == 1);
+    // RFC 6750 syntax cannot distinguish an opaque all-letter token from prose.
+    // Prefer redacting long candidates; short protocol terms remain diagnostic text.
     return (token.Length >= 12 && hasTokenFeatures)
-        || token.Length >= 24;
+        || token.Length >= 16;
   }
 
   private static bool IsBase64UrlSegment(string segment) =>
