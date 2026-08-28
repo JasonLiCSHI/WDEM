@@ -175,10 +175,10 @@ public sealed class ResourceGraphBuilder
   private static ResourceDefinition ApplyReferenceOverrides(
       ResourceDefinition resource,
       ProfileResourceReference reference) => resource with
-  {
-    VersionConstraint = reference.VersionConstraint ?? resource.VersionConstraint,
-    PreferredVersion = reference.PreferredVersion ?? resource.PreferredVersion
-  };
+      {
+        VersionConstraint = reference.VersionConstraint ?? resource.VersionConstraint,
+        PreferredVersion = reference.PreferredVersion ?? resource.PreferredVersion
+      };
 
   private static void ResolveDependencyClosure(
       DeveloperProfile profile,
@@ -410,10 +410,10 @@ public sealed class ResourceGraphBuilder
       WdemErrorCode.DependencyError,
       summary,
       detail)
-  {
-    ResourceId = resourceId,
-    SuggestedAction = "Correct the resource dependency declarations and try again."
-  };
+      {
+        ResourceId = resourceId,
+        SuggestedAction = "Correct the resource dependency declarations and try again."
+      };
 
   private sealed class NodeState(ResourceDefinition definition, ResourceOrigin origin)
   {

@@ -432,29 +432,29 @@ public sealed class ResourceGraphBuilderTests
       IReadOnlyDictionary<string, ResourceDefinition> resources,
       string? requiredId,
       IReadOnlyList<ProfileResourceReference>? optionalReferences = null) => new()
-  {
-    Id = "csharp-developer",
-    Version = "1.0.0",
-    DisplayName = "C# Developer",
-    Description = "C# developer workstation",
-    RequiredResources = requiredId is null
+      {
+        Id = "csharp-developer",
+        Version = "1.0.0",
+        DisplayName = "C# Developer",
+        Description = "C# developer workstation",
+        RequiredResources = requiredId is null
         ? []
         : [new ProfileResourceReference { Id = requiredId }],
-    OptionalResources = optionalReferences ?? [],
-    Resources = resources
-  };
+        OptionalResources = optionalReferences ?? [],
+        Resources = resources
+      };
 
   private static ResourceDefinition Resource(
       string id,
       IReadOnlyList<string>? dependencies = null,
       string? versionConstraint = null) => new()
-  {
-    Id = id,
-    Type = "package",
-    Provider = "test",
-    Dependencies = dependencies ?? [],
-    VersionConstraint = versionConstraint
-  };
+      {
+        Id = id,
+        Type = "package",
+        Provider = "test",
+        Dependencies = dependencies ?? [],
+        VersionConstraint = versionConstraint
+      };
 
   private static void AssertCannotMutateDictionary<TKey, TValue>(
       IReadOnlyDictionary<TKey, TValue> dictionary,
