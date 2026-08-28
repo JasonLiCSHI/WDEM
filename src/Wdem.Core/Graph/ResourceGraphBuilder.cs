@@ -29,7 +29,6 @@ public sealed class ResourceGraphBuilder
   {
     ArgumentNullException.ThrowIfNull(profile);
     ArgumentNullException.ThrowIfNull(selection);
-    ArgumentNullException.ThrowIfNull(selection.SelectedOptionalResourceIds);
 
     var errors = new List<StructuredError>();
     var nodes = new Dictionary<string, NodeState>(IdComparer);
@@ -37,9 +36,15 @@ public sealed class ResourceGraphBuilder
     var optionalReferences = ToReferenceMap(profile.OptionalResources);
 
     ValidateSelection(selection, requiredReferences, optionalReferences, errors);
-    var selectedOptionalIds = new HashSet<string>(
-        selection.SelectedOptionalResourceIds.Where(id => id is not null),
-        IdComparer);
+    var selectedOptionalIds = selection.SelectedOptionalResourceIds is null
+        ? new HashSet<string>(
+            profile.OptionalResources
+                .Where(reference => reference.DefaultSelected)
+                .Select(reference => reference.Id),
+            IdComparer)
+        : new HashSet<string>(
+            selection.SelectedOptionalResourceIds.Where(id => id is not null),
+            IdComparer);
 
     foreach (var reference in profile.RequiredResources)
     {
@@ -48,13 +53,18 @@ public sealed class ResourceGraphBuilder
 
     foreach (var reference in profile.OptionalResources)
     {
-      if (reference.DefaultSelected || selectedOptionalIds.Contains(reference.Id))
+      if (selectedOptionalIds.Contains(reference.Id))
       {
         AddSeed(profile, nodes, reference, ResourceOrigin.SelectedOptional, errors);
       }
     }
 
-    ResolveDependencyClosure(profile, nodes, errors);
+    ResolveDependencyClosure(
+        profile,
+        nodes,
+        requiredReferences,
+        optionalReferences,
+        errors);
 
     if (errors.Count == 0)
     {
@@ -96,6 +106,11 @@ public sealed class ResourceGraphBuilder
       IReadOnlyDictionary<string, ProfileResourceReference> optionalReferences,
       List<StructuredError> errors)
   {
+    if (selection.SelectedOptionalResourceIds is null)
+    {
+      return;
+    }
+
     foreach (var id in selection.SelectedOptionalResourceIds)
     {
       if (id is null)
@@ -163,6 +178,8 @@ public sealed class ResourceGraphBuilder
   private static void ResolveDependencyClosure(
       DeveloperProfile profile,
       Dictionary<string, NodeState> nodes,
+      IReadOnlyDictionary<string, ProfileResourceReference> requiredReferences,
+      IReadOnlyDictionary<string, ProfileResourceReference> optionalReferences,
       List<StructuredError> errors)
   {
     var pending = new Stack<string>(nodes.Keys.Reverse());
@@ -189,7 +206,12 @@ public sealed class ResourceGraphBuilder
 
         if (!nodes.TryGetValue(dependencyId, out var dependencyNode))
         {
-          dependencyNode = new NodeState(dependency, ResourceOrigin.AutoDependency);
+          var resolvedDependency = requiredReferences.TryGetValue(dependencyId, out var requiredReference)
+              ? ApplyReferenceOverrides(dependency, requiredReference)
+              : optionalReferences.TryGetValue(dependencyId, out var optionalReference)
+                  ? ApplyReferenceOverrides(dependency, optionalReference)
+                  : dependency;
+          dependencyNode = new NodeState(resolvedDependency, ResourceOrigin.AutoDependency);
           nodes.Add(dependency.Id, dependencyNode);
         }
 

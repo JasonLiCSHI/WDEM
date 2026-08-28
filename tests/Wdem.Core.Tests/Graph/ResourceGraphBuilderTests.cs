@@ -18,17 +18,26 @@ public sealed class ResourceGraphBuilderTests
     Assert.Equal(ResourceOrigin.AutoDependency, graph.Nodes["resharper"].Origin);
     Assert.Equal(ResourceOrigin.SelectedOptional, graph.Nodes["resharper-settings"].Origin);
     Assert.Equal(
-        [["git", "terminal"], ["visual-studio"], ["resharper"], ["resharper-settings"]],
+        [["git"], ["visual-studio"], ["resharper"], ["resharper-settings"]],
         graph.TopologicalLayers.Select(layer => layer.ResourceIds).ToArray());
   }
 
   [Fact]
   public void Build_DefaultSelectedOptionalResource_IsIncluded()
   {
-    var graph = CreateBuilder().Build(Profile(), EmptySelection());
+    var graph = CreateBuilder().Build(Profile(), new ProfileSelection());
 
     Assert.Equal(ResourceOrigin.SelectedOptional, graph.Nodes["terminal"].Origin);
     Assert.DoesNotContain("resharper", graph.Nodes.Keys);
+  }
+
+  [Fact]
+  public void Build_ExplicitEmptySelection_CancelsDefaultSelectedOptionalResources()
+  {
+    var graph = CreateBuilder().Build(Profile(), EmptySelection());
+
+    Assert.DoesNotContain("terminal", graph.Nodes.Keys);
+    Assert.Equal(ResourceOrigin.Required, graph.Nodes["visual-studio"].Origin);
   }
 
   [Fact]
@@ -50,7 +59,7 @@ public sealed class ResourceGraphBuilderTests
     var graph = CreateBuilder().Build(Profile(), new ProfileSelection(
         new HashSet<string>(["resharper", "resharper-settings"], StringComparer.OrdinalIgnoreCase)));
 
-    Assert.Equal(5, graph.Nodes.Count);
+    Assert.Equal(4, graph.Nodes.Count);
     Assert.Equal(ResourceOrigin.SelectedOptional, graph.Nodes["resharper"].Origin);
     Assert.Equal(
         ["resharper", "resharper-settings"],
@@ -64,6 +73,30 @@ public sealed class ResourceGraphBuilderTests
         new HashSet<string>(["resharper", "resharper-settings"], StringComparer.OrdinalIgnoreCase)));
 
     Assert.Equal(ResourceOrigin.SelectedOptional, graph.Nodes["resharper"].Origin);
+  }
+
+  [Fact]
+  public void Build_AutoDependency_AppliesItsOptionalReferenceVersionOverrides()
+  {
+    var source = Profile();
+    var profile = source with
+    {
+      OptionalResources = source.OptionalResources.Select(reference =>
+          reference.Id.Equals("resharper", StringComparison.OrdinalIgnoreCase)
+              ? reference with
+              {
+                VersionConstraint = "2026.1.x",
+                PreferredVersion = "2026.1.4"
+              }
+              : reference).ToArray()
+    };
+
+    var graph = CreateBuilder().Build(profile, new ProfileSelection(
+        new HashSet<string>(["resharper-settings"], StringComparer.OrdinalIgnoreCase)));
+
+    Assert.Equal(ResourceOrigin.AutoDependency, graph.Nodes["resharper"].Origin);
+    Assert.Equal("2026.1.x", graph.Nodes["resharper"].Definition.VersionConstraint);
+    Assert.Equal("2026.1.4", graph.Nodes["resharper"].Definition.PreferredVersion);
   }
 
   [Fact]
@@ -204,7 +237,7 @@ public sealed class ResourceGraphBuilderTests
           StringComparer.OrdinalIgnoreCase)
     };
 
-    var result = new ResourceGraphBuilder(_ => null).TryBuild(profile, EmptySelection());
+    var result = new ResourceGraphBuilder(_ => null).TryBuild(profile, new ProfileSelection());
 
     var error = Assert.Single(result.Errors);
     Assert.Equal(WdemErrorCode.ProfileError, error.Code);
@@ -275,8 +308,6 @@ public sealed class ResourceGraphBuilderTests
 
     Assert.Throws<ArgumentNullException>(() => builder.TryBuild(null!, EmptySelection()));
     Assert.Throws<ArgumentNullException>(() => builder.TryBuild(Profile(), null!));
-    Assert.Throws<ArgumentNullException>(() => builder.TryBuild(
-        Profile(), new ProfileSelection(null!)));
   }
 
   private static ResourceGraphBuilder CreateBuilder() => new(_ => null);
