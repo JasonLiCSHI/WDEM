@@ -306,6 +306,24 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     }
   }
 
+  [Theory]
+  [InlineData("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0In0.abcdefghijklmnopqrstuvwxyz_01234")]
+  [InlineData("k7m2q9v4x8n3p6r1t5w0-y2z7c4b9d6f3h8j1s5u0")]
+  [InlineData("k7m2q9v4x8n3p6r1t5w0_y2z7c4b9d6f3h8j1s5u0")]
+  public async Task MigrateAsync_RejectsDelimitedOpaqueCredentials(string credential)
+  {
+    WriteLegacy("state.json", JsonSerializer.Serialize(new[] { credential }));
+
+    var result = await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.Empty(result.ImportedStepNames);
+    Assert.DoesNotContain(
+        credential,
+        await File.ReadAllTextAsync(result.MarkerPath),
+        StringComparison.Ordinal);
+  }
+
   [Fact]
   public async Task MigrateAsync_PreservesLegitimateProductAndPackageLabels()
   {
@@ -313,6 +331,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     {
       "1Password",
       "Microsoft.VisualStudio.2022.BuildTools",
+      "Microsoft.VisualStudio.BuildTools-2022",
       "VisualStudioBuildTools2022",
       "VisualStudio17BuildTools2022x64"
     };
@@ -339,6 +358,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
           "importedStepNames": [
             "1Password",
             "Microsoft.VisualStudio.2022.BuildTools",
+            "Microsoft.VisualStudio.BuildTools-2022",
             "VisualStudioBuildTools2022",
             "VisualStudio17BuildTools2022x64"
           ]
@@ -356,6 +376,9 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     Assert.Contains("1Password", await File.ReadAllTextAsync(markerPath));
     Assert.Contains(
         "VisualStudio17BuildTools2022x64",
+        await File.ReadAllTextAsync(markerPath));
+    Assert.Contains(
+        "Microsoft.VisualStudio.BuildTools-2022",
         await File.ReadAllTextAsync(markerPath));
   }
 

@@ -488,6 +488,7 @@ public sealed class LegacyStateMigrationAdapter
         !string.Equals(StepNameRedactor.Redact(value), value, StringComparison.Ordinal) ||
         HasKnownCredentialPrefix(value) ||
         HasExplicitCompoundCredentialKey(value) ||
+        LooksLikeJsonWebToken(value) ||
         LooksLikeUnclassifiedOpaqueToken(value))
     {
       return false;
@@ -541,6 +542,14 @@ public sealed class LegacyStateMigrationAdapter
 
   private static bool LooksLikeUnclassifiedOpaqueToken(string value)
   {
+    var segments = value.Split(
+        ['.', '-', '_'],
+        StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    return segments.Any(LooksLikeOpaqueTokenSegment);
+  }
+
+  private static bool LooksLikeOpaqueTokenSegment(string value)
+  {
     const int MinimumOpaqueTokenLength = 20;
     const int MinimumOpaqueHexLength = 32;
     if (value.Length < MinimumOpaqueTokenLength ||
@@ -556,6 +565,48 @@ public sealed class LegacyStateMigrationAdapter
 
     return CountCamelCaseLexicalWords(value) < 2;
   }
+
+  private static bool LooksLikeJsonWebToken(string value)
+  {
+    var segments = value.Split('.', StringSplitOptions.None);
+    if (segments.Length != 3 ||
+        segments.Any(segment =>
+            segment.Length < 8 || !segment.All(IsBase64UrlCharacter)))
+    {
+      return false;
+    }
+
+    if (HasRecognizableJsonWebTokenHeader(segments[0]))
+    {
+      return true;
+    }
+
+    return segments[0].StartsWith("eyJ", StringComparison.Ordinal) &&
+        segments[1].StartsWith("eyJ", StringComparison.Ordinal);
+  }
+
+  private static bool HasRecognizableJsonWebTokenHeader(string segment)
+  {
+    try
+    {
+      var base64 = segment.Replace('-', '+').Replace('_', '/');
+      base64 += new string('=', (4 - base64.Length % 4) % 4);
+      using var document = JsonDocument.Parse(
+          Convert.FromBase64String(base64),
+          new JsonDocumentOptions { MaxDepth = 4 });
+      return document.RootElement.ValueKind == JsonValueKind.Object &&
+          (document.RootElement.TryGetProperty("alg", out _) ||
+           document.RootElement.TryGetProperty("typ", out _));
+    }
+    catch (Exception exception) when (
+        exception is FormatException or JsonException)
+    {
+      return false;
+    }
+  }
+
+  private static bool IsBase64UrlCharacter(char value) =>
+      char.IsAsciiLetterOrDigit(value) || value is '-' or '_';
 
   private static int CountCamelCaseLexicalWords(string value)
   {
