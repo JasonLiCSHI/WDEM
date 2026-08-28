@@ -116,11 +116,25 @@ public sealed record DetectedState
 
 public sealed record PlanStep
 {
+  private string _description = string.Empty;
+  private string? _reason;
+
   public required string Id { get; init; }
-  public required string Description { get; init; }
+  public required string Description
+  {
+    get => _description;
+    init => _description = DiagnosticTextSanitizer.Sanitize(
+        value ?? throw new ArgumentNullException(nameof(value)));
+  }
   public required PlanAction Action { get; init; }
   public required PrivilegeRequirement PrivilegeRequirement { get; init; }
   public required RestartPolicy RestartPolicy { get; init; }
+  public bool IsDestructive { get; init; }
+  public string? Reason
+  {
+    get => _reason;
+    init => _reason = value is null ? null : DiagnosticTextSanitizer.Sanitize(value);
+  }
 }
 
 public sealed record ResourcePlan
@@ -128,6 +142,7 @@ public sealed record ResourcePlan
   private IReadOnlyList<PlanStep> _steps = ProviderCollectionSnapshot.EmptyList<PlanStep>();
   private IReadOnlyList<StructuredError> _structuredErrors =
       ProviderCollectionSnapshot.EmptyList<StructuredError>();
+  private string? _error;
 
   public required string ResourceId { get; init; }
   public required string ResourceType { get; init; }
@@ -140,13 +155,17 @@ public sealed record ResourcePlan
     get => _steps;
     init => _steps = ProviderCollectionSnapshot.List(value);
   }
-  public string? Error { get; init; }
+  public string? Error
+  {
+    get => _error;
+    init => _error = value is null ? null : DiagnosticTextSanitizer.Sanitize(value);
+  }
   public IReadOnlyList<StructuredError> StructuredErrors
   {
     get => _structuredErrors;
     init => _structuredErrors = ProviderCollectionSnapshot.List(value);
   }
-  public bool RequiresApply => Steps.Count > 0;
+  public bool RequiresApply => Steps.Any(step => step.Action != PlanAction.None);
 }
 
 public sealed record ProviderProgress

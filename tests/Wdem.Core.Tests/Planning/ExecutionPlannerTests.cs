@@ -1,0 +1,644 @@
+using Wdem.Core.Execution;
+using Wdem.Core.Graph;
+using Wdem.Core.Planning;
+using Wdem.Core.Providers;
+using Wdem.Core.Resources;
+using Xunit;
+
+namespace Wdem.Core.Tests.Planning;
+
+public sealed class ExecutionPlannerTests
+{
+  [Fact]
+  public async Task CreateAsync_SatisfiedResource_IsAlreadySatisfiedWithoutApply()
+  {
+    var planner = Planner(new StubProvider());
+
+    var plan = await planner.CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", exists: true)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    var resource = Assert.Single(plan.Resources);
+    Assert.Equal(PlannedResourceStatus.AlreadySatisfied, resource.Status);
+    Assert.Equal(ComplianceStatus.Satisfied, resource.ResourcePlan.Compliance);
+    Assert.Equal(PlanAction.None, Assert.Single(resource.ResourcePlan.Steps).Action);
+    Assert.False(resource.ResourcePlan.RequiresApply);
+    Assert.True(plan.IsExecutable);
+  }
+
+  [Fact]
+  public async Task CreateAsync_SameEffectiveInput_HasStablePlanIdentityAndOrdering()
+  {
+    var firstResource = Resource("tool", dependencies: ["runtime"]);
+    var secondResource = Resource("runtime");
+    var provider = new StubProvider();
+    var planner = Planner(provider);
+    var firstGraph = Graph([secondResource], [firstResource]);
+    var secondGraph = Graph(
+        new Dictionary<string, ResourceDefinition>(StringComparer.OrdinalIgnoreCase)
+        {
+          ["tool"] = firstResource,
+          ["runtime"] = secondResource
+        },
+        [new ResourceGraphLayer(0, ["runtime"]), new ResourceGraphLayer(1, ["tool"])]);
+
+    var first = await planner.CreateAsync(
+        firstGraph,
+        States(State("runtime", false), State("tool", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+    var second = await planner.CreateAsync(
+        secondGraph,
+        States(State("tool", false), State("runtime", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.Equal(first.PlanId, second.PlanId);
+    Assert.Equal(first.Fingerprint, second.Fingerprint);
+    Assert.Equal(["runtime", "tool"], first.Resources.Select(item => item.Definition.Id));
+    Assert.Equal(
+        first.Resources.Select(item => item.ResourcePlan.DesiredStateFingerprint),
+        second.Resources.Select(item => item.ResourcePlan.DesiredStateFingerprint));
+  }
+
+  [Fact]
+  public async Task CreateAsync_ModifyingPlan_ExposesAuditAndRiskMetadata()
+  {
+    var resource = Resource("sdk") with
+    {
+      PrivilegeRequirement = PrivilegeRequirement.Administrator,
+      RestartPolicy = RestartPolicy.RestartRecommended
+    };
+    var provider = new StubProvider(plan: (definition, _) => ValidPlan(
+        definition,
+        ComplianceStatus.Missing,
+        new PlanStep
+        {
+          Id = "install",
+          Description = "Install SDK",
+          Action = PlanAction.Install,
+          PrivilegeRequirement = PrivilegeRequirement.Administrator,
+          RestartPolicy = RestartPolicy.RestartRecommended,
+          IsDestructive = true,
+          Reason = "Replaces an existing preview installation"
+        }));
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(resource),
+        States(State("sdk", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    var item = Assert.Single(plan.Resources);
+    Assert.Equal(PlannedResourceStatus.Ready, item.Status);
+    Assert.True(item.RequiresElevation);
+    Assert.True(item.IsDestructive);
+    Assert.Equal(PlanRisk.Destructive, item.Risk);
+    Assert.Equal("Replaces an existing preview installation", item.Reason);
+    Assert.Equal(ResourceOrigin.Required, item.Origin);
+    Assert.Equal("test", item.ResourcePlan.ProviderName);
+    Assert.Equal(PlanAction.Install, Assert.Single(item.ResourcePlan.Steps).Action);
+    Assert.Equal(RestartPolicy.RestartRecommended, item.RestartPolicy);
+  }
+
+  [Theory]
+  [InlineData(DetectionOutcome.Unsupported, ComplianceStatus.Unsupported, PlannedResourceStatus.Unsupported)]
+  [InlineData(DetectionOutcome.Failed, ComplianceStatus.DetectionFailed, PlannedResourceStatus.DetectionFailed)]
+  public async Task CreateAsync_NonRemediableDetectionState_IsNotExecutable(
+      DetectionOutcome outcome,
+      ComplianceStatus compliance,
+      PlannedResourceStatus expectedStatus)
+  {
+    var provider = new StubProvider(plan: (resource, _) => ValidPlan(resource, compliance));
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false) with { Outcome = outcome }),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Equal(expectedStatus, Assert.Single(plan.Resources).Status);
+    Assert.NotEmpty(plan.Errors);
+  }
+
+  [Fact]
+  public async Task CreateAsync_MissingProvider_MakesWholePlanNonExecutable()
+  {
+    var plan = await Planner().CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    var error = Assert.Single(plan.Errors);
+    Assert.Equal(WdemErrorCode.ProviderError, error.Code);
+    Assert.Equal("git", error.ResourceId);
+  }
+
+  [Fact]
+  public async Task CreateAsync_InvalidProviderParameters_PreservesStructuredDiagnostics()
+  {
+    var expected = new StructuredError(
+        WdemErrorCode.ConfigurationError,
+        "Invalid source",
+        "The requested source is not trusted.")
+    {
+      ResourceId = "git",
+      SuggestedAction = "Choose a trusted source."
+    };
+    var provider = new StubProvider(validation: _ => ProviderValidationResult.Invalid(expected));
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Equal(expected, Assert.Single(plan.Errors));
+    Assert.Equal(expected, Assert.Single(plan.Resources).Diagnostics.Single());
+    Assert.Equal(0, provider.PlanCalls);
+  }
+
+  [Fact]
+  public async Task CreateAsync_LegacyValidationText_IsRedacted()
+  {
+    var provider = new StubProvider(validation: _ => ProviderValidationResult.Invalid(
+        "download token=top-secret is rejected"));
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.DoesNotContain("top-secret", Assert.Single(plan.Errors).Detail, StringComparison.Ordinal);
+    Assert.Contains("[REDACTED]", Assert.Single(plan.Errors).Detail, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task CreateAsync_SecretParameters_AreAvailableToProviderButRedactedFromPlan()
+  {
+    string? providerValue = null;
+    var provider = new StubProvider(plan: (resource, _) =>
+    {
+      providerValue = resource.Parameters["access_token"];
+      return ValidPlan(resource, ComplianceStatus.Missing, Step("install"));
+    });
+    var resource = Resource("git") with
+    {
+      Parameters = new Dictionary<string, string?>
+      {
+        ["access_token"] = "provider-secret",
+        ["channel"] = "stable"
+      }
+    };
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(resource),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.Equal("provider-secret", providerValue);
+    var planned = Assert.Single(plan.Resources);
+    Assert.Equal("[REDACTED]", planned.Definition.Parameters["access_token"]);
+    Assert.Equal("stable", planned.Definition.Parameters["channel"]);
+    Assert.DoesNotContain("provider-secret", plan.Fingerprint, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task CreateAsync_NullProviderPlan_IsRejected()
+  {
+    var provider = new StubProvider(plan: (_, _) => null!);
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Equal(WdemErrorCode.ProviderError, Assert.Single(plan.Errors).Code);
+  }
+
+  [Fact]
+  public async Task CreateAsync_ProviderException_IsRedactedAndCaptured()
+  {
+    var provider = new StubProvider(plan: (_, _) => throw new InvalidOperationException(
+        "request password=hunter2 failed"));
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    var error = Assert.Single(plan.Errors);
+    Assert.Equal(WdemErrorCode.ProviderError, error.Code);
+    Assert.DoesNotContain("hunter2", error.Detail, StringComparison.Ordinal);
+    Assert.Contains("[REDACTED]", error.Detail, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task CreateAsync_CallerCancellation_IsPropagated()
+  {
+    using var cancellation = new CancellationTokenSource();
+    cancellation.Cancel();
+
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Planner(new StubProvider())
+        .CreateAsync(
+            Graph(Resource("git")),
+            States(State("git", false)),
+            "developer",
+            "1.0.0",
+            cancellation.Token));
+  }
+
+  [Fact]
+  public async Task CreateAsync_SpuriousProviderCancellation_IsProviderError()
+  {
+    var provider = new StubProvider(plan: (_, _) => throw new OperationCanceledException(
+        "provider cancelled itself"));
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Equal(WdemErrorCode.ProviderError, Assert.Single(plan.Errors).Code);
+  }
+
+  [Theory]
+  [InlineData("other", null, "test")]
+  [InlineData("git", "BAD-FINGERPRINT", "test")]
+  [InlineData("git", null, "other")]
+  public async Task CreateAsync_MalformedProviderIdentity_IsRejected(
+      string resourceId,
+      string? fingerprint,
+      string providerName)
+  {
+    var provider = new StubProvider(plan: (resource, _) => ValidPlan(
+        resource,
+        ComplianceStatus.Missing,
+        Step("install")) with
+    {
+      ResourceId = resourceId,
+      DesiredStateFingerprint = fingerprint ?? ResourceDefinitionFingerprint.Create(resource),
+      ProviderName = providerName
+    });
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Equal(WdemErrorCode.ProviderError, Assert.Single(plan.Errors).Code);
+  }
+
+  [Fact]
+  public async Task CreateAsync_DuplicateStepIds_AreRejectedCaseInsensitively()
+  {
+    var provider = new StubProvider(plan: (resource, _) => ValidPlan(
+        resource,
+        ComplianceStatus.Missing,
+        Step("install"),
+        Step("INSTALL")));
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Contains("duplicate", Assert.Single(plan.Errors).Detail, StringComparison.OrdinalIgnoreCase);
+  }
+
+  [Theory]
+  [InlineData(ComplianceStatus.Satisfied, PlanAction.Install)]
+  [InlineData(ComplianceStatus.Unsupported, PlanAction.Install)]
+  [InlineData(ComplianceStatus.DetectionFailed, PlanAction.Configure)]
+  public async Task CreateAsync_NonRemediableStatusWithModifyingStep_IsRejected(
+      ComplianceStatus compliance,
+      PlanAction action)
+  {
+    var provider = new StubProvider(plan: (resource, _) => ValidPlan(
+        resource,
+        compliance,
+        Step("invalid") with { Action = action }));
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", compliance == ComplianceStatus.Satisfied)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Equal(PlannedResourceStatus.Invalid, Assert.Single(plan.Resources).Status);
+  }
+
+  [Fact]
+  public async Task CreateAsync_FailedDependency_BlocksAllTransitiveDependents()
+  {
+    var provider = new StubProvider(validation: resource => resource.Id == "runtime"
+        ? ProviderValidationResult.Invalid("runtime source unavailable")
+        : ProviderValidationResult.Valid);
+    var graph = Graph(
+        [Resource("runtime")],
+        [Resource("sdk", dependencies: ["runtime"])],
+        [Resource("ide", dependencies: ["sdk"])]);
+
+    var plan = await Planner(provider).CreateAsync(
+        graph,
+        States(State("runtime", false), State("sdk", false), State("ide", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Equal(PlannedResourceStatus.Invalid, plan.Resources[0].Status);
+    Assert.Equal(PlannedResourceStatus.Blocked, plan.Resources[1].Status);
+    Assert.Equal(["runtime"], plan.Resources[1].BlockedBy);
+    Assert.Equal(PlannedResourceStatus.Blocked, plan.Resources[2].Status);
+    Assert.Equal(["sdk"], plan.Resources[2].BlockedBy);
+  }
+
+  [Fact]
+  public async Task CreateAsync_PreservesGraphLayerOrderAndDeepSnapshotsInputs()
+  {
+    var dependencies = new List<string> { "runtime" };
+    var parameters = new Dictionary<string, string?> { ["channel"] = "stable" };
+    var steps = new List<PlanStep> { Step("install") };
+    var runtime = Resource("runtime");
+    var tool = Resource("tool", dependencies) with { Parameters = parameters };
+    var provider = new StubProvider(plan: (resource, _) => new ResourcePlan
+    {
+      ResourceId = resource.Id,
+      ResourceType = resource.Type,
+      ProviderName = resource.Provider,
+      DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(resource),
+      Compliance = ComplianceStatus.Missing,
+      IsExecutable = true,
+      Steps = steps
+    });
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph([runtime], [tool]),
+        States(State("runtime", false), State("tool", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+    dependencies.Clear();
+    parameters["channel"] = "preview";
+    steps.Clear();
+
+    Assert.Equal([["runtime"], ["tool"]], plan.Layers.Select(layer => layer.ResourceIds));
+    Assert.Equal(["runtime"], plan.Resources[1].Dependencies);
+    Assert.Equal("stable", plan.Resources[1].Definition.Parameters["channel"]);
+    Assert.Single(plan.Resources[1].ResourcePlan.Steps);
+    AssertCannotMutateList(plan.Resources, plan.Resources[0]);
+    AssertCannotMutateList(plan.Layers, new ResourceGraphLayer(9, ["injected"]));
+    AssertCannotMutateList(plan.Errors, new StructuredError(
+        WdemErrorCode.ProviderError,
+        "injected",
+        "injected"));
+  }
+
+  [Fact]
+  public async Task CreateAsync_ExcessiveResourceCount_IsRejectedBeforeCallingProviders()
+  {
+    var provider = new StubProvider();
+    var resources = Enumerable.Range(0, ExecutionPlanner.MaxResourceCount + 1)
+        .Select(index => Resource($"resource-{index:D5}"))
+        .ToArray();
+    var graph = Graph(resources);
+
+    var plan = await Planner(provider).CreateAsync(
+        graph,
+        resources.ToDictionary(
+            resource => resource.Id,
+            resource => State(resource.Id, false),
+            StringComparer.OrdinalIgnoreCase),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Empty(plan.Resources);
+    Assert.Equal(0, provider.PlanCalls);
+    Assert.Equal(WdemErrorCode.DependencyError, Assert.Single(plan.Errors).Code);
+  }
+
+  [Fact]
+  public async Task CreateAsync_ExcessiveSteps_IsRejected()
+  {
+    var provider = new StubProvider(plan: (resource, _) => ValidPlan(
+        resource,
+        ComplianceStatus.Missing,
+        Enumerable.Range(0, ExecutionPlanner.MaxStepsPerResource + 1)
+            .Select(index => Step($"step-{index}"))
+            .ToArray()));
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Equal(WdemErrorCode.ProviderError, Assert.Single(plan.Errors).Code);
+  }
+
+  [Fact]
+  public async Task CreateAsync_EmptyOrMalformedGraph_IsNotExecutable()
+  {
+    var empty = await Planner().CreateAsync(
+        new ResourceGraph(
+            new Dictionary<string, ResolvedResource>(),
+            Array.Empty<ResourceGraphLayer>()),
+        new Dictionary<string, DetectedState>(),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+    var cycleLike = await Planner(new StubProvider()).CreateAsync(
+        new ResourceGraph(
+            GraphNodes(Resource("git")),
+            Array.Empty<ResourceGraphLayer>()),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(empty.IsExecutable);
+    Assert.False(cycleLike.IsExecutable);
+    Assert.All(empty.Errors.Concat(cycleLike.Errors), error =>
+        Assert.Equal(WdemErrorCode.DependencyError, error.Code));
+  }
+
+  private static ExecutionPlanner Planner(params IResourceProvider[] providers) => new(
+      new ResourceProviderRegistry(providers));
+
+  private static ResourceGraph Graph(params ResourceDefinition[][] layers)
+  {
+    var resources = layers.SelectMany(layer => layer).ToArray();
+    return Graph(
+        resources.ToDictionary(resource => resource.Id, StringComparer.OrdinalIgnoreCase),
+        layers.Select((layer, index) =>
+            new ResourceGraphLayer(index, layer.Select(resource => resource.Id).ToArray())).ToArray());
+  }
+
+  private static ResourceGraph Graph(params ResourceDefinition[] resources) => Graph(
+      resources.ToDictionary(resource => resource.Id, StringComparer.OrdinalIgnoreCase),
+      [new ResourceGraphLayer(0, resources.Select(resource => resource.Id).ToArray())]);
+
+  private static ResourceGraph Graph(
+      IReadOnlyDictionary<string, ResourceDefinition> resources,
+      IReadOnlyList<ResourceGraphLayer> layers) => new(
+          resources.ToDictionary(
+              pair => pair.Key,
+              pair => new ResolvedResource(
+                  pair.Value,
+                  ResourceOrigin.Required,
+                  new HashSet<string>(StringComparer.OrdinalIgnoreCase)),
+              StringComparer.OrdinalIgnoreCase),
+          layers);
+
+  private static IReadOnlyDictionary<string, ResolvedResource> GraphNodes(
+      params ResourceDefinition[] resources) => Graph(resources).Nodes;
+
+  private static ResourceDefinition Resource(
+      string id,
+      IReadOnlyList<string>? dependencies = null) => new()
+      {
+        Id = id,
+        Type = "package",
+        Provider = "test",
+        Dependencies = dependencies ?? []
+      };
+
+  private static DetectedState State(string id, bool exists) => new()
+  {
+    ResourceId = id,
+    Outcome = DetectionOutcome.Succeeded,
+    Exists = exists
+  };
+
+  private static IReadOnlyDictionary<string, DetectedState> States(
+      params DetectedState[] states) => states.ToDictionary(
+          state => state.ResourceId,
+          StringComparer.OrdinalIgnoreCase);
+
+  private static ResourcePlan ValidPlan(
+      ResourceDefinition resource,
+      ComplianceStatus compliance,
+      params PlanStep[] steps) => new()
+      {
+        ResourceId = resource.Id,
+        ResourceType = resource.Type,
+        ProviderName = resource.Provider,
+        DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(resource),
+        Compliance = compliance,
+        IsExecutable = compliance is ComplianceStatus.Satisfied or
+            ComplianceStatus.Missing or
+            ComplianceStatus.VersionMismatch or
+            ComplianceStatus.ConfigurationMismatch,
+        Steps = steps.Length == 0 && compliance == ComplianceStatus.Satisfied
+            ? [Step("none") with { Action = PlanAction.None }]
+            : steps
+      };
+
+  private static PlanStep Step(string id) => new()
+  {
+    Id = id,
+    Description = "Install resource",
+    Action = PlanAction.Install,
+    PrivilegeRequirement = PrivilegeRequirement.CurrentUser,
+    RestartPolicy = RestartPolicy.NoRestart
+  };
+
+  private static void AssertCannotMutateList<T>(IReadOnlyList<T> list, T value)
+  {
+    if (list is IList<T> mutable)
+    {
+      if (mutable.Count == 0)
+      {
+        Assert.Throws<NotSupportedException>(() => mutable.Add(value));
+      }
+      else
+      {
+        Assert.Throws<NotSupportedException>(() => mutable[0] = value);
+      }
+    }
+  }
+
+  private sealed class StubProvider(
+      Func<ResourceDefinition, ProviderValidationResult>? validation = null,
+      Func<ResourceDefinition, DetectedState, ResourcePlan>? plan = null) : IResourceProvider
+  {
+    public string ResourceType => "package";
+    public string ProviderName => "test";
+    public ProviderCapabilities Capabilities { get; } = new();
+    public int PlanCalls { get; private set; }
+
+    public ValueTask<ProviderValidationResult> ValidateAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      return ValueTask.FromResult(validation?.Invoke(resource) ?? ProviderValidationResult.Valid);
+    }
+
+    public ValueTask<DetectedState> DetectAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+
+    public ValueTask<ResourcePlan> PlanAsync(
+        ResourceDefinition resource,
+        DetectedState currentState,
+        CancellationToken cancellationToken)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      PlanCalls++;
+      return ValueTask.FromResult(plan is not null
+          ? plan(resource, currentState)
+          : currentState.Exists
+              ? ValidPlan(resource, ComplianceStatus.Satisfied)
+              : ValidPlan(resource, ComplianceStatus.Missing, Step("install")));
+    }
+
+    public ValueTask<ResourceApplyResult> ApplyAsync(
+        ResourceDefinition resource,
+        ResourcePlan plan,
+        IProgress<ProviderProgress>? progress,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+
+    public ValueTask<VerificationResult> VerifyAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+  }
+}
