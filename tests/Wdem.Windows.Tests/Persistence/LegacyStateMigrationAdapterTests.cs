@@ -315,6 +315,8 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
   [InlineData("k7m2q9v4x8n3p6r1_t5w0y2z7c4b9d6f3_h8j1s5u0a2c7e4g9")]
   [InlineData("550e8400-e29b-41d4-a716-446655440000")]
   [InlineData("qzxvbnmasdfghjkl-1234567890123456-plmoknijbuhvygct")]
+  [InlineData("com.k7m2q9v4x8n3p6r1t5w0y2z7c4b9d6f3.pkg")]
+  [InlineData("com.k7m2q9v4x8n3p6r1-t5w0y2z7c4b9d6f3.pkg")]
   public async Task MigrateAsync_RejectsDelimitedOpaqueCredentials(string credential)
   {
     WriteLegacy("state.json", JsonSerializer.Serialize(new[] { credential }));
@@ -338,6 +340,8 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
       "Microsoft.VisualStudio.2022.BuildTools",
       "Microsoft.VisualStudio.BuildTools-2022",
       "com.microsoft.visualstudiobuildtools",
+      "ai.openai.chatgptdesktop",
+      "visual-studio-build-tools-2022",
       "VisualStudioBuildTools2022",
       "VisualStudio17BuildTools2022x64"
     };
@@ -366,6 +370,8 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
             "Microsoft.VisualStudio.2022.BuildTools",
             "Microsoft.VisualStudio.BuildTools-2022",
             "com.microsoft.visualstudiobuildtools",
+            "ai.openai.chatgptdesktop",
+            "visual-studio-build-tools-2022",
             "VisualStudioBuildTools2022",
             "VisualStudio17BuildTools2022x64"
           ]
@@ -389,6 +395,12 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
         await File.ReadAllTextAsync(markerPath));
     Assert.Contains(
         "com.microsoft.visualstudiobuildtools",
+        await File.ReadAllTextAsync(markerPath));
+    Assert.Contains(
+        "ai.openai.chatgptdesktop",
+        await File.ReadAllTextAsync(markerPath));
+    Assert.Contains(
+        "visual-studio-build-tools-2022",
         await File.ReadAllTextAsync(markerPath));
   }
 

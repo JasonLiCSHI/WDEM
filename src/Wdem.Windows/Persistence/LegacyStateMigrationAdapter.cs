@@ -547,41 +547,56 @@ public sealed class LegacyStateMigrationAdapter
       return true;
     }
 
-    if (HasReverseDnsPackageStructure(value))
-    {
-      return false;
-    }
-
     var segments = value.Split(
         ['.', '-', '_'],
         StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-    if (segments.Any(LooksLikeOpaqueTokenSegment))
-    {
-      return true;
-    }
-
     var compactValue = string.Concat(segments);
-    return LooksLikeOpaqueTokenSegment(compactValue);
+    var hasOpaqueTokenStructure =
+        segments.Any(LooksLikeOpaqueTokenSegment) ||
+        LooksLikeOpaqueTokenSegment(compactValue);
+    return hasOpaqueTokenStructure && !HasLegitimatePackageLabelStructure(value);
   }
 
-  private static bool HasReverseDnsPackageStructure(string value)
+  private static bool HasLegitimatePackageLabelStructure(string value)
   {
-    var labels = value.Split('.', StringSplitOptions.None);
-    if (labels.Length < 3 ||
-        labels[0] is not ("com" or "org" or "net" or "io" or "dev" or "app"))
+    var segments = value.Split(['.', '-', '_'], StringSplitOptions.None);
+    if (segments.Length < 2 || segments.Any(string.IsNullOrEmpty))
     {
       return false;
     }
 
-    return labels.All(label =>
-        label.Length is > 0 and <= 63 &&
-        char.IsAsciiLetterOrDigit(label[0]) &&
-        char.IsAsciiLetterOrDigit(label[^1]) &&
-        label.All(character =>
-            char.IsAsciiLetterLower(character) ||
-            char.IsAsciiDigit(character) ||
-            character == '-'));
+    var wordCount = segments.Count(IsWordLikeLexicalSegment);
+    return wordCount >= 2 && segments.All(segment =>
+        IsWordLikeLexicalSegment(segment) || IsShortVersionSegment(segment));
   }
+
+  private static bool IsWordLikeLexicalSegment(string value)
+  {
+    if (value.Length == 0 || !value.All(char.IsAsciiLetter))
+    {
+      return false;
+    }
+
+    var hasVowel = false;
+    var vowelRun = 0;
+    var consonantRun = 0;
+    foreach (var character in value)
+    {
+      var isVowel = char.ToLowerInvariant(character) is 'a' or 'e' or 'i' or 'o' or 'u';
+      hasVowel |= isVowel;
+      vowelRun = isVowel ? vowelRun + 1 : 0;
+      consonantRun = isVowel ? 0 : consonantRun + 1;
+      if (vowelRun > 3 || consonantRun > 5)
+      {
+        return false;
+      }
+    }
+
+    return hasVowel;
+  }
+
+  private static bool IsShortVersionSegment(string value) =>
+      value.Length is > 0 and <= 8 && value.All(char.IsAsciiDigit);
 
   private static bool LooksLikeOpaqueTokenSegment(string value)
   {
