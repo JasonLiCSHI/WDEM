@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Wdem.Core.Execution;
 using Xunit;
@@ -206,5 +207,112 @@ public sealed class StructuredErrorTests
     Assert.True(
         exception is JsonException or ArgumentNullException,
         $"Expected JsonException or ArgumentNullException, got {exception?.GetType().FullName ?? "no exception"}.");
+  }
+
+  [Fact]
+  public void ExceptionPersistence_RedactsCompleteDigestAuthorizationLine()
+  {
+    const string diagnostic =
+        "Authorization: Digest username=\"Mufasa\", realm=\"testrealm@host.com\", " +
+        "nonce=\"abc\", response=\"deadbeef\"\r\nRetry remains available.";
+    var error = new StructuredError(
+        WdemErrorCode.ProviderError,
+        "Provider failed",
+        "See persisted diagnostics.")
+    {
+      UnderlyingException = new InvalidOperationException(diagnostic)
+    };
+
+    Assert.DoesNotContain("Mufasa", error.UnderlyingExceptionMessage, StringComparison.Ordinal);
+    Assert.DoesNotContain("testrealm", error.UnderlyingExceptionMessage, StringComparison.Ordinal);
+    Assert.DoesNotContain("deadbeef", error.UnderlyingExceptionMessage, StringComparison.Ordinal);
+    Assert.Contains("\r\nRetry remains available.", error.UnderlyingExceptionMessage, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void Deserialization_RedactsCompleteDigestAuthorizationLine()
+  {
+    const string diagnostic =
+        "Authorization: Digest username=\"Mufasa\", realm=\"testrealm@host.com\", " +
+        "nonce=\"abc\", response=\"deadbeef\"\nOrdinary follow-up diagnostic.";
+    var json = JsonSerializer.Serialize(new
+    {
+      Code = WdemErrorCode.ProviderError,
+      Summary = "Provider failed",
+      Detail = "See persisted diagnostics.",
+      UnderlyingExceptionMessage = diagnostic
+    });
+
+    var restored = JsonSerializer.Deserialize<StructuredError>(json);
+
+    Assert.NotNull(restored);
+    Assert.DoesNotContain("Mufasa", restored.UnderlyingExceptionMessage, StringComparison.Ordinal);
+    Assert.DoesNotContain("deadbeef", restored.UnderlyingExceptionMessage, StringComparison.Ordinal);
+    Assert.Contains("\nOrdinary follow-up diagnostic.", restored.UnderlyingExceptionMessage, StringComparison.Ordinal);
+  }
+
+  [Theory]
+  [InlineData("accessToken=at_123", "at_123")]
+  [InlineData("refreshToken=rt_123", "rt_123")]
+  [InlineData("clientSecret=hunter2", "hunter2")]
+  [InlineData("apiKey=key_123", "key_123")]
+  [InlineData("AccessToken=pascal_at", "pascal_at")]
+  [InlineData("ClientSecret=pascal_secret", "pascal_secret")]
+  public void ExceptionPersistence_RedactsCamelCaseOAuthKeys(
+      string diagnostic,
+      string sensitiveValue)
+  {
+    var error = new StructuredError(
+        WdemErrorCode.ProviderError,
+        "Provider failed",
+        "See persisted diagnostics.")
+    {
+      UnderlyingException = new InvalidOperationException(diagnostic)
+    };
+
+    Assert.DoesNotContain(sensitiveValue, error.UnderlyingExceptionMessage, StringComparison.Ordinal);
+  }
+
+  [Theory]
+  [InlineData("accessToken=at_123", "at_123")]
+  [InlineData("refreshToken=rt_123", "rt_123")]
+  [InlineData("clientSecret=hunter2", "hunter2")]
+  [InlineData("apiKey=key_123", "key_123")]
+  public void Deserialization_RedactsCamelCaseOAuthKeys(
+      string diagnostic,
+      string sensitiveValue)
+  {
+    var json = JsonSerializer.Serialize(new
+    {
+      Code = WdemErrorCode.ProviderError,
+      Summary = "Provider failed",
+      Detail = "See persisted diagnostics.",
+      UnderlyingExceptionMessage = diagnostic
+    });
+
+    var restored = JsonSerializer.Deserialize<StructuredError>(json);
+
+    Assert.NotNull(restored);
+    Assert.DoesNotContain(sensitiveValue, restored.UnderlyingExceptionMessage, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void ExceptionPersistence_HandlesLongDiagnosticsInBoundedTime()
+  {
+    var diagnostic = new string('a', 250_000) + " clientSecret=tail-secret";
+    var stopwatch = Stopwatch.StartNew();
+
+    var error = new StructuredError(
+        WdemErrorCode.ProviderError,
+        "Provider failed",
+        "See persisted diagnostics.")
+    {
+      UnderlyingException = new InvalidOperationException(diagnostic)
+    };
+
+    stopwatch.Stop();
+    Assert.DoesNotContain("tail-secret", error.UnderlyingExceptionMessage, StringComparison.Ordinal);
+    Assert.StartsWith(new string('a', 128), error.UnderlyingExceptionMessage, StringComparison.Ordinal);
+    Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5), $"Sanitization took {stopwatch.Elapsed}.");
   }
 }

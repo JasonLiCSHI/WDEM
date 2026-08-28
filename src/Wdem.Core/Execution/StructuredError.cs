@@ -74,7 +74,7 @@ public sealed record StructuredError
 internal static partial class SensitiveDataSanitizer
 {
   [GeneratedRegex(
-      """\b(?<key>(?:password|passwd|pwd|token|access[_-]?token|api[_-]?key|secret|authorization|[a-z][a-z0-9_-]*[_-](?:token|password|secret)))[ \t]*[:=][ \t]*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;,]+)""",
+      """\b(?<key>(?:password|passwd|pwd|token|access[_-]?token|refresh[_-]?token|client[_-]?secret|api[_-]?key|secret|authorization|[a-z][a-z0-9_-]*[_-](?:token|password|secret)))[ \t]*[:=][ \t]*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;,]+)""",
       RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.NonBacktracking)]
   private static partial Regex KeyValueSecretPattern();
 
@@ -84,7 +84,7 @@ internal static partial class SensitiveDataSanitizer
   private static partial Regex BearerTokenPattern();
 
   [GeneratedRegex(
-      @"\bauthorization[ \t]*[:=][ \t]*(?:basic|bearer|digest|negotiate|ntlm)[ \t]+[^\s,;]+",
+      @"\bauthorization[ \t]*[:=][^\r\n]*",
       RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.NonBacktracking)]
   private static partial Regex AuthorizationCredentialPattern();
 

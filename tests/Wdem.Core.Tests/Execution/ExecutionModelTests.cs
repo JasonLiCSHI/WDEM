@@ -74,4 +74,20 @@ public sealed class ExecutionModelTests
     Assert.Equal(0.75, percent);
     Assert.Equal("Configuring", message);
   }
+
+  [Fact]
+  public void ProviderProgress_LegacyThreeFieldJsonDefaultsToInfo()
+  {
+    const string json =
+        """{"Stage":"Apply","Percent":0.5,"Message":"Installing"}""";
+
+    var restored = JsonSerializer.Deserialize<ProviderProgress>(json);
+
+    Assert.NotNull(restored);
+    Assert.Equal("Apply", restored.Stage);
+    Assert.Equal(0.5, restored.Percent);
+    Assert.Equal("Installing", restored.Message);
+    Assert.Null(restored.StepId);
+    Assert.Equal(ProviderLogLevel.Info, restored.LogLevel);
+  }
 }
