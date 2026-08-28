@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.IO.Compression;
 using Moq;
 using Wdem.LegacySource.Interfaces;
 using Wdem.LegacySource.Services.Bootstrappers;
@@ -78,6 +79,48 @@ namespace Wdem.LegacySource.Tests.Services.Plugins
       Assert.True(handler.HasUserAgent);
     }
 
+    [Fact]
+    public async Task EnsurePluginsInstalledAsync_ExtractsAuthenticatedArchiveAndCleansTemporaryFiles()
+    {
+      const string token = "private-repository-token";
+      Environment.SetEnvironmentVariable("WDEM_GITHUB_TOKEN", token);
+      Environment.SetEnvironmentVariable("GITHUB_TOKEN", null);
+      var temporaryEntriesBefore = GetTemporaryPluginEntries();
+      var handler = new RecordingHandler(HttpStatusCode.OK, CreatePluginArchive());
+      using var client = new HttpClient(handler);
+      var manager = CreateManager(client, out _);
+
+      await manager.EnsurePluginsInstalledAsync(["sample-plugin"]);
+
+      var installedManifest = Path.Combine(_pluginsDirectory, "sample-plugin", "plugin.yaml");
+      Assert.True(File.Exists(installedManifest));
+      Assert.Contains("install_info:", File.ReadAllText(installedManifest));
+      Assert.Equal("Bearer", handler.Authorization?.Scheme);
+      Assert.Equal(token, handler.Authorization?.Parameter);
+      Assert.Equal(temporaryEntriesBefore, GetTemporaryPluginEntries());
+    }
+
+    private static byte[] CreatePluginArchive()
+    {
+      using var stream = new MemoryStream();
+      using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
+      {
+        var manifest = archive.CreateEntry("WDEM-main/plugins/sample-plugin/plugin.yaml");
+        using var writer = new StreamWriter(manifest.Open());
+        writer.Write("name: sample-plugin\ntype: powershell\ninstall_info:\n  check_command: test\n");
+      }
+
+      return stream.ToArray();
+    }
+
+    private static HashSet<string> GetTemporaryPluginEntries()
+    {
+      var temporaryDirectory = Path.GetTempPath();
+      return Directory.EnumerateFileSystemEntries(temporaryDirectory, "wdem-plugins-*.zip")
+          .Concat(Directory.EnumerateFileSystemEntries(temporaryDirectory, "wdem-extract-*"))
+          .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
     private PluginManager CreateManager(HttpClient client, out Mock<ILogger> logger)
     {
       logger = new Mock<ILogger>();
@@ -85,7 +128,7 @@ namespace Wdem.LegacySource.Tests.Services.Plugins
       return new PluginManager(new UvBootstrapper(runner.Object), new BunBootstrapper(runner.Object), logger.Object, _pluginsDirectory, httpClient: client);
     }
 
-    private sealed class RecordingHandler(HttpStatusCode statusCode) : HttpMessageHandler
+    private sealed class RecordingHandler(HttpStatusCode statusCode, byte[]? content = null) : HttpMessageHandler
     {
       public AuthenticationHeaderValue? Authorization { get; private set; }
       public bool HasUserAgent { get; private set; }
@@ -94,7 +137,10 @@ namespace Wdem.LegacySource.Tests.Services.Plugins
       {
         Authorization = request.Headers.Authorization;
         HasUserAgent = request.Headers.UserAgent.Any();
-        return Task.FromResult(new HttpResponseMessage(statusCode));
+        return Task.FromResult(new HttpResponseMessage(statusCode)
+        {
+          Content = new ByteArrayContent(content ?? [])
+        });
       }
     }
   }

@@ -21,9 +21,9 @@ dotnet test Wdem.sln -p:EnableWindowsTargeting=true --no-build
 
 The WDEM defaults for future product hosts are `%LOCALAPPDATA%\WDEM`,
 `WDEM_CONFIG_PATH`, `WDEM_STATE_PATH`, and `.wdem-state.json`. Existing
-`WINHOME_*` values are migration fallbacks only, while
-`%LOCALAPPDATA%\WinHome` state is read once and moved aside. Neither is part
-of the WDEM public contract.
+`WINHOME_STATE_PATH` is a deliberate one-time migration input for legacy
+state, while `%LOCALAPPDATA%\WinHome` state is read once and moved aside.
+Neither is part of the WDEM public contract.
 
 For license attribution and the transition boundary, see
 [THIRD-PARTY-NOTICES](../THIRD-PARTY-NOTICES.md) and

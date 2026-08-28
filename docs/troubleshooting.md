@@ -11,5 +11,5 @@ dotnet test Wdem.sln -p:EnableWindowsTargeting=true --no-build
 
 Use `%LOCALAPPDATA%\WDEM`, `WDEM_CONFIG_PATH`, and `WDEM_STATE_PATH` for
 development of transition-library behavior. Old `%LOCALAPPDATA%\WinHome`
-state is read once and moved aside; `WINHOME_*` values are migration
-fallbacks only. Neither is a supported WDEM interface.
+state is read once and moved aside; `WINHOME_STATE_PATH` is the only
+deliberate legacy migration input. Neither is a supported WDEM interface.

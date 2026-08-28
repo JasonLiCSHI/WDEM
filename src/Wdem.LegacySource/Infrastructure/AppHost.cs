@@ -84,7 +84,6 @@ public static class AppHost
     services.AddSingleton<IWindowsServiceManager, WindowsServiceManager>();
     services.AddSingleton<IScheduledTaskService, ScheduledTaskService>();
     services.AddSingleton<IRuntimeResolver, RuntimeResolver>();
-    services.AddSingleton<IUpdateService, UpdateService>();
     services.AddSingleton<ISecretResolver, SecretResolver>();
     services.AddSingleton<IStateService, StateService>();
     services.AddSingleton<IPluginManager>(sp => new PluginManager(

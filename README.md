@@ -31,9 +31,9 @@ $env:WDEM_CONFIG_PATH = 'C:\WDEM\config.yaml'
 $env:WDEM_STATE_PATH = 'C:\WDEM\.wdem-state.json'
 ```
 
-`WINHOME_*` values are migration fallbacks only; legacy
-`%LOCALAPPDATA%\WinHome` state is read once and moved aside. Neither is a
-WDEM public interface.
+`WINHOME_STATE_PATH` is a deliberate one-time migration input for legacy
+state only; legacy `%LOCALAPPDATA%\WinHome` state is also read once and moved
+aside. Neither is a WDEM public interface.
 
 ## Source provenance
 

@@ -16,5 +16,8 @@ namespace Wdem.LegacySource.Models
 
     [JsonPropertyName("step_history")]
     public Dictionary<string, StepResult> StepHistory { get; set; } = new();
+
+    [JsonPropertyName("legacy_migration_sources")]
+    public Dictionary<string, string> LegacyMigrationSources { get; set; } = new(StringComparer.OrdinalIgnoreCase);
   }
 }

@@ -12,6 +12,18 @@ namespace Wdem.LegacySource.Services.System
     private readonly object _sync = new();
     private StateData _inMemoryState;
 
+    private enum LegacyStateFormat
+    {
+      StateData,
+      StepHistory
+    }
+
+    private sealed record LegacyStateCandidate(
+        string Path,
+        string Description,
+        string BackupSuffix,
+        LegacyStateFormat Format);
+
     /// <summary>Initializes a new instance of <see cref="StateService"/>.</summary>
     public StateService(ILogger logger)
     {
@@ -42,106 +54,91 @@ namespace Wdem.LegacySource.Services.System
       // Migration fallbacks are read once and moved aside; WDEM never writes these paths.
       var legacyEnvStatePath = Environment.GetEnvironmentVariable("WINHOME_STATE_PATH");
 
-      bool oldStepExists = File.Exists(oldStepPath) && !IsCurrentStatePath(oldStepPath);
-      bool oldStateExists = File.Exists(oldStatePath) && !IsCurrentStatePath(oldStatePath);
-      bool oldCwdExists = File.Exists(cwdStatePath) && !IsCurrentStatePath(cwdStatePath);
-      bool legacyEnvExists = !string.IsNullOrWhiteSpace(legacyEnvStatePath)
-          && !IsCurrentStatePath(legacyEnvStatePath)
-          && File.Exists(legacyEnvStatePath);
+      var candidates = new Dictionary<string, LegacyStateCandidate>(StringComparer.OrdinalIgnoreCase);
+      AddCandidate(candidates, cwdStatePath, "legacy state", "backup", LegacyStateFormat.StateData);
+      AddCandidate(candidates, oldStatePath, "migration fallback state", "migration-backup", LegacyStateFormat.StateData);
+      AddCandidate(candidates, oldStepPath, "migration fallback step state", "backup", LegacyStateFormat.StepHistory);
+      AddCandidate(candidates, legacyEnvStatePath, "migration fallback state", "migration-backup", LegacyStateFormat.StateData);
 
-      if (!oldStepExists && !oldStateExists && !oldCwdExists && !legacyEnvExists) return;
+      if (candidates.Count == 0) return;
 
       lock (_sync)
       {
-        var merged = _inMemoryState;
-        var backups = new List<(string Path, string Description, string Suffix)>();
+        var pendingMoves = new Dictionary<string, (string Description, string Suffix)>(StringComparer.OrdinalIgnoreCase);
+        bool stateChanged = false;
 
-        AddLegacyState(cwdStatePath, oldCwdExists, "legacy state", "backup", merged, backups);
-        AddLegacyState(legacyEnvStatePath, legacyEnvExists, "migration fallback state", "migration-backup", merged, backups);
-        AddLegacyState(oldStatePath, oldStateExists, "migration fallback state", "migration-backup", merged, backups);
-        AddLegacySteps(oldStepPath, oldStepExists, merged, backups);
-
-        if (backups.Count == 0) return;
-
-        _inMemoryState = merged;
-        if (!TryFlushToDisk())
+        foreach (var candidate in candidates.Values.Where(candidate => File.Exists(candidate.Path)))
         {
-          _logger.LogWarning("[State] Legacy state was not backed up because the merged state could not be persisted.");
+          if (_inMemoryState.LegacyMigrationSources.TryGetValue(candidate.Path, out var recordedSuffix))
+          {
+            pendingMoves[candidate.Path] = (candidate.Description, recordedSuffix);
+            continue;
+          }
+
+          try
+          {
+            if (candidate.Format == LegacyStateFormat.StateData)
+            {
+              var legacyState = JsonSerializer.Deserialize<StateData>(File.ReadAllText(candidate.Path))
+                  ?? throw new JsonException("Legacy state contained JSON null.");
+              MergeStateData(_inMemoryState, legacyState);
+            }
+            else
+            {
+              var legacySteps = JsonSerializer.Deserialize<Dictionary<string, StepResult>>(File.ReadAllText(candidate.Path))
+                  ?? throw new JsonException("Legacy step history contained JSON null.");
+              foreach (var step in legacySteps) _inMemoryState.StepHistory.TryAdd(step.Key, step.Value);
+            }
+
+            _inMemoryState.LegacyMigrationSources[candidate.Path] = candidate.BackupSuffix;
+            pendingMoves[candidate.Path] = (candidate.Description, candidate.BackupSuffix);
+            stateChanged = true;
+          }
+          catch (JsonException ex)
+          {
+            const string invalidSuffix = "invalid";
+            _logger.LogWarning($"[State] Legacy state '{candidate.Path}' is invalid and will be quarantined: {ex.Message}");
+            _inMemoryState.LegacyMigrationSources[candidate.Path] = invalidSuffix;
+            pendingMoves[candidate.Path] = ("invalid legacy state", invalidSuffix);
+            stateChanged = true;
+          }
+          catch (Exception ex)
+          {
+            _logger.LogWarning($"[State] Could not read legacy state '{candidate.Path}': {ex.Message}");
+          }
+        }
+
+        if (stateChanged && !TryFlushToDisk())
+        {
+          _logger.LogWarning("[State] Legacy state was not moved because the migration result could not be persisted.");
           return;
         }
 
-        foreach (var backup in backups)
+        foreach (var pendingMove in pendingMoves)
         {
-          BackupMigratedFile(backup.Path, backup.Description, backup.Suffix);
+          BackupMigratedFile(pendingMove.Key, pendingMove.Value.Description, pendingMove.Value.Suffix);
         }
       }
     }
 
-    private void AddLegacyState(
+    private void AddCandidate(
+        Dictionary<string, LegacyStateCandidate> candidates,
         string? path,
-        bool exists,
         string description,
         string backupSuffix,
-        StateData merged,
-        List<(string Path, string Description, string Suffix)> backups)
+        LegacyStateFormat format)
     {
-      if (!exists || string.IsNullOrWhiteSpace(path)) return;
+      if (string.IsNullOrWhiteSpace(path)) return;
 
       try
       {
-        var legacyState = JsonSerializer.Deserialize<StateData>(File.ReadAllText(path));
-        if (legacyState == null) return;
-
-        MergeStateData(merged, legacyState);
-        backups.Add((path, description, backupSuffix));
+        var canonicalPath = Path.GetFullPath(path);
+        if (string.Equals(canonicalPath, Path.GetFullPath(_stateFilePath), StringComparison.OrdinalIgnoreCase)) return;
+        candidates.TryAdd(canonicalPath, new LegacyStateCandidate(canonicalPath, description, backupSuffix, format));
       }
-
-      catch (Exception)
+      catch (Exception ex)
       {
-        // Malformed legacy files are left in place rather than risking a backup before migration succeeds.
-      }
-    }
-
-    private bool IsCurrentStatePath(string? candidatePath)
-    {
-      if (string.IsNullOrWhiteSpace(candidatePath)) return false;
-
-      try
-      {
-        return string.Equals(
-            Path.GetFullPath(candidatePath),
-            Path.GetFullPath(_stateFilePath),
-            StringComparison.OrdinalIgnoreCase);
-      }
-      catch (Exception)
-      {
-        return string.Equals(candidatePath, _stateFilePath, StringComparison.OrdinalIgnoreCase);
-      }
-    }
-
-    private void AddLegacySteps(
-        string path,
-        bool exists,
-        StateData merged,
-        List<(string Path, string Description, string Suffix)> backups)
-    {
-      if (!exists) return;
-
-      try
-      {
-        var legacySteps = JsonSerializer.Deserialize<Dictionary<string, StepResult>>(File.ReadAllText(path));
-        if (legacySteps == null) return;
-
-        foreach (var step in legacySteps)
-        {
-          merged.StepHistory.TryAdd(step.Key, step.Value);
-        }
-
-        backups.Add((path, "migration fallback step state", "backup"));
-      }
-      catch (Exception)
-      {
-        // Malformed legacy files are left in place rather than risking a backup before migration succeeds.
+        _logger.LogWarning($"[State] Ignoring invalid legacy state path '{path}': {ex.Message}");
       }
     }
 
@@ -160,6 +157,11 @@ namespace Wdem.LegacySource.Services.System
       foreach (var step in source.StepHistory)
       {
         destination.StepHistory.TryAdd(step.Key, step.Value);
+      }
+
+      foreach (var migrationSource in source.LegacyMigrationSources)
+      {
+        destination.LegacyMigrationSources.TryAdd(migrationSource.Key, migrationSource.Value);
       }
     }
 
@@ -250,6 +252,7 @@ namespace Wdem.LegacySource.Services.System
           AppliedItems = new HashSet<string>(state.AppliedItems),
           SystemSettingOriginals = new Dictionary<string, object>(state.SystemSettingOriginals),
           StepHistory = new Dictionary<string, StepResult>(state.StepHistory),
+          LegacyMigrationSources = new Dictionary<string, string>(state.LegacyMigrationSources, StringComparer.OrdinalIgnoreCase),
         };
         FlushToDisk();
       }
@@ -340,15 +343,20 @@ namespace Wdem.LegacySource.Services.System
 
     private bool TryFlushToDisk()
     {
+      string? tmpPath = null;
       try
       {
         string json = JsonSerializer.Serialize(_inMemoryState, new JsonSerializerOptions { WriteIndented = true });
-        string tmpPath = _stateFilePath + ".tmp";
+        string stateDirectory = Path.GetDirectoryName(Path.GetFullPath(_stateFilePath))
+            ?? throw new InvalidOperationException("Could not determine the state directory.");
+        tmpPath = Path.Combine(stateDirectory, $".{Path.GetFileName(_stateFilePath)}.{Guid.NewGuid():N}.tmp");
 
-        using (var stream = File.Open(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None))
+        using (var stream = new FileStream(tmpPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
         using (var writer = new StreamWriter(stream))
         {
           writer.Write(json);
+          writer.Flush();
+          stream.Flush(flushToDisk: true);
         }
 
         File.Move(tmpPath, _stateFilePath, overwrite: true);
@@ -358,6 +366,13 @@ namespace Wdem.LegacySource.Services.System
       {
         _logger.LogWarning($"[State] Could not save state: {ex.Message}");
         return false;
+      }
+      finally
+      {
+        if (tmpPath is not null && File.Exists(tmpPath))
+        {
+          try { File.Delete(tmpPath); } catch { }
+        }
       }
     }
 
