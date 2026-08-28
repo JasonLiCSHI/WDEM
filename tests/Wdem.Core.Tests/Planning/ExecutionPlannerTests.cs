@@ -1419,6 +1419,154 @@ public sealed class ExecutionPlannerTests
   }
 
   [Fact]
+  public async Task CreateAsync_ControlCharacterIdentity_PreservesAcceptedBusinessContract()
+  {
+    const string resourceId = "git\r\nforged";
+    var provider = new StubProvider();
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource(resourceId)),
+        States(State(resourceId, false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    var planned = Assert.Single(plan.Resources);
+    Assert.True(plan.IsExecutable);
+    Assert.Equal(resourceId, planned.Definition.Id);
+    Assert.Equal(resourceId, planned.ResourcePlan.ResourceId);
+    Assert.Equal(1, provider.ValidationCalls);
+    Assert.Equal(1, provider.PlanCalls);
+  }
+
+  [Fact]
+  public async Task CreateAsync_ControlCharacterIdentity_IsSanitizedAcrossProviderFailurePaths()
+  {
+    const string resourceId = "git\r\nforged";
+    var providers = new StubProvider[]
+    {
+      new(validation: resource => ProviderValidationResult.Invalid(
+          new StructuredError(
+              WdemErrorCode.ConfigurationError,
+              "Invalid parameter.",
+              "The provider rejected a parameter.")
+          {
+            ResourceId = resource.Id
+          })),
+      new(validation: _ => ProviderValidationResult.Invalid("The provider rejected a parameter.")),
+      new(plan: (_, _) => throw new InvalidOperationException("Provider planning failed.")),
+      new(plan: (resource, _) => ValidPlan(
+          resource,
+          ComplianceStatus.Missing,
+          Step("install")) with
+      {
+        ResourceId = "different\r\nresource"
+      }),
+      new(plan: (resource, _) => ValidPlan(
+          resource,
+          ComplianceStatus.Missing,
+          Step("install"),
+          Step("INSTALL")))
+    };
+
+    foreach (var provider in providers)
+    {
+      var plan = await Planner(provider).CreateAsync(
+          Graph(Resource(resourceId)),
+          States(State(resourceId, false)),
+          "developer",
+          "1.0.0",
+          CancellationToken.None);
+
+      Assert.False(plan.IsExecutable);
+      Assert.Equal(resourceId, Assert.Single(plan.Resources).Definition.Id);
+      AssertPlannerDiagnosticsAreSafe(plan, resourceId);
+    }
+  }
+
+  [Fact]
+  public async Task CreateAsync_ControlCharacterIdentity_IsSanitizedInMissingStateDiagnostic()
+  {
+    const string resourceId = "git\r\nforged";
+
+    var plan = await Planner(new StubProvider()).CreateAsync(
+        Graph(Resource(resourceId)),
+        States(),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.Equal(resourceId, Assert.Single(plan.Resources).Definition.Id);
+    AssertPlannerDiagnosticsAreSafe(plan, resourceId);
+  }
+
+  [Fact]
+  public async Task CreateAsync_ControlCharacterIdentity_IsSanitizedInComplianceMismatchDiagnostic()
+  {
+    const string resourceId = "git\r\nforged";
+    var provider = new StubProvider(plan: (resource, _) =>
+        ValidPlan(resource, ComplianceStatus.Satisfied));
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource(resourceId)),
+        States(State(resourceId, false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.Equal(resourceId, Assert.Single(plan.Resources).Definition.Id);
+    AssertPlannerDiagnosticsAreSafe(plan, resourceId);
+  }
+
+  [Fact]
+  public async Task CreateAsync_ControlCharacterIdentity_IsSanitizedInBlockedDiagnostic()
+  {
+    const string runtimeId = "runtime\r\nforged";
+    const string toolId = "tool\u0001forged";
+    var runtime = Resource(runtimeId);
+    var tool = Resource(toolId, [runtimeId]);
+    var provider = new StubProvider(validation: resource => resource.Id == runtimeId
+        ? ProviderValidationResult.Invalid("Runtime validation failed.")
+        : ProviderValidationResult.Valid);
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph([runtime], [tool]),
+        States(State(runtimeId, false), State(toolId, false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.Equal([runtimeId, toolId], plan.Resources.Select(item => item.Definition.Id));
+    AssertPlannerDiagnosticsAreSafe(plan, runtimeId, toolId);
+  }
+
+  [Fact]
+  public async Task CreateAsync_ControlCharacterIdentity_IsSanitizedInMalformedGraphDiagnostic()
+  {
+    const string resourceId = "git\r\nforged";
+    var resource = Resource(resourceId);
+    var graph = Graph(
+        new Dictionary<string, ResourceDefinition>(StringComparer.OrdinalIgnoreCase)
+        {
+          [resourceId] = resource
+        },
+        [
+          new ResourceGraphLayer(0, [resourceId]),
+          new ResourceGraphLayer(1, [resourceId])
+        ]);
+
+    var plan = await Planner(new StubProvider()).CreateAsync(
+        graph,
+        States(State(resourceId, false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.Empty(plan.Resources);
+    AssertPlannerDiagnosticsAreSafe(plan, resourceId);
+  }
+
+  [Fact]
   public async Task CreateAsync_OversizedResourceIdentity_IsNotReplayedIntoDiagnosticsOrFingerprint()
   {
     var oversizedId = new string('\u754c', ExecutionPlanner.MaxTextFieldByteCount);
@@ -1718,6 +1866,45 @@ public sealed class ExecutionPlannerTests
     PrivilegeRequirement = PrivilegeRequirement.CurrentUser,
     RestartPolicy = RestartPolicy.NoRestart
   };
+
+  private static void AssertPlannerDiagnosticsAreSafe(
+      ExecutionPlan plan,
+      params string[] unsafeIdentities)
+  {
+    var diagnostics = plan.Errors
+        .Concat(plan.Resources.SelectMany(resource => resource.Diagnostics))
+        .Distinct()
+        .ToArray();
+    Assert.NotEmpty(diagnostics);
+    Assert.All(diagnostics, diagnostic =>
+    {
+      Assert.True(diagnostic.ResourceId is null || !diagnostic.ResourceId.Any(char.IsControl));
+      Assert.True(diagnostic.StepId is null || !diagnostic.StepId.Any(char.IsControl));
+
+      var visibleFields = new[]
+      {
+        diagnostic.Summary,
+        diagnostic.Detail,
+        diagnostic.LogLocation,
+        diagnostic.SuggestedAction,
+        diagnostic.UnderlyingExceptionType,
+        diagnostic.UnderlyingExceptionMessage
+      };
+      foreach (var value in visibleFields)
+      {
+        if (value is null)
+        {
+          continue;
+        }
+
+        Assert.DoesNotContain(value, char.IsControl);
+        Assert.True(
+            System.Text.Encoding.UTF8.GetByteCount(value) <= ExecutionPlanner.MaxTextFieldByteCount);
+        Assert.All(unsafeIdentities, identity =>
+            Assert.DoesNotContain(identity, value, StringComparison.Ordinal));
+      }
+    });
+  }
 
   private static void AssertCannotMutateList<T>(IReadOnlyList<T> list, T value)
   {

@@ -136,7 +136,7 @@ public sealed partial class ExecutionPlanner
           diagnostic.Code,
           SanitizeVisible(diagnostic.Summary),
           SanitizeVisible(diagnostic.Detail),
-          diagnostic.ResourceId is null ? null : definition.Id,
+          diagnostic.ResourceId is null ? null : NormalizeResourceId(definition.Id),
           canonicalStepId,
           diagnostic.ProcessExitCode,
           SanitizeOptional(diagnostic.LogLocation),

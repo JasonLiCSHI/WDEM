@@ -144,9 +144,11 @@ public sealed partial class ExecutionPlanner(
           var blockedError = new StructuredError(
               WdemErrorCode.DependencyError,
               "The resource is blocked by a dependency.",
-              $"Resource '{resolved.Definition.Id}' is blocked by: {string.Join(", ", blockedBy)}.")
+              SanitizeVisible(
+                  $"Resource '{SanitizeVisible(resolved.Definition.Id)}' is blocked by: " +
+                  $"{string.Join(", ", blockedBy.Select(SanitizeVisible))}."))
           {
-            ResourceId = resolved.Definition.Id,
+            ResourceId = NormalizeResourceId(resolved.Definition.Id),
             SuggestedAction = "Resolve the failed dependencies and create a new plan."
           };
           item = item with
@@ -207,7 +209,8 @@ public sealed partial class ExecutionPlanner(
           ProviderError(
               definition.Id,
               "No provider is available for the resource.",
-              $"Provider '{definition.Provider}' is not registered for type '{definition.Type}'."));
+              $"Provider '{SanitizeVisible(definition.Provider)}' is not registered for type " +
+              $"'{SanitizeVisible(definition.Type)}'."));
     }
 
     if (!detectedStates.TryGetValue(definition.Id, out var detectedState) ||
@@ -219,9 +222,11 @@ public sealed partial class ExecutionPlanner(
           new StructuredError(
               WdemErrorCode.DetectionError,
               "Detected state is missing.",
-              $"No detected state was supplied for resource '{definition.Id}'.")
+              SanitizeVisible(
+                  $"No detected state was supplied for resource " +
+                  $"'{SanitizeVisible(definition.Id)}'."))
           {
-            ResourceId = definition.Id,
+            ResourceId = NormalizeResourceId(definition.Id),
             SuggestedAction = "Detect the resource again before creating a plan."
           },
           PlannedResourceStatus.DetectionFailed);
@@ -235,9 +240,11 @@ public sealed partial class ExecutionPlanner(
           new StructuredError(
               WdemErrorCode.DetectionError,
               "Detected state does not match the resource.",
-              $"State for resource '{SanitizeVisible(detectedState.ResourceId)}' cannot plan resource '{definition.Id}'.")
+              SanitizeVisible(
+                  $"State for resource '{SanitizeVisible(detectedState.ResourceId)}' cannot plan " +
+                  $"resource '{SanitizeVisible(definition.Id)}'."))
           {
-            ResourceId = definition.Id,
+            ResourceId = NormalizeResourceId(definition.Id),
             SuggestedAction = "Detect the resource again before creating a plan."
           },
           PlannedResourceStatus.DetectionFailed);
@@ -345,7 +352,7 @@ public sealed partial class ExecutionPlanner(
       return Failure(resolved, definition, ProviderError(
           definition.Id,
           "Provider validation returned no result.",
-          $"Provider '{definition.Provider}' returned a null validation result."));
+          $"Provider '{SanitizeVisible(definition.Provider)}' returned a null validation result."));
     }
 
     if (!validation.IsValid)
@@ -387,7 +394,7 @@ public sealed partial class ExecutionPlanner(
       return Failure(resolved, definition, ProviderError(
           definition.Id,
           "Provider planning returned no result.",
-          $"Provider '{definition.Provider}' returned a null resource plan."));
+          $"Provider '{SanitizeVisible(definition.Provider)}' returned a null resource plan."));
     }
 
     var planError = ValidateProviderPlan(
@@ -501,11 +508,13 @@ public sealed partial class ExecutionPlanner(
               ? [DetectionStateError(
                   definition.Id,
                   detectedState.Outcome,
-                  $"Resource '{definition.Id}' has detection outcome '{detectedState.Outcome}'.")]
+                  $"Resource '{SanitizeVisible(definition.Id)}' has detection outcome " +
+                  $"'{detectedState.Outcome}'.")]
               : [ProviderError(
                   definition.Id,
                   "The provider cannot produce an executable plan.",
-                  $"Resource '{definition.Id}' has compliance status '{plan.Compliance}'.")];
+                  $"Resource '{SanitizeVisible(definition.Id)}' has compliance status " +
+                  $"'{plan.Compliance}'.")];
       item = item with { Diagnostics = ReadOnly(diagnostics) };
     }
 

@@ -40,7 +40,8 @@ public sealed partial class ExecutionPlanner
       return ProviderError(
           definition.Id,
           "Provider plan contains too many steps.",
-          $"Resource '{definition.Id}' has {plan.Steps.Count} steps; the limit is {MaxStepsPerResource}.");
+          $"Resource '{SanitizeVisible(definition.Id)}' has {plan.Steps.Count} steps; " +
+          $"the limit is {MaxStepsPerResource}.");
     }
 
     var stepIds = new HashSet<string>(IdComparer);
@@ -82,7 +83,8 @@ public sealed partial class ExecutionPlanner
         return ProviderError(
             definition.Id,
             "Provider plan contains duplicate step ids.",
-            $"Duplicate step id '{step.Id}' occurs for resource '{definition.Id}'.");
+            $"Duplicate step id '{SanitizeVisible(step.Id)}' occurs for resource " +
+            $"'{SanitizeVisible(definition.Id)}'.");
       }
     }
 
@@ -93,9 +95,11 @@ public sealed partial class ExecutionPlanner
               ? WdemErrorCode.DetectionError
               : WdemErrorCode.ProviderError,
           "Provider plan contradicts the compliance evaluation.",
-          $"The compliance evaluator returned '{evaluatedCompliance}' but the provider returned '{plan.Compliance}'.")
+          SanitizeVisible(
+              $"The compliance evaluator returned '{evaluatedCompliance}' but the provider " +
+              $"returned '{plan.Compliance}'."))
       {
-        ResourceId = definition.Id,
+        ResourceId = NormalizeResourceId(definition.Id),
         SuggestedAction = "Detect the resource again and review the provider implementation."
       };
     }
@@ -167,12 +171,14 @@ public sealed partial class ExecutionPlanner
             node is null ||
             !seen.Add(id))
         {
-          return MalformedGraph($"Resource '{id}' is missing from the graph or occurs in multiple layers.");
+          return MalformedGraph(
+              $"Resource '{SanitizeVisible(id)}' is missing from the graph or occurs in multiple layers.");
         }
 
         if (!IdComparer.Equals(node.Definition.Id, id))
         {
-          return MalformedGraph($"Resource '{id}' does not match its definition identity.");
+          return MalformedGraph(
+              $"Resource '{SanitizeVisible(id)}' does not match its definition identity.");
         }
 
         if (string.IsNullOrWhiteSpace(node.Definition.Type) ||
@@ -198,12 +204,14 @@ public sealed partial class ExecutionPlanner
                 !graph.Nodes.ContainsKey(dependency) ||
                 (!completed.Contains(dependency) && !current.Contains(dependency))))
         {
-          return MalformedGraph($"Resource '{id}' has a missing or incorrectly ordered dependency.");
+          return MalformedGraph(
+              $"Resource '{SanitizeVisible(id)}' has a missing or incorrectly ordered dependency.");
         }
 
         if (node.Definition.Dependencies.Any(current.Contains))
         {
-          return MalformedGraph($"Resource '{id}' depends on a resource in the same graph layer.");
+          return MalformedGraph(
+              $"Resource '{SanitizeVisible(id)}' depends on a resource in the same graph layer.");
         }
       }
 
@@ -217,8 +225,8 @@ public sealed partial class ExecutionPlanner
 
   private static StructuredError MalformedGraph(string detail) => new(
       WdemErrorCode.DependencyError,
-      "The resource graph is not a valid topological plan.",
-      detail)
+      SanitizeVisible("The resource graph is not a valid topological plan."),
+      SanitizeVisible(detail))
   {
     SuggestedAction = "Rebuild the resource graph and create a new plan."
   };
