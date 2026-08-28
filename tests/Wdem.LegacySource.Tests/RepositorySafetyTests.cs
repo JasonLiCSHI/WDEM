@@ -42,6 +42,21 @@ public class RepositorySafetyTests
     Assert.Contains("throw", contents, StringComparison.OrdinalIgnoreCase);
   }
 
+  [Fact]
+  public void ProvenanceRemoteScript_EnforcesWdemOriginForFetchAndPush()
+  {
+    var contents = File.ReadAllText(Path.Combine(
+        GetRepositoryRoot(),
+        "tools",
+        "Configure-WinHomeProvenanceRemotes.ps1"));
+
+    Assert.Contains("$originUrl = 'https://github.com/JasonLiCSHI/WDEM.git'", contents);
+    Assert.Contains("remote set-url origin $originUrl", contents);
+    Assert.Contains("remote set-url --push origin $originUrl", contents);
+    Assert.Contains("$originFetchUrl", contents);
+    Assert.Contains("$originPushUrl", contents);
+  }
+
   private static string GetRepositoryRoot()
   {
     for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)

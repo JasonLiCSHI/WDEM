@@ -1352,8 +1352,8 @@ capabilities:
             {
                 new GitHubAsset
                 {
-                    Name = "winhome-win-x64.zip",
-                    BrowserDownloadUrl = "https://github.com/example/releases/download/v1.2.3/winhome-win-x64.zip"
+                    Name = "WDEM-win-x64.zip",
+                    BrowserDownloadUrl = "https://github.com/JasonLiCSHI/WDEM/releases/download/v1.2.3/WDEM-win-x64.zip"
                 }
             }
     };
@@ -1366,6 +1366,10 @@ capabilities:
     Assert.Equal(original.Name, deserialized.Name);
     Assert.Equal(original.Body, deserialized.Body);
     Assert.Single(deserialized.Assets);
+    Assert.Equal("WDEM-win-x64.zip", deserialized.Assets[0].Name);
+    Assert.Equal(
+        "https://github.com/JasonLiCSHI/WDEM/releases/download/v1.2.3/WDEM-win-x64.zip",
+        deserialized.Assets[0].BrowserDownloadUrl);
     Assert.Equal(original.Assets[0].Name, deserialized.Assets[0].Name);
     Assert.Equal(original.Assets[0].BrowserDownloadUrl, deserialized.Assets[0].BrowserDownloadUrl);
   }
