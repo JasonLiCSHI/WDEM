@@ -5,11 +5,33 @@ environment-management product under active development.
 
 ## Current status
 
-The product boundary is being established around `Wdem.Core`. Source-derived
-implementation remains available during the transition as the
-`Wdem.LegacySource` library. WDEM does not publish a product executable and
-does not make a long-term compatibility commitment for the transition
-command-line interface.
+`Wdem.Cli.exe` is the sole supported command-line surface for managing a
+developer environment. It is profile-driven; transition source remains an
+internal library and does not provide a supported executable or command
+compatibility contract.
+
+## Command line
+
+Run the CLI from the build output, or use `dotnet run` while developing:
+
+```powershell
+dotnet run --project src/Wdem.Cli -- inspect --profile profiles/csharp-developer.yaml --json
+dotnet run --project src/Wdem.Cli -- apply --profile profiles/csharp-developer.yaml --select resharper --max-concurrency 4
+```
+
+The supported grammar is:
+
+```text
+wdem inspect --profile <file> [--select <resourceId> ...] [--json]
+wdem apply --profile <file> [--select <resourceId> ...] [--max-concurrency 1..32] [--json]
+wdem retry --run <guid> --resource <resourceId> ... [--json]
+wdem resume --run <guid> [--json]
+wdem runs list [--json]
+```
+
+`--json` writes newline-delimited JSON. A successful run exits with `0`;
+profile or plan validation errors use `2`, execution failures use `3`, and
+cancellation uses `130`.
 
 ## Build and test
 
