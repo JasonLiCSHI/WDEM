@@ -34,6 +34,9 @@ public sealed record ExecutionRun
   public required ExecutionState State { get; init; }
   public ExecutionOutcome? Outcome { get; init; }
   public Guid? RetriedFromRunId { get; init; }
+  public long Revision { get; init; }
+  public Guid? RecoveryClaimId { get; init; }
+  public DateTimeOffset? RecoveryClaimedAtUtc { get; init; }
   public required MachineInformation Machine { get; init; }
   public ResourceGraph? Graph { get; init; }
   public ExecutionPlan? Plan { get; init; }

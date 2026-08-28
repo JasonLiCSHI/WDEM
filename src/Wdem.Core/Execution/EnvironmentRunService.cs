@@ -14,6 +14,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
 {
   private static readonly StringComparer IdComparer = StringComparer.OrdinalIgnoreCase;
   private static readonly TimeSpan PersistenceTimeout = TimeSpan.FromSeconds(10);
+  private static readonly TimeSpan RecoveryClaimLease = TimeSpan.FromMinutes(5);
   private readonly IProfileCatalog _profiles;
   private readonly ResourceGraphBuilder _graphBuilder;
   private readonly IResourceProviderRegistry _providers;
@@ -22,6 +23,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
   private readonly IResourceScheduler _scheduler;
   private readonly IExecutionRunStore _runStore;
   private readonly IResourceApplyDispatcher _dispatcher;
+  private readonly TimeProvider _timeProvider;
 
   public EnvironmentRunService(
       IProfileCatalog profiles,
@@ -31,7 +33,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       IExecutionPlanner planner,
       IResourceScheduler scheduler,
       IExecutionRunStore runStore,
-      IResourceApplyDispatcher dispatcher)
+      IResourceApplyDispatcher dispatcher,
+      TimeProvider? timeProvider = null)
   {
     _profiles = profiles ?? throw new ArgumentNullException(nameof(profiles));
     _graphBuilder = graphBuilder ?? throw new ArgumentNullException(nameof(graphBuilder));
@@ -42,6 +45,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     _scheduler = scheduler ?? throw new ArgumentNullException(nameof(scheduler));
     _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
     _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
+    _timeProvider = timeProvider ?? TimeProvider.System;
   }
 
   public Task<ExecutionRun> InspectAsync(
@@ -86,8 +90,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       CancellationToken cancellationToken)
   {
     var runs = await _runStore.ListAsync(cancellationToken).ConfigureAwait(false);
+    var now = _timeProvider.GetUtcNow();
     return runs
-        .Where(IsRecoverableState)
+        .Where(run => IsRecoverableState(run) && !HasActiveRecoveryClaim(run, now))
         .Select(run => new RecoveryCandidate
         {
           RunId = run.RunId,
@@ -101,11 +106,12 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
   }
 
   public async Task<ExecutionRun> RecoverAsync(
-      Guid priorRunId,
-      CancellationToken cancellationToken)
+    Guid priorRunId,
+    CancellationToken cancellationToken)
   {
     var prior = await GetRequiredRunAsync(priorRunId, cancellationToken).ConfigureAwait(false);
-    if (!IsRecoverableState(prior))
+    var now = _timeProvider.GetUtcNow();
+    if (!IsRecoverableState(prior) || HasActiveRecoveryClaim(prior, now))
     {
       throw new InvalidOperationException(
           $"Execution run '{priorRunId:D}' is not eligible for recovery.");
@@ -118,26 +124,62 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           $"Execution run '{priorRunId:D}' has no remaining resources to recover.");
     }
 
+    var claimed = prior with
+    {
+      Revision = checked(prior.Revision + 1),
+      RecoveryClaimId = Guid.NewGuid(),
+      RecoveryClaimedAtUtc = now
+    };
+    if (!await _runStore.TrySaveAsync(
+            claimed,
+            prior.Revision,
+            prior.RecoveryClaimId,
+            cancellationToken).ConfigureAwait(false))
+    {
+      throw new InvalidOperationException(
+          $"Execution run '{priorRunId:D}' is no longer available for recovery.");
+    }
+
     var request = new RunRequest(
-        prior.ProfileSourcePath,
-        prior.SelectedOptionalResourceIds,
-        RetriedFromRunId: prior.RunId);
-    var recovered = await ExecuteFreshAsync(
-        request,
-        RunMode.Apply,
-        remaining,
-        cancellationToken).ConfigureAwait(false);
+        claimed.ProfileSourcePath,
+        claimed.SelectedOptionalResourceIds,
+        RetriedFromRunId: claimed.RunId);
+    ExecutionRun recovered;
+    try
+    {
+      recovered = await FindSuccessfulRecoveryReplacementAsync(
+          claimed.RunId,
+          remaining,
+          cancellationToken).ConfigureAwait(false) ??
+          await ExecuteFreshAsync(
+              request,
+              RunMode.Apply,
+              remaining,
+              cancellationToken).ConfigureAwait(false);
+    }
+    catch (Exception executionException)
+    {
+      try
+      {
+        await ReleaseRecoveryClaimAsync(claimed).ConfigureAwait(false);
+      }
+      catch (Exception releaseException)
+      {
+        executionException.Data["RecoveryClaimReleaseException"] = releaseException;
+      }
+
+      throw;
+    }
+
     if (recovered.State == ExecutionState.Completed &&
         recovered.Outcome == ExecutionOutcome.Succeeded)
     {
-      if (prior.State == ExecutionState.Completed)
-      {
-        await AcknowledgeRestartResourcesAsync(prior, remaining).ConfigureAwait(false);
-      }
-      else
-      {
-        await CompleteSupersededRunAsync(prior, recovered.RunId).ConfigureAwait(false);
-      }
+      await CompleteRecoveryClaimAsync(claimed, recovered.RunId, remaining)
+          .ConfigureAwait(false);
+    }
+    else
+    {
+      await ReleaseRecoveryClaimAsync(claimed).ConfigureAwait(false);
     }
 
     return recovered;
@@ -146,11 +188,41 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
   public async Task AbandonAsync(Guid priorRunId, CancellationToken cancellationToken)
   {
     var prior = await GetRequiredRunAsync(priorRunId, cancellationToken).ConfigureAwait(false);
+    if (HasActiveRecoveryClaim(prior, _timeProvider.GetUtcNow()))
+    {
+      throw new InvalidOperationException(
+          $"Execution run '{priorRunId:D}' is currently claimed for recovery.");
+    }
+
     if (prior.State == ExecutionState.Completed)
     {
-      await AcknowledgeRestartResourcesAsync(
-          prior,
-          PendingResourceIds(prior)).ConfigureAwait(false);
+      var pending = PendingResourceIds(prior);
+      var acknowledged = prior.AcknowledgedRestartResourceIds
+          .Concat(prior.ResourceResults.Values
+              .Where(result => pending.Contains(result.ResourceId) &&
+                  result.RestartRequirement != RestartPolicy.NoRestart)
+              .Select(result => result.ResourceId))
+          .ToHashSet(IdComparer);
+      if (acknowledged.SetEquals(prior.AcknowledgedRestartResourceIds))
+      {
+        return;
+      }
+
+      var updated = prior with
+      {
+        Revision = checked(prior.Revision + 1),
+        AcknowledgedRestartResourceIds = acknowledged
+      };
+      if (!await TryPersistClaimTransitionAsync(
+              updated,
+              prior.Revision,
+              prior.RecoveryClaimId)
+          .ConfigureAwait(false))
+      {
+        throw new InvalidOperationException(
+            $"Execution run '{priorRunId:D}' is no longer available to abandon.");
+      }
+
       return;
     }
 
@@ -179,14 +251,24 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
             .Where(result => result.RestartRequirement != RestartPolicy.NoRestart)
             .Select(result => result.ResourceId))
         .ToHashSet(IdComparer);
-    await PersistTerminalAsync(prior with
+    var abandoned = prior with
     {
+      Revision = checked(prior.Revision + 1),
       State = ExecutionState.Completed,
       Outcome = ExecutionOutcome.Cancelled,
       EndedAtUtc = endedAt,
       ResourceResults = results,
       AcknowledgedRestartResourceIds = acknowledgedRestartResourceIds
-    }).ConfigureAwait(false);
+    };
+    if (!await TryPersistClaimTransitionAsync(
+            abandoned,
+            prior.Revision,
+            prior.RecoveryClaimId)
+        .ConfigureAwait(false))
+    {
+      throw new InvalidOperationException(
+          $"Execution run '{priorRunId:D}' is no longer available to abandon.");
+    }
   }
 
   private async Task<ExecutionRun> ExecuteFreshAsync(
@@ -698,32 +780,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     return ids.ToFrozenSet(IdComparer);
   }
 
-  private async Task AcknowledgeRestartResourcesAsync(
+  private static ExecutionRun CompleteSupersededRun(
       ExecutionRun run,
-      IReadOnlySet<string> resourceIds)
-  {
-    var acknowledged = run.AcknowledgedRestartResourceIds.ToHashSet(IdComparer);
-    foreach (var result in run.ResourceResults.Values)
-    {
-      if (resourceIds.Contains(result.ResourceId) &&
-          result.RestartRequirement != RestartPolicy.NoRestart)
-      {
-        acknowledged.Add(result.ResourceId);
-      }
-    }
-
-    if (acknowledged.SetEquals(run.AcknowledgedRestartResourceIds))
-    {
-      return;
-    }
-
-    await PersistTerminalAsync(run with
-    {
-      AcknowledgedRestartResourceIds = acknowledged
-    }).ConfigureAwait(false);
-  }
-
-  private async Task CompleteSupersededRunAsync(ExecutionRun run, Guid replacementRunId)
+      Guid replacementRunId)
   {
     var endedAt = DateTimeOffset.UtcNow;
     var results = run.ResourceResults.ToDictionary(
@@ -751,19 +810,101 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
             .Where(result => result.RestartRequirement != RestartPolicy.NoRestart)
             .Select(result => result.ResourceId))
         .ToHashSet(IdComparer);
-    await PersistTerminalAsync(run with
+    return run with
     {
       State = ExecutionState.Completed,
       Outcome = ExecutionOutcome.Cancelled,
       EndedAtUtc = endedAt,
       ResourceResults = results,
       AcknowledgedRestartResourceIds = acknowledgedRestartResourceIds
-    }).ConfigureAwait(false);
+    };
+  }
+
+  private async Task CompleteRecoveryClaimAsync(
+      ExecutionRun claimed,
+      Guid replacementRunId,
+      IReadOnlySet<string> resourceIds)
+  {
+    var terminal = claimed.State == ExecutionState.Completed
+        ? claimed with
+        {
+          AcknowledgedRestartResourceIds = claimed.AcknowledgedRestartResourceIds
+              .Concat(claimed.ResourceResults.Values
+                  .Where(result => resourceIds.Contains(result.ResourceId) &&
+                      result.RestartRequirement != RestartPolicy.NoRestart)
+                  .Select(result => result.ResourceId))
+              .ToHashSet(IdComparer)
+        }
+        : CompleteSupersededRun(claimed, replacementRunId);
+    terminal = terminal with
+    {
+      Revision = checked(claimed.Revision + 1),
+      RecoveryClaimId = null,
+      RecoveryClaimedAtUtc = null
+    };
+    if (!await TryPersistClaimTransitionAsync(
+            terminal,
+            claimed.Revision,
+            claimed.RecoveryClaimId)
+        .ConfigureAwait(false))
+    {
+      throw new InvalidOperationException(
+          $"Recovery claim for run '{claimed.RunId:D}' is no longer current.");
+    }
+  }
+
+  private async Task<ExecutionRun?> FindSuccessfulRecoveryReplacementAsync(
+      Guid priorRunId,
+      IReadOnlySet<string> resourceIds,
+      CancellationToken cancellationToken)
+  {
+    var runs = await _runStore.ListAsync(cancellationToken).ConfigureAwait(false);
+    return runs
+        .Where(run => run.RetriedFromRunId == priorRunId &&
+            run.State == ExecutionState.Completed &&
+            run.Outcome == ExecutionOutcome.Succeeded &&
+            resourceIds.All(run.ResourceResults.ContainsKey))
+        .OrderBy(run => run.StartedAtUtc)
+        .ThenBy(run => run.RunId)
+        .FirstOrDefault();
+  }
+
+  private async Task ReleaseRecoveryClaimAsync(ExecutionRun claimed)
+  {
+    var released = claimed with
+    {
+      Revision = checked(claimed.Revision + 1),
+      RecoveryClaimId = null,
+      RecoveryClaimedAtUtc = null
+    };
+    await TryPersistClaimTransitionAsync(
+        released,
+        claimed.Revision,
+        claimed.RecoveryClaimId).ConfigureAwait(false);
+  }
+
+  private async Task<bool> TryPersistClaimTransitionAsync(
+      ExecutionRun run,
+      long expectedRevision,
+      Guid? expectedRecoveryClaimId)
+  {
+    using var timeout = new CancellationTokenSource(PersistenceTimeout);
+    return await _runStore.TrySaveAsync(
+        run,
+        expectedRevision,
+        expectedRecoveryClaimId,
+        timeout.Token)
+        .ConfigureAwait(false);
   }
 
   private static bool IsRecoverableState(ExecutionRun run) =>
       run.State is ExecutionState.Pending or ExecutionState.Ready or ExecutionState.Running ||
       run.RestartRequirements.Count > 0 && PendingResourceIds(run).Count > 0;
+
+  private static bool HasActiveRecoveryClaim(ExecutionRun run, DateTimeOffset now) =>
+      run.RecoveryClaimId is not null &&
+      run.RecoveryClaimedAtUtc is { } claimedAt &&
+      claimedAt + RecoveryClaimLease > now;
 
   private async Task<ExecutionRun> GetRequiredRunAsync(
       Guid runId,

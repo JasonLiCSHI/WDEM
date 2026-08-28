@@ -1102,6 +1102,33 @@ public sealed class EnvironmentRunServiceTests
       return Task.CompletedTask;
     }
 
+    public Task<bool> TrySaveAsync(
+        ExecutionRun run,
+        long expectedRevision,
+        Guid? expectedRecoveryClaimId,
+        CancellationToken cancellationToken)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      lock (_runs)
+      {
+        if (!_runs.TryGetValue(run.RunId, out var current))
+        {
+          throw new KeyNotFoundException(
+              $"Execution run '{run.RunId:D}' does not exist.");
+        }
+
+        if (current.Revision != expectedRevision ||
+            current.RecoveryClaimId != expectedRecoveryClaimId)
+        {
+          return Task.FromResult(false);
+        }
+
+        _runs[run.RunId] = run;
+        SavedSnapshots.Add(run);
+        return Task.FromResult(true);
+      }
+    }
+
     public Task AppendLogAsync(
         Guid runId,
         RunLogEntry entry,

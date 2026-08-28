@@ -133,7 +133,53 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
         .ConfigureAwait(false);
     var path = SnapshotPath(run.RunId);
     EnsureRunExists(run.RunId, path);
+    var current = await ReadSnapshotAsync(run.RunId, cancellationToken).ConfigureAwait(false) ??
+        throw new KeyNotFoundException($"Execution run '{run.RunId:D}' does not exist.");
+    if (current.Revision != run.Revision)
+    {
+      throw new InvalidOperationException(
+          $"Execution run '{run.RunId:D}' revision {run.Revision} is stale; " +
+          $"the current revision is {current.Revision}.");
+    }
+
     await WriteSnapshotAsync(path, Redact(run), cancellationToken).ConfigureAwait(false);
+  }
+
+  public async Task<bool> TrySaveAsync(
+      ExecutionRun run,
+      long expectedRevision,
+      Guid? expectedRecoveryClaimId,
+      CancellationToken cancellationToken)
+  {
+    ArgumentNullException.ThrowIfNull(run);
+    if (expectedRevision < 0 ||
+        expectedRevision == long.MaxValue ||
+        run.Revision != expectedRevision + 1)
+    {
+      throw new ArgumentOutOfRangeException(
+          nameof(expectedRevision),
+          expectedRevision,
+          "The replacement run revision must immediately follow the expected revision.");
+    }
+
+    ValidateRunForPersistence(run);
+    cancellationToken.ThrowIfCancellationRequested();
+    await using var runLock = await AcquireRunLockForExistingSnapshotAsync(
+        run.RunId,
+        cancellationToken)
+        .ConfigureAwait(false);
+    var path = SnapshotPath(run.RunId);
+    EnsureRunExists(run.RunId, path);
+    var current = await ReadSnapshotAsync(run.RunId, cancellationToken).ConfigureAwait(false) ??
+        throw new KeyNotFoundException($"Execution run '{run.RunId:D}' does not exist.");
+    if (current.Revision != expectedRevision ||
+        current.RecoveryClaimId != expectedRecoveryClaimId)
+    {
+      return false;
+    }
+
+    await WriteSnapshotAsync(path, Redact(run), cancellationToken).ConfigureAwait(false);
+    return true;
   }
 
   public async Task AppendLogAsync(
@@ -811,6 +857,20 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
 
   private static void ValidateRunForPersistence(ExecutionRun run)
   {
+    if (run.Revision < 0)
+    {
+      throw new ArgumentException(
+          "An execution run revision cannot be negative.",
+          nameof(run));
+    }
+
+    if (run.RecoveryClaimId.HasValue != run.RecoveryClaimedAtUtc.HasValue)
+    {
+      throw new ArgumentException(
+          "A recovery claim requires both an identifier and a claim timestamp.",
+          nameof(run));
+    }
+
     ValidateEnum(run.Mode, "run mode");
     ValidateEnum(run.State, "run state");
     ValidateOptionalEnum(run.Outcome, "run outcome");

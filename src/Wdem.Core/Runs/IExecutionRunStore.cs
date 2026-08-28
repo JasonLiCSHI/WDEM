@@ -11,6 +11,11 @@ public interface IExecutionRunStore
   Task<IReadOnlyList<ExecutionRun>> ListAsync(CancellationToken cancellationToken);
   Task<IReadOnlyList<ExecutionRun>> ListIncompleteAsync(CancellationToken cancellationToken);
   Task SaveAsync(ExecutionRun run, CancellationToken cancellationToken);
+  Task<bool> TrySaveAsync(
+      ExecutionRun run,
+      long expectedRevision,
+      Guid? expectedRecoveryClaimId,
+      CancellationToken cancellationToken);
   Task AppendLogAsync(
       Guid runId,
       RunLogEntry entry,

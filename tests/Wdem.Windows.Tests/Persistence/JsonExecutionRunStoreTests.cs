@@ -72,6 +72,64 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task CreateAsync_RoundTripsRecoveryClaimWithoutWeakeningRedaction()
+  {
+    var claimId = Guid.NewGuid();
+    var claimedAt = new DateTimeOffset(2030, 1, 2, 3, 4, 5, TimeSpan.Zero);
+    var run = SampleRun() with
+    {
+      Revision = 7,
+      RecoveryClaimId = claimId,
+      RecoveryClaimedAtUtc = claimedAt,
+      AcknowledgedRestartResourceIds = new HashSet<string>(
+          ["token=acknowledgement-secret"],
+          StringComparer.OrdinalIgnoreCase),
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = SampleResourceResult() with
+        {
+          DetectedBefore = MissingEvidence("password=evidence-secret")
+        }
+      }
+    };
+
+    await _store.CreateAsync(run, CancellationToken.None);
+
+    var disk = await File.ReadAllTextAsync(_store.SnapshotPath(run.RunId));
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+    Assert.Equal(7, restored!.Revision);
+    Assert.Equal(claimId, restored.RecoveryClaimId);
+    Assert.Equal(claimedAt, restored.RecoveryClaimedAtUtc);
+    Assert.Contains("token=***", restored.AcknowledgedRestartResourceIds);
+    Assert.Equal(
+        "password=***",
+        restored.ResourceResults["git"].DetectedBefore!.Evidence["detail"]);
+    Assert.DoesNotContain("acknowledgement-secret", disk, StringComparison.Ordinal);
+    Assert.DoesNotContain("evidence-secret", disk, StringComparison.Ordinal);
+  }
+
+  [Theory]
+  [InlineData(-1, false, false)]
+  [InlineData(0, true, false)]
+  [InlineData(0, false, true)]
+  public async Task CreateAsync_RejectsInvalidRecoveryClaimMetadata(
+      long revision,
+      bool includeClaimId,
+      bool includeClaimedAt)
+  {
+    var run = SampleRun() with
+    {
+      Revision = revision,
+      RecoveryClaimId = includeClaimId ? Guid.NewGuid() : null,
+      RecoveryClaimedAtUtc = includeClaimedAt ? DateTimeOffset.UtcNow : null
+    };
+
+    await Assert.ThrowsAsync<ArgumentException>(() =>
+        _store.CreateAsync(run, CancellationToken.None));
+    Assert.False(File.Exists(_store.SnapshotPath(run.RunId)));
+  }
+
+  [Fact]
   public async Task AppendLogAsync_RedactsStandaloneBearerWithoutConsumingDiagnosticText()
   {
     var run = SampleRun();
@@ -415,6 +473,97 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
     Assert.NotNull(restored);
     Assert.Single(restored.RestartReasons);
+  }
+
+  [Fact]
+  public async Task TrySaveAsync_RejectsTerminalizationByWrongClaimOwner()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    var claimId = Guid.NewGuid();
+    var claimed = run with
+    {
+      Revision = 1,
+      RecoveryClaimId = claimId,
+      RecoveryClaimedAtUtc = DateTimeOffset.UtcNow
+    };
+    Assert.True(await _store.TrySaveAsync(
+        claimed,
+        expectedRevision: 0,
+        expectedRecoveryClaimId: null,
+        CancellationToken.None));
+    var terminal = claimed with
+    {
+      Revision = 2,
+      State = ExecutionState.Completed,
+      Outcome = ExecutionOutcome.Cancelled,
+      EndedAtUtc = DateTimeOffset.UtcNow,
+      RecoveryClaimId = null,
+      RecoveryClaimedAtUtc = null
+    };
+
+    var saved = await _store.TrySaveAsync(
+        terminal,
+        expectedRevision: 1,
+        expectedRecoveryClaimId: Guid.NewGuid(),
+        CancellationToken.None);
+
+    var persisted = await _store.GetAsync(run.RunId, CancellationToken.None);
+    Assert.False(saved);
+    Assert.Equal(claimId, persisted!.RecoveryClaimId);
+    Assert.Equal(1, persisted.Revision);
+  }
+
+  [Fact]
+  public async Task TrySaveAsync_StaleClaimOwnerCannotOverwriteNewOwner()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    var firstClaimId = Guid.NewGuid();
+    var firstClaim = run with
+    {
+      Revision = 1,
+      RecoveryClaimId = firstClaimId,
+      RecoveryClaimedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-10)
+    };
+    Assert.True(await _store.TrySaveAsync(
+        firstClaim,
+        expectedRevision: 0,
+        expectedRecoveryClaimId: null,
+        CancellationToken.None));
+    var secondClaimId = Guid.NewGuid();
+    var secondClaim = firstClaim with
+    {
+      Revision = 2,
+      RecoveryClaimId = secondClaimId,
+      RecoveryClaimedAtUtc = DateTimeOffset.UtcNow
+    };
+    Assert.True(await _store.TrySaveAsync(
+        secondClaim,
+        expectedRevision: 1,
+        expectedRecoveryClaimId: firstClaimId,
+        CancellationToken.None));
+
+    var staleTerminal = firstClaim with
+    {
+      Revision = 2,
+      State = ExecutionState.Completed,
+      Outcome = ExecutionOutcome.Succeeded,
+      EndedAtUtc = DateTimeOffset.UtcNow,
+      RecoveryClaimId = null,
+      RecoveryClaimedAtUtc = null
+    };
+    var saved = await _store.TrySaveAsync(
+        staleTerminal,
+        expectedRevision: 1,
+        expectedRecoveryClaimId: firstClaimId,
+        CancellationToken.None);
+
+    var persisted = await _store.GetAsync(run.RunId, CancellationToken.None);
+    Assert.False(saved);
+    Assert.Equal(2, persisted!.Revision);
+    Assert.Equal(secondClaimId, persisted.RecoveryClaimId);
+    Assert.Equal(ExecutionState.Running, persisted.State);
   }
 
   [Fact]
@@ -1011,6 +1160,17 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     StartedAtUtc = DateTimeOffset.UtcNow,
     RestartRequirement = RestartPolicy.NoRestart,
     StepResults = [SampleStepResult()]
+  };
+
+  private static DetectedState MissingEvidence(string detail) => new()
+  {
+    ResourceId = "git",
+    Outcome = DetectionOutcome.Succeeded,
+    Exists = false,
+    Evidence = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+      ["detail"] = detail
+    }
   };
 
   private static StepResult SampleStepResult() => new()
