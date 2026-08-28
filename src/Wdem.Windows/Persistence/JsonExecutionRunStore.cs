@@ -18,7 +18,10 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
   private const int LogIndexRecordSize = sizeof(long) * 3;
   private static readonly UTF8Encoding Utf8WithoutBom = new(false);
   private readonly object _diagnosticsGate = new();
+  private readonly object _logIndexGate = new();
   private readonly List<StructuredError> _diagnostics = [];
+  private readonly Dictionary<string, ValidatedLogIndex> _validatedLogIndexes =
+      new(StringComparer.OrdinalIgnoreCase);
   private readonly WdemDataPaths _paths;
   private readonly LogRedactor _redactor;
   private readonly JsonSerializerOptions _snapshotJsonOptions;
@@ -75,7 +78,12 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
       return null;
     }
 
-    await using var runLock = await AcquireRunLockAsync(runId, cancellationToken)
+    var snapshotPath = SnapshotPath(runId);
+    var removeUnusedLock = !File.Exists(snapshotPath);
+    await using var runLock = await AcquireRunLockAsync(
+        runId,
+        cancellationToken,
+        deleteOnClose: removeUnusedLock)
         .ConfigureAwait(false);
     return await ReadSnapshotAsync(runId, cancellationToken).ConfigureAwait(false);
   }
@@ -128,6 +136,7 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
       CancellationToken cancellationToken)
   {
     ArgumentNullException.ThrowIfNull(entry);
+    ValidateLogEntryForPersistence(entry);
     cancellationToken.ThrowIfCancellationRequested();
     await using var runLock = await AcquireRunLockAsync(runId, cancellationToken)
         .ConfigureAwait(false);
@@ -159,6 +168,9 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
         logPath,
         new LogIndexRecord(entry.Sequence, startOffset, stream.Length),
         cancellationToken).ConfigureAwait(false);
+    RememberValidatedLogIndex(
+        logPath,
+        new LogIndexState(index.Count + 1, entry.Sequence, stream.Length));
   }
 
   public async Task<IReadOnlyList<RunLogEntry>> ReadLogPageAsync(
@@ -207,14 +219,17 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
       RespectRequiredConstructorParameters = true,
       WriteIndented = writeIndented
     };
-    options.Converters.Add(new JsonStringEnumConverter());
+    options.Converters.Add(new JsonStringEnumConverter(
+        namingPolicy: null,
+        allowIntegerValues: false));
     options.Converters.Add(new ReadOnlyStringSetJsonConverter());
     return options;
   }
 
   private async Task<FileStream> AcquireRunLockAsync(
       Guid runId,
-      CancellationToken cancellationToken)
+      CancellationToken cancellationToken,
+      bool deleteOnClose = false)
   {
     Directory.CreateDirectory(_paths.RunsDirectory);
     var lockPath = Path.Combine(_paths.RunsDirectory, $"{runId:D}.lock");
@@ -229,7 +244,8 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
             FileAccess.ReadWrite,
             FileShare.None,
             1,
-            FileOptions.Asynchronous);
+            FileOptions.Asynchronous
+                | (deleteOnClose ? FileOptions.DeleteOnClose : FileOptions.None));
       }
       catch (IOException)
       {
@@ -356,7 +372,7 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
   {
     if (!File.Exists(logPath))
     {
-      return new LogIndexState(0, 0);
+      return new LogIndexState(0, 0, 0);
     }
 
     await using var log = new FileStream(
@@ -366,43 +382,175 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
         FileShare.Read,
         4096,
         FileOptions.Asynchronous | FileOptions.WriteThrough);
+    var indexPath = logPath + ".index";
+    var state = await ValidateLogIndexAsync(log, indexPath, cancellationToken)
+        .ConfigureAwait(false);
+    if (state is null)
+    {
+      return await RebuildLogIndexAsync(log, indexPath, cancellationToken)
+          .ConfigureAwait(false);
+    }
+
+    log.Position = state.Value.IndexedLength;
     await using var index = new FileStream(
-        logPath + ".index",
+        indexPath,
         FileMode.OpenOrCreate,
-        FileAccess.ReadWrite,
+        FileAccess.Write,
         FileShare.Read,
         4096,
         FileOptions.Asynchronous | FileOptions.WriteThrough);
+    index.Position = state.Value.Count * LogIndexRecordSize;
+    var reconciled = await AppendLogTailToIndexAsync(
+        log,
+        index,
+        state.Value,
+        logPath,
+        cancellationToken).ConfigureAwait(false);
+    await FlushLogAndIndexAsync(log, index, cancellationToken).ConfigureAwait(false);
+    RememberValidatedLogIndex(logPath, reconciled);
+    return reconciled;
+  }
 
-    var completeIndexLength = index.Length - (index.Length % LogIndexRecordSize);
-    if (completeIndexLength != index.Length)
+  private async Task<LogIndexState?> ValidateLogIndexAsync(
+      FileStream log,
+      string indexPath,
+      CancellationToken cancellationToken)
+  {
+    if (!File.Exists(indexPath))
     {
-      index.SetLength(completeIndexLength);
+      return new LogIndexState(0, 0, 0);
     }
 
-    var count = completeIndexLength / LogIndexRecordSize;
+    var fingerprint = GetLogIndexFingerprint(indexPath);
+    lock (_logIndexGate)
+    {
+      if (_validatedLogIndexes.TryGetValue(indexPath, out var validated)
+          && validated.Fingerprint == fingerprint
+          && validated.State.IndexedLength <= log.Length)
+      {
+        return validated.State;
+      }
+    }
+
+    if (fingerprint.Length % LogIndexRecordSize != 0)
+    {
+      return null;
+    }
+
+    await using var index = new FileStream(
+        indexPath,
+        FileMode.Open,
+        FileAccess.Read,
+        FileShare.Read,
+        4096,
+        FileOptions.Asynchronous | FileOptions.RandomAccess);
+    var count = index.Length / LogIndexRecordSize;
     var lastSequence = 0L;
     var indexedLength = 0L;
-    if (count > 0)
+    for (var ordinal = 0L; ordinal < count; ordinal++)
     {
-      var last = await ReadLogIndexRecordAsync(index, count - 1, cancellationToken)
+      cancellationToken.ThrowIfCancellationRequested();
+      var record = await ReadLogIndexRecordAsync(index, ordinal, cancellationToken)
           .ConfigureAwait(false);
-      if (last.StartOffset < 0
-          || last.EndOffset <= last.StartOffset
-          || last.EndOffset > log.Length)
+      if (record.Sequence <= lastSequence
+          || record.StartOffset != indexedLength
+          || record.EndOffset <= record.StartOffset
+          || record.EndOffset > log.Length
+          || record.EndOffset - record.StartOffset > int.MaxValue)
       {
-        index.SetLength(0);
-        count = 0;
+        return null;
+      }
+
+      var bytes = new byte[(int)(record.EndOffset - record.StartOffset)];
+      log.Position = record.StartOffset;
+      await log.ReadExactlyAsync(bytes, cancellationToken).ConfigureAwait(false);
+      if (bytes[^1] != (byte)'\n')
+      {
+        return null;
+      }
+
+      RunLogEntry entry;
+      try
+      {
+        entry = DeserializeLogEntry(DecodeLogLine(bytes), log.Name);
+      }
+      catch (InvalidDataException)
+      {
+        return null;
+      }
+
+      if (entry.Sequence != record.Sequence)
+      {
+        return null;
+      }
+
+      lastSequence = record.Sequence;
+      indexedLength = record.EndOffset;
+    }
+
+    return new LogIndexState(count, lastSequence, indexedLength);
+  }
+
+  private async Task<LogIndexState> RebuildLogIndexAsync(
+      FileStream log,
+      string indexPath,
+      CancellationToken cancellationToken)
+  {
+    var temporaryPath = $"{indexPath}.{Guid.NewGuid():N}.tmp";
+    try
+    {
+      log.Position = 0;
+      LogIndexState rebuilt;
+      await using (var temporaryIndex = new FileStream(
+          temporaryPath,
+          FileMode.CreateNew,
+          FileAccess.Write,
+          FileShare.None,
+          4096,
+          FileOptions.Asynchronous | FileOptions.WriteThrough))
+      {
+        rebuilt = await AppendLogTailToIndexAsync(
+            log,
+            temporaryIndex,
+            new LogIndexState(0, 0, 0),
+            log.Name,
+            cancellationToken).ConfigureAwait(false);
+        await FlushLogAndIndexAsync(log, temporaryIndex, cancellationToken)
+            .ConfigureAwait(false);
+      }
+
+      cancellationToken.ThrowIfCancellationRequested();
+      if (File.Exists(indexPath))
+      {
+        File.Replace(temporaryPath, indexPath, destinationBackupFileName: null);
       }
       else
       {
-        lastSequence = last.Sequence;
-        indexedLength = last.EndOffset;
+        File.Move(temporaryPath, indexPath);
+      }
+
+      RememberValidatedLogIndex(log.Name, rebuilt);
+      return rebuilt;
+    }
+    finally
+    {
+      if (File.Exists(temporaryPath))
+      {
+        File.Delete(temporaryPath);
       }
     }
+  }
 
-    log.Position = indexedLength;
-    index.Position = count * LogIndexRecordSize;
+  private async Task<LogIndexState> AppendLogTailToIndexAsync(
+      FileStream log,
+      FileStream index,
+      LogIndexState initialState,
+      string logPath,
+      CancellationToken cancellationToken)
+  {
+    var count = initialState.Count;
+    var lastSequence = initialState.LastSequence;
+    var indexedLength = initialState.IndexedLength;
     while (log.Position < log.Length)
     {
       cancellationToken.ThrowIfCancellationRequested();
@@ -440,13 +588,38 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
       await WriteLogIndexRecordAsync(index, record, cancellationToken).ConfigureAwait(false);
       count++;
       lastSequence = entry.Sequence;
+      indexedLength = record.EndOffset;
     }
 
+    return new LogIndexState(count, lastSequence, indexedLength);
+  }
+
+  private static async Task FlushLogAndIndexAsync(
+      FileStream log,
+      FileStream index,
+      CancellationToken cancellationToken)
+  {
     await log.FlushAsync(cancellationToken).ConfigureAwait(false);
     log.Flush(flushToDisk: true);
     await index.FlushAsync(cancellationToken).ConfigureAwait(false);
     index.Flush(flushToDisk: true);
-    return new LogIndexState(count, lastSequence);
+  }
+
+  private void RememberValidatedLogIndex(string logPath, LogIndexState state)
+  {
+    var indexPath = logPath + ".index";
+    var validated = new ValidatedLogIndex(GetLogIndexFingerprint(indexPath), state);
+    lock (_logIndexGate)
+    {
+      _validatedLogIndexes[indexPath] = validated;
+    }
+  }
+
+  private static LogIndexFingerprint GetLogIndexFingerprint(string indexPath)
+  {
+    var info = new FileInfo(indexPath);
+    info.Refresh();
+    return new LogIndexFingerprint(info.Length, info.LastWriteTimeUtc.Ticks);
   }
 
   private async Task<IReadOnlyList<RunLogEntry>> ReadIndexedLogPageAsync(
@@ -599,10 +772,12 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
   {
     try
     {
-      return JsonSerializer.Deserialize<RunLogEntry>(line, _logJsonOptions)
+      var entry = JsonSerializer.Deserialize<RunLogEntry>(line, _logJsonOptions)
           ?? throw new JsonException("The log entry was null.");
+      ValidateLogEntryForPersistence(entry);
+      return entry;
     }
-    catch (JsonException exception)
+    catch (Exception exception) when (exception is JsonException or ArgumentException)
     {
       throw new InvalidDataException($"Run log '{logPath}' contains malformed NDJSON.", exception);
     }
@@ -618,6 +793,32 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
 
   private static void ValidateRunForPersistence(ExecutionRun run)
   {
+    ValidateEnum(run.Mode, "run mode");
+    ValidateEnum(run.State, "run state");
+    ValidateOptionalEnum(run.Outcome, "run outcome");
+    ValidateElements(run.SelectedOptionalResourceIds, "selected optional resource identifiers");
+    ValidateElements(run.ResourceResults.Values, "resource results");
+    ValidateElements(run.RestartReasons, "restart reasons");
+    foreach (var restartRequirement in run.RestartRequirements)
+    {
+      ValidateEnum(restartRequirement, "restart requirement");
+    }
+
+    if (run.Graph is not null)
+    {
+      ValidateGraph(run.Graph);
+    }
+
+    if (run.Plan is not null)
+    {
+      ValidatePlan(run.Plan);
+    }
+
+    foreach (var result in run.ResourceResults.Values)
+    {
+      ValidateResourceResult(result);
+    }
+
     if (run.State == ExecutionState.Completed
         && (run.Outcome is null || run.EndedAtUtc is null))
     {
@@ -635,16 +836,171 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
     }
   }
 
+  private static void ValidateGraph(ResourceGraph graph)
+  {
+    ArgumentNullException.ThrowIfNull(graph.Nodes);
+    ValidateElements(graph.Nodes.Values, "graph nodes");
+    ValidateElements(graph.TopologicalLayers, "graph layers");
+    foreach (var node in graph.Nodes.Values)
+    {
+      ValidateEnum(node.Origin, "resource origin");
+      ValidateElements(node.RequiredBy, "resource dependants");
+      ValidateDefinition(node.Definition);
+    }
+
+    foreach (var layer in graph.TopologicalLayers)
+    {
+      ValidateElements(layer.ResourceIds, "graph layer resource identifiers");
+    }
+  }
+
+  private static void ValidatePlan(ExecutionPlan plan)
+  {
+    ValidateElements(plan.Layers, "plan layers");
+    ValidateElements(plan.Resources, "planned resources");
+    ValidateElements(plan.Errors, "plan errors");
+    foreach (var layer in plan.Layers)
+    {
+      ValidateElements(layer.ResourceIds, "plan layer resource identifiers");
+    }
+
+    foreach (var resource in plan.Resources)
+    {
+      ValidateDefinition(resource.Definition);
+      ValidateEnum(resource.Origin, "planned resource origin");
+      ValidateEnum(resource.Status, "planned resource status");
+      ValidateEnum(resource.Risk, "plan risk");
+      ValidateEnum(resource.RestartPolicy, "planned resource restart policy");
+      ValidateElements(resource.Dependencies, "planned resource dependencies");
+      ValidateElements(resource.BlockedBy, "blocking resource identifiers");
+      ValidateElements(resource.Diagnostics, "planned resource diagnostics");
+      foreach (var diagnostic in resource.Diagnostics)
+      {
+        ValidateStructuredError(diagnostic);
+      }
+
+      ValidateResourcePlan(resource.ResourcePlan);
+    }
+
+    foreach (var error in plan.Errors)
+    {
+      ValidateStructuredError(error);
+    }
+  }
+
+  private static void ValidateResourcePlan(ResourcePlan plan)
+  {
+    ArgumentNullException.ThrowIfNull(plan);
+    ValidateEnum(plan.Compliance, "resource plan compliance");
+    ValidateElements(plan.Steps, "plan steps");
+    ValidateElements(plan.StructuredErrors, "resource plan errors");
+    foreach (var step in plan.Steps)
+    {
+      ValidateEnum(step.Action, "plan action");
+      ValidateEnum(step.PrivilegeRequirement, "plan step privilege requirement");
+      ValidateEnum(step.RestartPolicy, "plan step restart policy");
+    }
+
+    foreach (var error in plan.StructuredErrors)
+    {
+      ValidateStructuredError(error);
+    }
+  }
+
+  private static void ValidateDefinition(ResourceDefinition definition)
+  {
+    ArgumentNullException.ThrowIfNull(definition);
+    ValidateEnum(definition.PrivilegeRequirement, "resource privilege requirement");
+    ValidateEnum(definition.RestartPolicy, "resource restart policy");
+    ValidateElements(definition.Dependencies, "resource dependencies");
+  }
+
+  private static void ValidateResourceResult(ResourceResult result)
+  {
+    ValidateEnum(result.State, "resource result state");
+    ValidateOptionalEnum(result.Outcome, "resource result outcome");
+    ValidateOptionalEnum(result.FinalCompliance, "final compliance");
+    ValidateEnum(result.RestartRequirement, "resource restart requirement");
+    ValidateElements(result.StepResults, "step results");
+    if (result.DetectedBefore is not null)
+    {
+      ValidateDetectedState(result.DetectedBefore);
+    }
+
+    if (result.DetectedAfter is not null)
+    {
+      ValidateDetectedState(result.DetectedAfter);
+    }
+
+    if (result.Error is not null)
+    {
+      ValidateStructuredError(result.Error);
+    }
+
+    foreach (var step in result.StepResults)
+    {
+      ValidateEnum(step.State, "step result state");
+      ValidateOptionalEnum(step.Outcome, "step result outcome");
+      if (step.Error is not null)
+      {
+        ValidateStructuredError(step.Error);
+      }
+    }
+  }
+
+  private static void ValidateDetectedState(DetectedState state)
+  {
+    ValidateEnum(state.Outcome, "detection outcome");
+    ValidateElements(state.InstalledVersions, "installed versions");
+    if (state.StructuredError is not null)
+    {
+      ValidateStructuredError(state.StructuredError);
+    }
+  }
+
+  private static void ValidateStructuredError(StructuredError error) =>
+      ValidateEnum(error.Code, "structured error code");
+
+  private static void ValidateLogEntryForPersistence(RunLogEntry entry)
+  {
+    ValidateEnum(entry.Level, "log level");
+    if (entry.Error is not null)
+    {
+      ValidateStructuredError(entry.Error);
+    }
+  }
+
+  private static void ValidateEnum<TEnum>(TEnum value, string field)
+      where TEnum : struct, Enum
+  {
+    if (!Enum.IsDefined(value))
+    {
+      throw new ArgumentException($"The persisted {field} has an undefined value.");
+    }
+  }
+
+  private static void ValidateOptionalEnum<TEnum>(TEnum? value, string field)
+      where TEnum : struct, Enum
+  {
+    if (value is TEnum defined)
+    {
+      ValidateEnum(defined, field);
+    }
+  }
+
+  private static void ValidateElements<T>(IEnumerable<T> values, string field)
+  {
+    ArgumentNullException.ThrowIfNull(values);
+    if (values.Any(value => value is null))
+    {
+      throw new ArgumentException($"The persisted {field} cannot contain null elements.");
+    }
+  }
+
   private static ExecutionRun SnapshotRestoredRun(ExecutionRun run) => run with
   {
     Graph = run.Graph is null ? null : SnapshotRestoredGraph(run.Graph),
-    Plan = run.Plan is null ? null : run.Plan with
-    {
-      Resources = run.Plan.Resources.Select(resource => resource with
-      {
-        Definition = SnapshotRestoredDefinition(resource.Definition)
-      }).ToArray()
-    }
+    Plan = run.Plan is null ? null : SnapshotRestoredPlan(run.Plan)
   };
 
   private static ResourceGraph SnapshotRestoredGraph(ResourceGraph graph) => graph with
@@ -656,15 +1012,47 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
           Definition = SnapshotRestoredDefinition(pair.Value.Definition),
           RequiredBy = pair.Value.RequiredBy.ToFrozenSet(StringComparer.OrdinalIgnoreCase)
         },
-        StringComparer.OrdinalIgnoreCase)
+        StringComparer.OrdinalIgnoreCase),
+    TopologicalLayers = SnapshotRestoredLayers(graph.TopologicalLayers)
   };
+
+  private static ExecutionPlan SnapshotRestoredPlan(ExecutionPlan plan) => plan with
+  {
+    Layers = SnapshotRestoredLayers(plan.Layers),
+    Resources = ReadOnly(plan.Resources.Select(SnapshotRestoredResource)),
+    Errors = ReadOnly(plan.Errors)
+  };
+
+  private static PlannedResource SnapshotRestoredResource(PlannedResource resource) =>
+      resource with
+      {
+        Definition = SnapshotRestoredDefinition(resource.Definition),
+        Dependencies = ReadOnly(resource.Dependencies),
+        ResourcePlan = resource.ResourcePlan with
+        {
+          Steps = ReadOnly(resource.ResourcePlan.Steps),
+          StructuredErrors = ReadOnly(resource.ResourcePlan.StructuredErrors)
+        },
+        BlockedBy = ReadOnly(resource.BlockedBy),
+        Diagnostics = ReadOnly(resource.Diagnostics)
+      };
+
+  private static IReadOnlyList<ResourceGraphLayer> SnapshotRestoredLayers(
+      IEnumerable<ResourceGraphLayer> layers) =>
+      ReadOnly(layers.Select(layer => layer with
+      {
+        ResourceIds = ReadOnly(layer.ResourceIds)
+      }));
 
   private static ResourceDefinition SnapshotRestoredDefinition(ResourceDefinition definition) =>
       definition with
       {
-        Dependencies = Array.AsReadOnly(definition.Dependencies.ToArray()),
+        Dependencies = ReadOnly(definition.Dependencies),
         Parameters = definition.Parameters.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase)
       };
+
+  private static IReadOnlyList<T> ReadOnly<T>(IEnumerable<T> values) =>
+      Array.AsReadOnly(values.ToArray());
 
   private ExecutionRun Redact(ExecutionRun run) => run with
   {
@@ -795,7 +1183,16 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
         StringComparer.OrdinalIgnoreCase)
   };
 
-  private readonly record struct LogIndexState(long Count, long LastSequence);
+  private readonly record struct LogIndexState(
+      long Count,
+      long LastSequence,
+      long IndexedLength);
+
+  private readonly record struct LogIndexFingerprint(long Length, long LastWriteTicks);
+
+  private readonly record struct ValidatedLogIndex(
+      LogIndexFingerprint Fingerprint,
+      LogIndexState State);
 
   private readonly record struct LogIndexRecord(
       long Sequence,

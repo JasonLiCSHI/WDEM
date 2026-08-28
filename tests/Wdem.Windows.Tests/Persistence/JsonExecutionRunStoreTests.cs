@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Wdem.Core.Execution;
@@ -113,6 +114,35 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task AppendLogAsync_RedactsShortBearerTokensFromMessageAndErrorOnDisk()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    await _store.AppendLogAsync(
+        run.RunId,
+        SampleLog(1) with
+        {
+          Message = "Bearer abc123",
+          Error = new StructuredError(
+              WdemErrorCode.ProviderError,
+              "Bearer hunter2",
+              "Bearer detail1")
+        },
+        CancellationToken.None);
+
+    var disk = await File.ReadAllTextAsync(_store.LogPath(run.RunId));
+    var entry = Assert.Single(await _store.ReadLogPageAsync(
+        run.RunId, 0, 10, CancellationToken.None));
+
+    Assert.DoesNotContain("abc123", disk, StringComparison.Ordinal);
+    Assert.DoesNotContain("hunter2", disk, StringComparison.Ordinal);
+    Assert.DoesNotContain("detail1", disk, StringComparison.Ordinal);
+    Assert.Equal("Bearer ***", entry.Message);
+    Assert.DoesNotContain("hunter2", entry.Error!.Summary, StringComparison.Ordinal);
+    Assert.DoesNotContain("detail1", entry.Error.Detail, StringComparison.Ordinal);
+  }
+
+  [Fact]
   public async Task AppendLogAsync_PreservesBearerProtocolDiagnosticOnDisk()
   {
     var run = SampleRun();
@@ -184,6 +214,63 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     Assert.Equal("user", parameters["SCOPE"]);
     Assert.True(((ICollection<KeyValuePair<string, ResolvedResource>>)nodes).IsReadOnly);
     Assert.True(((ICollection<KeyValuePair<string, string?>>)parameters).IsReadOnly);
+  }
+
+  [Fact]
+  public async Task GetAsync_RestoresAllNestedPlanAndGraphCollectionsAsReadOnly()
+  {
+    var diagnostic = new StructuredError(
+        WdemErrorCode.ProviderError,
+        "Provider unavailable",
+        "Provider unavailable");
+    var definition = SampleDefinition() with { Dependencies = ["dependency"] };
+    var plan = SamplePlan();
+    var plannedResource = Assert.Single(plan.Resources) with
+    {
+      Definition = definition,
+      Dependencies = ["dependency"],
+      BlockedBy = ["blocker"],
+      Diagnostics = [diagnostic],
+      ResourcePlan = Assert.Single(plan.Resources).ResourcePlan with
+      {
+        StructuredErrors = [diagnostic]
+      }
+    };
+    var run = SampleRun() with
+    {
+      Graph = new ResourceGraph(
+          new Dictionary<string, ResolvedResource>(StringComparer.OrdinalIgnoreCase)
+          {
+            ["git"] = new(
+                definition,
+                ResourceOrigin.Required,
+                new HashSet<string>(["consumer"], StringComparer.OrdinalIgnoreCase))
+          },
+          [new ResourceGraphLayer(0, ["git"])]),
+      Plan = plan with
+      {
+        Layers = [new ResourceGraphLayer(0, ["git"])],
+        Resources = [plannedResource],
+        Errors = [diagnostic]
+      }
+    };
+    await _store.CreateAsync(run, CancellationToken.None);
+
+    var restored = (await _store.GetAsync(run.RunId, CancellationToken.None))!;
+    var restoredResource = Assert.Single(restored.Plan!.Resources);
+
+    AssertReadOnly(restored.Graph!.TopologicalLayers);
+    AssertReadOnly(Assert.Single(restored.Graph.TopologicalLayers).ResourceIds);
+    AssertReadOnly(restored.Plan.Layers);
+    AssertReadOnly(Assert.Single(restored.Plan.Layers).ResourceIds);
+    AssertReadOnly(restored.Plan.Resources);
+    AssertReadOnly(restored.Plan.Errors);
+    AssertReadOnly(restoredResource.Dependencies);
+    AssertReadOnly(restoredResource.BlockedBy);
+    AssertReadOnly(restoredResource.Diagnostics);
+    AssertReadOnly(restoredResource.Definition.Dependencies);
+    AssertReadOnly(restoredResource.ResourcePlan.Steps);
+    AssertReadOnly(restoredResource.ResourcePlan.StructuredErrors);
   }
 
   [Fact]
@@ -293,6 +380,28 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
         _store.AppendLogAsync(run.RunId, SampleLog(1), CancellationToken.None));
   }
 
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task AppendLogAsync_RejectsUndefinedEnumsBeforeWriting(bool invalidErrorCode)
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    var entry = invalidErrorCode
+        ? SampleLog(1) with
+        {
+          Error = new StructuredError(
+              (WdemErrorCode)999,
+              "Invalid code",
+              "Invalid code")
+        }
+        : SampleLog(1) with { Level = (ProviderLogLevel)999 };
+
+    await Assert.ThrowsAsync<ArgumentException>(() =>
+        _store.AppendLogAsync(run.RunId, entry, CancellationToken.None));
+    Assert.False(File.Exists(_store.LogPath(run.RunId)));
+  }
+
   [Fact]
   public async Task AppendLogAsync_CoordinatesLogAndIndexAcrossStoreInstances()
   {
@@ -382,6 +491,57 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Theory]
+  [InlineData("sequence")]
+  [InlineData("start")]
+  [InlineData("end")]
+  public async Task ReadLogPageAsync_AtomicallyRebuildsAnyCorruptCompleteIndexRecord(
+      string corruptField)
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    foreach (var sequence in Enumerable.Range(1, 3))
+    {
+      await _store.AppendLogAsync(run.RunId, SampleLog(sequence), CancellationToken.None);
+    }
+
+    const int recordSize = sizeof(long) * 3;
+    var indexPath = _store.LogIndexPath(run.RunId);
+    var indexBytes = await File.ReadAllBytesAsync(indexPath);
+    var secondRecord = recordSize;
+    var corruptOffset = corruptField switch
+    {
+      "sequence" => secondRecord,
+      "start" => secondRecord + sizeof(long),
+      _ => secondRecord + (sizeof(long) * 2)
+    };
+    var corruptValue = corruptField switch
+    {
+      "sequence" => 99L,
+      "start" => 0L,
+      _ => BinaryPrimitives.ReadInt64LittleEndian(
+          indexBytes.AsSpan((recordSize * 2) + (sizeof(long) * 2), sizeof(long)))
+    };
+    BinaryPrimitives.WriteInt64LittleEndian(
+        indexBytes.AsSpan(corruptOffset, sizeof(long)),
+        corruptValue);
+    await File.WriteAllBytesAsync(indexPath, indexBytes);
+    var reopenedStore = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor());
+
+    var page = await reopenedStore.ReadLogPageAsync(
+        run.RunId, 0, 10, CancellationToken.None);
+
+    Assert.Equal([1L, 2L, 3L], page.Select(entry => entry.Sequence));
+    var repairedIndex = await File.ReadAllBytesAsync(indexPath);
+    Assert.Equal(2L, BinaryPrimitives.ReadInt64LittleEndian(
+        repairedIndex.AsSpan(secondRecord, sizeof(long))));
+    Assert.Empty(Directory.GetFiles(
+        Path.GetDirectoryName(indexPath)!,
+        Path.GetFileName(indexPath) + ".*.tmp"));
+  }
+
+  [Theory]
   [InlineData(-1, 1)]
   [InlineData(0, 0)]
   [InlineData(0, 1001)]
@@ -404,6 +564,20 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
         _store.SaveAsync(run with { RunId = Guid.NewGuid() }, CancellationToken.None));
     await Assert.ThrowsAsync<KeyNotFoundException>(() =>
         _store.AppendLogAsync(Guid.NewGuid(), SampleLog(1), CancellationToken.None));
+  }
+
+  [Fact]
+  public async Task GetAsync_MissingRunDoesNotLeaveLockFile()
+  {
+    var runId = Guid.NewGuid();
+    Directory.CreateDirectory(new WdemDataPaths(_directory).RunsDirectory);
+
+    Assert.Null(await _store.GetAsync(runId, CancellationToken.None));
+
+    var lockPath = Path.Combine(
+        new WdemDataPaths(_directory).RunsDirectory,
+        $"{runId:D}.lock");
+    Assert.False(File.Exists(lockPath));
   }
 
   [Theory]
@@ -504,6 +678,52 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     await File.WriteAllTextAsync(
         snapshotPath,
         document.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+
+    Assert.Null(restored);
+    Assert.False(File.Exists(snapshotPath));
+    Assert.Single(Directory.GetFiles(
+        Path.GetDirectoryName(snapshotPath)!, $"{run.RunId:D}.json.corrupted.*"));
+    Assert.Single(_store.Diagnostics);
+  }
+
+  [Fact]
+  public async Task GetAsync_PreservesSnapshotWithNullPlanResource()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    var snapshotPath = _store.SnapshotPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(snapshotPath))!.AsObject();
+    document["plan"]!["resources"]!.AsArray()[0] = null;
+    await File.WriteAllTextAsync(snapshotPath, document.ToJsonString());
+
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+
+    Assert.Null(restored);
+    Assert.False(File.Exists(snapshotPath));
+    Assert.Single(Directory.GetFiles(
+        Path.GetDirectoryName(snapshotPath)!, $"{run.RunId:D}.json.corrupted.*"));
+    Assert.Single(_store.Diagnostics);
+  }
+
+  [Theory]
+  [InlineData("number")]
+  [InlineData("numericString")]
+  [InlineData("unknownString")]
+  public async Task GetAsync_PreservesSnapshotWithInvalidEnum(string invalidKind)
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    var snapshotPath = _store.SnapshotPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(snapshotPath))!.AsObject();
+    document["state"] = invalidKind switch
+    {
+      "number" => JsonValue.Create(999),
+      "numericString" => JsonValue.Create("999"),
+      _ => JsonValue.Create("UnknownState")
+    };
+    await File.WriteAllTextAsync(snapshotPath, document.ToJsonString());
 
     var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
 
@@ -757,6 +977,13 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
       "git",
       "git:install",
       $"message-{sequence}");
+
+  private static void AssertReadOnly<T>(IReadOnlyList<T> values)
+  {
+    var collection = Assert.IsAssignableFrom<ICollection<T>>(values);
+    Assert.True(collection.IsReadOnly);
+    Assert.Throws<NotSupportedException>(() => collection.Add(values[0]));
+  }
 
   private sealed class StubMachineInformationSource : IWindowsMachineInformationSource
   {

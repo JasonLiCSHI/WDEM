@@ -133,28 +133,10 @@ public sealed partial class LogRedactor
 
   private static bool LooksLikeStandaloneBearerToken(string token)
   {
-    var jwtSegments = token.Split('.');
-    if (jwtSegments.Length >= 3 && jwtSegments.All(IsBase64UrlSegment))
-    {
-      return true;
-    }
-
-    var hasDigit = token.Any(char.IsAsciiDigit);
-    var strongTokenPunctuationKinds = token
-        .Where(character => character is '-' or '_' or '~' or '+' or '/' or '=')
-        .Distinct()
-        .Count();
-    var hasTokenFeatures = strongTokenPunctuationKinds >= 2
-        || (hasDigit && strongTokenPunctuationKinds == 1);
-    // RFC 6750 syntax cannot distinguish an opaque all-letter token from prose.
-    // Prefer redacting long candidates; short protocol terms remain diagnostic text.
-    return (token.Length >= 12 && hasTokenFeatures)
-        || token.Length >= 16;
+    return !token.Equals("OAuth2", StringComparison.OrdinalIgnoreCase)
+        && !token.Equals("RFC6750", StringComparison.OrdinalIgnoreCase)
+        && !token.Equals("service", StringComparison.OrdinalIgnoreCase);
   }
-
-  private static bool IsBase64UrlSegment(string segment) =>
-      segment.Length > 0
-      && segment.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
 
   private static string RedactSecretBlocks(string value)
   {

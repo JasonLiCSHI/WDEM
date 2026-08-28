@@ -66,6 +66,8 @@ public sealed class LogRedactorTests
   [InlineData("(Bearer abc.def.ghi) completed", "(Bearer ***) completed")]
   [InlineData("Bearer abc.def.ghi.", "Bearer ***.")]
   [InlineData("Bearer abcDEFghi+/=", "Bearer ***")]
+  [InlineData("Bearer abc123", "Bearer ***")]
+  [InlineData("Bearer hunter2", "Bearer ***")]
   [InlineData("Bearer abcdefghijklmnop", "Bearer ***")]
   [InlineData("Bearer abcdefghijklmnopqrstuvw", "Bearer ***")]
   public void Redact_RemovesStandaloneBearerTokensWithoutConsumingFollowingText(
@@ -87,6 +89,37 @@ public sealed class LogRedactorTests
   public void Redact_PreservesBearerProtocolDiagnostics(string input)
   {
     Assert.Equal(input, _redactor.Redact(input));
+  }
+
+  [Fact]
+  public void Redact_SanitizesShortBearerTokensInStructuredErrorFields()
+  {
+    var error = new StructuredError(
+        WdemErrorCode.ProviderError,
+        "Bearer abc123",
+        "Bearer hunter2")
+    {
+      ResourceId = "Bearer resource1",
+      StepId = "Bearer step123",
+      LogLocation = "Bearer log123",
+      SuggestedAction = "Bearer action1",
+      UnderlyingException = new InvalidOperationException("Bearer failure1")
+    };
+
+    var result = _redactor.Redact(error);
+
+    var visibleFields = new[]
+    {
+      (result.Summary, "abc123"),
+      (result.Detail, "hunter2"),
+      (result.ResourceId, "resource1"),
+      (result.StepId, "step123"),
+      (result.LogLocation, "log123"),
+      (result.SuggestedAction, "action1"),
+      (result.UnderlyingExceptionMessage, "failure1")
+    };
+    Assert.All(visibleFields, field =>
+        Assert.DoesNotContain(field.Item2, field.Item1, StringComparison.Ordinal));
   }
 
   [Fact]
