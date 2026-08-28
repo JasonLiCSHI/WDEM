@@ -105,4 +105,106 @@ public sealed class StructuredErrorTests
     Assert.DoesNotContain("abc.def.ghi", error.UnderlyingExceptionMessage, StringComparison.Ordinal);
     Assert.DoesNotContain("abc.def.ghi", json, StringComparison.Ordinal);
   }
+
+  [Fact]
+  public void Deserialization_SanitizesPersistedExceptionMessage()
+  {
+    const string json =
+        """{"Code":6,"Summary":"Install failed","Detail":"Provider error","UnderlyingExceptionMessage":"token=raw-secret"}""";
+
+    var restored = JsonSerializer.Deserialize<StructuredError>(json);
+
+    Assert.NotNull(restored);
+    Assert.DoesNotContain("raw-secret", restored.UnderlyingExceptionMessage, StringComparison.Ordinal);
+    Assert.DoesNotContain("raw-secret", JsonSerializer.Serialize(restored), StringComparison.Ordinal);
+  }
+
+  [Theory]
+  [InlineData("OAuth failed: client_secret=hunter2", "hunter2")]
+  [InlineData("Process inherited GITHUB_TOKEN=ghp_abcdef", "ghp_abcdef")]
+  [InlineData("Database rejected DB_PASSWORD: p@ssw0rd", "p@ssw0rd")]
+  [InlineData("Vault returned MY_SECRET='top-secret'", "top-secret")]
+  [InlineData("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz")]
+  [InlineData("Authorization: Negotiate abc123", "abc123")]
+  [InlineData(@"Could not read C:\Users\Alice\AppData\Local\WDEM", "Alice")]
+  [InlineData(@"Could not read \\server\Users\Bob\profile.json", "Bob")]
+  [InlineData(@"Could not read \\server\home\Carol\profile.json", "Carol")]
+  [InlineData("Could not read /home/dave/.config/wdem", "dave")]
+  public void ExceptionPersistence_RedactsCredentialsAndUserPaths(
+      string diagnostic,
+      string sensitiveValue)
+  {
+    var error = new StructuredError(
+        WdemErrorCode.ProviderError,
+        "Provider failed",
+        "See persisted diagnostics.")
+    {
+      UnderlyingException = new InvalidOperationException(diagnostic)
+    };
+
+    Assert.DoesNotContain(
+        sensitiveValue,
+        error.UnderlyingExceptionMessage,
+        StringComparison.OrdinalIgnoreCase);
+  }
+
+  [Fact]
+  public void ExceptionPersistence_PreservesOrdinaryDiagnostics()
+  {
+    const string diagnostic =
+        @"Git exited while reading C:\Program Files\Git\config at revision tokenization.";
+    var error = new StructuredError(
+        WdemErrorCode.ProviderError,
+        "Provider failed",
+        "See persisted diagnostics.")
+    {
+      UnderlyingException = new InvalidOperationException(diagnostic)
+    };
+
+    Assert.Equal(diagnostic, error.UnderlyingExceptionMessage);
+  }
+
+  [Fact]
+  public void ClearingUnderlyingException_ClearsPersistedDiagnostics()
+  {
+    var original = new StructuredError(
+        WdemErrorCode.ProviderError,
+        "Provider failed",
+        "See persisted diagnostics.")
+    {
+      UnderlyingException = new InvalidOperationException("safe diagnostic")
+    };
+
+    var cleared = original with { UnderlyingException = null };
+
+    Assert.Null(cleared.UnderlyingException);
+    Assert.Null(cleared.UnderlyingExceptionType);
+    Assert.Null(cleared.UnderlyingExceptionMessage);
+  }
+
+  [Fact]
+  public void Constructor_RejectsNullSummaryOrDetail()
+  {
+    Assert.Throws<ArgumentNullException>(() => new StructuredError(
+        WdemErrorCode.ProviderError,
+        null!,
+        "detail"));
+    Assert.Throws<ArgumentNullException>(() => new StructuredError(
+        WdemErrorCode.ProviderError,
+        "summary",
+        null!));
+  }
+
+  [Theory]
+  [InlineData("{}")]
+  [InlineData("{\"Code\":9,\"Summary\":null,\"Detail\":\"detail\"}")]
+  [InlineData("{\"Code\":9,\"Summary\":\"summary\",\"Detail\":null}")]
+  public void Deserialization_RejectsMissingOrNullRequiredText(string json)
+  {
+    var exception = Record.Exception(() => JsonSerializer.Deserialize<StructuredError>(json));
+
+    Assert.True(
+        exception is JsonException or ArgumentNullException,
+        $"Expected JsonException or ArgumentNullException, got {exception?.GetType().FullName ?? "no exception"}.");
+  }
 }

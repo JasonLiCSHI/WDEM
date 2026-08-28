@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Wdem.Core.Resources;
 
 namespace Wdem.Core.Providers;
@@ -101,6 +102,7 @@ public sealed record ResourcePlan
 
 public sealed record ProviderProgress(string Stage, double Percent, string Message)
 {
+  [JsonConstructor]
   public ProviderProgress(
       string stage,
       double percent,

@@ -51,11 +51,17 @@ public sealed partial class VersionConstraint
     {
       var minimum = ParseVersion(rangeMatch.Groups["minimum"].Value);
       var maximumGroup = rangeMatch.Groups["maximum"];
+      SemanticVersion? maximum = maximumGroup.Success
+          ? ParseVersion(maximumGroup.Value)
+          : null;
+      if (maximum is { } exclusiveMaximum && minimum.CompareTo(exclusiveMaximum) >= 0)
+      {
+        throw new FormatException("A version range must have a maximum greater than its minimum.");
+      }
+
       return new VersionConstraint(
           minimumVersion: minimum,
-          exclusiveMaximumVersion: maximumGroup.Success
-              ? ParseVersion(maximumGroup.Value)
-              : null);
+          exclusiveMaximumVersion: maximum);
     }
 
     throw new FormatException($"Unsupported version constraint '{expression}'.");
@@ -109,11 +115,11 @@ public sealed partial class VersionConstraint
   [GeneratedRegex(@"\A(?<major>\d+)\.(?<minor>\d+)\.[xX]\z", RegexOptions.CultureInvariant)]
   private static partial Regex WildcardPattern();
 
-  [GeneratedRegex(@"\A=\s*(?<version>\d+(?:\.\d+){0,3})\z", RegexOptions.CultureInvariant)]
+  [GeneratedRegex(@"\A=[ \t]*(?<version>\d+(?:\.\d+){0,3})\z", RegexOptions.CultureInvariant)]
   private static partial Regex ExactPattern();
 
   [GeneratedRegex(
-      @"\A>=\s*(?<minimum>\d+(?:\.\d+){0,3})(?:\s+<\s*(?<maximum>\d+(?:\.\d+){0,3}))?\z",
+      @"\A>=[ \t]*(?<minimum>\d+(?:\.\d+){0,3})(?:[ \t]+<[ \t]*(?<maximum>\d+(?:\.\d+){0,3}))?\z",
       RegexOptions.CultureInvariant)]
   private static partial Regex RangePattern();
 }

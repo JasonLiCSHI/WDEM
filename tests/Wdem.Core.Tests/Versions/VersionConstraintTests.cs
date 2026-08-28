@@ -14,6 +14,9 @@ public sealed class VersionConstraintTests
   [InlineData("2.50.0", ">= 2.50", true)]
   [InlineData("2.49.9", ">= 2.50", false)]
   [InlineData("10.0.7", "10.0.x", true)]
+  [InlineData("19.0.0", ">= 18.3 < 19.0", false)]
+  [InlineData("18.3.2", "=\t18.3.2", true)]
+  [InlineData("2.50.0", ">=\t2.50\t<\t3.0", true)]
   public void IsSatisfiedBy_EvaluatesSupportedExpressions(
       string installed,
       string expression,
@@ -84,6 +87,14 @@ public sealed class VersionConstraintTests
   [InlineData(">= 18.3 < 19.0\n")]
   [InlineData(">= 18.3 < 19.0\r\n")]
   [InlineData("\n= 18.3.2")]
+  [InlineData("=\n1.2")]
+  [InlineData("=\r\n1.2")]
+  [InlineData(">=\n1.2")]
+  [InlineData(">=\r\n1.2")]
+  [InlineData(">= 1.2\n< 2.0")]
+  [InlineData(">= 1.2\r\n< 2.0")]
+  [InlineData(">= 2 < 2")]
+  [InlineData(">= 3 < 2")]
   public void Parse_RejectsMalformedExpressions(string expression)
   {
     Assert.Throws<FormatException>(() => VersionConstraint.Parse(expression));
