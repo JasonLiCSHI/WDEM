@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using Wdem.Core.Execution;
 using Wdem.Core.Profiles;
 using Wdem.Core.Resources;
@@ -85,7 +86,9 @@ public sealed class ResourceGraphBuilder
     var layers = errors.Count == 0
         ? BuildTopologicalLayers(nodes)
         : Array.Empty<ResourceGraphLayer>();
-    return new ResourceGraphBuildResult(CreateGraph(nodes, layers), errors.ToArray());
+    return new ResourceGraphBuildResult(
+        CreateGraph(nodes, layers),
+        Array.AsReadOnly(errors.ToArray()));
   }
 
   private static Dictionary<string, ProfileResourceReference> ToReferenceMap(
@@ -111,7 +114,9 @@ public sealed class ResourceGraphBuilder
       return;
     }
 
-    foreach (var id in selection.SelectedOptionalResourceIds)
+    foreach (var id in selection.SelectedOptionalResourceIds
+                 .OrderBy(id => id, StringComparer.OrdinalIgnoreCase)
+                 .ThenBy(id => id, StringComparer.Ordinal))
     {
       if (id is null)
       {
@@ -160,7 +165,7 @@ public sealed class ResourceGraphBuilder
       return;
     }
 
-    if (origin < existing.Origin)
+    if (GetOriginPriority(origin) > GetOriginPriority(existing.Origin))
     {
       existing.Origin = origin;
       existing.Definition = overridden;
@@ -357,15 +362,38 @@ public sealed class ResourceGraphBuilder
       IReadOnlyDictionary<string, NodeState> nodes,
       IReadOnlyList<ResourceGraphLayer> layers)
   {
-    var resolved = nodes.ToDictionary(
+    var resolved = nodes.ToFrozenDictionary(
         pair => pair.Key,
         pair => new ResolvedResource(
-            pair.Value.Definition,
+            SnapshotDefinition(pair.Value.Definition),
             pair.Value.Origin,
-            new HashSet<string>(pair.Value.RequiredBy, IdComparer)),
+            pair.Value.RequiredBy.ToFrozenSet(IdComparer)),
         IdComparer);
-    return new ResourceGraph(resolved, layers);
+    var readOnlyLayers = Array.AsReadOnly(layers
+        .Select(layer => new ResourceGraphLayer(
+            layer.Index,
+            Array.AsReadOnly(layer.ResourceIds.ToArray())))
+        .ToArray());
+    return new ResourceGraph(resolved, readOnlyLayers);
   }
+
+  private static ResourceDefinition SnapshotDefinition(ResourceDefinition definition) =>
+      definition with
+      {
+        Dependencies = Array.AsReadOnly(definition.Dependencies.ToArray()),
+        Parameters = definition.Parameters.ToFrozenDictionary(
+            pair => pair.Key,
+            pair => pair.Value,
+            StringComparer.OrdinalIgnoreCase)
+      };
+
+  private static int GetOriginPriority(ResourceOrigin origin) => origin switch
+  {
+    ResourceOrigin.Required => 3,
+    ResourceOrigin.SelectedOptional => 2,
+    ResourceOrigin.AutoDependency => 1,
+    _ => throw new ArgumentOutOfRangeException(nameof(origin), origin, "Unknown resource origin.")
+  };
 
   private static StructuredError ProfileError(string summary, string detail) => new(
       WdemErrorCode.ProfileError,

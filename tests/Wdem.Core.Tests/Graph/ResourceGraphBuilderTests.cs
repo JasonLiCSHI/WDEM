@@ -293,6 +293,88 @@ public sealed class ResourceGraphBuilderTests
   }
 
   [Fact]
+  public void Build_DeepSnapshotsMutableResourceInputs()
+  {
+    var dependencies = new List<string> { "git" };
+    var parameters = new Dictionary<string, string?> { ["channel"] = "stable" };
+    var selectedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "tool" };
+    var profile = Profile(
+        new Dictionary<string, ResourceDefinition>(StringComparer.OrdinalIgnoreCase)
+        {
+          ["git"] = Resource("git"),
+          ["tool"] = Resource("tool") with
+          {
+            Dependencies = dependencies,
+            Parameters = parameters
+          }
+        },
+        requiredId: "git",
+        optionalReferences: [new ProfileResourceReference { Id = "tool" }]);
+
+    var graph = CreateBuilder().Build(profile, new ProfileSelection(selectedIds));
+    dependencies.Clear();
+    dependencies.Add("other");
+    parameters["channel"] = "mutated";
+    parameters["new"] = "value";
+    selectedIds.Clear();
+
+    Assert.Equal(["git"], graph.Nodes["tool"].Definition.Dependencies);
+    Assert.Equal("stable", graph.Nodes["tool"].Definition.Parameters["channel"]);
+    Assert.False(graph.Nodes["tool"].Definition.Parameters.ContainsKey("new"));
+    Assert.Equal([["git"], ["tool"]],
+        graph.TopologicalLayers.Select(layer => layer.ResourceIds).ToArray());
+  }
+
+  [Fact]
+  public void Build_ResultCollectionsCannotBeMutatedThroughConcreteCollectionInterfaces()
+  {
+    var graph = CreateBuilder().Build(Profile(), new ProfileSelection(
+        new HashSet<string>(["resharper-settings"], StringComparer.OrdinalIgnoreCase)));
+
+    AssertCannotMutateDictionary(graph.Nodes, "injected", graph.Nodes["git"]);
+    AssertCannotMutateList(graph.TopologicalLayers, new ResourceGraphLayer(99, ["injected"]));
+    AssertCannotMutateList(graph.TopologicalLayers[0].ResourceIds, "injected");
+    AssertCannotMutateSet(graph.Nodes["visual-studio"].RequiredBy, "injected");
+    AssertCannotMutateList(graph.Nodes["resharper"].Definition.Dependencies, "injected");
+    AssertCannotMutateDictionary(
+        graph.Nodes["resharper"].Definition.Parameters,
+        "injected",
+        "value");
+
+    Assert.False(graph.Nodes.ContainsKey("injected"));
+    Assert.Equal([["git"], ["visual-studio"], ["resharper"], ["resharper-settings"]],
+        graph.TopologicalLayers.Select(layer => layer.ResourceIds).ToArray());
+  }
+
+  [Fact]
+  public void TryBuild_ErrorCollectionCannotBeMutated()
+  {
+    var result = CreateBuilder().TryBuild(Profile(), new ProfileSelection(
+        new HashSet<string>(["unknown"], StringComparer.OrdinalIgnoreCase)));
+
+    AssertCannotMutateList(
+        result.Errors,
+        new StructuredError(WdemErrorCode.ProfileError, "injected", "injected"));
+    Assert.Single(result.Errors);
+  }
+
+  [Fact]
+  public void TryBuild_MultipleInvalidSelections_ReturnsErrorsInStableIdOrder()
+  {
+    var first = CreateBuilder().TryBuild(Profile(), new ProfileSelection(
+        new HashSet<string>(StringComparer.Ordinal) { "Zulu", "alpha", "BRAVO" }));
+    var second = CreateBuilder().TryBuild(Profile(), new ProfileSelection(
+        new HashSet<string>(StringComparer.Ordinal) { "BRAVO", "Zulu", "alpha" }));
+
+    Assert.Equal(first.Errors.Select(error => error.Detail), second.Errors.Select(error => error.Detail));
+    Assert.Collection(
+        first.Errors,
+        error => Assert.Contains("alpha", error.Detail, StringComparison.Ordinal),
+        error => Assert.Contains("BRAVO", error.Detail, StringComparison.Ordinal),
+        error => Assert.Contains("Zulu", error.Detail, StringComparison.Ordinal));
+  }
+
+  [Fact]
   public void Build_GraphErrors_ThrowsConvenienceException()
   {
     var exception = Assert.Throws<InvalidOperationException>(() =>
@@ -373,4 +455,38 @@ public sealed class ResourceGraphBuilderTests
     Dependencies = dependencies ?? [],
     VersionConstraint = versionConstraint
   };
+
+  private static void AssertCannotMutateDictionary<TKey, TValue>(
+      IReadOnlyDictionary<TKey, TValue> dictionary,
+      TKey key,
+      TValue value) where TKey : notnull
+  {
+    if (dictionary is IDictionary<TKey, TValue> mutable)
+    {
+      Assert.Throws<NotSupportedException>(() => mutable.Add(key, value));
+    }
+  }
+
+  private static void AssertCannotMutateList<T>(IReadOnlyList<T> list, T value)
+  {
+    if (list is IList<T> mutable)
+    {
+      if (mutable.Count == 0)
+      {
+        Assert.Throws<NotSupportedException>(() => mutable.Add(value));
+      }
+      else
+      {
+        Assert.Throws<NotSupportedException>(() => mutable[0] = value);
+      }
+    }
+  }
+
+  private static void AssertCannotMutateSet<T>(IReadOnlySet<T> set, T value)
+  {
+    if (set is ISet<T> mutable)
+    {
+      Assert.Throws<NotSupportedException>(() => mutable.Add(value));
+    }
+  }
 }

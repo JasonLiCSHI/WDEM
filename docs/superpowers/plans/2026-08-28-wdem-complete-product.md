@@ -666,7 +666,8 @@ Implement:
 
 ```csharp
 public enum ResourceOrigin { Required, SelectedOptional, AutoDependency }
-public sealed record ProfileSelection(IReadOnlySet<string> SelectedOptionalResourceIds);
+public sealed record ProfileSelection(
+    IReadOnlySet<string>? SelectedOptionalResourceIds = null);
 public sealed record ResolvedResource(
     ResourceDefinition Definition,
     ResourceOrigin Origin,
@@ -682,8 +683,8 @@ public sealed record ResourceGraphBuildResult(
 
 `ResourceGraphBuilder.TryBuild(DeveloperProfile profile, ProfileSelection selection)` must return `ResourceGraphBuildResult`; add `ResourceGraph Build(DeveloperProfile profile, ProfileSelection selection)` as the throwing convenience overload used by happy-path callers and tests. It must:
 
-1. Seed every required reference plus default-selected and user-selected optional references.
-2. Reject selection IDs that are not optional and reject attempts to remove required resources.
+1. Always seed every required reference. When `SelectedOptionalResourceIds` is `null` (no UI selection has been supplied), seed the profile's default-selected optional references; when it is non-null, treat it as the UI's complete final optional selection, so an explicit empty set can cancel every default-selected optional resource.
+2. Reject explicit selection IDs that are not optional. Required resources are independent of the optional selection and can never be removed by omitting them from the explicit set.
 3. Visit each `ResourceDefinition.Dependencies` recursively; add absent dependencies as `AutoDependency`; retain the strongest origin in the order `Required`, `SelectedOptional`, `AutoDependency`.
 4. Use a case-insensitive ID dictionary, so shared dependencies become one node and remain while any selected node requires them.
 5. Expand selected resource parameters through `ProfileValueExpander.ExpandSelected`; return a `ProfileError` with no executable layers when an environment substitution remains unresolved.
