@@ -20,6 +20,19 @@ public sealed class LogRedactorTests
     Assert.Equal(expected, _redactor.Redact(input));
   }
 
+  [Theory]
+  [InlineData("Bearer abc.def.ghi", "Bearer ***")]
+  [InlineData("using bEaReR ABC123-token", "using bEaReR ***")]
+  [InlineData("Bearer abc.def.ghi, retry scheduled", "Bearer ***, retry scheduled")]
+  [InlineData("Bearer abc.def.ghi; provider healthy", "Bearer ***; provider healthy")]
+  [InlineData("(Bearer abc.def.ghi) completed", "(Bearer ***) completed")]
+  public void Redact_RemovesStandaloneBearerTokensWithoutConsumingFollowingText(
+      string input,
+      string expected)
+  {
+    Assert.Equal(expected, _redactor.Redact(input));
+  }
+
   [Fact]
   public void Redact_RemovesPrivateKeyAndCertificateBodiesAcrossLines()
   {

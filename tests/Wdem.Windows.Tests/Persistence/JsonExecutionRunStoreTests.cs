@@ -61,6 +61,29 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task AppendLogAsync_RedactsStandaloneBearerWithoutConsumingDiagnosticText()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    await _store.AppendLogAsync(
+        run.RunId,
+        new RunLogEntry(
+            1,
+            DateTimeOffset.UtcNow,
+            ProviderLogLevel.Info,
+            "git",
+            "git:install",
+            "using bearer abc.def.ghi, provider retry scheduled"),
+        CancellationToken.None);
+
+    var disk = await File.ReadAllTextAsync(_store.LogPath(run.RunId));
+    var page = await _store.ReadLogPageAsync(run.RunId, 0, 10, CancellationToken.None);
+
+    Assert.DoesNotContain("abc.def.ghi", disk, StringComparison.Ordinal);
+    Assert.Equal("using bearer ***, provider retry scheduled", Assert.Single(page).Message);
+  }
+
+  [Fact]
   public async Task CreateAsync_WritesCamelCaseSnapshotAndNormalizesProgress()
   {
     var run = SampleRun() with

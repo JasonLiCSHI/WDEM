@@ -39,7 +39,8 @@ public sealed partial class LogRedactor
 
     var redacted = SecretBlockPattern().Replace(value, match =>
         $"-----BEGIN {match.Groups["type"].Value}-----\n***\n-----END {match.Groups["type"].Value}-----");
-    redacted = BearerPattern().Replace(redacted, "${prefix}***");
+    redacted = AuthorizationBearerPattern().Replace(redacted, "${prefix}***");
+    redacted = StandaloneBearerPattern().Replace(redacted, "${prefix}***");
     redacted = QuotedAssignmentPattern().Replace(
         redacted,
         "${prefix}${quote}***${quote}");
@@ -105,7 +106,12 @@ public sealed partial class LogRedactor
   [GeneratedRegex(
       @"(?<prefix>\bauthorization\s*:\s*bearer\s+)[^\s,;]+",
       RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-  private static partial Regex BearerPattern();
+  private static partial Regex AuthorizationBearerPattern();
+
+  [GeneratedRegex(
+      @"(?<prefix>\bbearer[ \t]+)(?:(?=[a-z0-9._~+/=-]{6,})(?=[a-z0-9._~+/=-]*(?:[0-9._~+/-]))[a-z0-9._~+/=-]+|[a-z]{16,})",
+      RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+  private static partial Regex StandaloneBearerPattern();
 
   [GeneratedRegex(
       "(?<prefix>(?<![a-z0-9_-])[\\\"']?(?:password|token|api[-_]?key|thumbprint)(?![a-z0-9_-])[\\\"']?\\s*[:=]\\s*)(?<quote>[\\\"'])(?:\\\\.|(?!\\k<quote>).)*?\\k<quote>",
