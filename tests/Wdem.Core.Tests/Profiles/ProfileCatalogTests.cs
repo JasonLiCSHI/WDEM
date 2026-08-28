@@ -393,6 +393,54 @@ public sealed class ProfileCatalogTests
   }
 
   [Fact]
+  public async Task LoadFileAsync_StructuredProviderValidationFailure_IsPreserved()
+  {
+    using var directory = new TemporaryDirectory();
+    var path = directory.Write("provider-structured-rejection.json", ValidSingleResourceJson("git"));
+    var providerError = new StructuredError(
+        WdemErrorCode.ProviderError,
+        "Provider rejected the resource.",
+        "The requested source is not trusted.")
+    {
+      ResourceId = "git",
+      SuggestedAction = "Choose a trusted source."
+    };
+    var registry = new ResourceProviderRegistry([
+      new DelegateProvider((_, _) => ValueTask.FromResult(
+          ProviderValidationResult.Invalid(providerError)))
+    ]);
+
+    var result = await new DirectoryProfileCatalog(directory.Path, registry).LoadFileAsync(path);
+
+    Assert.False(result.IsValid);
+    Assert.Same(providerError, Assert.Single(result.Errors));
+  }
+
+  [Fact]
+  public async Task LoadFileAsync_BothProviderDiagnosticForms_PrefersStructuredErrors()
+  {
+    using var directory = new TemporaryDirectory();
+    var path = directory.Write("provider-inconsistent-rejection.json", ValidSingleResourceJson("git"));
+    var providerError = new StructuredError(
+        WdemErrorCode.ProviderError,
+        "Structured rejection.",
+        "Structured detail.");
+    var registry = new ResourceProviderRegistry([
+      new DelegateProvider((_, _) => ValueTask.FromResult(new ProviderValidationResult
+      {
+        Errors = ["legacy duplicate"],
+        StructuredErrors = [providerError]
+      }))
+    ]);
+
+    var result = await new DirectoryProfileCatalog(directory.Path, registry).LoadFileAsync(path);
+
+    Assert.Same(providerError, Assert.Single(result.Errors));
+    Assert.DoesNotContain(result.Errors, error =>
+        error.Detail.Contains("legacy duplicate", StringComparison.Ordinal));
+  }
+
+  [Fact]
   public async Task LoadFileAsync_SanitizesProviderValidationDiagnostics()
   {
     using var directory = new TemporaryDirectory();
@@ -442,6 +490,29 @@ public sealed class ProfileCatalogTests
     var registry = new ResourceProviderRegistry([
       new DelegateProvider((_, _) => ValueTask.FromResult(
           new ProviderValidationResult { Errors = new string[] { null! } }))
+    ]);
+
+    var result = await new DirectoryProfileCatalog(directory.Path, registry).LoadFileAsync(path);
+
+    var error = Assert.Single(result.Errors);
+    Assert.Equal(WdemErrorCode.ProfileError, error.Code);
+    Assert.Contains("contract", error.Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("/resources/git", error.Detail, StringComparison.Ordinal);
+  }
+
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public async Task LoadFileAsync_NullStructuredProviderDiagnosticsReturnContractError(
+      bool nullCollection)
+  {
+    using var directory = new TemporaryDirectory();
+    var path = directory.Write("provider-null-structured-error.json", ValidSingleResourceJson("git"));
+    var registry = new ResourceProviderRegistry([
+      new DelegateProvider((_, _) => ValueTask.FromResult(new ProviderValidationResult
+      {
+        StructuredErrors = nullCollection ? null! : new StructuredError[] { null! }
+      }))
     ]);
 
     var result = await new DirectoryProfileCatalog(directory.Path, registry).LoadFileAsync(path);

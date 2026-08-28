@@ -61,13 +61,17 @@ Only `Missing`, `VersionMismatch`, and `ConfigurationMismatch` may produce modif
 
 `ProviderCapabilities` declares support for sources, version constraints, installer parameters, and in-progress cancellation. `MaxConcurrentOperations` defaults to one. `ConcurrencyGroup` lets providers that share an underlying installer serialize their work; when absent, the scheduler derives a group from resource type and provider name.
 
-A provider must reject requested behavior that its capabilities do not support. Capability flags describe real behavior—they are not feature requests or optimistic hints.
+A provider must reject requested behavior that its capabilities do not support. Capability flags describe real behavior—they are not feature requests or optimistic hints. Registration rejects blank resource/provider identities, null capabilities, and `MaxConcurrentOperations` values less than one.
 
 ## Progress, logs, and errors
 
 `ProviderProgress` contains a lifecycle stage, a normalized percent in `[0, 1]`, a safe summary message, an optional step ID, and `ProviderLogLevel`. Providers should use stable step IDs from the plan and emit enough progress to connect logs with a resource operation.
 
 Provider-facing failures must include `StructuredError`. The diagnostic identifies a `WdemErrorCode`, summary, sanitized detail, resource and optional step, process exit code when available, retryability, log location, and suggested action. Never put credentials, access tokens, authorization headers, secrets, or user-specific paths into messages. Do not expose raw exception text directly; attach the exception to `UnderlyingException` so WDEM records sanitized metadata.
+
+Provider model collections are immutable snapshots: callers may not mutate a model through a retained source collection or a concrete collection interface. Null collections and null collection entries violate the provider contract and are rejected.
+
+`ResourceApplyResult.Diagnostics` contains sanitized, non-fatal apply diagnostics that do not change the operation outcome. For example, the legacy adapter records one bounded diagnostic and detaches a failing progress observer while allowing the installation itself to continue.
 
 Compatibility string fields (`DetectedState.Error`, `ProviderValidationResult.Errors`, and `ResourcePlan.Error`) remain available during migration. New providers should populate structured diagnostics; `ProviderValidationResult.IsValid` is false when either error collection is non-empty.
 

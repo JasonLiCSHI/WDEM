@@ -330,22 +330,31 @@ internal sealed class ProfileValidator(IResourceProviderRegistry providerRegistr
         continue;
       }
 
-      string[] validationErrors;
+      ProviderValidationResult validation;
+      string[] compatibilityErrors;
+      StructuredError[] structuredErrors;
       try
       {
-        var validation = await provider.ValidateAsync(resource, cancellationToken).ConfigureAwait(false);
+        validation = await provider.ValidateAsync(resource, cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
-        if (validation?.Errors is null)
+        if (validation?.Errors is null || validation.StructuredErrors is null)
         {
           throw new InvalidOperationException(
-              "Provider validation contract violation: the result, Errors collection, and its entries must not be null.");
+              "Provider validation contract violation: the result and diagnostic collections must not be null.");
         }
 
-        validationErrors = new string[validation.Errors.Count];
-        for (var index = 0; index < validationErrors.Length; index++)
+        compatibilityErrors = validation.Errors.ToArray();
+        if (compatibilityErrors.Any(error => error is null))
         {
-          validationErrors[index] = validation.Errors[index] ?? throw new InvalidOperationException(
-              "Provider validation contract violation: the result, Errors collection, and its entries must not be null.");
+          throw new InvalidOperationException(
+              "Provider validation contract violation: compatibility error entries must not be null.");
+        }
+
+        structuredErrors = validation.StructuredErrors.ToArray();
+        if (structuredErrors.Any(error => error is null))
+        {
+          throw new InvalidOperationException(
+              "Provider validation contract violation: structured error entries must not be null.");
         }
       }
       catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -373,7 +382,18 @@ internal sealed class ProfileValidator(IResourceProviderRegistry providerRegistr
         continue;
       }
 
-      foreach (var validationError in validationErrors)
+      if (validation.IsValid)
+      {
+        continue;
+      }
+
+      if (structuredErrors.Length > 0)
+      {
+        errors.AddRange(structuredErrors);
+        continue;
+      }
+
+      foreach (var validationError in compatibilityErrors)
       {
         cancellationToken.ThrowIfCancellationRequested();
         errors.Add(ProfileErrorFactory.Create(sourcePath, "The resource provider rejected the resource.",

@@ -514,7 +514,8 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
       string stepId)
   {
     private readonly object _gate = new();
-    private readonly List<StructuredError> _diagnostics = [];
+    private IProgress<ProviderProgress>? _observer = observer;
+    private StructuredError? _diagnostic;
     private double _lastProgress;
 
     public double LastProgress
@@ -534,7 +535,9 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
       {
         lock (_gate)
         {
-          return Array.AsReadOnly(_diagnostics.ToArray());
+          return _diagnostic is null
+              ? Array.AsReadOnly(Array.Empty<StructuredError>())
+              : Array.AsReadOnly(new[] { _diagnostic });
         }
       }
     }
@@ -549,32 +552,27 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
       lock (_gate)
       {
         _lastProgress = report.Percent;
-      }
-
-      if (observer is null)
-      {
-        return;
-      }
-
-      try
-      {
-        observer.Report(report);
-      }
-      catch (Exception exception)
-      {
-        var diagnostic = new StructuredError(
-            WdemErrorCode.ProviderError,
-            "Progress observer failed.",
-            exception.Message)
+        if (_observer is null)
         {
-          ResourceId = resourceId,
-          StepId = stepId,
-          UnderlyingException = exception,
-          IsRetryable = false
-        };
-        lock (_gate)
+          return;
+        }
+
+        try
         {
-          _diagnostics.Add(diagnostic);
+          _observer.Report(report);
+        }
+        catch (Exception exception)
+        {
+          _observer = null;
+          _diagnostic = new StructuredError(
+              WdemErrorCode.ProviderError,
+              "Progress observer failed.",
+              exception.Message)
+          {
+            ResourceId = resourceId,
+            StepId = stepId,
+            IsRetryable = false
+          };
         }
       }
     }

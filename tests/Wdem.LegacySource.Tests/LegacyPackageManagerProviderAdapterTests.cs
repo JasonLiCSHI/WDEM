@@ -432,6 +432,88 @@ public sealed class LegacyPackageManagerProviderAdapterTests
         CancellationToken.None), Times.Once);
   }
 
+  [Fact]
+  public async Task ApplyAsync_AlwaysFailingObserver_IsDetachedAfterFirstFailure()
+  {
+    var adapter = CreateAdapter();
+    var resource = CreateResource();
+    var plan = await adapter.PlanAsync(resource, new DetectedState
+    {
+      ResourceId = resource.Id,
+      Outcome = DetectionOutcome.Succeeded,
+      Exists = false
+    }, CancellationToken.None);
+    _packageManager
+        .Setup(manager => manager.InstallAsync(
+            It.IsAny<AppConfig>(),
+            It.IsAny<IProgress<string>?>(),
+            CancellationToken.None))
+        .Returns<AppConfig, IProgress<string>?, CancellationToken>((_, progress, _) =>
+        {
+          for (var index = 0; index < 1_000; index++)
+          {
+            progress?.Report($"message {index}");
+          }
+
+          return Task.CompletedTask;
+        });
+    var invocationCount = 0;
+    var observer = new ImmediateProgress<ProviderProgress>(_ =>
+    {
+      Interlocked.Increment(ref invocationCount);
+      throw new InvalidOperationException("token=super-secret observer failed");
+    });
+
+    var result = await adapter.ApplyAsync(resource, plan, observer, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
+    Assert.Equal(1, invocationCount);
+    var diagnostic = Assert.Single(result.Diagnostics);
+    Assert.DoesNotContain("super-secret", diagnostic.Detail, StringComparison.Ordinal);
+    Assert.Null(diagnostic.UnderlyingException);
+    Assert.Null(diagnostic.UnderlyingExceptionType);
+    Assert.Null(diagnostic.UnderlyingExceptionMessage);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_ConcurrentProgressFailure_AtomicallyDetachesObserver()
+  {
+    var adapter = CreateAdapter();
+    var resource = CreateResource();
+    var plan = await adapter.PlanAsync(resource, new DetectedState
+    {
+      ResourceId = resource.Id,
+      Outcome = DetectionOutcome.Succeeded,
+      Exists = false
+    }, CancellationToken.None);
+    _packageManager
+        .Setup(manager => manager.InstallAsync(
+            It.IsAny<AppConfig>(),
+            It.IsAny<IProgress<string>?>(),
+            CancellationToken.None))
+        .Returns<AppConfig, IProgress<string>?, CancellationToken>(async (_, progress, _) =>
+        {
+          await Task.WhenAll(Enumerable.Range(0, 64).Select(index => Task.Run(() =>
+              progress?.Report($"concurrent message {index}"))));
+        });
+    var invocationCount = 0;
+    var observer = new ImmediateProgress<ProviderProgress>(report =>
+    {
+      Interlocked.Increment(ref invocationCount);
+      if (report.Percent == 0.5)
+      {
+        throw new InvalidOperationException("observer failed concurrently");
+      }
+    });
+
+    var result = await adapter.ApplyAsync(resource, plan, observer, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
+    Assert.Equal(2, invocationCount);
+    Assert.Single(result.Diagnostics);
+    Assert.Equal(1, Assert.Single(result.StepResults).Progress);
+  }
+
   private LegacyPackageManagerProviderAdapter CreateAdapter() =>
       new("winget", _packageManager.Object);
 
