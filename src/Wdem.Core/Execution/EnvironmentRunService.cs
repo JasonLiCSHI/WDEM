@@ -49,13 +49,29 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
 
   public Task<ExecutionRun> InspectAsync(
       RunRequest request,
-      CancellationToken cancellationToken) =>
-      ExecuteFreshAsync(request, RunMode.Inspect, resourceFilter: null, cancellationToken);
+      CancellationToken cancellationToken)
+  {
+    ValidatePublicRequestProvenance(request);
+    return ExecuteFreshAsync(
+        request,
+        RunMode.Inspect,
+        resourceFilter: null,
+        retriedFromRunId: null,
+        cancellationToken);
+  }
 
   public Task<ExecutionRun> ApplyAsync(
       RunRequest request,
-      CancellationToken cancellationToken) =>
-      ExecuteFreshAsync(request, RunMode.Apply, resourceFilter: null, cancellationToken);
+      CancellationToken cancellationToken)
+  {
+    ValidatePublicRequestProvenance(request);
+    return ExecuteFreshAsync(
+        request,
+        RunMode.Apply,
+        resourceFilter: null,
+        retriedFromRunId: null,
+        cancellationToken);
+  }
 
   public async Task<ExecutionRun> RetryAsync(
       Guid priorRunId,
@@ -79,9 +95,13 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
 
     var request = new RunRequest(
         prior.ProfileSourcePath,
-        prior.SelectedOptionalResourceIds,
-        RetriedFromRunId: prior.RunId);
-    return await ExecuteFreshAsync(request, RunMode.Apply, requested, cancellationToken)
+        prior.SelectedOptionalResourceIds);
+    return await ExecuteFreshAsync(
+            request,
+            RunMode.Apply,
+            requested,
+            prior.RunId,
+            cancellationToken)
         .ConfigureAwait(false);
   }
 
@@ -179,8 +199,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
 
     var request = new RunRequest(
         claimed.ProfileSourcePath,
-        claimed.SelectedOptionalResourceIds,
-        RetriedFromRunId: claimed.RunId);
+        claimed.SelectedOptionalResourceIds);
     ExecutionRun recovered;
     try
     {
@@ -192,6 +211,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
               request,
               RunMode.Apply,
               remaining,
+              claimed.RunId,
               cancellationToken).ConfigureAwait(false);
     }
     catch (Exception executionException)
@@ -320,6 +340,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       RunRequest request,
       RunMode mode,
       IReadOnlySet<string>? resourceFilter,
+      Guid? retriedFromRunId,
       CancellationToken cancellationToken)
   {
     ValidateRequest(request);
@@ -343,6 +364,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           mode,
           loaded,
           diagnostics,
+          retriedFromRunId,
           cancellationToken)
           .ConfigureAwait(false);
     }
@@ -359,6 +381,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           mode,
           loaded with { SourcePath = sourcePath },
           graphResult.Errors,
+          retriedFromRunId,
           cancellationToken).ConfigureAwait(false);
     }
 
@@ -387,7 +410,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       SelectedOptionalResourceIds = request.SelectedOptionalResourceIds,
       StartedAtUtc = DateTimeOffset.UtcNow,
       State = ExecutionState.Ready,
-      RetriedFromRunId = request.RetriedFromRunId,
+      RetriedFromRunId = retriedFromRunId,
       Machine = CurrentMachine(),
       Graph = graph,
       Plan = plan,
@@ -721,6 +744,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       RunMode mode,
       ProfileLoadResult loaded,
       IReadOnlyList<StructuredError> diagnostics,
+      Guid? retriedFromRunId,
       CancellationToken cancellationToken)
   {
     var now = DateTimeOffset.UtcNow;
@@ -738,7 +762,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       EndedAtUtc = now,
       State = ExecutionState.Completed,
       Outcome = ExecutionOutcome.Failed,
-      RetriedFromRunId = request.RetriedFromRunId,
+      RetriedFromRunId = retriedFromRunId,
       Machine = CurrentMachine(),
       Plan = ExecutionPlanner.CreatePlan(profileId, profileVersion, [], [], diagnostics),
       ResourceResults = new Dictionary<string, ResourceResult>(IdComparer)
@@ -971,6 +995,17 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           nameof(request),
           request.MaximumConcurrency,
           "Maximum concurrency must be between 1 and 32.");
+    }
+  }
+
+  private static void ValidatePublicRequestProvenance(RunRequest request)
+  {
+    ArgumentNullException.ThrowIfNull(request);
+    if (request.RetriedFromRunId is not null)
+    {
+      throw new ArgumentException(
+          "Recovery provenance can only be assigned by retry or recovery operations.",
+          nameof(request));
     }
   }
 

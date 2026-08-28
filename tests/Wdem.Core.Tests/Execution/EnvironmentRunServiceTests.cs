@@ -29,6 +29,21 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task InspectAsync_RejectsCallerSuppliedRecoveryProvenance()
+  {
+    var provider = new ScriptedProvider(Missing("git"));
+    var (service, store) = CreateService(provider);
+
+    var exception = await Assert.ThrowsAsync<ArgumentException>(() =>
+        service.InspectAsync(
+            Request() with { RetriedFromRunId = Guid.NewGuid() },
+            CancellationToken.None));
+
+    Assert.Equal("request", exception.ParamName);
+    Assert.Empty(await store.ListAsync(CancellationToken.None));
+  }
+
+  [Fact]
   public async Task InspectAsync_InvalidProfilePreservesValidationDiagnostics()
   {
     var error = new StructuredError(
@@ -130,6 +145,26 @@ public sealed class EnvironmentRunServiceTests
         first.PlanId);
     Assert.NotEqual(first.Fingerprint, changed.Fingerprint);
     Assert.NotEqual(first.PlanId, changed.PlanId);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_RejectsCallerSuppliedRecoveryProvenance()
+  {
+    var provider = new ScriptedProvider(Missing("git"));
+    var (service, store) = CreateService(provider);
+    var prior = InterruptedRun();
+    await store.CreateAsync(prior, CancellationToken.None);
+
+    var exception = await Assert.ThrowsAsync<ArgumentException>(() =>
+        service.ApplyAsync(
+            Request() with { RetriedFromRunId = prior.RunId },
+            CancellationToken.None));
+
+    Assert.Equal("request", exception.ParamName);
+    Assert.Equal(0, provider.ApplyCalls);
+    Assert.Equal(
+        [prior.RunId],
+        (await store.ListAsync(CancellationToken.None)).Select(run => run.RunId));
   }
 
   [Fact]
@@ -413,8 +448,9 @@ public sealed class EnvironmentRunServiceTests
     var (service, store) = CreateService(provider);
     var interrupted = InterruptedRun();
     await store.CreateAsync(interrupted, CancellationToken.None);
-    var inspect = await service.InspectAsync(
-        Request() with { RetriedFromRunId = interrupted.RunId },
+    var inspect = await service.InspectAsync(Request(), CancellationToken.None);
+    inspect = await store.SaveAsync(
+        inspect with { RetriedFromRunId = interrupted.RunId },
         CancellationToken.None);
 
     var recovered = await service.RecoverAsync(
