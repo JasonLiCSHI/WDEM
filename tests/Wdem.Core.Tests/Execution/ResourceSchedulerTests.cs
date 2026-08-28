@@ -342,8 +342,9 @@ public sealed class ResourceSchedulerTests
     Assert.Equal("a", failed.ResourceId);
     Assert.Equal(ExecutionState.Completed, failed.State);
     Assert.Equal(ExecutionOutcome.Failed, failed.Outcome);
-    Assert.Equal(returnedStartedAtUtc, failed.StartedAtUtc);
-    Assert.Equal(returnedEndedAtUtc, failed.EndedAtUtc);
+    Assert.NotNull(failed.StartedAtUtc);
+    Assert.NotNull(failed.EndedAtUtc);
+    Assert.True(failed.EndedAtUtc >= failed.StartedAtUtc);
     Assert.Equal(WdemErrorCode.ProviderError, failed.Error?.Code);
     Assert.False(failed.Error?.IsRetryable);
 
@@ -355,8 +356,11 @@ public sealed class ResourceSchedulerTests
         blocked.Error?.Detail);
   }
 
-  [Fact]
-  public async Task ExecuteAsync_SucceededResultWithCancelledStep_FailsAndBlocksDependent()
+  [Theory]
+  [InlineData(ExecutionOutcome.Succeeded)]
+  [InlineData(ExecutionOutcome.NotRequired)]
+  public async Task ExecuteAsync_DependencySatisfyingResultWithCancelledStep_FailsAndBlocksDependent(
+      ExecutionOutcome resourceOutcome)
   {
     var invoked = new List<string>();
     var stepStartedAtUtc = new DateTimeOffset(2026, 8, 28, 2, 3, 4, TimeSpan.Zero);
@@ -366,7 +370,7 @@ public sealed class ResourceSchedulerTests
         (resource, _) =>
         {
           invoked.Add(resource.Definition.Id);
-          return Task.FromResult(Result(resource.Definition.Id, ExecutionOutcome.Succeeded) with
+          return Task.FromResult(Result(resource.Definition.Id, resourceOutcome) with
           {
             StepResults =
             [
@@ -399,8 +403,11 @@ public sealed class ResourceSchedulerTests
     Assert.Equal(ExecutionOutcome.Skipped, result.Results["b"].Outcome);
   }
 
-  [Fact]
-  public async Task ExecuteAsync_SucceededResultWithNonZeroExitCode_FailsAndBlocksDependent()
+  [Theory]
+  [InlineData(ExecutionOutcome.Succeeded)]
+  [InlineData(ExecutionOutcome.NotRequired)]
+  public async Task ExecuteAsync_DependencySatisfyingResultWithNonZeroExitCode_FailsAndBlocksDependent(
+      ExecutionOutcome resourceOutcome)
   {
     var invoked = new List<string>();
     var result = await _scheduler.ExecuteAsync(
@@ -408,7 +415,7 @@ public sealed class ResourceSchedulerTests
         (resource, _) =>
         {
           invoked.Add(resource.Definition.Id);
-          return Task.FromResult(Result(resource.Definition.Id, ExecutionOutcome.Succeeded) with
+          return Task.FromResult(Result(resource.Definition.Id, resourceOutcome) with
           {
             StepResults =
             [
@@ -435,6 +442,125 @@ public sealed class ResourceSchedulerTests
     Assert.Equal(1603, Assert.Single(failed.StepResults).ProcessExitCode);
     Assert.Equal(ExecutionState.Blocked, result.Results["b"].State);
     Assert.Equal(ExecutionOutcome.Skipped, result.Results["b"].Outcome);
+  }
+
+  [Theory]
+  [InlineData(ExecutionOutcome.Succeeded, ExecutionState.Completed, null)]
+  [InlineData(ExecutionOutcome.NotRequired, ExecutionState.Completed, 999)]
+  [InlineData(ExecutionOutcome.Succeeded, ExecutionState.Running, (int)ExecutionOutcome.Succeeded)]
+  [InlineData(ExecutionOutcome.NotRequired, ExecutionState.Ready, (int)ExecutionOutcome.NotRequired)]
+  public async Task ExecuteAsync_DependencySatisfyingResultWithMalformedStep_FailsAndBlocksDependent(
+      ExecutionOutcome resourceOutcome,
+      ExecutionState stepState,
+      int? rawStepOutcome)
+  {
+    var invoked = new List<string>();
+    var result = await _scheduler.ExecuteAsync(
+        ChainPlan("a", "b"),
+        (resource, _) =>
+        {
+          invoked.Add(resource.Definition.Id);
+          return Task.FromResult(Result(resource.Definition.Id, resourceOutcome) with
+          {
+            StepResults =
+            [
+              new StepResult
+              {
+                StepId = "install",
+                Name = "Install",
+                State = stepState,
+                Outcome = rawStepOutcome.HasValue
+                    ? (ExecutionOutcome)rawStepOutcome.Value
+                    : null
+              }
+            ]
+          });
+        },
+        _ => new ProviderCapabilities(),
+        maximumConcurrency: 1,
+        CancellationToken.None);
+
+    Assert.Equal(["a"], invoked);
+    var failed = result.Results["a"];
+    Assert.Equal(ExecutionOutcome.Failed, failed.Outcome);
+    Assert.Equal(WdemErrorCode.ProviderError, failed.Error?.Code);
+    Assert.False(failed.Error?.IsRetryable);
+    Assert.Single(failed.StepResults);
+    Assert.Equal(ExecutionState.Blocked, result.Results["b"].State);
+    Assert.Equal(ExecutionOutcome.Skipped, result.Results["b"].Outcome);
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_NotRequiredResultWithCompletedNotRequiredStep_AllowsDependent()
+  {
+    var invoked = new List<string>();
+    var result = await _scheduler.ExecuteAsync(
+        ChainPlan("a", "b"),
+        (resource, _) =>
+        {
+          invoked.Add(resource.Definition.Id);
+          return Task.FromResult(Result(resource.Definition.Id, ExecutionOutcome.NotRequired) with
+          {
+            StepResults = resource.Definition.Id == "a"
+                ?
+                [
+                  new StepResult
+                  {
+                    StepId = "install",
+                    Name = "Install",
+                    State = ExecutionState.Completed,
+                    Outcome = ExecutionOutcome.NotRequired,
+                    ProcessExitCode = 0
+                  }
+                ]
+                : []
+          });
+        },
+        _ => new ProviderCapabilities(),
+        maximumConcurrency: 1,
+        CancellationToken.None);
+
+    Assert.Equal(["a", "b"], invoked);
+    Assert.Equal(ExecutionOutcome.NotRequired, result.Results["a"].Outcome);
+    Assert.Equal(ExecutionOutcome.NotRequired, result.Results["b"].Outcome);
+  }
+
+  [Theory]
+  [InlineData(0)]
+  [InlineData(1)]
+  [InlineData(2)]
+  public async Task ExecuteAsync_ProviderControlledResourceTimestamps_AreReplacedWithSchedulerInterval(
+      int scenario)
+  {
+    var beforeExecution = DateTimeOffset.UtcNow;
+    var (providerStartedAtUtc, providerEndedAtUtc) = scenario switch
+    {
+      0 => (beforeExecution.AddHours(-1), beforeExecution.AddHours(-2)),
+      1 => (beforeExecution.AddDays(1), beforeExecution.AddDays(2)),
+      _ => (beforeExecution.AddDays(-2), beforeExecution.AddDays(-1))
+    };
+
+    var result = await _scheduler.ExecuteAsync(
+        IndependentPlan("a"),
+        (resource, _) => Task.FromResult(Result(
+            resource.Definition.Id,
+            ExecutionOutcome.Succeeded) with
+        {
+          StartedAtUtc = providerStartedAtUtc,
+          EndedAtUtc = providerEndedAtUtc
+        }),
+        _ => new ProviderCapabilities(),
+        maximumConcurrency: 1,
+        CancellationToken.None);
+    var afterExecution = DateTimeOffset.UtcNow;
+
+    var completed = result.Results["a"];
+    Assert.NotNull(completed.StartedAtUtc);
+    Assert.NotNull(completed.EndedAtUtc);
+    Assert.InRange(completed.StartedAtUtc.Value, beforeExecution, afterExecution);
+    Assert.InRange(completed.EndedAtUtc.Value, completed.StartedAtUtc.Value, afterExecution);
+    Assert.NotEqual(providerStartedAtUtc, completed.StartedAtUtc);
+    Assert.NotEqual(providerEndedAtUtc, completed.EndedAtUtc);
   }
 
   private static TaskCompletionSource NewGate() =>

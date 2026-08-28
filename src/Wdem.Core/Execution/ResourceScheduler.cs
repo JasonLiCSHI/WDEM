@@ -333,25 +333,27 @@ public sealed class ResourceScheduler : IResourceScheduler
         throw new InvalidOperationException("The resource execution delegate returned no result.");
       }
 
+      var endedAt = DateTimeOffset.UtcNow;
       if (returned.Outcome is not { } outcome || !Enum.IsDefined(outcome))
       {
         return new CompletedExecution(id, Failed(
             id,
             new InvalidOperationException(
                 "The resource execution delegate returned an invalid outcome."),
-            returned.StartedAtUtc ?? startedAt,
-            returned.EndedAtUtc ?? DateTimeOffset.UtcNow,
+            startedAt,
+            endedAt,
             returned));
       }
 
-      if (outcome == ExecutionOutcome.Succeeded && HasUnsuccessfulStepEvidence(returned))
+      if (outcome is ExecutionOutcome.Succeeded or ExecutionOutcome.NotRequired &&
+          HasIncoherentStepEvidence(returned))
       {
         return new CompletedExecution(id, Failed(
             id,
             new InvalidOperationException(
-                "The resource execution delegate returned unsuccessful step evidence for a successful outcome."),
-            returned.StartedAtUtc ?? startedAt,
-            returned.EndedAtUtc ?? DateTimeOffset.UtcNow,
+                "The resource execution delegate returned incoherent step evidence for a dependency-satisfying outcome."),
+            startedAt,
+            endedAt,
             returned));
       }
 
@@ -359,8 +361,8 @@ public sealed class ResourceScheduler : IResourceScheduler
       {
         ResourceId = id,
         State = ExecutionState.Completed,
-        StartedAtUtc = returned.StartedAtUtc ?? startedAt,
-        EndedAtUtc = returned.EndedAtUtc ?? DateTimeOffset.UtcNow
+        StartedAtUtc = startedAt,
+        EndedAtUtc = endedAt
       };
       return new CompletedExecution(id, result);
     }
@@ -391,9 +393,11 @@ public sealed class ResourceScheduler : IResourceScheduler
           ExecutionOutcome.Cancelled or
           ExecutionOutcome.Skipped;
 
-  private static bool HasUnsuccessfulStepEvidence(ResourceResult result) =>
+  private static bool HasIncoherentStepEvidence(ResourceResult result) =>
       result.StepResults.Any(step =>
-          IsBlockingOutcome(step.Outcome) ||
+          step is null ||
+          step.State != ExecutionState.Completed ||
+          step.Outcome is not (ExecutionOutcome.Succeeded or ExecutionOutcome.NotRequired) ||
           step.ProcessExitCode is { } exitCode && exitCode != 0);
 
   private static ResourceResult Pending(string id) => new()
