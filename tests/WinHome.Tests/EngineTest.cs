@@ -2,6 +2,8 @@ using Moq;
 using WinHome.Interfaces;
 using WinHome.Models;
 using WinHome.Models.Plugins;
+using Wdem.Core.Providers;
+using WinHome.Providers;
 using Xunit;
 
 namespace WinHome.Tests
@@ -396,6 +398,34 @@ namespace WinHome.Tests
     }
 
     [Fact]
+    public async Task RunAsync_RejectsVersionIgnoredByLegacyPackageManager()
+    {
+      var config = new Configuration();
+      config.Apps.Add(new AppConfig
+      {
+        Id = "Git.Git",
+        Manager = "winget",
+        Version = "2.51.0"
+      });
+      var mockLogger = new Mock<ILogger>();
+      var registry = new ResourceProviderRegistry(
+      [
+        new LegacyPackageManagerProviderAdapter("winget", _mockWinget.Object)
+      ]);
+      var engine = CreateEngine(mockLogger, resourceProviders: registry);
+
+      await Assert.ThrowsAsync<InvalidOperationException>(() => engine.RunAsync(config, false));
+
+      _mockWinget.Verify(
+          manager => manager.Install(It.IsAny<AppConfig>(), It.IsAny<bool>()),
+          Times.Never);
+      mockLogger.Verify(
+          logger => logger.LogError(It.Is<string>(message =>
+              message.Contains("cannot reliably detect or enforce package versions"))),
+          Times.Once);
+    }
+
+    [Fact]
     public async Task RunAsync_ShouldNotMarkFailedRegistryApplyAsApplied()
     {
       // Arrange
@@ -638,7 +668,9 @@ namespace WinHome.Tests
       }
     }
 
-    private Engine CreateEngine(Mock<ILogger> logger)
+    private Engine CreateEngine(
+        Mock<ILogger> logger,
+        IResourceProviderRegistry? resourceProviders = null)
     {
       var tmp = Path.Combine(Path.GetTempPath(), $"winhome_state_test_{Guid.NewGuid()}.json");
       var stateWriter = new WinHome.Services.StateWriter(tmp);
@@ -657,7 +689,8 @@ namespace WinHome.Tests
           _mockStateService.Object,
           logger.Object,
           _mockRuntimeResolver.Object,
-          stateWriter
+          stateWriter,
+          resourceProviders
       );
     }
 

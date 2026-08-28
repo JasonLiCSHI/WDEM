@@ -8,7 +8,7 @@
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <DefaultItemExcludes>$(DefaultItemExcludes);WinHome.Tests\**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);WinHome.Tests\**;Wdem.Core\**</DefaultItemExcludes>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
     <Version>1.2.0</Version>
@@ -24,6 +24,10 @@
     <PackageReference Include="System.ServiceProcess.ServiceController" Version="10.0.10" />
     <PackageReference Include="YamlDotNet" Version="18.1.0" />
     <PackageReference Include="TaskScheduler" Version="2.12.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="Wdem.Core\Wdem.Core.csproj" />
   </ItemGroup>
 
 </Project>

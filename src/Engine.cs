@@ -2,7 +2,10 @@ using System.Collections.Concurrent;
 using System.Net.Http;
 using WinHome.Interfaces;
 using WinHome.Models;
+using WinHome.Providers;
 using WinHome.Services;
+using Wdem.Core.Providers;
+using Wdem.Core.Resources;
 
 namespace WinHome
 {
@@ -23,6 +26,7 @@ namespace WinHome
     private readonly IPluginRunner _pluginRunner;
     private readonly IStateService _stateService;
     private readonly IRuntimeResolver _runtimeResolver;
+    private readonly IResourceProviderRegistry? _resourceProviders;
     private readonly StateWriter _stateWriter;
     private static readonly HttpClient _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
     private static readonly Uri ConnectivityCheckUri = new("http://www.msftconnecttest.com/connecttest.txt");
@@ -42,7 +46,8 @@ namespace WinHome
         IPluginRunner pluginRunner,
         IStateService stateService,
         ILogger logger,
-        IRuntimeResolver runtimeResolver)
+        IRuntimeResolver runtimeResolver,
+        IResourceProviderRegistry? resourceProviders = null)
     {
       _managers = managers;
       _dotfiles = dotfiles;
@@ -58,6 +63,7 @@ namespace WinHome
       _stateService = stateService;
       _logger = logger;
       _runtimeResolver = runtimeResolver;
+      _resourceProviders = resourceProviders;
       _stateWriter = new StateWriter();
     }
 
@@ -77,8 +83,9 @@ namespace WinHome
         IStateService stateService,
         ILogger logger,
         IRuntimeResolver runtimeResolver,
-        StateWriter? stateWriter)
-        : this(managers, dotfiles, registry, systemSettings, wsl, git, env, serviceManager, scheduledTaskService, pluginManager, pluginRunner, stateService, logger, runtimeResolver)
+        StateWriter? stateWriter,
+        IResourceProviderRegistry? resourceProviders = null)
+        : this(managers, dotfiles, registry, systemSettings, wsl, git, env, serviceManager, scheduledTaskService, pluginManager, pluginRunner, stateService, logger, runtimeResolver, resourceProviders)
     {
       _stateWriter = stateWriter ?? new StateWriter();
     }
@@ -290,25 +297,37 @@ namespace WinHome
           var stepId = $"{app.Manager}:{app.Id}";
           _logger.LogInfo($"[Engine] Processing {stepId}...");
 
-          if (!forceReapply && !dryRun && applyState.TryGetValue(stepId, out var previous) && previous.Status == StepStatus.Succeeded)
-          {
-            _logger.LogInfo($"[Engine] Skipping previously applied {stepId}.");
-            var skippedResult = new StepResult
-            {
-              StepId = stepId,
-              StepType = "app",
-              StepName = app.Id,
-              Status = StepStatus.Skipped,
-              AppliedAt = previous.AppliedAt
-            };
-            applyState[stepId] = skippedResult;
-            continue;
-          }
-
           if (_managers.TryGetValue(app.Manager, out var mgr))
           {
             try
             {
+              if (_resourceProviders?.TryGet("package", app.Manager, out var resourceProvider) == true &&
+                  resourceProvider is not null)
+              {
+                var validation = await resourceProvider.ValidateAsync(
+                    CreatePackageResourceDefinition(app),
+                    CancellationToken.None);
+                if (!validation.IsValid)
+                {
+                  throw new InvalidOperationException(string.Join(" ", validation.Errors));
+                }
+              }
+
+              if (!forceReapply && !dryRun && applyState.TryGetValue(stepId, out var previous) && previous.Status == StepStatus.Succeeded)
+              {
+                _logger.LogInfo($"[Engine] Skipping previously applied {stepId}.");
+                var skippedResult = new StepResult
+                {
+                  StepId = stepId,
+                  StepType = "app",
+                  StepName = app.Id,
+                  Status = StepStatus.Skipped,
+                  AppliedAt = previous.AppliedAt
+                };
+                applyState[stepId] = skippedResult;
+                continue;
+              }
+
               if (mgr is WinHome.Services.Plugins.PluginPackageManagerAdapter adapter)
               {
                 if (loggedPlugins.Add(app.Manager))
@@ -717,6 +736,36 @@ namespace WinHome
       {
         _logger.LogWarning("\n[Dry Run] State was NOT saved.");
       }
+    }
+
+    private static ResourceDefinition CreatePackageResourceDefinition(AppConfig app)
+    {
+      var parameters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+      {
+        [LegacyPackageManagerProviderAdapter.PackageIdParameter] = app.Id
+      };
+
+      if (!string.IsNullOrWhiteSpace(app.Source))
+      {
+        parameters[LegacyPackageManagerProviderAdapter.SourceParameter] = app.Source;
+      }
+
+      if (!string.IsNullOrWhiteSpace(app.Params))
+      {
+        parameters[LegacyPackageManagerProviderAdapter.InstallerParametersParameter] = app.Params;
+      }
+
+      return new ResourceDefinition
+      {
+        Id = app.ResourceId ?? $"{app.Manager}:{app.Id}",
+        Type = "package",
+        Provider = app.Manager,
+        DisplayName = app.Id,
+        PreferredVersion = app.Version,
+        Dependencies = app.DependsOn is null ? Array.Empty<string>() : app.DependsOn,
+        Parameters = parameters,
+        PrivilegeRequirement = PrivilegeRequirement.Administrator
+      };
     }
 
     /// <summary>Prints a diff of what will change compared to the previously applied state.</summary>

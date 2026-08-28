@@ -11,6 +11,8 @@ using WinHome.Services.Logging;
 using WinHome.Services.Managers;
 using WinHome.Services.Plugins;
 using WinHome.Services.System;
+using Wdem.Core.Providers;
+using WinHome.Providers;
 using WinHome.Services;
 
 namespace WinHome.Infrastructure;
@@ -129,6 +131,21 @@ public static class AppHost
             { "scoop", sp.GetRequiredService<ScoopService>() }
         });
 
+    services.AddSingleton<IResourceProviderRegistry>(sp =>
+        new ResourceProviderRegistry(
+        [
+            new LegacyPackageManagerProviderAdapter(
+                "winget",
+                sp.GetRequiredService<WingetService>(),
+                supportsSource: true),
+            new LegacyPackageManagerProviderAdapter(
+                "choco",
+                sp.GetRequiredService<ChocolateyService>()),
+            new LegacyPackageManagerProviderAdapter(
+                "scoop",
+                sp.GetRequiredService<ScoopService>())
+        ]));
+
     services.AddSingleton<Engine>(sp => new Engine(
         sp.GetRequiredService<Dictionary<string, IPackageManager>>(),
         sp.GetRequiredService<IDotfileService>(),
@@ -143,7 +160,8 @@ public static class AppHost
         sp.GetRequiredService<IPluginRunner>(),
         sp.GetRequiredService<IStateService>(),
         sp.GetRequiredService<ILogger>(),
-        sp.GetRequiredService<IRuntimeResolver>()
+        sp.GetRequiredService<IRuntimeResolver>(),
+        sp.GetRequiredService<IResourceProviderRegistry>()
     ));
     services.AddSingleton<AppRunner>(sp => new AppRunner(
         sp.GetRequiredService<Engine>(),
