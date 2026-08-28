@@ -133,6 +133,120 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     Assert.Equal(repairedMarker, await File.ReadAllTextAsync(markerPath));
   }
 
+  [Theory]
+  [InlineData(MigrationFailureStage.QuarantineCopy, false)]
+  [InlineData(MigrationFailureStage.QuarantineCopy, true)]
+  [InlineData(MigrationFailureStage.SentinelReplace, false)]
+  [InlineData(MigrationFailureStage.SentinelReplace, true)]
+  public async Task MigrateAsync_InvalidMarkerFailureAlwaysLeavesPermanentGate(
+      MigrationFailureStage failureStage,
+      bool cancel)
+  {
+    const string invalidMarker = "{";
+    var markerDirectory = Path.Combine(_root, "WDEM");
+    Directory.CreateDirectory(markerDirectory);
+    var markerPath = Path.Combine(markerDirectory, "migration-v1.json");
+    await File.WriteAllTextAsync(markerPath, invalidMarker);
+    WriteLegacy("state.json", "[\"must-not-import\"]");
+    var legacyPath = Path.Combine(_root, "WinHome", "state.json");
+    var firstResolver = new RecordingFinalPathResolver(legacyPath);
+    var adapter = new LegacyStateMigrationAdapter(
+        _root,
+        firstResolver,
+        new FaultInjectingMigrationFileOperations(failureStage, cancel));
+
+    if (cancel)
+    {
+      await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+          adapter.MigrateAsync(CancellationToken.None));
+    }
+    else
+    {
+      await Assert.ThrowsAnyAsync<IOException>(() =>
+          adapter.MigrateAsync(CancellationToken.None));
+    }
+
+    Assert.Equal(invalidMarker, await File.ReadAllTextAsync(markerPath));
+    Assert.False(firstResolver.ObservedOpenReadableStream);
+
+    var secondResolver = new RecordingFinalPathResolver(legacyPath);
+    var second = await new LegacyStateMigrationAdapter(_root, secondResolver)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.False(second.MigrationPerformed);
+    Assert.Empty(second.ImportedStepNames);
+    Assert.False(secondResolver.ObservedOpenReadableStream);
+    using var marker = JsonDocument.Parse(await File.ReadAllTextAsync(markerPath));
+    Assert.Empty(marker.RootElement.GetProperty("importedStepNames").EnumerateArray());
+  }
+
+  [Fact]
+  public async Task MigrateAsync_CommitConflictReturnsPersistedWinnerNames()
+  {
+    WriteLegacy("state.json", "[\"local-step-a\"]");
+    var markerPath = Path.Combine(_root, "WDEM", "migration-v1.json");
+    var winnerMarker = CreateMarkerJson(["winner-step-b"]);
+    var firstResolver = new RecordingFinalPathResolver(
+        Path.Combine(_root, "WinHome", "state.json"));
+    var adapter = new LegacyStateMigrationAdapter(
+        _root,
+        firstResolver,
+        new CompetingMigrationFileOperations(winnerMarker));
+
+    var result = await adapter.MigrateAsync(CancellationToken.None);
+
+    Assert.False(result.MigrationPerformed);
+    Assert.Equal(["winner-step-b"], result.ImportedStepNames);
+    Assert.Equal(1, firstResolver.OpenReadableStreamCount);
+    var persistedMarker = await File.ReadAllTextAsync(markerPath);
+    Assert.Contains("winner-step-b", persistedMarker, StringComparison.Ordinal);
+    Assert.DoesNotContain("local-step-a", persistedMarker, StringComparison.Ordinal);
+
+    var secondResolver = new RecordingFinalPathResolver(
+        Path.Combine(_root, "WinHome", "state.json"));
+    var second = await new LegacyStateMigrationAdapter(_root, secondResolver)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.False(second.MigrationPerformed);
+    Assert.False(secondResolver.ObservedOpenReadableStream);
+    Assert.Equal(persistedMarker, await File.ReadAllTextAsync(markerPath));
+  }
+
+  [Fact]
+  public async Task MigrateAsync_InvalidCommitConflictRepairsGateWithoutRereadingLegacy()
+  {
+    WriteLegacy("state.json", "[\"local-step-a\"]");
+    var markerPath = Path.Combine(_root, "WDEM", "migration-v1.json");
+    var firstResolver = new RecordingFinalPathResolver(
+        Path.Combine(_root, "WinHome", "state.json"));
+    var adapter = new LegacyStateMigrationAdapter(
+        _root,
+        firstResolver,
+        new CompetingMigrationFileOperations("{"));
+
+    var result = await adapter.MigrateAsync(CancellationToken.None);
+
+    Assert.False(result.MigrationPerformed);
+    Assert.Empty(result.ImportedStepNames);
+    Assert.Equal(1, firstResolver.OpenReadableStreamCount);
+    using (var marker = JsonDocument.Parse(await File.ReadAllTextAsync(markerPath)))
+    {
+      Assert.Empty(marker.RootElement.GetProperty("importedStepNames").EnumerateArray());
+    }
+
+    var secondResolver = new RecordingFinalPathResolver(
+        Path.Combine(_root, "WinHome", "state.json"));
+    var second = await new LegacyStateMigrationAdapter(_root, secondResolver)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.False(second.MigrationPerformed);
+    Assert.False(secondResolver.ObservedOpenReadableStream);
+    Assert.DoesNotContain(
+        "local-step-a",
+        await File.ReadAllTextAsync(markerPath),
+        StringComparison.Ordinal);
+  }
+
   [Fact]
   public async Task MigrateAsync_ConcurrentInstancesPerformMigrationOnce()
   {
@@ -698,13 +812,86 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
       ILegacyFileFinalPathResolver
   {
     public bool ObservedOpenReadableStream { get; private set; }
+    public int OpenReadableStreamCount { get; private set; }
 
     public string ResolveFinalPath(FileStream stream, string requestedPath)
     {
       ObservedOpenReadableStream = stream.CanRead && !stream.SafeFileHandle.IsClosed;
+      if (ObservedOpenReadableStream)
+      {
+        OpenReadableStreamCount++;
+      }
+
       return finalPath;
     }
   }
+
+  public enum MigrationFailureStage
+  {
+    QuarantineCopy,
+    SentinelReplace
+  }
+
+  private sealed class FaultInjectingMigrationFileOperations(
+      MigrationFailureStage failureStage,
+      bool cancel) : ILegacyMigrationFileOperations
+  {
+    public void CopyMarkerForQuarantine(string sourcePath, string destinationPath)
+    {
+      ThrowIfRequested(MigrationFailureStage.QuarantineCopy);
+      File.Copy(sourcePath, destinationPath, overwrite: false);
+    }
+
+    public void CommitNewMarker(string temporaryPath, string markerPath) =>
+        File.Move(temporaryPath, markerPath, overwrite: false);
+
+    public void ReplaceMarker(string temporaryPath, string markerPath)
+    {
+      ThrowIfRequested(MigrationFailureStage.SentinelReplace);
+      File.Move(temporaryPath, markerPath, overwrite: true);
+    }
+
+    private void ThrowIfRequested(MigrationFailureStage currentStage)
+    {
+      if (failureStage != currentStage)
+      {
+        return;
+      }
+
+      if (cancel)
+      {
+        throw new OperationCanceledException(new CancellationToken(canceled: true));
+      }
+
+      throw new IOException($"Injected {currentStage} failure.");
+    }
+  }
+
+  private sealed class CompetingMigrationFileOperations(string winnerMarker) :
+      ILegacyMigrationFileOperations
+  {
+    public void CopyMarkerForQuarantine(string sourcePath, string destinationPath) =>
+        File.Copy(sourcePath, destinationPath, overwrite: false);
+
+    public void CommitNewMarker(string temporaryPath, string markerPath)
+    {
+      File.WriteAllText(markerPath, winnerMarker);
+      throw new IOException("Injected marker commit conflict.");
+    }
+
+    public void ReplaceMarker(string temporaryPath, string markerPath) =>
+        File.Move(temporaryPath, markerPath, overwrite: true);
+  }
+
+  private static string CreateMarkerJson(IReadOnlyList<string> importedStepNames) =>
+      JsonSerializer.Serialize(new
+      {
+        schemaVersion = 1,
+        recordKind = "legacy-step-name-reference",
+        sourceProduct = "WinHome",
+        importedAtUtc = "2026-08-29T00:00:00Z",
+        importedStepNames
+      });
 
   private void WriteLegacy(string fileName, string contents)
   {
