@@ -9,6 +9,8 @@ namespace Wdem.Windows.Providers;
 public sealed class WinGetPackageProvider : IResourceProvider
 {
   public const string PackageIdParameter = "packageId";
+  public const string SourceParameter = "source";
+  private const int PackageNotFoundExitCode = unchecked((int)0x8A150014);
 
   private readonly WinGetCommandClient _winGet;
   private readonly IComplianceEvaluator _complianceEvaluator;
@@ -61,6 +63,19 @@ public sealed class WinGetPackageProvider : IResourceProvider
       errors.Add($"Parameter '{PackageIdParameter}' is required.");
     }
 
+    if (resource.Parameters.TryGetValue(SourceParameter, out var source) &&
+        string.IsNullOrWhiteSpace(source))
+    {
+      errors.Add($"Parameter '{SourceParameter}' cannot be empty.");
+    }
+
+    foreach (var parameter in resource.Parameters.Keys.Where(parameter =>
+                 !string.Equals(parameter, PackageIdParameter, StringComparison.OrdinalIgnoreCase) &&
+                 !string.Equals(parameter, SourceParameter, StringComparison.OrdinalIgnoreCase)))
+    {
+      errors.Add($"Parameter '{parameter}' is not supported.");
+    }
+
     return ValueTask.FromResult(errors.Count == 0
         ? ProviderValidationResult.Valid
         : new ProviderValidationResult
@@ -86,9 +101,20 @@ public sealed class WinGetPackageProvider : IResourceProvider
       return DetectionFailure(resource, "The packageId parameter is missing.");
     }
 
-    var result = await _winGet.ListAsync(packageId, cancellationToken).ConfigureAwait(false);
+    var source = GetOptionalParameter(resource, SourceParameter);
+    var result = await _winGet.ListAsync(packageId, source, cancellationToken).ConfigureAwait(false);
     var evidence = CommandEvidence("winget list", result);
-    if (!result.Started || result.ExitCode != 0)
+    if (result.Error is not null)
+    {
+      return ProviderLifecycleSupport.DetectionFailure(
+          resource,
+          result,
+          "WinGet package detection failed.",
+          "The WinGet process did not complete successfully.",
+          evidence);
+    }
+
+    if (!result.Started || result.ExitCode == PackageNotFoundExitCode)
     {
       return new DetectedState
       {
@@ -99,7 +125,21 @@ public sealed class WinGetPackageProvider : IResourceProvider
       };
     }
 
-    if (!CommandVersionParser.TryParseWinGetList(result.StandardOutput, packageId, out var version))
+    if (result.ExitCode != 0)
+    {
+      return ProviderLifecycleSupport.DetectionFailure(
+          resource,
+          result,
+          "WinGet package detection failed.",
+          "The WinGet command returned an unexpected nonzero exit code.",
+          evidence);
+    }
+
+    if (!CommandVersionParser.TryParseWinGetList(
+            result.StandardOutput,
+            packageId,
+            out var detectedVersion,
+            out var comparableVersion))
     {
       return DetectionFailure(
           resource,
@@ -108,14 +148,13 @@ public sealed class WinGetPackageProvider : IResourceProvider
           evidence);
     }
 
-    var normalized = FormatVersion(version);
     return new DetectedState
     {
       ResourceId = resource.Id,
       Outcome = DetectionOutcome.Succeeded,
       Exists = true,
-      Version = normalized,
-      InstalledVersions = [version],
+      Version = detectedVersion,
+      InstalledVersions = comparableVersion is null ? [] : [comparableVersion.Value],
       Evidence = evidence
     };
   }
@@ -152,6 +191,7 @@ public sealed class WinGetPackageProvider : IResourceProvider
         resource.Id,
         packageId,
         resource.PreferredVersion,
+        GetOptionalParameter(resource, SourceParameter),
         cancellationToken).ConfigureAwait(false);
     if (source.Error is not null)
     {
@@ -186,6 +226,23 @@ public sealed class WinGetPackageProvider : IResourceProvider
     ArgumentNullException.ThrowIfNull(resource);
     ArgumentNullException.ThrowIfNull(plan);
     cancellationToken.ThrowIfCancellationRequested();
+    var validation = await ValidateAsync(resource, cancellationToken).ConfigureAwait(false);
+    var invalidResource = ProviderLifecycleSupport.RejectInvalidResource(resource, validation);
+    if (invalidResource is not null)
+    {
+      return invalidResource;
+    }
+
+    var invalidPlan = ProviderLifecycleSupport.RejectInvalidPlan(
+        resource,
+        plan,
+        ResourceType,
+        ProviderName);
+    if (invalidPlan is not null)
+    {
+      return invalidPlan;
+    }
+
     if (!plan.RequiresApply)
     {
       return new ResourceApplyResult
@@ -203,6 +260,7 @@ public sealed class WinGetPackageProvider : IResourceProvider
         resource.Id,
         packageId,
         resource.PreferredVersion,
+        GetOptionalParameter(resource, SourceParameter),
         cancellationToken).ConfigureAwait(false);
     if (source.Error is not null)
     {
@@ -215,37 +273,22 @@ public sealed class WinGetPackageProvider : IResourceProvider
         step.Id,
         packageId,
         resource.PreferredVersion,
+        GetOptionalParameter(resource, SourceParameter),
         null,
         cancellationToken).ConfigureAwait(false);
     progress?.Report(new ProviderProgress("Verify", 0.75, $"Verifying {packageId}.", step.Id));
     var verification = await VerifyAsync(resource, cancellationToken).ConfigureAwait(false);
-    var succeeded = verification.Compliance == ComplianceStatus.Satisfied;
-    var error = succeeded
-        ? null
-        : command.Error ?? _winGet.CreateInstallationError(
+    return ProviderLifecycleSupport.CompleteAfterVerification(
+        resource,
+        step,
+        command,
+        verification,
+        _complianceEvaluator,
+        _winGet.CreateInstallationError(
             resource.Id,
             step.Id,
             packageId,
-            command.Process.ExitCode);
-
-    return new ResourceApplyResult
-    {
-      ResourceId = resource.Id,
-      Outcome = succeeded ? ApplyOutcome.Succeeded : ApplyOutcome.Failed,
-      Error = error,
-      Diagnostics = command.Error is null ? [] : [command.Error],
-      StepResults =
-      [
-        new ProviderStepResult
-        {
-          StepId = step.Id,
-          Action = step.Action,
-          Progress = succeeded ? 1 : 0.75,
-          ProcessExitCode = command.Process.ExitCode,
-          Error = error
-        }
-      ]
-    };
+            command.Process.ExitCode));
   }
 
   public async ValueTask<VerificationResult> VerifyAsync(
@@ -268,24 +311,12 @@ public sealed class WinGetPackageProvider : IResourceProvider
       PlanStep step,
       StructuredError error,
       int? exitCode,
-      double progress) => new()
-      {
-        ResourceId = resource.Id,
-        Outcome = ApplyOutcome.Failed,
-        Error = error,
-        Diagnostics = [error],
-        StepResults =
-    [
-      new ProviderStepResult
-      {
-        StepId = step.Id,
-        Action = step.Action,
-        Progress = progress,
-        ProcessExitCode = exitCode,
-        Error = error
-      }
-    ]
-      };
+      double progress) => ProviderLifecycleSupport.Failure(
+          resource,
+          step,
+          error,
+          exitCode,
+          progress);
 
   private static ResourcePlan BasePlan(
       ResourceDefinition resource,
@@ -355,8 +386,8 @@ public sealed class WinGetPackageProvider : IResourceProvider
     return false;
   }
 
-  private static string FormatVersion(Wdem.Core.Versions.SemanticVersion version) =>
-      version.Revision == 0
-          ? $"{version.Major}.{version.Minor}.{version.Patch}"
-          : $"{version.Major}.{version.Minor}.{version.Patch}.{version.Revision}";
+  private static string? GetOptionalParameter(ResourceDefinition resource, string name) =>
+      resource.Parameters.TryGetValue(name, out var value) && !string.IsNullOrWhiteSpace(value)
+          ? value
+          : null;
 }

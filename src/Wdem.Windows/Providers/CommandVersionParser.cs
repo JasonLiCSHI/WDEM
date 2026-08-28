@@ -5,46 +5,75 @@ namespace Wdem.Windows.Providers;
 
 internal static partial class CommandVersionParser
 {
-  public static bool TryParseGit(string? output, out SemanticVersion version)
+  public static bool TryParseGit(
+      string? output,
+      out string detectedVersion,
+      out SemanticVersion? comparableVersion)
   {
-    version = default;
+    detectedVersion = string.Empty;
+    comparableVersion = null;
     if (string.IsNullOrWhiteSpace(output))
     {
       return false;
     }
 
     var match = GitVersionPattern().Match(output.Trim());
-    return match.Success && SemanticVersion.TryParse(match.Groups["version"].Value, out version);
+    if (!match.Success)
+    {
+      return false;
+    }
+
+    var stableVersion = match.Groups["stable"].Value;
+    detectedVersion = match.Groups["unsupported"].Success
+        ? stableVersion + match.Groups["unsupported"].Value
+        : stableVersion;
+    if (!match.Groups["unsupported"].Success &&
+        SemanticVersion.TryParse(stableVersion, out var parsed))
+    {
+      comparableVersion = parsed;
+    }
+
+    return true;
   }
 
   public static bool TryParseDotNetSdks(
       IReadOnlyList<string> output,
-      out IReadOnlyList<SemanticVersion> versions)
+      out IReadOnlyList<string> detectedVersions,
+      out IReadOnlyList<SemanticVersion> comparableVersions)
   {
+    var detected = new List<string>();
     var parsed = new List<SemanticVersion>();
     foreach (var line in output.Where(line => !string.IsNullOrWhiteSpace(line)))
     {
       var firstColumn = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
           .FirstOrDefault();
-      if (!SemanticVersion.TryParse(firstColumn, out var version))
+      if (firstColumn is null || !VersionTokenPattern().IsMatch(firstColumn))
       {
-        versions = [];
+        detectedVersions = [];
+        comparableVersions = [];
         return false;
       }
 
-      parsed.Add(version);
+      detected.Add(firstColumn);
+      if (SemanticVersion.TryParse(firstColumn, out var version))
+      {
+        parsed.Add(version);
+      }
     }
 
-    versions = parsed;
-    return parsed.Count > 0;
+    detectedVersions = detected;
+    comparableVersions = parsed;
+    return detected.Count > 0;
   }
 
   public static bool TryParseWinGetList(
       IReadOnlyList<string> output,
       string packageId,
-      out SemanticVersion version)
+      out string detectedVersion,
+      out SemanticVersion? comparableVersion)
   {
-    version = default;
+    detectedVersion = string.Empty;
+    comparableVersion = null;
     foreach (var line in output)
     {
       var columns = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
@@ -52,8 +81,14 @@ internal static partial class CommandVersionParser
           columns,
           column => string.Equals(column, packageId, StringComparison.OrdinalIgnoreCase));
       if (packageIndex >= 0 && packageIndex + 1 < columns.Length &&
-          TryParseNumericPrefix(columns[packageIndex + 1], out version))
+          VersionTokenPattern().IsMatch(columns[packageIndex + 1]))
       {
+        detectedVersion = columns[packageIndex + 1];
+        if (SemanticVersion.TryParse(detectedVersion, out var parsed))
+        {
+          comparableVersion = parsed;
+        }
+
         return true;
       }
     }
@@ -61,20 +96,13 @@ internal static partial class CommandVersionParser
     return false;
   }
 
-  private static bool TryParseNumericPrefix(string text, out SemanticVersion version)
-  {
-    version = default;
-    var match = NumericVersionPrefixPattern().Match(text);
-    return match.Success && SemanticVersion.TryParse(match.Groups["version"].Value, out version);
-  }
-
   [GeneratedRegex(
-      @"\Agit version (?<version>\d+\.\d+\.\d+)(?:\.[^\s]+)?\z",
+      @"\Agit version (?<stable>\d+\.\d+\.\d+)(?:\.windows\.\d+|(?<unsupported>[-+][^\s]+))?\z",
       RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
   private static partial Regex GitVersionPattern();
 
   [GeneratedRegex(
-      @"\A(?<version>\d+(?:\.\d+){0,3})(?:[^\d.].*)?\z",
+      @"\A\d+(?:\.\d+){0,3}(?:[-+][0-9A-Za-z.-]+)?\z",
       RegexOptions.CultureInvariant)]
-  private static partial Regex NumericVersionPrefixPattern();
+  private static partial Regex VersionTokenPattern();
 }

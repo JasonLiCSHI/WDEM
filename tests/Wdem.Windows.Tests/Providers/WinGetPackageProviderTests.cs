@@ -12,6 +12,20 @@ namespace Wdem.Windows.Tests.Providers;
 
 public sealed class WinGetPackageProviderTests
 {
+  public static TheoryData<string> PlanMismatches => new()
+  {
+    "not-executable",
+    "resource-id",
+    "resource-type",
+    "provider",
+    "fingerprint",
+    "step-id",
+    "step-action",
+    "step-privilege",
+    "step-restart",
+    "extra-step"
+  };
+
   [Fact]
   public async Task Factory_RegistersAllP0WinGetProviders()
   {
@@ -60,7 +74,7 @@ public sealed class WinGetPackageProviderTests
     var process = new ScriptedProcessExecutor();
     process.Enqueue(
         "winget",
-        ["show", "--id", "Git.Git", "--exact", "--version", "2.52.1",
+        ["show", "--id", "Git.Git", "--exact", "--versions",
          "--accept-source-agreements", "--disable-interactivity"],
         new ProcessExecutionResult(
             true,
@@ -85,7 +99,7 @@ public sealed class WinGetPackageProviderTests
     var process = new ScriptedProcessExecutor();
     process.Enqueue(
         "winget",
-        ["show", "--id", "Git.Git", "--exact", "--version", "2.52.1",
+        ["show", "--id", "Git.Git", "--exact", "--versions",
          "--accept-source-agreements", "--disable-interactivity"],
         Success("Version: 2.51.0"));
     var provider = new WinGetPackageProvider(process, new ComplianceEvaluator());
@@ -106,7 +120,7 @@ public sealed class WinGetPackageProviderTests
     var process = new ScriptedProcessExecutor();
     process.Enqueue(
         "winget",
-        ["show", "--id", "Git.Git", "--exact", "--version", "2.52.1",
+        ["show", "--id", "Git.Git", "--exact", "--versions",
          "--accept-source-agreements", "--disable-interactivity"],
         Success(sourceOutput));
     var provider = new WinGetPackageProvider(process, new ComplianceEvaluator());
@@ -116,6 +130,219 @@ public sealed class WinGetPackageProviderTests
 
     Assert.False(plan.IsExecutable);
     Assert.Equal(WdemErrorCode.DownloadError, Assert.Single(plan.StructuredErrors).Code);
+  }
+
+  [Fact]
+  public async Task PlanAsync_AcceptsExactVersionFromLocalizedVersionsOutput()
+  {
+    var process = new ScriptedProcessExecutor();
+    process.Enqueue(
+        "winget",
+        ["show", "--id", "Git.Git", "--exact", "--versions",
+         "--accept-source-agreements", "--disable-interactivity"],
+        Success("版本", "------", "2.52.1"));
+    var provider = new WinGetPackageProvider(process, new ComplianceEvaluator());
+    var resource = PackageResource(preferredVersion: "2.52.1");
+
+    var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+
+    Assert.True(plan.IsExecutable);
+    Assert.True(plan.RequiresApply);
+  }
+
+  [Theory]
+  [InlineData("Name: 2.52.1")]
+  [InlineData("Id: 2.52.1")]
+  [InlineData("其他字段: 2.52.1")]
+  public async Task PlanAsync_DoesNotTreatOtherFieldsAsAvailableVersions(string sourceOutput)
+  {
+    var process = new ScriptedProcessExecutor();
+    process.Enqueue(
+        "winget",
+        ["show", "--id", "Git.Git", "--exact", "--versions",
+         "--accept-source-agreements", "--disable-interactivity"],
+        Success(sourceOutput));
+    var provider = new WinGetPackageProvider(process, new ComplianceEvaluator());
+    var resource = PackageResource(preferredVersion: "2.52.1");
+
+    var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Equal(WdemErrorCode.DownloadError, Assert.Single(plan.StructuredErrors).Code);
+  }
+
+  [Theory]
+  [MemberData(nameof(PlanMismatches))]
+  public async Task ApplyAsync_RejectsMismatchedOrStalePlan(string mismatch)
+  {
+    var process = new ScriptedProcessExecutor();
+    process.Enqueue("winget", SourceQuery(), Success("Git.Git"));
+    process.Enqueue("winget", InstallArguments(), Success("Installed"));
+    process.Enqueue("winget", ListArguments(),
+        Success("Name  Id       Version", "Git   Git.Git  2.52.1"));
+    var provider = new WinGetPackageProvider(process, new ComplianceEvaluator());
+    var resource = PackageResource();
+
+    var result = await provider.ApplyAsync(
+        resource,
+        MismatchedPlan(InstallPlan(resource), mismatch),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(WdemErrorCode.ProviderError, result.Error!.Code);
+    Assert.Equal(3, process.Remaining.Count);
+  }
+
+  [Fact]
+  public async Task DetectAsync_UnknownNonzeroExitIsDetectionFailure()
+  {
+    var process = new ScriptedProcessExecutor();
+    process.Enqueue("winget", ListArguments(),
+        new ProcessExecutionResult(true, 42, [], ["unexpected failure"]));
+    var provider = new WinGetPackageProvider(process, new ComplianceEvaluator());
+
+    var state = await provider.DetectAsync(PackageResource(), CancellationToken.None);
+
+    Assert.Equal(DetectionOutcome.Failed, state.Outcome);
+    Assert.Equal(WdemErrorCode.DetectionError, state.StructuredError!.Code);
+  }
+
+  [Fact]
+  public async Task DetectAsync_PackageNotFoundExitIsSuccessfulMissingState()
+  {
+    var process = new ScriptedProcessExecutor();
+    process.Enqueue("winget", ListArguments(),
+        new ProcessExecutionResult(true, unchecked((int)0x8A150014), [], []));
+    var provider = new WinGetPackageProvider(process, new ComplianceEvaluator());
+
+    var state = await provider.DetectAsync(PackageResource(), CancellationToken.None);
+
+    Assert.Equal(DetectionOutcome.Succeeded, state.Outcome);
+    Assert.False(state.Exists);
+  }
+
+  [Fact]
+  public async Task DetectAsync_ProcessErrorOverridesParseableOutputAndIsPreserved()
+  {
+    var processError = new StructuredError(
+        WdemErrorCode.ProviderError,
+        "Output drain failed.",
+        "The process output could not be collected.");
+    var process = new ScriptedProcessExecutor();
+    process.Enqueue("winget", ListArguments(), new ProcessExecutionResult(
+        true,
+        0,
+        ["Name  Id       Version", "Git   Git.Git  2.52.1"],
+        [],
+        processError));
+    var provider = new WinGetPackageProvider(process, new ComplianceEvaluator());
+
+    var state = await provider.DetectAsync(PackageResource(), CancellationToken.None);
+
+    Assert.Equal(DetectionOutcome.Failed, state.Outcome);
+    Assert.Same(processError, state.StructuredError);
+  }
+
+  [Theory]
+  [InlineData("2.52.1-preview")]
+  [InlineData("2.52.1+build.7")]
+  public async Task DetectAsync_PrereleaseOrBuildVersionIsNotNormalizedToStable(string version)
+  {
+    var process = new ScriptedProcessExecutor();
+    process.Enqueue("winget", ListArguments(),
+        Success("Name  Id       Version", $"Git   Git.Git  {version}"));
+    var provider = new WinGetPackageProvider(process, new ComplianceEvaluator());
+    var resource = PackageResource() with { VersionConstraint = "= 2.52.1" };
+
+    var state = await provider.DetectAsync(resource, CancellationToken.None);
+    var compliance = new ComplianceEvaluator().Evaluate(resource, state);
+
+    Assert.Equal(DetectionOutcome.Succeeded, state.Outcome);
+    Assert.True(state.Exists);
+    Assert.Equal(version, state.Version);
+    Assert.Empty(state.InstalledVersions);
+    Assert.Equal(ComplianceStatus.VersionMismatch, compliance.Status);
+  }
+
+  [Fact]
+  public async Task ValidateAndApply_SourceIsAllowedAndPassedToEveryWinGetCommand()
+  {
+    var process = new ScriptedProcessExecutor();
+    process.Enqueue("winget",
+        ["show", "--id", "Git.Git", "--exact", "--source", "company",
+         "--accept-source-agreements", "--disable-interactivity"],
+        Success("Git.Git"));
+    process.Enqueue("winget",
+        ["install", "--id", "Git.Git", "--exact", "--source", "company", "--silent",
+         "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"],
+        Success("Installed"));
+    process.Enqueue("winget",
+        ["list", "--id", "Git.Git", "--exact", "--source", "company"],
+        Success("Name  Id       Version", "Git   Git.Git  2.52.1"));
+    var provider = new WinGetPackageProvider(process, new ComplianceEvaluator());
+    var resource = PackageResource() with
+    {
+      Parameters = new Dictionary<string, string?>
+      {
+        ["packageId"] = "Git.Git",
+        ["source"] = "company"
+      }
+    };
+
+    var validation = await provider.ValidateAsync(resource, CancellationToken.None);
+    var result = await provider.ApplyAsync(
+        resource,
+        InstallPlan(resource),
+        null,
+        CancellationToken.None);
+
+    Assert.True(validation.IsValid);
+    Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
+    Assert.Empty(process.Remaining);
+  }
+
+  [Fact]
+  public async Task ValidateAsync_RejectsUnknownParameter()
+  {
+    var provider = new WinGetPackageProvider(
+        new ScriptedProcessExecutor(),
+        new ComplianceEvaluator());
+    var resource = PackageResource() with
+    {
+      Parameters = new Dictionary<string, string?>
+      {
+        ["packageId"] = "Git.Git",
+        ["unexpected"] = "value"
+      }
+    };
+
+    var validation = await provider.ValidateAsync(resource, CancellationToken.None);
+
+    Assert.False(validation.IsValid);
+    Assert.Contains(validation.Errors, error => error.Contains("unexpected", StringComparison.Ordinal));
+  }
+
+  [Fact]
+  public async Task ApplyAsync_VerificationMismatchUsesVersionErrorAndDiagnostic()
+  {
+    var process = new ScriptedProcessExecutor();
+    process.Enqueue("winget", SourceQuery(), Success("Git.Git"));
+    process.Enqueue("winget", InstallArguments(), Success("Installed"));
+    process.Enqueue("winget", ListArguments(),
+        Success("Name  Id       Version", "Git   Git.Git  2.51.0"));
+    var provider = new WinGetPackageProvider(process, new ComplianceEvaluator());
+    var resource = PackageResource() with { VersionConstraint = ">= 2.52.1" };
+
+    var result = await provider.ApplyAsync(
+        resource,
+        InstallPlan(resource),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(WdemErrorCode.VersionError, result.Error!.Code);
+    Assert.Contains(result.Diagnostics, error => error.Code == WdemErrorCode.VersionError);
   }
 
   [Fact]
@@ -240,6 +467,27 @@ public sealed class WinGetPackageProviderTests
         RestartPolicy = resource.RestartPolicy
       }
     ]
+  };
+
+  private static ResourcePlan MismatchedPlan(ResourcePlan plan, string mismatch) => mismatch switch
+  {
+    "not-executable" => plan with { IsExecutable = false },
+    "resource-id" => plan with { ResourceId = "other" },
+    "resource-type" => plan with { ResourceType = "other" },
+    "provider" => plan with { ProviderName = "other" },
+    "fingerprint" => plan with { DesiredStateFingerprint = "stale" },
+    "step-id" => plan with { Steps = [plan.Steps[0] with { Id = "other:install" }] },
+    "step-action" => plan with { Steps = [plan.Steps[0] with { Action = PlanAction.Configure }] },
+    "step-privilege" => plan with
+    {
+      Steps = [plan.Steps[0] with { PrivilegeRequirement = PrivilegeRequirement.Administrator }]
+    },
+    "step-restart" => plan with
+    {
+      Steps = [plan.Steps[0] with { RestartPolicy = RestartPolicy.RestartRequired }]
+    },
+    "extra-step" => plan with { Steps = [plan.Steps[0], plan.Steps[0]] },
+    _ => throw new ArgumentOutOfRangeException(nameof(mismatch))
   };
 
   private static ProcessExecutionResult Success(params string[] output) =>

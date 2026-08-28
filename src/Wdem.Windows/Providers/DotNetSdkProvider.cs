@@ -46,7 +46,20 @@ public sealed class DotNetSdkProvider : IResourceProvider
   {
     cancellationToken.ThrowIfCancellationRequested();
     ArgumentNullException.ThrowIfNull(resource);
-    return ValueTask.FromResult(ProviderValidationResult.Valid);
+    var errors = new List<string>();
+    if (!string.Equals(resource.Type, ResourceType, StringComparison.OrdinalIgnoreCase))
+    {
+      errors.Add("Resource type must be 'dotnet-sdk'.");
+    }
+
+    if (!string.Equals(resource.Provider, ProviderName, StringComparison.OrdinalIgnoreCase))
+    {
+      errors.Add("Resource provider must be 'winget'.");
+    }
+
+    errors.AddRange(resource.Parameters.Keys.Select(
+        parameter => $"Parameter '{parameter}' is not supported."));
+    return ValueTask.FromResult(Validation(resource, errors));
   }
 
   public async ValueTask<DetectedState> DetectAsync(
@@ -58,6 +71,16 @@ public sealed class DotNetSdkProvider : IResourceProvider
         new ProcessExecutionRequest("dotnet", ["--list-sdks"]),
         null,
         cancellationToken).ConfigureAwait(false);
+    if (result.Error is not null)
+    {
+      return ProviderLifecycleSupport.DetectionFailure(
+          resource,
+          result,
+          ".NET SDK detection failed.",
+          "The dotnet process did not complete successfully.",
+          Evidence(result));
+    }
+
     if (!result.Started)
     {
       return new DetectedState
@@ -81,7 +104,10 @@ public sealed class DotNetSdkProvider : IResourceProvider
     }
 
     if (result.ExitCode != 0 ||
-        !CommandVersionParser.TryParseDotNetSdks(result.StandardOutput, out var versions))
+        !CommandVersionParser.TryParseDotNetSdks(
+            result.StandardOutput,
+            out var detectedVersions,
+            out var versions))
     {
       var error = new StructuredError(
           WdemErrorCode.DetectionError,
@@ -106,7 +132,7 @@ public sealed class DotNetSdkProvider : IResourceProvider
       ResourceId = resource.Id,
       Outcome = DetectionOutcome.Succeeded,
       Exists = true,
-      Version = FormatVersion(versions[^1]),
+      Version = detectedVersions[^1],
       InstalledVersions = versions,
       Evidence = Evidence(result)
     };
@@ -120,6 +146,16 @@ public sealed class DotNetSdkProvider : IResourceProvider
     cancellationToken.ThrowIfCancellationRequested();
     ArgumentNullException.ThrowIfNull(resource);
     ArgumentNullException.ThrowIfNull(currentState);
+    var validation = await ValidateAsync(resource, cancellationToken).ConfigureAwait(false);
+    if (!validation.IsValid)
+    {
+      return Plan(resource, ComplianceStatus.DetectionFailed, false) with
+      {
+        Error = validation.StructuredErrors.FirstOrDefault()?.Detail,
+        StructuredErrors = validation.StructuredErrors
+      };
+    }
+
     var compliance = _complianceEvaluator.Evaluate(resource, currentState);
     if (compliance.Status == ComplianceStatus.Satisfied)
     {
@@ -139,6 +175,7 @@ public sealed class DotNetSdkProvider : IResourceProvider
         resource.Id,
         PackageId,
         resource.PreferredVersion,
+        null,
         cancellationToken).ConfigureAwait(false);
     if (source.Error is not null)
     {
@@ -176,6 +213,23 @@ public sealed class DotNetSdkProvider : IResourceProvider
     cancellationToken.ThrowIfCancellationRequested();
     ArgumentNullException.ThrowIfNull(resource);
     ArgumentNullException.ThrowIfNull(plan);
+    var validation = await ValidateAsync(resource, cancellationToken).ConfigureAwait(false);
+    var invalidResource = ProviderLifecycleSupport.RejectInvalidResource(resource, validation);
+    if (invalidResource is not null)
+    {
+      return invalidResource;
+    }
+
+    var invalidPlan = ProviderLifecycleSupport.RejectInvalidPlan(
+        resource,
+        plan,
+        ResourceType,
+        ProviderName);
+    if (invalidPlan is not null)
+    {
+      return invalidPlan;
+    }
+
     if (!plan.RequiresApply)
     {
       return new ResourceApplyResult
@@ -192,6 +246,7 @@ public sealed class DotNetSdkProvider : IResourceProvider
         resource.Id,
         PackageId,
         resource.PreferredVersion,
+        null,
         cancellationToken).ConfigureAwait(false);
     if (source.Error is not null)
     {
@@ -205,36 +260,21 @@ public sealed class DotNetSdkProvider : IResourceProvider
         PackageId,
         resource.PreferredVersion,
         null,
+        null,
         cancellationToken).ConfigureAwait(false);
     progress?.Report(new ProviderProgress("Verify", 0.75, "Verifying .NET SDK.", step.Id));
     var verification = await VerifyAsync(resource, cancellationToken).ConfigureAwait(false);
-    var succeeded = verification.Compliance == ComplianceStatus.Satisfied;
-    var error = succeeded
-        ? null
-        : command.Error ?? _winGet.CreateInstallationError(
+    return ProviderLifecycleSupport.CompleteAfterVerification(
+        resource,
+        step,
+        command,
+        verification,
+        _complianceEvaluator,
+        _winGet.CreateInstallationError(
             resource.Id,
             step.Id,
             PackageId,
-            command.Process.ExitCode);
-
-    return new ResourceApplyResult
-    {
-      ResourceId = resource.Id,
-      Outcome = succeeded ? ApplyOutcome.Succeeded : ApplyOutcome.Failed,
-      Error = error,
-      Diagnostics = command.Error is null ? [] : [command.Error],
-      StepResults =
-      [
-        new ProviderStepResult
-        {
-          StepId = step.Id,
-          Action = step.Action,
-          Progress = succeeded ? 1 : 0.5,
-          ProcessExitCode = command.Process.ExitCode,
-          Error = error
-        }
-      ]
-    };
+            command.Process.ExitCode));
   }
 
   public async ValueTask<VerificationResult> VerifyAsync(
@@ -278,27 +318,26 @@ public sealed class DotNetSdkProvider : IResourceProvider
       PlanStep step,
       StructuredError error,
       int? exitCode,
-      double progress) => new()
-      {
-        ResourceId = resource.Id,
-        Outcome = ApplyOutcome.Failed,
-        Error = error,
-        Diagnostics = [error],
-        StepResults =
-    [
-      new ProviderStepResult
-      {
-        StepId = step.Id,
-        Action = step.Action,
-        Progress = progress,
-        ProcessExitCode = exitCode,
-        Error = error
-      }
-    ]
-      };
+      double progress) => ProviderLifecycleSupport.Failure(
+          resource,
+          step,
+          error,
+          exitCode,
+          progress);
 
-  private static string FormatVersion(Wdem.Core.Versions.SemanticVersion version) =>
-      version.Revision == 0
-          ? $"{version.Major}.{version.Minor}.{version.Patch}"
-          : $"{version.Major}.{version.Minor}.{version.Patch}.{version.Revision}";
+  private static ProviderValidationResult Validation(
+      ResourceDefinition resource,
+      IReadOnlyList<string> errors) => errors.Count == 0
+          ? ProviderValidationResult.Valid
+          : new ProviderValidationResult
+          {
+            Errors = errors,
+            StructuredErrors = errors.Select(detail => new StructuredError(
+                WdemErrorCode.ProviderError,
+                ".NET SDK resource validation failed.",
+                detail)
+            {
+              ResourceId = resource.Id
+            }).ToArray()
+          };
 }

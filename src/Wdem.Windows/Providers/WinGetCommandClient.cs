@@ -27,8 +27,11 @@ public sealed class WinGetCommandClient
 
   public Task<ProcessExecutionResult> ListAsync(
       string packageId,
+      string? source,
       CancellationToken cancellationToken) => _processExecutor.ExecuteAsync(
-          new ProcessExecutionRequest(FileName, ["list", "--id", packageId, "--exact"]),
+          new ProcessExecutionRequest(
+              FileName,
+              WithSource(["list", "--id", packageId, "--exact"], source)),
           null,
           cancellationToken);
 
@@ -36,15 +39,16 @@ public sealed class WinGetCommandClient
       string resourceId,
       string packageId,
       string? preferredVersion,
+      string? source,
       CancellationToken cancellationToken)
   {
     var arguments = new List<string> { "show", "--id", packageId, "--exact" };
     if (!string.IsNullOrWhiteSpace(preferredVersion))
     {
-      arguments.Add("--version");
-      arguments.Add(preferredVersion);
+      arguments.Add("--versions");
     }
 
+    AddSource(arguments, source);
     arguments.Add("--accept-source-agreements");
     arguments.Add("--disable-interactivity");
     var result = await _processExecutor.ExecuteAsync(
@@ -53,7 +57,7 @@ public sealed class WinGetCommandClient
         cancellationToken).ConfigureAwait(false);
     if (result.Started && result.ExitCode == 0 && result.Error is null &&
         (string.IsNullOrWhiteSpace(preferredVersion) ||
-         ContainsExactVersion(result.StandardOutput, preferredVersion)))
+         ContainsExactVersionToken(result.StandardOutput, preferredVersion)))
     {
       return new WinGetCommandResult(result, null);
     }
@@ -72,27 +76,15 @@ public sealed class WinGetCommandClient
     });
   }
 
-  private static bool ContainsExactVersion(
+  private static bool ContainsExactVersionToken(
       IReadOnlyList<string> output,
       string preferredVersion)
   {
-    foreach (var line in output)
-    {
-      var separator = line.IndexOf(':', StringComparison.Ordinal);
-      if (separator < 0 ||
-          !string.Equals(
-              line[..separator].Trim(),
-              "Version",
-              StringComparison.OrdinalIgnoreCase))
-      {
-        continue;
-      }
-
-      var sourceVersion = line[(separator + 1)..].Trim().Trim('"');
-      return string.Equals(sourceVersion, preferredVersion.Trim(), StringComparison.Ordinal);
-    }
-
-    return false;
+    var expected = preferredVersion.Trim();
+    return output.Any(line => string.Equals(
+        line.Trim().Trim('"'),
+        expected,
+        StringComparison.Ordinal));
   }
 
   public async Task<WinGetCommandResult> InstallAsync(
@@ -100,6 +92,7 @@ public sealed class WinGetCommandClient
       string stepId,
       string packageId,
       string? preferredVersion,
+      string? source,
       IProgress<string>? output,
       CancellationToken cancellationToken)
   {
@@ -114,6 +107,7 @@ public sealed class WinGetCommandClient
       arguments.Add(preferredVersion);
     }
 
+    AddSource(arguments, source);
     arguments.AddRange(
     [
       "--silent",
@@ -151,4 +145,22 @@ public sealed class WinGetCommandClient
         LogLocation = _logLocation,
         IsRetryable = true
       };
+
+  private static IReadOnlyList<string> WithSource(
+      IReadOnlyList<string> arguments,
+      string? source)
+  {
+    var result = arguments.ToList();
+    AddSource(result, source);
+    return result;
+  }
+
+  private static void AddSource(List<string> arguments, string? source)
+  {
+    if (!string.IsNullOrWhiteSpace(source))
+    {
+      arguments.Add("--source");
+      arguments.Add(source);
+    }
+  }
 }
