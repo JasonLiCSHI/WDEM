@@ -407,6 +407,30 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task RecoverAsync_IgnoresSuccessfulInspectLinkedToPriorRun()
+  {
+    var provider = new ScriptedProvider(Missing("git"));
+    var (service, store) = CreateService(provider);
+    var interrupted = InterruptedRun();
+    await store.CreateAsync(interrupted, CancellationToken.None);
+    var inspect = await service.InspectAsync(
+        Request() with { RetriedFromRunId = interrupted.RunId },
+        CancellationToken.None);
+
+    var recovered = await service.RecoverAsync(
+        interrupted.RunId,
+        CancellationToken.None);
+
+    var persistedPrior = await store.GetAsync(interrupted.RunId, CancellationToken.None);
+    Assert.Equal(RunMode.Inspect, inspect.Mode);
+    Assert.Equal(ExecutionOutcome.Succeeded, inspect.Outcome);
+    Assert.Equal(RunMode.Apply, recovered.Mode);
+    Assert.NotEqual(inspect.RunId, recovered.RunId);
+    Assert.Equal(1, provider.ApplyCalls);
+    Assert.Equal(ExecutionState.Completed, persistedPrior!.State);
+  }
+
+  [Fact]
   public async Task RecoverAsync_SuccessConsumesIncompletePriorAcrossServices()
   {
     var provider = new ScriptedProvider(Satisfied("git", "2.52.1"));
@@ -568,7 +592,7 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
-  public async Task FindRecoveryCandidatesAsync_DiscoversRunPersistedBeforeProviderCompletes()
+  public async Task FindRecoveryCandidatesAsync_HidesRunWhileProviderIsApplying()
   {
     var applyEntered = new TaskCompletionSource(
         TaskCreationOptions.RunContinuationsAsynchronously);
@@ -596,20 +620,17 @@ public sealed class EnvironmentRunServiceTests
     {
       await applyEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-      var secondStore = new InMemoryRunStore(sharedRuns);
       var (recoveryService, _) = CreateService(
           new ScriptedProvider(Missing("git")),
-          store: secondStore);
+          store: firstStore);
       var persisted = Assert.Single(
-          await secondStore.ListAsync(CancellationToken.None));
+          await firstStore.ListAsync(CancellationToken.None));
       var candidates = await recoveryService.FindRecoveryCandidatesAsync(
           CancellationToken.None);
 
       Assert.Equal(ExecutionState.Running, persisted.State);
       Assert.Equal(ExecutionState.Running, persisted.ResourceResults["git"].State);
-      var candidate = Assert.Single(candidates);
-      Assert.Equal(persisted.RunId, candidate.RunId);
-      Assert.Equal(["git"], candidate.PendingResourceIds);
+      Assert.Empty(candidates);
     }
     finally
     {

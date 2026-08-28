@@ -33,6 +33,45 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task TryAcquireRecoveryOperationAsync_PropagatesAndRecordsUnexpectedIoFailure()
+  {
+    var runId = Guid.NewGuid();
+    var expected = new IOException("access denied", unchecked((int)0x80070005));
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        _ => throw expected);
+
+    var actual = await Assert.ThrowsAsync<IOException>(
+        () => store.TryAcquireRecoveryOperationAsync(runId, CancellationToken.None));
+
+    Assert.Same(expected, actual);
+    var diagnostic = Assert.Single(store.Diagnostics);
+    Assert.Equal(WdemErrorCode.DetectionError, diagnostic.Code);
+    Assert.Contains(runId.ToString("D"), diagnostic.Detail, StringComparison.Ordinal);
+    Assert.Contains(expected.Message, diagnostic.Detail, StringComparison.Ordinal);
+  }
+
+  [Theory]
+  [InlineData(unchecked((int)0x80070020))]
+  [InlineData(unchecked((int)0x80070021))]
+  public async Task TryAcquireRecoveryOperationAsync_ReturnsBusyForSharingAndLockViolations(
+      int hresult)
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        _ => throw new IOException("busy", hresult));
+
+    var operation = await store.TryAcquireRecoveryOperationAsync(
+        Guid.NewGuid(),
+        CancellationToken.None);
+
+    Assert.Null(operation);
+    Assert.Empty(store.Diagnostics);
+  }
+
+  [Fact]
   public async Task CreateAndAppendLog_RoundTripsRunAndNeverPersistsSecrets()
   {
     var run = SampleRun();

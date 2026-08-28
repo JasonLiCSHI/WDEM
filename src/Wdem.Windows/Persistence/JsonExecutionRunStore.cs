@@ -14,6 +14,8 @@ namespace Wdem.Windows.Persistence;
 
 public sealed class JsonExecutionRunStore : IExecutionRunStore
 {
+  private const int SharingViolation = 32;
+  private const int LockViolation = 33;
   private const int MaximumLogPageSize = 1000;
   private const int LogIndexRecordSize = sizeof(long) * 3;
   private static readonly TimeSpan MaximumClaimClockSkew = TimeSpan.FromMinutes(5);
@@ -27,15 +29,27 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
   private readonly LogRedactor _redactor;
   private readonly JsonSerializerOptions _snapshotJsonOptions;
   private readonly JsonSerializerOptions _logJsonOptions;
+  private readonly Func<string, IAsyncDisposable> _recoveryLockOpener;
   private readonly TimeProvider _timeProvider;
 
   public JsonExecutionRunStore(
       WdemDataPaths paths,
       LogRedactor redactor,
       TimeProvider? timeProvider = null)
+      : this(paths, redactor, OpenRecoveryLock, timeProvider)
+  {
+  }
+
+  internal JsonExecutionRunStore(
+      WdemDataPaths paths,
+      LogRedactor redactor,
+      Func<string, IAsyncDisposable> recoveryLockOpener,
+      TimeProvider? timeProvider = null)
   {
     _paths = paths ?? throw new ArgumentNullException(nameof(paths));
     _redactor = redactor ?? throw new ArgumentNullException(nameof(redactor));
+    _recoveryLockOpener = recoveryLockOpener ??
+        throw new ArgumentNullException(nameof(recoveryLockOpener));
     _snapshotJsonOptions = CreateJsonOptions(writeIndented: true);
     _logJsonOptions = CreateJsonOptions(writeIndented: false);
     _timeProvider = timeProvider ?? TimeProvider.System;
@@ -137,20 +151,45 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
     var lockPath = Path.Combine(_paths.RunsDirectory, $"{runId:D}.recovery.lock");
     try
     {
-      IAsyncDisposable lease = new FileStream(
+      var lease = _recoveryLockOpener(lockPath);
+      return Task.FromResult<IAsyncDisposable?>(lease);
+    }
+    catch (IOException exception) when (IsRecoveryLockBusy(exception))
+    {
+      return Task.FromResult<IAsyncDisposable?>(null);
+    }
+    catch (IOException exception)
+    {
+      var diagnostic = new StructuredError(
+          WdemErrorCode.DetectionError,
+          "Recovery operation lock could not be acquired.",
+          $"Run '{runId:D}' recovery lock failed: {exception.Message}")
+      {
+        IsRetryable = false
+      };
+      lock (_diagnosticsGate)
+      {
+        _diagnostics.Add(diagnostic);
+      }
+
+      throw;
+    }
+  }
+
+  private static bool IsRecoveryLockBusy(IOException exception)
+  {
+    var nativeErrorCode = exception.HResult & 0xFFFF;
+    return nativeErrorCode is SharingViolation or LockViolation;
+  }
+
+  private static IAsyncDisposable OpenRecoveryLock(string lockPath) =>
+      new FileStream(
           lockPath,
           FileMode.OpenOrCreate,
           FileAccess.ReadWrite,
           FileShare.None,
           1,
           FileOptions.Asynchronous);
-      return Task.FromResult<IAsyncDisposable?>(lease);
-    }
-    catch (IOException)
-    {
-      return Task.FromResult<IAsyncDisposable?>(null);
-    }
-  }
 
   public async Task<ExecutionRun> SaveAsync(
       ExecutionRun run,

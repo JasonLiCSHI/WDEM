@@ -64,6 +64,72 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
   }
 
   [Fact]
+  public async Task ApplyAsync_HoldsRecoveryOperationUntilTerminalState()
+  {
+    var provider = new GatedProvider();
+    var ownerService = CreateService(provider, CreateStore());
+    var competitor = CreateService(provider, CreateStore());
+    var ownerTask = ownerService.ApplyAsync(Request(), CancellationToken.None);
+    try
+    {
+      await provider.FirstApplyEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+      var visible = Assert.Single(
+          await CreateStore().ListIncompleteAsync(CancellationToken.None));
+      var candidates = await competitor.FindRecoveryCandidatesAsync(CancellationToken.None);
+      var recoveryTask = AttemptRecoveryAsync(
+          competitor,
+          visible.RunId,
+          Task.CompletedTask);
+      await Task.WhenAny(recoveryTask, provider.SecondApplyEntered.Task)
+          .WaitAsync(TimeSpan.FromSeconds(5));
+      var abandonError = await AttemptAbandonAsync(competitor, visible.RunId);
+
+      provider.ReleaseApply.TrySetResult();
+      ExecutionRun? ownerRun = null;
+      Exception? ownerError = null;
+      try
+      {
+        ownerRun = await ownerTask.WaitAsync(TimeSpan.FromSeconds(5));
+      }
+      catch (Exception exception)
+      {
+        ownerError = exception;
+      }
+
+      var recovery = await recoveryTask.WaitAsync(TimeSpan.FromSeconds(5));
+      var afterCandidates = await competitor.FindRecoveryCandidatesAsync(
+          CancellationToken.None);
+      var afterRecovery = await AttemptRecoveryAsync(
+          competitor,
+          visible.RunId,
+          Task.CompletedTask);
+
+      Assert.Empty(candidates);
+      Assert.IsType<InvalidOperationException>(recovery.Error);
+      Assert.IsType<InvalidOperationException>(abandonError);
+      Assert.Null(ownerError);
+      Assert.Equal(ExecutionOutcome.Succeeded, ownerRun!.Outcome);
+      Assert.Equal(1, provider.ApplyCalls);
+      Assert.DoesNotContain(
+          afterCandidates,
+          candidate => candidate.RunId == visible.RunId);
+      Assert.IsType<InvalidOperationException>(afterRecovery.Error);
+    }
+    finally
+    {
+      provider.ReleaseApply.TrySetResult();
+      try
+      {
+        await ownerTask.WaitAsync(TimeSpan.FromSeconds(5));
+      }
+      catch
+      {
+        // The assertions above report the owner failure after all provider calls are released.
+      }
+    }
+  }
+
+  [Fact]
   public async Task AbandonAsync_CannotTerminatePriorClaimedByRecovery()
   {
     var provider = new GatedProvider();
@@ -505,6 +571,10 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
       }
     }
   };
+
+  private static RunRequest Request() => new(
+      "input/profile.yaml",
+      new HashSet<string>(StringComparer.OrdinalIgnoreCase));
 
   private static ExecutionRun InterruptedRun() => new()
   {

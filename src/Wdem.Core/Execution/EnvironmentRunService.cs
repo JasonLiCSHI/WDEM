@@ -393,6 +393,16 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       Plan = plan,
       ResourceResults = initialResults
     };
+    await using var operation = mode == RunMode.Apply
+        ? await _runStore.TryAcquireRecoveryOperationAsync(run.RunId, cancellationToken)
+            .ConfigureAwait(false)
+        : null;
+    if (mode == RunMode.Apply && operation is null)
+    {
+      throw new InvalidOperationException(
+          $"Execution run '{run.RunId:D}' already has an active operation.");
+    }
+
     await _runStore.CreateAsync(run, cancellationToken).ConfigureAwait(false);
 
     if (mode == RunMode.Inspect)
@@ -903,6 +913,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     var runs = await _runStore.ListAsync(cancellationToken).ConfigureAwait(false);
     return runs
         .Where(run => run.RetriedFromRunId == priorRunId &&
+            run.Mode == RunMode.Apply &&
             run.State == ExecutionState.Completed &&
             run.Outcome == ExecutionOutcome.Succeeded &&
             resourceIds.All(run.ResourceResults.ContainsKey))
