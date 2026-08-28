@@ -15,6 +15,7 @@ using Wdem.LegacySource.Services.Plugins;
 using Wdem.LegacySource.Services.System;
 using Wdem.Windows.Persistence;
 using Wdem.Windows.Processes;
+using Wdem.Windows.Providers;
 
 namespace Wdem.Windows.Composition;
 
@@ -59,9 +60,14 @@ public static class WdemWindowsFactory
         new WingetBootstrapper(processRunner, logger),
         logger,
         runtimeResolver);
+    var complianceEvaluator = new ComplianceEvaluator();
+    var winGetCommandClient = new WinGetCommandClient(processExecutor);
     var providerRegistry = new ResourceProviderRegistry(
     [
-      new LegacyPackageManagerProviderAdapter("winget", winget, supportsSource: true)
+      new LegacyPackageManagerProviderAdapter("winget", winget, supportsSource: true),
+      new WinGetPackageProvider(winGetCommandClient, complianceEvaluator),
+      new GitProvider(processExecutor, winGetCommandClient, complianceEvaluator),
+      new DotNetSdkProvider(processExecutor, winGetCommandClient, complianceEvaluator)
     ]);
 
     var pluginManager = new PluginManager(
@@ -77,7 +83,6 @@ public static class WdemWindowsFactory
         migrateLegacy: false);
     var runStore = new JsonExecutionRunStore(paths, new LogRedactor());
     var profiles = new DirectoryProfileCatalog(profilesDirectory, providerRegistry);
-    var complianceEvaluator = new ComplianceEvaluator();
     var environmentRuns = new EnvironmentRunService(
         profiles,
         new ResourceGraphBuilder(),
