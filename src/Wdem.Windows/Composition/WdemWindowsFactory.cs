@@ -71,7 +71,10 @@ public static class WdemWindowsFactory
         Path.Combine(paths.Root, "plugins"),
         runtimeResolver);
     var pluginRunner = new PluginRunner(logger, runtimeResolver);
-    var state = new StateService(logger);
+    var state = new StateService(
+        logger,
+        Path.Combine(paths.Root, ".wdem-state.json"),
+        migrateLegacy: false);
     var runStore = new JsonExecutionRunStore(paths, new LogRedactor());
     var profiles = new DirectoryProfileCatalog(profilesDirectory, providerRegistry);
     var complianceEvaluator = new ComplianceEvaluator();

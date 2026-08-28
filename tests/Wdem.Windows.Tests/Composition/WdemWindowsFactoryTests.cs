@@ -17,6 +17,8 @@ public sealed class WdemWindowsFactoryTests : IDisposable
       $"wdem-factory-{Guid.NewGuid():N}");
   private readonly string? _originalStatePath =
       Environment.GetEnvironmentVariable("WDEM_STATE_PATH");
+  private readonly string? _originalLegacyStatePath =
+      Environment.GetEnvironmentVariable("WINHOME_STATE_PATH");
 
   [Fact]
   public async Task CreateAsync_ComposesAndReusesWindowsTransitionServices()
@@ -45,9 +47,57 @@ public sealed class WdemWindowsFactoryTests : IDisposable
     Assert.True(File.Exists(Path.Combine(paths.Root, "migration-v1.json")));
   }
 
+  [Fact]
+  public async Task CreateAsync_UsesOnlyReadOnlyMarkerMigrationAndIsolatedWdemState()
+  {
+    var profilesDirectory = Path.Combine(_root, "profiles");
+    var legacyDirectory = Path.Combine(_root, "WinHome");
+    Directory.CreateDirectory(profilesDirectory);
+    Directory.CreateDirectory(legacyDirectory);
+    var legacyStatePath = Path.Combine(legacyDirectory, "state.json");
+    var legacyContents = """
+        {
+          "applied_items": ["legacy-success"],
+          "step_history": {
+            "legacy-step": { "stepName": "Legacy Step", "status": "Succeeded" }
+          }
+        }
+        """;
+    await File.WriteAllTextAsync(legacyStatePath, legacyContents);
+    var externalStatePath = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-forbidden-state-{Guid.NewGuid():N}.json");
+    Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", legacyStatePath);
+    Environment.SetEnvironmentVariable("WDEM_STATE_PATH", externalStatePath);
+    var paths = new WdemDataPaths(_root);
+
+    var first = await WdemWindowsFactory.CreateAsync(
+        profilesDirectory,
+        paths,
+        CancellationToken.None);
+    var firstMarker = await File.ReadAllTextAsync(
+        Path.Combine(paths.Root, "migration-v1.json"));
+    var second = await WdemWindowsFactory.CreateAsync(
+        profilesDirectory,
+        paths,
+        CancellationToken.None);
+    var secondMarker = await File.ReadAllTextAsync(
+        Path.Combine(paths.Root, "migration-v1.json"));
+
+    Assert.True(File.Exists(legacyStatePath));
+    Assert.Equal(legacyContents, await File.ReadAllTextAsync(legacyStatePath));
+    Assert.Empty(first.LegacyState.ListItems());
+    Assert.Empty(first.LegacyState.ListSteps());
+    Assert.Empty(second.LegacyState.ListItems());
+    Assert.Empty(second.LegacyState.ListSteps());
+    Assert.Equal(firstMarker, secondMarker);
+    Assert.False(File.Exists(externalStatePath));
+  }
+
   public void Dispose()
   {
     Environment.SetEnvironmentVariable("WDEM_STATE_PATH", _originalStatePath);
+    Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", _originalLegacyStatePath);
     if (Directory.Exists(_root))
     {
       Directory.Delete(_root, recursive: true);

@@ -226,20 +226,30 @@ public sealed class LegacyStateMigrationAdapter
   {
     foreach (var property in dictionary.EnumerateObject())
     {
-      var name = TryGetString(property.Value, "stepName") ??
-          TryGetString(property.Value, "step_name") ??
-          TryGetString(property.Value, "StepName") ??
-          property.Name;
+      if (property.Value.ValueKind != JsonValueKind.Object)
+      {
+        continue;
+      }
+
+      string? name;
+      if (TryGetProperty(property.Value, "stepName", out var stepName) ||
+          TryGetProperty(property.Value, "step_name", out stepName))
+      {
+        if (stepName.ValueKind != JsonValueKind.String)
+        {
+          continue;
+        }
+
+        name = stepName.GetString();
+      }
+      else
+      {
+        name = property.Name;
+      }
+
       AddName(name, names, seen);
     }
   }
-
-  private static string? TryGetString(JsonElement element, string name) =>
-      element.ValueKind == JsonValueKind.Object &&
-      TryGetProperty(element, name, out var value) &&
-      value.ValueKind == JsonValueKind.String
-          ? value.GetString()
-          : null;
 
   private static bool TryGetProperty(
       JsonElement element,
@@ -269,24 +279,41 @@ public sealed class LegacyStateMigrationAdapter
       return;
     }
 
-    var sanitized = new string(candidate
-        .Trim()
-        .Where(character => !char.IsControl(character))
-        .Take(256)
-        .ToArray());
-    sanitized = RedactAssignment(sanitized);
-    if (sanitized.Length > 0 && seen.Add(sanitized))
+    var sanitized = candidate.Trim();
+    if (IsSafeStepName(sanitized) && seen.Add(sanitized))
     {
       names.Add(sanitized);
     }
   }
 
-  private static string RedactAssignment(string value)
+  private static bool IsSafeStepName(string value)
   {
-    var separator = value.IndexOf('=');
-    return separator > 0
-        ? string.Concat(value.AsSpan(0, separator + 1), "[redacted]")
-        : value;
+    const int MaximumStepNameLength = 128;
+    if (value.Length is 0 or > MaximumStepNameLength ||
+        value.Any(character => char.IsControl(character)) ||
+        value.Contains("..", StringComparison.Ordinal) ||
+        value.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+    {
+      return false;
+    }
+
+    if (value.Any(character =>
+            !(char.IsLetterOrDigit(character) ||
+              char.IsWhiteSpace(character) ||
+              character is '-' or '_' or '.' or '(' or ')' or '+' or '#')))
+    {
+      return false;
+    }
+
+    var words = value.Split(
+        [' ', '-', '_', '.', '(', ')', '+', '#'],
+        StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    return !words.Any(word => word.Equals("token", StringComparison.OrdinalIgnoreCase) ||
+        word.Equals("secret", StringComparison.OrdinalIgnoreCase) ||
+        word.Equals("password", StringComparison.OrdinalIgnoreCase) ||
+        word.Equals("apikey", StringComparison.OrdinalIgnoreCase) ||
+        word.Equals("credential", StringComparison.OrdinalIgnoreCase) ||
+        word.Equals("authorization", StringComparison.OrdinalIgnoreCase));
   }
 
   private async Task WriteMarkerAtomicallyAsync(

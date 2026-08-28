@@ -37,7 +37,7 @@ public sealed class LegacySourceProcessExecutorAdapter(IProcessRunner legacy) : 
                 "Process could not be started.",
                 "The requested external process could not be started.")
             {
-              IsRetryable = true
+              IsRetryable = false
             });
   }
 

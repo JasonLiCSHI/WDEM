@@ -26,13 +26,19 @@ namespace Wdem.LegacySource.Services.System
 
     /// <summary>Initializes a new instance of <see cref="StateService"/>.</summary>
     public StateService(ILogger logger)
+        : this(logger, ResolveDefaultStatePath(), migrateLegacy: true)
     {
-      _logger = logger;
+    }
 
-      var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-      var wdemDir = Path.Combine(appData, "WDEM");
-      var envPath = Environment.GetEnvironmentVariable("WDEM_STATE_PATH");
-      _stateFilePath = envPath ?? Path.Combine(wdemDir, ".wdem-state.json");
+    /// <summary>
+    /// Initializes state at an explicit WDEM-owned path and optionally enables the historical
+    /// transition-source migration behavior.
+    /// </summary>
+    public StateService(ILogger logger, string stateFilePath, bool migrateLegacy)
+    {
+      _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+      ArgumentException.ThrowIfNullOrWhiteSpace(stateFilePath);
+      _stateFilePath = Path.GetFullPath(stateFilePath);
 
       var stateDirectory = Path.GetDirectoryName(_stateFilePath);
       if (!string.IsNullOrEmpty(stateDirectory) && !Directory.Exists(stateDirectory))
@@ -41,7 +47,18 @@ namespace Wdem.LegacySource.Services.System
       }
 
       _inMemoryState = LoadState();
-      MigrateLegacyState();
+      if (migrateLegacy)
+      {
+        MigrateLegacyState();
+      }
+    }
+
+    private static string ResolveDefaultStatePath()
+    {
+      var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+      var wdemDirectory = Path.Combine(appData, "WDEM");
+      return Environment.GetEnvironmentVariable("WDEM_STATE_PATH") ??
+          Path.Combine(wdemDirectory, ".wdem-state.json");
     }
 
     private void MigrateLegacyState()

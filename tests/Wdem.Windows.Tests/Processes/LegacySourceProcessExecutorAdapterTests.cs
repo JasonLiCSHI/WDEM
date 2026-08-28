@@ -98,7 +98,33 @@ public sealed class LegacySourceProcessExecutorAdapterTests
     Assert.False(result.Started);
     Assert.Null(result.ExitCode);
     Assert.NotNull(result.Error);
+    Assert.False(result.Error.IsRetryable);
     Assert.DoesNotContain("do-not-copy", result.Error.Detail, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_InvalidWorkingDirectoryMapsToNonRetryableStartFailure()
+  {
+    var legacy = new RecordingProcessRunner
+    {
+      Handler = (_, _, workingDirectory, _, _) => Task.FromResult(
+          new ProcessRunResult(
+              !string.Equals(workingDirectory, "invalid-working-directory", StringComparison.Ordinal),
+              null,
+              [],
+              []))
+    };
+    var adapter = new LegacySourceProcessExecutorAdapter(legacy);
+
+    var result = await adapter.ExecuteAsync(
+        new ProcessExecutionRequest("tool.exe", [], "invalid-working-directory"),
+        null,
+        CancellationToken.None);
+
+    Assert.False(result.Started);
+    Assert.NotNull(result.Error);
+    Assert.False(result.Error.IsRetryable);
+    Assert.Equal("Process could not be started.", result.Error.Summary);
   }
 
   private sealed class RecordingProgress : IProgress<string>

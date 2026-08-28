@@ -52,7 +52,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     var result = await adapter.MigrateAsync(CancellationToken.None);
 
     Assert.Equal(
-        ["First step", "step-two", "array-step", "token=[redacted]"],
+        ["First step", "step-two", "array-step"],
         result.ImportedStepNames);
   }
 
@@ -148,6 +148,49 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     finally
     {
       Directory.Delete(outside, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task MigrateAsync_RejectsUnsafeLabelsWithoutPersistingSensitiveOrPathData()
+  {
+    var overlong = new string('x', 257);
+    WriteLegacy("state.json", JsonSerializer.Serialize(new object[]
+    {
+      "Install Git",
+      "configure-shell",
+      "Git.Git",
+      "apiKey: super-secret",
+      "password=\"quoted-secret\"",
+      "Bearer abc.def.ghi",
+      @"C:\Users\Jane\secret.txt",
+      @"\\server\share\secret.txt",
+      "/home/jane/.ssh/id_rsa",
+      "control\u0001name",
+      overlong
+    }));
+    WriteLegacy(".winhome-state.json", """
+        {
+          "safe-step": { "stepName": "Configure Shell" },
+          "unsafe-path": { "stepName": "C:\\private\\token.txt" },
+          "malicious": { "stepName": { "nested": "super-secret" } }
+        }
+        """);
+    var adapter = new LegacyStateMigrationAdapter(_root);
+
+    var result = await adapter.MigrateAsync(CancellationToken.None);
+
+    Assert.Equal(
+        ["Configure Shell", "Install Git", "configure-shell", "Git.Git"],
+        result.ImportedStepNames);
+    var marker = await File.ReadAllTextAsync(result.MarkerPath);
+    foreach (var forbidden in new[]
+    {
+      "super-secret", "quoted-secret", "abc.def.ghi", "Jane", "server", "jane",
+      "control", "nested", overlong
+    })
+    {
+      Assert.DoesNotContain(forbidden, marker, StringComparison.OrdinalIgnoreCase);
     }
   }
 
