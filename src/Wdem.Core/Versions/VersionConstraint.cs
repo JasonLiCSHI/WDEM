@@ -106,14 +106,14 @@ public sealed partial class VersionConstraint
     return segment;
   }
 
-  [GeneratedRegex(@"^(?<major>\d+)\.(?<minor>\d+)\.[xX]$", RegexOptions.CultureInvariant)]
+  [GeneratedRegex(@"\A(?<major>\d+)\.(?<minor>\d+)\.[xX]\z", RegexOptions.CultureInvariant)]
   private static partial Regex WildcardPattern();
 
-  [GeneratedRegex(@"^=\s*(?<version>\d+(?:\.\d+){0,3})$", RegexOptions.CultureInvariant)]
+  [GeneratedRegex(@"\A=\s*(?<version>\d+(?:\.\d+){0,3})\z", RegexOptions.CultureInvariant)]
   private static partial Regex ExactPattern();
 
   [GeneratedRegex(
-      @"^>=\s*(?<minimum>\d+(?:\.\d+){0,3})(?:\s+<\s*(?<maximum>\d+(?:\.\d+){0,3}))?$",
+      @"\A>=\s*(?<minimum>\d+(?:\.\d+){0,3})(?:\s+<\s*(?<maximum>\d+(?:\.\d+){0,3}))?\z",
       RegexOptions.CultureInvariant)]
   private static partial Regex RangePattern();
 }

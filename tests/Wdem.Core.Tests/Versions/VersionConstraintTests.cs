@@ -77,6 +77,13 @@ public sealed class VersionConstraintTests
   [InlineData(">= 18.3 <")]
   [InlineData(">= 18.3 < 19.0 ignored")]
   [InlineData("18.3.2 || >= 0")]
+  [InlineData("= 18.3.2\n")]
+  [InlineData("= 18.3.2\r\n")]
+  [InlineData("18.3.x\n")]
+  [InlineData("18.3.x\r\n")]
+  [InlineData(">= 18.3 < 19.0\n")]
+  [InlineData(">= 18.3 < 19.0\r\n")]
+  [InlineData("\n= 18.3.2")]
   public void Parse_RejectsMalformedExpressions(string expression)
   {
     Assert.Throws<FormatException>(() => VersionConstraint.Parse(expression));
