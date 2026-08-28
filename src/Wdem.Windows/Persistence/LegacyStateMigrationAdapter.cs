@@ -547,6 +547,11 @@ public sealed class LegacyStateMigrationAdapter
       return true;
     }
 
+    if (HasReverseDnsPackageStructure(value))
+    {
+      return false;
+    }
+
     var segments = value.Split(
         ['.', '-', '_'],
         StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -556,29 +561,26 @@ public sealed class LegacyStateMigrationAdapter
     }
 
     var compactValue = string.Concat(segments);
-    return LooksLikeOpaqueTokenSegment(compactValue) &&
-        !HasReadablePackageStructure(value, segments);
+    return LooksLikeOpaqueTokenSegment(compactValue);
   }
 
-  private static bool HasReadablePackageStructure(
-      string value,
-      IReadOnlyList<string> segments) =>
-      value.Any(character => character is '.' or '-' or '_') &&
-      segments.Count >= 2 &&
-      segments.All(IsReadablePackageSegment);
-
-  private static bool IsReadablePackageSegment(string segment)
+  private static bool HasReverseDnsPackageStructure(string value)
   {
-    if (segment.All(char.IsAsciiLetter) || segment.All(char.IsAsciiDigit) ||
-        CountCamelCaseLexicalWords(segment) > 0)
+    var labels = value.Split('.', StringSplitOptions.None);
+    if (labels.Length < 3 ||
+        labels[0] is not ("com" or "org" or "net" or "io" or "dev" or "app"))
     {
-      return true;
+      return false;
     }
 
-    var digitStart = segment.IndexOfAnyInRange('0', '9');
-    return digitStart > 0 &&
-        segment[..digitStart].All(char.IsAsciiLetter) &&
-        segment[digitStart..].All(char.IsAsciiDigit);
+    return labels.All(label =>
+        label.Length is > 0 and <= 63 &&
+        char.IsAsciiLetterOrDigit(label[0]) &&
+        char.IsAsciiLetterOrDigit(label[^1]) &&
+        label.All(character =>
+            char.IsAsciiLetterLower(character) ||
+            char.IsAsciiDigit(character) ||
+            character == '-'));
   }
 
   private static bool LooksLikeOpaqueTokenSegment(string value)
