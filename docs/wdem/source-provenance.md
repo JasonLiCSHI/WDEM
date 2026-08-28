@@ -1,0 +1,17 @@
+# WDEM source provenance
+
+WDEM is an independent product repository. Its transitional
+`Wdem.LegacySource` library contains source-derived material from
+[DotDev262/WinHome](https://github.com/DotDev262/WinHome), copyright (c) 2025
+Aryan Madhusudhanan, under the MIT License.
+
+The repository retains `LICENSE` and `THIRD-PARTY-NOTICES.md` for that source
+provenance. The `winhome-source` and `winhome-fork` Git remotes may be used to
+inspect provenance only: their push URLs are `DISABLED`. WDEM does not merge
+to an upstream WinHome repository.
+
+`Wdem.Core` is the WDEM-owned core. `Wdem.LegacySource` is a transitional
+library boundary, not a WDEM command-line product or compatibility promise.
+WDEM releases, branding, namespaces, state paths, environment variables,
+documentation, CI configuration, solution names, and project names are
+independent of the provenance sources.

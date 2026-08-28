@@ -1,0 +1,22 @@
+using System;
+using System.Text.Json.Serialization;
+using YamlDotNet.Serialization;
+
+namespace Wdem.LegacySource.Models
+{
+  /// <summary>Configures how often a scheduled task repeats and for how long.</summary>
+  public class RepetitionPatternConfig
+  {
+    [YamlMember(Alias = "interval")]
+    [JsonPropertyName("interval")]
+    public TimeSpan Interval { get; set; }
+
+    [YamlMember(Alias = "duration")]
+    [JsonPropertyName("duration")]
+    public TimeSpan Duration { get; set; }
+
+    [YamlMember(Alias = "stopAtDurationEnd")]
+    [JsonPropertyName("stopAtDurationEnd")]
+    public bool StopAtDurationEnd { get; set; }
+  }
+}

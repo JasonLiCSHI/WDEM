@@ -1,0 +1,15 @@
+using Wdem.LegacySource.Models.Plugins;
+
+namespace Wdem.LegacySource.Interfaces
+{
+  /// <summary>Discovers and manages plugins from the configured plugin directories.</summary>
+  public interface IPluginManager
+  {
+    /// <summary>Enumerates all discovered plugin manifests.</summary>
+    IEnumerable<PluginManifest> DiscoverPlugins();
+    /// <summary>Ensures the required runtime is installed for the given plugin.</summary>
+    Task EnsureRuntimeAsync(PluginManifest plugin);
+    /// <summary>Downloads and installs missing plugins from the remote pack.</summary>
+    Task EnsurePluginsInstalledAsync(IEnumerable<string> configuredPluginNames);
+  }
+}

@@ -1,0 +1,173 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Wdem.LegacySource.Interfaces;
+using Wdem.LegacySource.Services.Bootstrappers;
+using Wdem.LegacySource.Services.Logging;
+using Wdem.LegacySource.Services.Managers;
+using Wdem.LegacySource.Services.Plugins;
+using Wdem.LegacySource.Services.System;
+using Wdem.Core.Providers;
+using Wdem.LegacySource.Providers;
+using Wdem.LegacySource.Services;
+
+namespace Wdem.LegacySource.Infrastructure;
+
+/// <summary>Configures the dependency injection container and builds the application host.</summary>
+public static class AppHost
+{
+  /// <summary>Creates and configures the application <see cref="IHost"/> with all services registered.</summary>
+  /// <param name="args">Command-line arguments used to detect early flags (e.g. --json).</param>
+  /// <returns>A configured <see cref="IHost"/> ready for service resolution.</returns>
+  public static IHost CreateHost(string[] args)
+  {
+    bool isJson = args.Contains("--json");
+
+    // Early parse log file routine: Intercepts the raw command argument elements before host compilation
+    string? logFilePath = null;
+    for (int i = 0; i < args.Length; i++)
+    {
+      if (args[i] == "--log-file" && i + 1 < args.Length)
+      {
+        logFilePath = args[i + 1];
+        break;
+      }
+    }
+
+    return Host.CreateDefaultBuilder(args)
+        .ConfigureServices((context, services) =>
+        {
+          ConfigureServices(context.Configuration, services, isJson, logFilePath);
+        })
+        .Build();
+  }
+
+  /// <summary>Registers all application services into the DI container.</summary>
+  /// <param name="configuration">Application configuration source.</param>
+  /// <param name="services">The service collection to register into.</param>
+  /// <param name="isJsonForce">If <c>true</c>, forces JSON logging regardless of configuration.</param>
+  /// <param name="logFilePath">The parsed file path target to pass down to persistent logger instances.</param>
+  public static void ConfigureServices(IConfiguration configuration, IServiceCollection services, bool isJsonForce = false, string? logFilePath = null)
+  {
+    var isJsonConfig = configuration.GetValue<bool>("json");
+    var isJson = isJsonForce || isJsonConfig;
+
+    if (isJson)
+    {
+      services.AddSingleton<ILogger>(sp => new JsonLogger(logFilePath));
+    }
+    else
+    {
+      services.AddSingleton<ILogger>(sp => new ConsoleLogger(logFilePath));
+    }
+
+    // System Services
+    services.AddSingleton<IProcessRunner, DefaultProcessRunner>();
+    services.AddSingleton<IFileSystem, DefaultFileSystem>();
+    services.AddSingleton<IServiceControllerWrapper, ServiceControllerWrapper>();
+    services.AddSingleton<IRegistryWrapper, RegistryWrapper>();
+
+    // Domain Services
+    services.AddSingleton<IConfigValidator, ConfigValidator>();
+    services.AddSingleton<IConfigBackupService, ConfigBackupService>();
+    services.AddSingleton<IConfigDriftService, ConfigDriftService>();
+    services.AddSingleton<IDotfileService, DotfileService>();
+    services.AddSingleton<IRegistryService, RegistryService>();
+    services.AddSingleton<ISystemSettingsService, SystemSettingsService>();
+    services.AddSingleton<IWslService, WslService>();
+    services.AddSingleton<IGitService, GitService>();
+    services.AddSingleton<IEnvironmentService, EnvironmentService>();
+    services.AddSingleton<IWindowsServiceManager, WindowsServiceManager>();
+    services.AddSingleton<IScheduledTaskService, ScheduledTaskService>();
+    services.AddSingleton<IRuntimeResolver, RuntimeResolver>();
+    services.AddSingleton<IUpdateService, UpdateService>();
+    services.AddSingleton<ISecretResolver, SecretResolver>();
+    services.AddSingleton<IStateService, StateService>();
+    services.AddSingleton<IPluginManager>(sp => new PluginManager(
+        sp.GetRequiredService<UvBootstrapper>(),
+        sp.GetRequiredService<BunBootstrapper>(),
+        sp.GetRequiredService<ILogger>(),
+        null,
+        sp.GetRequiredService<IRuntimeResolver>()
+    ));
+    services.AddSingleton<IGeneratorService, GeneratorService>();
+    services.AddSingleton<IPluginRunner, PluginRunner>();
+
+    // Bootstrappers
+    services.AddSingleton<ChocolateyBootstrapper>();
+    services.AddSingleton<ScoopBootstrapper>();
+    services.AddSingleton<WingetBootstrapper>();
+    services.AddSingleton<UvBootstrapper>();
+    services.AddSingleton<BunBootstrapper>();
+
+    // Package Managers
+    services.AddSingleton<WingetService>(sp => new WingetService(
+        sp.GetRequiredService<IProcessRunner>(),
+        sp.GetRequiredService<WingetBootstrapper>(),
+        sp.GetRequiredService<ILogger>(),
+        sp.GetRequiredService<IRuntimeResolver>()
+    ));
+    services.AddSingleton<ChocolateyService>(sp => new ChocolateyService(
+        sp.GetRequiredService<IProcessRunner>(),
+        sp.GetRequiredService<ChocolateyBootstrapper>(),
+        sp.GetRequiredService<ILogger>(),
+        sp.GetRequiredService<IRuntimeResolver>()
+    ));
+    services.AddSingleton<ScoopService>(sp => new ScoopService(
+        sp.GetRequiredService<IProcessRunner>(),
+        sp.GetRequiredService<ScoopBootstrapper>(),
+        sp.GetRequiredService<ILogger>(),
+        sp.GetRequiredService<IRuntimeResolver>()
+    ));
+
+    services.AddSingleton<Dictionary<string, IPackageManager>>(sp => new()
+        {
+            { "winget", sp.GetRequiredService<WingetService>() },
+            { "choco", sp.GetRequiredService<ChocolateyService>() },
+            { "scoop", sp.GetRequiredService<ScoopService>() }
+        });
+
+    services.AddSingleton<IResourceProviderRegistry>(sp =>
+        new ResourceProviderRegistry(
+        [
+            new LegacyPackageManagerProviderAdapter(
+                "winget",
+                sp.GetRequiredService<WingetService>(),
+                supportsSource: true),
+            new LegacyPackageManagerProviderAdapter(
+                "choco",
+                sp.GetRequiredService<ChocolateyService>()),
+            new LegacyPackageManagerProviderAdapter(
+                "scoop",
+                sp.GetRequiredService<ScoopService>())
+        ]));
+
+    services.AddSingleton<Engine>(sp => new Engine(
+        sp.GetRequiredService<Dictionary<string, IPackageManager>>(),
+        sp.GetRequiredService<IDotfileService>(),
+        sp.GetRequiredService<IRegistryService>(),
+        sp.GetRequiredService<ISystemSettingsService>(),
+        sp.GetRequiredService<IWslService>(),
+        sp.GetRequiredService<IGitService>(),
+        sp.GetRequiredService<IEnvironmentService>(),
+        sp.GetRequiredService<IWindowsServiceManager>(),
+        sp.GetRequiredService<IScheduledTaskService>(),
+        sp.GetRequiredService<IPluginManager>(),
+        sp.GetRequiredService<IPluginRunner>(),
+        sp.GetRequiredService<IStateService>(),
+        sp.GetRequiredService<ILogger>(),
+        sp.GetRequiredService<IRuntimeResolver>(),
+        sp.GetRequiredService<IResourceProviderRegistry>()
+    ));
+    services.AddSingleton<AppRunner>(sp => new AppRunner(
+        sp.GetRequiredService<Engine>(),
+        sp.GetRequiredService<IConfigValidator>(),
+        sp.GetRequiredService<ISecretResolver>(),
+        sp.GetRequiredService<ILogger>()
+    ));
+  }
+}
