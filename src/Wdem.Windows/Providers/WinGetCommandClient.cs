@@ -1,6 +1,5 @@
 using Wdem.Core.Execution;
 using Wdem.Core.Processes;
-using System.Text.RegularExpressions;
 
 namespace Wdem.Windows.Providers;
 
@@ -77,11 +76,23 @@ public sealed class WinGetCommandClient
       IReadOnlyList<string> output,
       string preferredVersion)
   {
-    var pattern = $@"(?<![0-9.]){Regex.Escape(preferredVersion)}(?![0-9.])";
-    return output.Any(line => Regex.IsMatch(
-        line,
-        pattern,
-        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase));
+    foreach (var line in output)
+    {
+      var separator = line.IndexOf(':', StringComparison.Ordinal);
+      if (separator < 0 ||
+          !string.Equals(
+              line[..separator].Trim(),
+              "Version",
+              StringComparison.OrdinalIgnoreCase))
+      {
+        continue;
+      }
+
+      var sourceVersion = line[(separator + 1)..].Trim().Trim('"');
+      return string.Equals(sourceVersion, preferredVersion.Trim(), StringComparison.Ordinal);
+    }
+
+    return false;
   }
 
   public async Task<WinGetCommandResult> InstallAsync(

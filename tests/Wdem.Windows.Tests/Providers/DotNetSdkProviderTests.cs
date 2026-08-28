@@ -80,6 +80,29 @@ public sealed class DotNetSdkProviderTests
     Assert.Equal(DetectionOutcome.Failed, state.Outcome);
   }
 
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task DetectAndPlan_EmptySdkListIsSuccessfulMissingState(bool whitespaceLine)
+  {
+    var process = new RecordingProcessExecutor
+    {
+      Handler = request => request.FileName == "dotnet"
+          ? new ProcessExecutionResult(true, 0, whitespaceLine ? ["   "] : [], [])
+          : new ProcessExecutionResult(true, 0, ["available"], [])
+    };
+    var provider = new DotNetSdkProvider(process, new ComplianceEvaluator());
+    var resource = DotNetResource("10.0.x");
+
+    var state = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, state, CancellationToken.None);
+
+    Assert.Equal(DetectionOutcome.Succeeded, state.Outcome);
+    Assert.False(state.Exists);
+    Assert.True(plan.IsExecutable);
+    Assert.True(plan.RequiresApply);
+  }
+
   [Fact]
   public async Task ApplyAsync_SuccessfulExitWithoutVerifiedSdkFails()
   {
@@ -164,7 +187,7 @@ public sealed class DotNetSdkProviderTests
             0,
             ["10.0.105 [C:\\Program Files\\dotnet\\sdk]"],
             []),
-        _ => new ProcessExecutionResult(true, 0, ["10.0.105"], [])
+        _ => new ProcessExecutionResult(true, 0, ["Version: 10.0.105"], [])
       };
       return Task.FromResult(result);
     }

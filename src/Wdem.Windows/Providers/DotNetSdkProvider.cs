@@ -69,6 +69,17 @@ public sealed class DotNetSdkProvider : IResourceProvider
       };
     }
 
+    if (result.ExitCode == 0 && result.StandardOutput.All(string.IsNullOrWhiteSpace))
+    {
+      return new DetectedState
+      {
+        ResourceId = resource.Id,
+        Outcome = DetectionOutcome.Succeeded,
+        Exists = false,
+        Evidence = Evidence(result)
+      };
+    }
+
     if (result.ExitCode != 0 ||
         !CommandVersionParser.TryParseDotNetSdks(result.StandardOutput, out var versions))
     {

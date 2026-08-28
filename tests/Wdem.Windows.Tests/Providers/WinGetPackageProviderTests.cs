@@ -97,6 +97,27 @@ public sealed class WinGetPackageProviderTests
     Assert.Equal(WdemErrorCode.DownloadError, Assert.Single(plan.StructuredErrors).Code);
   }
 
+  [Theory]
+  [InlineData("Version: 2.52.1-preview")]
+  [InlineData("Version: 2.52.1+build.7")]
+  [InlineData("Release Notes: fixes for 2.52.1")]
+  public async Task PlanAsync_RequiresExactValueFromExplicitVersionField(string sourceOutput)
+  {
+    var process = new ScriptedProcessExecutor();
+    process.Enqueue(
+        "winget",
+        ["show", "--id", "Git.Git", "--exact", "--version", "2.52.1",
+         "--accept-source-agreements", "--disable-interactivity"],
+        Success(sourceOutput));
+    var provider = new WinGetPackageProvider(process, new ComplianceEvaluator());
+    var resource = PackageResource(preferredVersion: "2.52.1");
+
+    var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Equal(WdemErrorCode.DownloadError, Assert.Single(plan.StructuredErrors).Code);
+  }
+
   [Fact]
   public async Task ApplyAsync_WithoutPreferredVersionOmitsVersionArguments()
   {
