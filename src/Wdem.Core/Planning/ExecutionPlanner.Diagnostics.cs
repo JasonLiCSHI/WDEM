@@ -34,15 +34,11 @@ public sealed partial class ExecutionPlanner
       return false;
     }
 
-    var merged = new List<StructuredError>(structuredDiagnostics.Count + validation.Errors.Count);
-    var seenDetails = new HashSet<string>(StringComparer.Ordinal);
-    foreach (var diagnostic in structuredDiagnostics)
-    {
-      if (seenDetails.Add(diagnostic.Detail))
-      {
-        merged.Add(diagnostic);
-      }
-    }
+    var merged = new List<StructuredError>(structuredDiagnostics);
+    var structuredDetails = structuredDiagnostics
+        .Select(diagnostic => diagnostic.Detail)
+        .ToHashSet(StringComparer.Ordinal);
+    var legacyDetails = new HashSet<string>(StringComparer.Ordinal);
 
     foreach (var error in validation.Errors)
     {
@@ -57,7 +53,7 @@ public sealed partial class ExecutionPlanner
       }
 
       var sanitized = SanitizeVisible(error);
-      if (!seenDetails.Add(sanitized))
+      if (structuredDetails.Contains(sanitized) || !legacyDetails.Add(sanitized))
       {
         continue;
       }
@@ -102,6 +98,7 @@ public sealed partial class ExecutionPlanner
     }
 
     var snapshots = new List<StructuredError>(diagnostics.Count);
+    var seen = new HashSet<DiagnosticAuditIdentity>();
     foreach (var diagnostic in diagnostics)
     {
       if (diagnostic is null || !Enum.IsDefined(diagnostic.Code))
@@ -135,7 +132,7 @@ public sealed partial class ExecutionPlanner
         return false;
       }
 
-      snapshots.Add(StructuredError.CreateSnapshot(
+      var snapshot = StructuredError.CreateSnapshot(
           diagnostic.Code,
           SanitizeVisible(diagnostic.Summary),
           SanitizeVisible(diagnostic.Detail),
@@ -146,7 +143,11 @@ public sealed partial class ExecutionPlanner
           SanitizeOptional(diagnostic.SuggestedAction),
           diagnostic.IsRetryable,
           SanitizeOptional(diagnostic.UnderlyingExceptionType),
-          SanitizeOptional(diagnostic.UnderlyingExceptionMessage)));
+          SanitizeOptional(diagnostic.UnderlyingExceptionMessage));
+      if (seen.Add(DiagnosticAuditIdentity.From(snapshot)))
+      {
+        snapshots.Add(snapshot);
+      }
     }
 
     normalized = ReadOnly(snapshots);
@@ -160,7 +161,7 @@ public sealed partial class ExecutionPlanner
           WdemErrorCode.ProviderError,
           SanitizeVisible(summary),
           SanitizeVisible(exception.Message),
-          resourceId,
+          NormalizeResourceId(resourceId),
           null,
           null,
           null,
@@ -187,7 +188,7 @@ public sealed partial class ExecutionPlanner
           },
           SanitizeVisible(detail))
       {
-        ResourceId = resourceId,
+        ResourceId = NormalizeResourceId(resourceId),
         SuggestedAction = "Detect the resource again before creating a new plan."
       };
 
@@ -199,7 +200,7 @@ public sealed partial class ExecutionPlanner
           SanitizeVisible(summary),
           SanitizeVisible(detail))
       {
-        ResourceId = resourceId,
+        ResourceId = NormalizeResourceId(resourceId),
         SuggestedAction = "Review provider diagnostics and create a new plan."
       };
 
@@ -271,4 +272,34 @@ public sealed partial class ExecutionPlanner
 
   private static int Utf8ByteCount(string? value) =>
       value is null ? 0 : Encoding.UTF8.GetByteCount(value);
+
+  private static string? NormalizeResourceId(string? value) =>
+      IsValidResourceId(value) ? value : null;
+
+  private sealed record DiagnosticAuditIdentity(
+      WdemErrorCode Code,
+      string? ResourceId,
+      string? StepId,
+      string Summary,
+      string Detail,
+      int? ProcessExitCode,
+      string? LogLocation,
+      string? SuggestedAction,
+      bool IsRetryable,
+      string? UnderlyingExceptionType,
+      string? UnderlyingExceptionMessage)
+  {
+    public static DiagnosticAuditIdentity From(StructuredError error) => new(
+        error.Code,
+        error.ResourceId,
+        error.StepId,
+        error.Summary,
+        error.Detail,
+        error.ProcessExitCode,
+        error.LogLocation,
+        error.SuggestedAction,
+        error.IsRetryable,
+        error.UnderlyingExceptionType,
+        error.UnderlyingExceptionMessage);
+  }
 }

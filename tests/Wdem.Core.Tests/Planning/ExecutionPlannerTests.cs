@@ -1,3 +1,4 @@
+using Wdem.Core.Compliance;
 using Wdem.Core.Execution;
 using Wdem.Core.Graph;
 using Wdem.Core.Planning;
@@ -800,6 +801,11 @@ public sealed class ExecutionPlannerTests
       ComplianceStatus.Unsupported,
       PlannedResourceStatus.Unsupported,
       WdemErrorCode.ProviderError)]
+  [InlineData(
+      DetectionOutcome.Cancelled,
+      ComplianceStatus.DetectionFailed,
+      PlannedResourceStatus.DetectionFailed,
+      WdemErrorCode.CancellationError)]
   public async Task CreateAsync_NonExecutableTerminalPlanWithErrors_PreservesStatusAndDiagnostics(
       DetectionOutcome outcome,
       ComplianceStatus compliance,
@@ -1224,8 +1230,313 @@ public sealed class ExecutionPlannerTests
         Assert.Equal(WdemErrorCode.DependencyError, error.Code));
   }
 
+  [Theory]
+  [InlineData(">=3.0", null, "2.52.1", ComplianceStatus.VersionMismatch)]
+  [InlineData(null, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      null, ComplianceStatus.ConfigurationMismatch)]
+  public async Task CreateAsync_ProviderCannotOverrideEvaluatorCompliance(
+      string? versionConstraint,
+      string? actualHash,
+      string? detectedVersion,
+      ComplianceStatus expectedCompliance)
+  {
+    var resource = Resource("git") with
+    {
+      VersionConstraint = versionConstraint,
+      Parameters = actualHash is null
+          ? new Dictionary<string, string?>()
+          : new Dictionary<string, string?>
+          {
+            ["expectedSha256"] = new string('a', 64)
+          }
+    };
+    var provider = new StubProvider(plan: (definition, _) =>
+        ValidPlan(definition, ComplianceStatus.Satisfied));
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(resource),
+        States(State("git", true) with
+        {
+          Version = detectedVersion,
+          ConfigurationHash = actualHash
+        }),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    var planned = Assert.Single(plan.Resources);
+    Assert.False(plan.IsExecutable);
+    Assert.Equal(PlannedResourceStatus.Invalid, planned.Status);
+    Assert.Contains(plan.Errors, error =>
+        error.Detail.Contains(expectedCompliance.ToString(), StringComparison.Ordinal));
+  }
+
+  [Fact]
+  public async Task CreateAsync_UsesInjectedComplianceEvaluatorAsAuthority()
+  {
+    var evaluator = new StubComplianceEvaluator(new ComplianceResult(
+        ComplianceStatus.Satisfied,
+        "The injected evaluator classified the resource."));
+    var provider = new StubProvider(plan: (resource, _) =>
+        ValidPlan(resource, ComplianceStatus.Satisfied));
+    var planner = new ExecutionPlanner(
+        new ResourceProviderRegistry([provider]),
+        evaluator);
+
+    var plan = await planner.CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.Equal(1, evaluator.EvaluateCalls);
+    Assert.Equal(PlannedResourceStatus.AlreadySatisfied, Assert.Single(plan.Resources).Status);
+  }
+
+  [Fact]
+  public async Task CreateAsync_MalformedResourceDefinitions_ReturnStructuredBoundaryPlans()
+  {
+    var malformed = new[]
+    {
+      Resource("git") with { Dependencies = null! },
+      Resource("git") with { Parameters = null! },
+      Resource("git") with
+      {
+        Parameters = new Dictionary<string, string?>(StringComparer.Ordinal)
+        {
+          ["token"] = "first",
+          ["TOKEN"] = "second"
+        }
+      },
+      Resource("git") with
+      {
+        Parameters = new Dictionary<string, string?> { ["channel"] = null }
+      },
+      Resource("git") with { Dependencies = new ThrowingReadOnlyList<string>() },
+      Resource("bad\u0001id")
+    };
+
+    foreach (var resource in malformed)
+    {
+      var provider = new StubProvider();
+      ExecutionPlan? plan = null;
+      var exception = await Record.ExceptionAsync(async () =>
+          plan = await Planner(provider).CreateAsync(
+              Graph(resource),
+              States(State(resource.Id, false)),
+              "developer",
+              "1.0.0",
+              CancellationToken.None));
+
+      Assert.Null(exception);
+      Assert.NotNull(plan);
+      Assert.False(plan.IsExecutable);
+      Assert.Empty(plan.Resources);
+      Assert.NotEmpty(plan.Errors);
+      Assert.All(plan.Errors, error => Assert.True(
+          error.ResourceId is null || !error.ResourceId.Any(char.IsControl)));
+      Assert.Equal(0, provider.PlanCalls);
+    }
+  }
+
+  [Fact]
+  public async Task CreateAsync_StructuredDiagnosticsWithSameDetailUseFullAuditIdentity()
+  {
+    var provider = new StubProvider(validation: resource => new ProviderValidationResult
+    {
+      StructuredErrors =
+      [
+        new StructuredError(WdemErrorCode.ConfigurationError, "first", "shared")
+        {
+          ResourceId = resource.Id,
+          ProcessExitCode = 1
+        },
+        new StructuredError(WdemErrorCode.ConfigurationError, "second", "shared")
+        {
+          ResourceId = resource.Id,
+          ProcessExitCode = 2
+        }
+      ]
+    });
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.Equal(2, plan.Errors.Count);
+    Assert.Equal([1, 2], plan.Errors.Select(error => error.ProcessExitCode));
+  }
+
+  [Fact]
+  public async Task CreateAsync_StepDescriptionIsValidatedAndStoredAfterSanitization()
+  {
+    var invalidProvider = new StubProvider(plan: (resource, _) => ValidPlan(
+        resource,
+        ComplianceStatus.Missing,
+        Step("install") with { Description = "\u0001\u0002" }));
+    var validProvider = new StubProvider(plan: (resource, _) => ValidPlan(
+        resource,
+        ComplianceStatus.Missing,
+        Step("install") with { Description = "Install\u0001Git" }));
+
+    var invalid = await Planner(invalidProvider).CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+    var valid = await Planner(validProvider).CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(invalid.IsExecutable);
+    Assert.Empty(Assert.Single(invalid.Resources).ResourcePlan.Steps);
+    Assert.Equal("Install Git", Assert.Single(
+        Assert.Single(valid.Resources).ResourcePlan.Steps).Description);
+  }
+
+  [Fact]
+  public async Task CreateAsync_DiagnosticAuditFieldsParticipateInFingerprint()
+  {
+    var pairs = new (StructuredError First, StructuredError Second)[]
+    {
+      (Diagnostic(exitCode: 1), Diagnostic(exitCode: 2)),
+      (Diagnostic(logLocation: "first.log"), Diagnostic(logLocation: "second.log")),
+      (Diagnostic(suggestedAction: "first"), Diagnostic(suggestedAction: "second")),
+      (Diagnostic(retryable: false), Diagnostic(retryable: true)),
+      (Diagnostic(exception: new InvalidOperationException("same")),
+          Diagnostic(exception: new ArgumentException("same"))),
+      (Diagnostic(exception: new InvalidOperationException("first")),
+          Diagnostic(exception: new InvalidOperationException("second")))
+    };
+
+    foreach (var pair in pairs)
+    {
+      var first = await TerminalDiagnosticPlan(pair.First);
+      var second = await TerminalDiagnosticPlan(pair.Second);
+
+      Assert.NotEqual(first.Fingerprint, second.Fingerprint);
+      Assert.NotEqual(first.PlanId, second.PlanId);
+    }
+  }
+
+  [Fact]
+  public async Task CreateAsync_ExternalFieldCollectionAndTotalBudgetsAreStructuredFailures()
+  {
+    var oversizedField = State("git", true) with
+    {
+      Version = new string('x', ExecutionPlanner.MaxTextFieldByteCount + 1)
+    };
+    var oversizedCollection = State("git", true) with
+    {
+      Evidence = Enumerable.Range(0, 10_001).ToDictionary(
+          index => $"key-{index}",
+          _ => string.Empty)
+    };
+    var oversizedTotal = State("git", true) with
+    {
+      Evidence = Enumerable.Range(0, 1_025).ToDictionary(
+          index => $"key-{index}",
+          _ => new string('x', ExecutionPlanner.MaxTextFieldByteCount))
+    };
+
+    foreach (var state in new[] { oversizedField, oversizedCollection, oversizedTotal })
+    {
+      var provider = new StubProvider();
+      var plan = await Planner(provider).CreateAsync(
+          Graph(Resource("git")),
+          States(state),
+          "developer",
+          "1.0.0",
+          CancellationToken.None);
+
+      Assert.False(plan.IsExecutable);
+      Assert.Empty(plan.Resources);
+      Assert.NotEmpty(plan.Errors);
+      Assert.Equal(0, provider.PlanCalls);
+    }
+  }
+
+  [Fact]
+  public async Task CreateAsync_ResourceFieldCollectionAndTotalBudgetsAreStructuredFailures()
+  {
+    var oversizedField = Resource("git") with
+    {
+      DisplayName = new string('x', ExecutionPlanner.MaxTextFieldByteCount + 1)
+    };
+    var oversizedCollection = Resource("git") with
+    {
+      Parameters = Enumerable.Range(0, 10_001).ToDictionary(
+          index => $"key-{index}",
+          _ => (string?)string.Empty)
+    };
+    var oversizedTotal = Resource("git") with
+    {
+      Parameters = Enumerable.Range(0, 1_025).ToDictionary(
+          index => $"key-{index}",
+          _ => (string?)new string('x', ExecutionPlanner.MaxTextFieldByteCount))
+    };
+
+    foreach (var resource in new[] { oversizedField, oversizedCollection, oversizedTotal })
+    {
+      var provider = new StubProvider();
+      var plan = await Planner(provider).CreateAsync(
+          Graph(resource),
+          States(State("git", false)),
+          "developer",
+          "1.0.0",
+          CancellationToken.None);
+
+      Assert.False(plan.IsExecutable);
+      Assert.Empty(plan.Resources);
+      Assert.NotEmpty(plan.Errors);
+      Assert.Equal(0, provider.PlanCalls);
+    }
+  }
+
+  private static StructuredError Diagnostic(
+      int? exitCode = null,
+      string? logLocation = null,
+      string? suggestedAction = null,
+      bool retryable = false,
+      Exception? exception = null) => new(
+          WdemErrorCode.DetectionError,
+          "Detection failed.",
+          "shared detail")
+      {
+        ResourceId = "git",
+        ProcessExitCode = exitCode,
+        LogLocation = logLocation,
+        SuggestedAction = suggestedAction,
+        IsRetryable = retryable,
+        UnderlyingException = exception
+      };
+
+  private static async Task<ExecutionPlan> TerminalDiagnosticPlan(StructuredError diagnostic)
+  {
+    var provider = new StubProvider(plan: (resource, _) =>
+        ValidPlan(resource, ComplianceStatus.DetectionFailed) with
+        {
+          StructuredErrors = [diagnostic]
+        });
+    return await Planner(provider).CreateAsync(
+        Graph(Resource("git")),
+        States(State("git", false) with { Outcome = DetectionOutcome.Failed }),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+  }
+
   private static ExecutionPlanner Planner(params IResourceProvider[] providers) => new(
-      new ResourceProviderRegistry(providers));
+      new ResourceProviderRegistry(providers),
+      new ComplianceEvaluator());
 
   private static ResourceGraph Graph(params ResourceDefinition[][] layers)
   {
@@ -1383,5 +1694,28 @@ public sealed class ExecutionPlannerTests
     public ValueTask<VerificationResult> VerifyAsync(
         ResourceDefinition resource,
         CancellationToken cancellationToken) => throw new NotSupportedException();
+  }
+
+  private sealed class StubComplianceEvaluator(ComplianceResult result) : IComplianceEvaluator
+  {
+    public int EvaluateCalls { get; private set; }
+
+    public ComplianceResult Evaluate(ResourceDefinition desired, DetectedState current)
+    {
+      EvaluateCalls++;
+      return result;
+    }
+  }
+
+  private sealed class ThrowingReadOnlyList<T> : IReadOnlyList<T>
+  {
+    public int Count => 1;
+    public T this[int index] => throw new InvalidOperationException("snapshot failed");
+
+    public IEnumerator<T> GetEnumerator() =>
+        throw new InvalidOperationException("snapshot failed");
+
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() =>
+        GetEnumerator();
   }
 }

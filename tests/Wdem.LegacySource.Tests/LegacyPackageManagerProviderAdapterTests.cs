@@ -165,7 +165,9 @@ public sealed class LegacyPackageManagerProviderAdapterTests
               new HashSet<string>(StringComparer.OrdinalIgnoreCase))
         },
         [new ResourceGraphLayer(0, [resource.Id])]);
-    var planner = new ExecutionPlanner(new ResourceProviderRegistry([adapter]));
+    var planner = new ExecutionPlanner(
+        new ResourceProviderRegistry([adapter]),
+        new Wdem.Core.Compliance.ComplianceEvaluator());
 
     var executionPlan = await planner.CreateAsync(
         graph,

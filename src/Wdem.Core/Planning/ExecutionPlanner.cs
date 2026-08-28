@@ -1,6 +1,7 @@
 using System.Collections.Frozen;
 using System.Security.Cryptography;
 using System.Text;
+using Wdem.Core.Compliance;
 using Wdem.Core.Execution;
 using Wdem.Core.Graph;
 using Wdem.Core.Providers;
@@ -8,7 +9,9 @@ using Wdem.Core.Resources;
 
 namespace Wdem.Core.Planning;
 
-public sealed partial class ExecutionPlanner(IResourceProviderRegistry providers) : IExecutionPlanner
+public sealed partial class ExecutionPlanner(
+    IResourceProviderRegistry providers,
+    IComplianceEvaluator complianceEvaluator) : IExecutionPlanner
 {
   public const int MaxResourceCount = 10_000;
   public const int MaxStepsPerResource = 1_000;
@@ -16,12 +19,17 @@ public sealed partial class ExecutionPlanner(IResourceProviderRegistry providers
   public const int MaxTextFieldByteCount = 4_096;
   public const int MaxDiagnosticsPerResource = 100;
   public const int MaxTotalProviderTextByteCount = 4 * 1024 * 1024;
+  public const int MaxExternalCollectionCount = 10_000;
+  public const int MaxTotalExternalTextByteCount = 4 * 1024 * 1024;
 
   private const int MaxStepIdLength = 128;
+  private const int MaxResourceIdLength = 128;
 
   private static readonly StringComparer IdComparer = StringComparer.OrdinalIgnoreCase;
   private readonly IResourceProviderRegistry _providers =
       providers ?? throw new ArgumentNullException(nameof(providers));
+  private readonly IComplianceEvaluator _complianceEvaluator =
+      complianceEvaluator ?? throw new ArgumentNullException(nameof(complianceEvaluator));
 
   public async Task<ExecutionPlan> CreateAsync(
       ResourceGraph graph,
@@ -42,45 +50,83 @@ public sealed partial class ExecutionPlanner(IResourceProviderRegistry providers
       throw new ArgumentException("Profile identity fields exceed the execution-plan size limit.");
     }
 
-    if (!TrySnapshotDetectedStates(
-            detectedStates,
-            out var detectedStateSnapshot,
-            out var detectedStateCollectionError))
+    var totalExternalTextBytes = 0;
+    ResourceGraph graphSnapshot;
+    StructuredError? graphSnapshotError;
+    try
+    {
+      if (!TrySnapshotGraph(
+              graph,
+              ref totalExternalTextBytes,
+              out graphSnapshot,
+              out graphSnapshotError))
+      {
+        return CreatePlan(profileId, profileVersion, [], [], [graphSnapshotError!]);
+      }
+    }
+    catch (Exception exception)
     {
       return CreatePlan(
           profileId,
           profileVersion,
           [],
           [],
-          [detectedStateCollectionError!]);
+          [BoundaryException(
+              WdemErrorCode.ProfileError,
+              "The resource graph could not be safely snapshotted.",
+              exception)]);
     }
 
-    var graphError = ValidateGraph(graph);
-    if (graphError is not null || graph.Nodes.Count > MaxResourceCount)
+    IReadOnlyDictionary<string, DetectedState> detectedStateSnapshot;
+    StructuredError? detectedStateCollectionError;
+    try
     {
-      var error = graphError ?? new StructuredError(
-          WdemErrorCode.DependencyError,
-          "The execution plan is too large.",
-          $"The graph contains {graph.Nodes.Count} resources; the limit is {MaxResourceCount}.")
+      if (!TrySnapshotDetectedStates(
+              detectedStates,
+              ref totalExternalTextBytes,
+              out detectedStateSnapshot,
+              out detectedStateCollectionError))
       {
-        SuggestedAction = "Reduce the selected resource set and create a new plan."
-      };
-      return CreatePlan(profileId, profileVersion, [], [], [error]);
+        return CreatePlan(
+            profileId,
+            profileVersion,
+            [],
+            [],
+            [detectedStateCollectionError!]);
+      }
+    }
+    catch (Exception exception)
+    {
+      return CreatePlan(
+          profileId,
+          profileVersion,
+          [],
+          [],
+          [BoundaryException(
+              WdemErrorCode.DetectionError,
+              "The detected-state collection could not be safely snapshotted.",
+              exception)]);
+    }
+
+    var graphError = ValidateGraph(graphSnapshot);
+    if (graphError is not null)
+    {
+      return CreatePlan(profileId, profileVersion, [], [], [graphError]);
     }
 
     var errors = new List<StructuredError>();
-    var planned = new List<PlannedResource>(graph.Nodes.Count);
+    var planned = new List<PlannedResource>(graphSnapshot.Nodes.Count);
     var plannedById = new Dictionary<string, PlannedResource>(IdComparer);
     var totalSteps = 0;
     var totalProviderTextBytes = 0;
-    var canonicalLayers = CanonicalizeLayers(graph.TopologicalLayers);
+    var canonicalLayers = CanonicalizeLayers(graphSnapshot.TopologicalLayers);
 
     foreach (var layer in canonicalLayers)
     {
       foreach (var resourceId in layer.ResourceIds)
       {
         cancellationToken.ThrowIfCancellationRequested();
-        var resolved = graph.Nodes[resourceId];
+        var resolved = graphSnapshot.Nodes[resourceId];
         var item = await PlanResourceAsync(
             resolved,
             detectedStateSnapshot,
@@ -151,7 +197,7 @@ public sealed partial class ExecutionPlanner(IResourceProviderRegistry providers
       IReadOnlyDictionary<string, DetectedState> detectedStates,
       CancellationToken cancellationToken)
   {
-    var definition = SnapshotDefinition(resolved.Definition);
+    var definition = resolved.Definition;
     if (!_providers.TryGet(definition.Type, definition.Provider, out var provider) ||
         provider is null)
     {
@@ -238,6 +284,45 @@ public sealed partial class ExecutionPlanner(IResourceProviderRegistry providers
           detectedState.Error));
     }
 
+    ComplianceResult compliance;
+    try
+    {
+      compliance = _complianceEvaluator.Evaluate(definition, detectedState);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      throw;
+    }
+    catch (Exception exception)
+    {
+      return Failure(resolved, definition, ProviderException(
+          definition.Id,
+          "Compliance evaluation failed.",
+          exception));
+    }
+
+    if (compliance is null || !Enum.IsDefined(compliance.Status))
+    {
+      return Failure(resolved, definition, ProviderError(
+          definition.Id,
+          "Compliance evaluation returned an invalid result.",
+          "The compliance evaluator must return a defined compliance status."));
+    }
+
+    IReadOnlyList<StructuredError> complianceDiagnostics = [];
+    if (compliance.Error is not null)
+    {
+      if (!TryNormalizeDiagnostics(
+              definition,
+              [compliance.Error],
+              new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+              out complianceDiagnostics,
+              out var complianceDiagnosticError))
+      {
+        return Failure(resolved, definition, complianceDiagnosticError!);
+      }
+    }
+
     ProviderValidationResult validation;
     try
     {
@@ -305,7 +390,10 @@ public sealed partial class ExecutionPlanner(IResourceProviderRegistry providers
           $"Provider '{definition.Provider}' returned a null resource plan."));
     }
 
-    var planError = ValidateProviderPlan(definition, detectedState, resourcePlan);
+    var planError = ValidateProviderPlan(
+        definition,
+        compliance.Status,
+        resourcePlan);
     if (planError is not null)
     {
       var hasReportedErrors = resourcePlan.Error is not null ||
@@ -407,6 +495,8 @@ public sealed partial class ExecutionPlanner(IResourceProviderRegistry providers
           ? planDiagnostics
           : detectedDiagnostics.Count > 0
           ? ReadOnly(detectedDiagnostics)
+          : complianceDiagnostics.Count > 0
+          ? complianceDiagnostics
           : status is PlannedResourceStatus.Unsupported or PlannedResourceStatus.DetectionFailed
               ? [DetectionStateError(
                   definition.Id,
@@ -498,18 +588,6 @@ public sealed partial class ExecutionPlanner(IResourceProviderRegistry providers
       Diagnostics = diagnostics
     };
   }
-
-  private static ResourceDefinition SnapshotDefinition(ResourceDefinition definition) =>
-      definition with
-      {
-        Dependencies = ReadOnly(definition.Dependencies
-            .Order(IdComparer)
-            .ThenBy(id => id, StringComparer.Ordinal)),
-        Parameters = definition.Parameters.ToFrozenDictionary(
-            pair => pair.Key,
-            pair => pair.Value,
-            StringComparer.OrdinalIgnoreCase)
-      };
 
   private static ResourceDefinition RedactDefinition(ResourceDefinition definition) =>
       definition with
@@ -615,6 +693,10 @@ public sealed partial class ExecutionPlanner(IResourceProviderRegistry providers
       {
         Append(canonical, blockedBy);
       }
+      foreach (var diagnostic in resource.Diagnostics)
+      {
+        AppendDiagnostic(canonical, diagnostic);
+      }
       Append(canonical, resource.ResourcePlan.ResourceId);
       Append(canonical, resource.ResourcePlan.ResourceType);
       Append(canonical, resource.ResourcePlan.ProviderName);
@@ -636,11 +718,7 @@ public sealed partial class ExecutionPlanner(IResourceProviderRegistry providers
 
     foreach (var error in errors)
     {
-      Append(canonical, error.Code.ToString());
-      Append(canonical, error.ResourceId);
-      Append(canonical, error.StepId);
-      Append(canonical, error.Summary);
-      Append(canonical, error.Detail);
+      AppendDiagnostic(canonical, error);
     }
 
     return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString())));
@@ -651,6 +729,22 @@ public sealed partial class ExecutionPlanner(IResourceProviderRegistry providers
     Span<byte> bytes = stackalloc byte[16];
     Convert.FromHexString(fingerprint).AsSpan(0, bytes.Length).CopyTo(bytes);
     return new Guid(bytes);
+  }
+
+  private static void AppendDiagnostic(StringBuilder canonical, StructuredError error)
+  {
+    Append(canonical, error.Code.ToString());
+    Append(canonical, error.ResourceId);
+    Append(canonical, error.StepId);
+    Append(canonical, error.Summary);
+    Append(canonical, error.Detail);
+    Append(canonical, error.ProcessExitCode?.ToString(
+        System.Globalization.CultureInfo.InvariantCulture));
+    Append(canonical, error.LogLocation);
+    Append(canonical, error.SuggestedAction);
+    Append(canonical, error.IsRetryable.ToString());
+    Append(canonical, error.UnderlyingExceptionType);
+    Append(canonical, error.UnderlyingExceptionMessage);
   }
 
   private static void Append(StringBuilder builder, string? value)

@@ -1,4 +1,3 @@
-using System.Collections.Frozen;
 using Wdem.Core.Execution;
 using Wdem.Core.Graph;
 using Wdem.Core.Providers;
@@ -8,62 +7,9 @@ namespace Wdem.Core.Planning;
 
 public sealed partial class ExecutionPlanner
 {
-  private static bool TrySnapshotDetectedStates(
-      IReadOnlyDictionary<string, DetectedState> source,
-      out IReadOnlyDictionary<string, DetectedState> snapshot,
-      out StructuredError? contractError)
-  {
-    var states = new Dictionary<string, DetectedState>(IdComparer);
-    foreach (var pair in source)
-    {
-      if (string.IsNullOrWhiteSpace(pair.Key) || pair.Value is null)
-      {
-        snapshot = FrozenDictionary<string, DetectedState>.Empty;
-        contractError = new StructuredError(
-            WdemErrorCode.DetectionError,
-            "The detected-state collection is malformed.",
-            "Detected-state keys must be non-empty and values cannot be null.")
-        {
-          SuggestedAction = "Detect the selected resources again before creating a plan."
-        };
-        return false;
-      }
-
-      if (!IdComparer.Equals(pair.Key, pair.Value.ResourceId))
-      {
-        snapshot = FrozenDictionary<string, DetectedState>.Empty;
-        contractError = new StructuredError(
-            WdemErrorCode.DetectionError,
-            "The detected-state collection has an identity mismatch.",
-            $"State key '{SanitizeVisible(pair.Key)}' does not match its resource identity.")
-        {
-          SuggestedAction = "Detect the selected resources again before creating a plan."
-        };
-        return false;
-      }
-
-      if (!states.TryAdd(pair.Key, pair.Value))
-      {
-        snapshot = FrozenDictionary<string, DetectedState>.Empty;
-        contractError = new StructuredError(
-            WdemErrorCode.DetectionError,
-            "The detected-state collection contains a duplicate resource.",
-            $"Duplicate resource '{SanitizeVisible(pair.Key)}' occurs when compared case-insensitively.")
-        {
-          SuggestedAction = "Detect the selected resources again before creating a plan."
-        };
-        return false;
-      }
-    }
-
-    snapshot = states.ToFrozenDictionary(IdComparer);
-    contractError = null;
-    return true;
-  }
-
   private static StructuredError? ValidateProviderPlan(
       ResourceDefinition definition,
-      DetectedState detectedState,
+      ComplianceStatus evaluatedCompliance,
       ResourcePlan plan)
   {
     var expectedFingerprint = ResourceDefinitionFingerprint.Create(definition);
@@ -100,7 +46,9 @@ public sealed partial class ExecutionPlanner
     var stepIds = new HashSet<string>(IdComparer);
     foreach (var step in plan.Steps)
     {
-      if (!IsValidStepId(step.Id) || string.IsNullOrWhiteSpace(step.Description))
+      var sanitizedDescription = SanitizeVisible(step.Description);
+      var sanitizedReason = SanitizeOptional(step.Reason);
+      if (!IsValidStepId(step.Id) || string.IsNullOrWhiteSpace(sanitizedDescription))
       {
         return ProviderError(
             definition.Id,
@@ -119,7 +67,9 @@ public sealed partial class ExecutionPlanner
       }
 
       if (Utf8ByteCount(step.Description) > MaxTextFieldByteCount ||
-          step.Reason is not null && Utf8ByteCount(step.Reason) > MaxTextFieldByteCount)
+          Utf8ByteCount(sanitizedDescription) > MaxTextFieldByteCount ||
+          step.Reason is not null && Utf8ByteCount(step.Reason) > MaxTextFieldByteCount ||
+          sanitizedReason is not null && Utf8ByteCount(sanitizedReason) > MaxTextFieldByteCount)
       {
         return ProviderError(
             definition.Id,
@@ -136,25 +86,14 @@ public sealed partial class ExecutionPlanner
       }
     }
 
-    var expectedCompliance = detectedState.Outcome switch
-    {
-      DetectionOutcome.Failed or DetectionOutcome.Cancelled => ComplianceStatus.DetectionFailed,
-      DetectionOutcome.Unsupported => ComplianceStatus.Unsupported,
-      DetectionOutcome.Succeeded when !detectedState.Exists => ComplianceStatus.Missing,
-      _ => (ComplianceStatus?)null
-    };
-    var detectedComplianceMismatch =
-        (expectedCompliance is not null && plan.Compliance != expectedCompliance) ||
-        (detectedState.Outcome == DetectionOutcome.Succeeded &&
-         detectedState.Exists &&
-         plan.Compliance is ComplianceStatus.Missing or
-             ComplianceStatus.DetectionFailed or ComplianceStatus.Unsupported);
-    if (detectedComplianceMismatch)
+    if (plan.Compliance != evaluatedCompliance)
     {
       return new StructuredError(
-          WdemErrorCode.DetectionError,
-          "Provider plan contradicts the detected state.",
-          $"Detection outcome '{detectedState.Outcome}' cannot produce compliance status '{plan.Compliance}'.")
+          evaluatedCompliance is ComplianceStatus.DetectionFailed or ComplianceStatus.Unsupported
+              ? WdemErrorCode.DetectionError
+              : WdemErrorCode.ProviderError,
+          "Provider plan contradicts the compliance evaluation.",
+          $"The compliance evaluator returned '{evaluatedCompliance}' but the provider returned '{plan.Compliance}'.")
       {
         ResourceId = definition.Id,
         SuggestedAction = "Detect the resource again and review the provider implementation."
@@ -295,4 +234,19 @@ public sealed partial class ExecutionPlanner
         character is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or
             '.' or '_' or ':' or '-');
   }
+
+  private static bool IsValidResourceId(string? value)
+  {
+    if (string.IsNullOrEmpty(value) || value.Length > MaxResourceIdLength ||
+        !IsAsciiLetterOrDigit(value[0]))
+    {
+      return false;
+    }
+
+    return value.All(character =>
+        IsAsciiLetterOrDigit(character) || character is '.' or '_' or '-');
+  }
+
+  private static bool IsAsciiLetterOrDigit(char character) =>
+      character is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9';
 }
