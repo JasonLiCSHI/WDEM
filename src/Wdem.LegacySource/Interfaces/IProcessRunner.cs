@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using Wdem.LegacySource.Models;
 
 namespace Wdem.LegacySource.Interfaces
 {
@@ -21,6 +22,25 @@ namespace Wdem.LegacySource.Interfaces
         bool dryRun,
         Action<string>? onOutput,
         CancellationToken cancellationToken);
+
+    /// <summary>Runs a command and retains its exit code and separated output evidence.</summary>
+    Task<ProcessRunResult> RunCommandDetailedAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        Action<ProcessOutputLine>? onOutput,
+        CancellationToken cancellationToken);
+
+    /// <summary>Runs a command in a working directory and retains detailed evidence.</summary>
+    Task<ProcessRunResult> RunCommandDetailedAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        string? workingDirectory,
+        Action<ProcessOutputLine>? onOutput,
+        CancellationToken cancellationToken) => RunCommandDetailedAsync(
+            fileName,
+            arguments,
+            onOutput,
+            cancellationToken);
 
     /// <summary>Runs a command and captures output using a raw argument string (deprecated).</summary>
     [Obsolete("Use the IEnumerable<string> overload instead to prevent command injection.")]

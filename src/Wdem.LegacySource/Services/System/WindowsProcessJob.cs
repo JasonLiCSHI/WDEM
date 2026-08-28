@@ -38,7 +38,8 @@ internal sealed class WindowsProcessJob : IDisposable
 
   public static WindowsProcessJob Start(
       string fileName,
-      IEnumerable<string> arguments)
+      IEnumerable<string> arguments,
+      string? workingDirectory = null)
   {
     if (!OperatingSystem.IsWindows())
     {
@@ -102,7 +103,7 @@ internal sealed class WindowsProcessJob : IDisposable
               inheritHandles: true,
               ExtendedStartupInfoPresent | CreateNoWindow,
               IntPtr.Zero,
-              null,
+              workingDirectory,
               ref startupInfo,
               out processInformation))
       {

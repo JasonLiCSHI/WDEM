@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Threading;
+using Wdem.LegacySource.Models;
 using Wdem.LegacySource.Services.System;
 using Xunit;
 
@@ -9,6 +10,152 @@ namespace Wdem.LegacySource.Tests.Services.System
 {
   public class DefaultProcessRunnerTests
   {
+    [Fact]
+    public async Task RunCommandDetailedAsync_RetainsExitCodeAndSeparatedOutputAfterDrain()
+    {
+      var runner = new DefaultProcessRunner();
+      var output = new List<ProcessOutputLine>();
+      var (executable, arguments) = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+          ? ("cmd", new[] { "/d", "/c", "(echo stdout-line) & (echo stderr-line 1>&2) & exit /b 37" })
+          : ("sh", new[] { "-c", "echo stdout-line; echo stderr-line >&2; exit 37" });
+
+      var result = await runner.RunCommandDetailedAsync(
+          executable,
+          arguments,
+          output.Add,
+          CancellationToken.None);
+
+      Assert.True(result.Started);
+      Assert.Equal(37, result.ExitCode);
+      Assert.Contains("stdout-line", result.StandardOutput);
+      Assert.Contains(result.StandardError, line => line.Trim() == "stderr-line");
+      Assert.Contains(output, line => !line.IsStandardError && line.Text == "stdout-line");
+      Assert.Contains(output, line => line.IsStandardError && line.Text.Trim() == "stderr-line");
+    }
+
+    [Fact]
+    public async Task RunCommandDetailedAsync_PreservesArgumentTokensAndWorkingDirectory()
+    {
+      var runner = new DefaultProcessRunner();
+      var directory = Path.Combine(Path.GetTempPath(), $"wdem-process-{Guid.NewGuid():N}");
+      Directory.CreateDirectory(directory);
+      try
+      {
+        var specialArgument = "two words-quote\"-trailing\\";
+        var scriptPath = Path.Combine(directory, "echo-args.ps1");
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+          File.WriteAllText(
+              scriptPath,
+              "[Console]::Out.WriteLine((Get-Location).Path)\n[Console]::Out.WriteLine($args[0])\n");
+        }
+
+        var command = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? (FileName: "powershell.exe", Arguments: new[]
+            {
+              "-NoLogo", "-NoProfile", "-NonInteractive", "-File", scriptPath,
+              specialArgument
+            })
+            : (FileName: "sh", Arguments: new[] { "-c", "pwd; printf '%s\\n' \"$1\"", "sh", specialArgument });
+
+        var result = await runner.RunCommandDetailedAsync(
+            command.FileName,
+            command.Arguments,
+            directory,
+            null,
+            CancellationToken.None);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar),
+            Path.GetFullPath(result.StandardOutput[0]).TrimEnd(Path.DirectorySeparatorChar),
+            ignoreCase: RuntimeInformation.IsOSPlatform(OSPlatform.Windows));
+        Assert.Equal(specialArgument, result.StandardOutput[1]);
+      }
+      finally
+      {
+        Directory.Delete(directory, recursive: true);
+      }
+    }
+
+    [Fact]
+    public async Task RunCommandDetailedAsync_DrainsAllOutputAfterProcessExit()
+    {
+      var runner = new DefaultProcessRunner();
+      const int lineCount = 400;
+      var command = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+          ? (FileName: "powershell.exe", Arguments: new[]
+          {
+            "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+            $"1..{lineCount} | ForEach-Object {{ [Console]::Out.WriteLine(\"out-$_\"); [Console]::Error.WriteLine(\"err-$_\") }}"
+          })
+          : (FileName: "sh", Arguments: new[] { "-c", $"i=1; while [ $i -le {lineCount} ]; do echo out-$i; echo err-$i >&2; i=$((i+1)); done" });
+
+      var result = await runner.RunCommandDetailedAsync(
+          command.FileName,
+          command.Arguments,
+          null,
+          CancellationToken.None);
+
+      Assert.Equal(0, result.ExitCode);
+      Assert.Equal(lineCount, result.StandardOutput.Count);
+      Assert.Equal(lineCount, result.StandardError.Count);
+      Assert.Equal($"out-{lineCount}", result.StandardOutput[^1]);
+      Assert.Equal($"err-{lineCount}", result.StandardError[^1]);
+    }
+
+    [Fact]
+    public async Task RunCommandDetailedAsync_MissingExecutableReturnsNotStarted()
+    {
+      var runner = new DefaultProcessRunner();
+
+      var result = await runner.RunCommandDetailedAsync(
+          $"missing-{Guid.NewGuid():N}",
+          [],
+          null,
+          CancellationToken.None);
+
+      Assert.False(result.Started);
+      Assert.Null(result.ExitCode);
+      Assert.Empty(result.StandardOutput);
+      Assert.Empty(result.StandardError);
+    }
+
+    [Fact]
+    public async Task RunCommandDetailedAsync_CancellationTerminatesProcess()
+    {
+      var runner = new DefaultProcessRunner();
+      var executable = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "cmd" : "sh";
+      var arguments = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+          ? new[] { "/c", "ping 127.0.0.1 -n 30 > nul" }
+          : new[] { "-c", "sleep 30" };
+      using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+
+      await Assert.ThrowsAsync<OperationCanceledException>(() =>
+          runner.RunCommandDetailedAsync(
+              executable,
+              arguments,
+              null,
+              cancellation.Token));
+    }
+
+    [Fact]
+    public async Task RunCommandAsync_MissingExecutableRetainsFailureCallbackBehavior()
+    {
+      var runner = new DefaultProcessRunner();
+      var output = new List<string>();
+      var executable = $"missing-{Guid.NewGuid():N}";
+
+      var result = await runner.RunCommandAsync(
+          executable,
+          [],
+          false,
+          output.Add,
+          CancellationToken.None);
+
+      Assert.False(result);
+      Assert.Contains(output, line => line.Contains("Error starting", StringComparison.Ordinal));
+    }
+
     /// <summary>RunCommand returns true without executing when dryRun is enabled.</summary>
     [Fact]
     public void RunCommand_DryRunTrue_ReturnsTrueWithoutExecuting()

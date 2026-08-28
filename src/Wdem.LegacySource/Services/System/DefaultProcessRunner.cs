@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Wdem.LegacySource.Interfaces;
+using Wdem.LegacySource.Models;
 
 namespace Wdem.LegacySource.Services.System
 {
@@ -51,148 +52,93 @@ namespace Wdem.LegacySource.Services.System
     {
       cancellationToken.ThrowIfCancellationRequested();
       if (dryRun) return true;
-
-      var startInfo = new ProcessStartInfo
+      var result = await RunCommandDetailedAsync(
+          fileName,
+          args,
+          line => onOutput?.Invoke(line.Text),
+          cancellationToken).ConfigureAwait(false);
+      if (!result.Started)
       {
-        FileName = fileName,
-        UseShellExecute = false,
-        CreateNoWindow = true,
-        RedirectStandardOutput = true,
-        RedirectStandardError = true
-      };
-      foreach (var arg in args)
-      {
-        startInfo.ArgumentList.Add(arg);
+        onOutput?.Invoke($"[ProcessRunner] Error starting {fileName}.");
       }
+
+      return result.Started && result.ExitCode == 0;
+    }
+
+    public Task<ProcessRunResult> RunCommandDetailedAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        Action<ProcessOutputLine>? onOutput,
+        CancellationToken cancellationToken) => RunCommandDetailedAsync(
+            fileName,
+            arguments,
+            null,
+            onOutput,
+            cancellationToken);
+
+    public async Task<ProcessRunResult> RunCommandDetailedAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        string? workingDirectory,
+        Action<ProcessOutputLine>? onOutput,
+        CancellationToken cancellationToken)
+    {
+      ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
+      ArgumentNullException.ThrowIfNull(arguments);
+      cancellationToken.ThrowIfCancellationRequested();
+      var argumentSnapshot = arguments.ToArray();
 
       try
       {
-        if (OperatingSystem.IsWindows())
-        {
-          return await RunWindowsJobCommandAsync(
-              fileName,
-              args,
-              onOutput,
-              cancellationToken);
-        }
-
-        using var process = new Process { StartInfo = startInfo };
-        var outputClosed = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var errorClosed = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        process.OutputDataReceived += (_, eventArgs) =>
-        {
-          if (eventArgs.Data is null)
-          {
-            outputClosed.TrySetResult();
-          }
-          else
-          {
-            onOutput?.Invoke(eventArgs.Data);
-          }
-        };
-        process.ErrorDataReceived += (_, eventArgs) =>
-        {
-          if (eventArgs.Data is null)
-          {
-            errorClosed.TrySetResult();
-          }
-          else
-          {
-            onOutput?.Invoke(eventArgs.Data);
-          }
-        };
-
-        if (!process.Start())
-        {
-          return false;
-        }
-
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-
-        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
-        using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-            cancellationToken,
-            timeout.Token);
-
-        try
-        {
-          await process.WaitForExitAsync(linkedCancellation.Token);
-          try
-          {
-            await Task.WhenAll(outputClosed.Task, errorClosed.Task)
-                .WaitAsync(TimeSpan.FromSeconds(5), linkedCancellation.Token);
-          }
-          catch (TimeoutException)
-          {
-            global::System.Diagnostics.Trace.WriteLine(
-                $"[ProcessRunner] Timed out draining output for {fileName}.");
-            return false;
-          }
-
-          return process.ExitCode == 0;
-        }
-        catch (OperationCanceledException)
-        {
-          try
-          {
-            if (!process.HasExited)
-            {
-              process.Kill(entireProcessTree: true);
-            }
-          }
-
-          catch (InvalidOperationException)
-          {
-            // The process exited between HasExited and Kill.
-          }
-          catch (Exception cleanupError)
-          {
-            global::System.Diagnostics.Trace.WriteLine(
-                $"[ProcessRunner] Failed to terminate {fileName}: {cleanupError.Message}");
-          }
-
-          try
-          {
-            await process.WaitForExitAsync(CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(5));
-            await Task.WhenAll(outputClosed.Task, errorClosed.Task)
-                .WaitAsync(TimeSpan.FromSeconds(5));
-          }
-          catch (Exception cleanupError)
-          {
-            global::System.Diagnostics.Trace.WriteLine(
-                $"[ProcessRunner] Failed while waiting for {fileName} cleanup: {cleanupError.Message}");
-          }
-
-          cancellationToken.ThrowIfCancellationRequested();
-          return false;
-        }
+        return OperatingSystem.IsWindows()
+            ? await RunWindowsJobCommandDetailedAsync(
+                fileName,
+                argumentSnapshot,
+                workingDirectory,
+                onOutput,
+                cancellationToken).ConfigureAwait(false)
+            : await RunPortableCommandDetailedAsync(
+                fileName,
+                argumentSnapshot,
+                workingDirectory,
+                onOutput,
+                cancellationToken).ConfigureAwait(false);
       }
       catch (OperationCanceledException)
       {
         throw;
       }
-      catch (Exception ex)
+      catch (Exception exception)
       {
-        onOutput?.Invoke($"[ProcessRunner] Error starting {fileName}: {ex.Message}");
         global::System.Diagnostics.Trace.WriteLine(
-            $"[ProcessRunner] Error starting {fileName}: {ex.Message}");
-        return false;
+            $"[ProcessRunner] Could not start process: {exception.GetType().Name}");
+        return new ProcessRunResult(false, null, [], []);
       }
     }
 
-    private static async Task<bool> RunWindowsJobCommandAsync(
+    private static async Task<ProcessRunResult> RunWindowsJobCommandDetailedAsync(
         string fileName,
-        IEnumerable<string> arguments,
-        Action<string>? onOutput,
+        IReadOnlyList<string> arguments,
+        string? workingDirectory,
+        Action<ProcessOutputLine>? onOutput,
         CancellationToken cancellationToken)
     {
-      using var processJob = WindowsProcessJob.Start(fileName, arguments);
-      var outputTask = DrainOutputAsync(processJob.StandardOutput, onOutput);
-      var errorTask = DrainOutputAsync(processJob.StandardError, onOutput);
+      using var processJob = WindowsProcessJob.Start(fileName, arguments, workingDirectory);
+      var standardOutput = new List<string>();
+      var standardError = new List<string>();
+      var outputGate = new object();
+      var outputTask = CaptureOutputAsync(
+          processJob.StandardOutput,
+          false,
+          standardOutput,
+          outputGate,
+          onOutput);
+      var errorTask = CaptureOutputAsync(
+          processJob.StandardError,
+          true,
+          standardError,
+          outputGate,
+          onOutput);
       using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
       using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
           cancellationToken,
@@ -200,41 +146,148 @@ namespace Wdem.LegacySource.Services.System
 
       try
       {
-        await processJob.Process.WaitForExitAsync(linkedCancellation.Token);
-        int exitCode = processJob.Process.ExitCode;
-        await processJob.WaitForEmptyAsync(linkedCancellation.Token);
+        await processJob.Process.WaitForExitAsync(linkedCancellation.Token).ConfigureAwait(false);
+        var exitCode = processJob.Process.ExitCode;
+        await processJob.WaitForEmptyAsync(linkedCancellation.Token).ConfigureAwait(false);
         await Task.WhenAll(outputTask, errorTask)
-            .WaitAsync(TimeSpan.FromSeconds(5), linkedCancellation.Token);
-        return exitCode == 0;
+            .WaitAsync(TimeSpan.FromSeconds(5), linkedCancellation.Token)
+            .ConfigureAwait(false);
+        return SnapshotResult(true, exitCode, standardOutput, standardError);
       }
       catch (OperationCanceledException)
       {
         processJob.Terminate();
+        await DrainAfterTerminationAsync(outputTask, errorTask).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        return SnapshotResult(true, null, standardOutput, standardError);
+      }
+    }
+
+    private static async Task<ProcessRunResult> RunPortableCommandDetailedAsync(
+        string fileName,
+        IReadOnlyList<string> arguments,
+        string? workingDirectory,
+        Action<ProcessOutputLine>? onOutput,
+        CancellationToken cancellationToken)
+    {
+      var startInfo = new ProcessStartInfo
+      {
+        FileName = fileName,
+        WorkingDirectory = workingDirectory ?? string.Empty,
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true
+      };
+      foreach (var argument in arguments)
+      {
+        startInfo.ArgumentList.Add(argument);
+      }
+
+      using var process = new Process { StartInfo = startInfo };
+      if (!process.Start())
+      {
+        return new ProcessRunResult(false, null, [], []);
+      }
+
+      var standardOutput = new List<string>();
+      var standardError = new List<string>();
+      var outputGate = new object();
+      var outputTask = CaptureOutputAsync(
+          process.StandardOutput,
+          false,
+          standardOutput,
+          outputGate,
+          onOutput);
+      var errorTask = CaptureOutputAsync(
+          process.StandardError,
+          true,
+          standardError,
+          outputGate,
+          onOutput);
+      using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+      using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+          cancellationToken,
+          timeout.Token);
+
+      try
+      {
+        await process.WaitForExitAsync(linkedCancellation.Token).ConfigureAwait(false);
+        var exitCode = process.ExitCode;
+        await Task.WhenAll(outputTask, errorTask)
+            .WaitAsync(TimeSpan.FromSeconds(5), linkedCancellation.Token)
+            .ConfigureAwait(false);
+        return SnapshotResult(true, exitCode, standardOutput, standardError);
+      }
+      catch (OperationCanceledException)
+      {
         try
         {
-          await Task.WhenAll(outputTask, errorTask)
-              .WaitAsync(TimeSpan.FromSeconds(5));
+          if (!process.HasExited)
+          {
+            process.Kill(entireProcessTree: true);
+          }
         }
-        catch (Exception cleanupError)
+        catch (InvalidOperationException)
         {
-          global::System.Diagnostics.Trace.WriteLine(
-              $"[ProcessRunner] Failed while draining cancelled process output: {cleanupError.Message}");
+          // The process exited between HasExited and Kill.
         }
 
+        await DrainAfterTerminationAsync(outputTask, errorTask).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
-        return false;
+        return SnapshotResult(true, null, standardOutput, standardError);
       }
     }
 
-    private static async Task DrainOutputAsync(
+    private static async Task CaptureOutputAsync(
         StreamReader reader,
-        Action<string>? onOutput)
+        bool isStandardError,
+        List<string> destination,
+        object outputGate,
+        Action<ProcessOutputLine>? onOutput)
     {
-      while (await reader.ReadLineAsync() is { } line)
+      while (await reader.ReadLineAsync().ConfigureAwait(false) is { } line)
       {
-        onOutput?.Invoke(line);
+        lock (outputGate)
+        {
+          destination.Add(line);
+          try
+          {
+            onOutput?.Invoke(new ProcessOutputLine(isStandardError, line));
+          }
+          catch (Exception exception)
+          {
+            global::System.Diagnostics.Trace.WriteLine(
+                $"[ProcessRunner] Output observer failed: {exception.GetType().Name}");
+          }
+        }
       }
     }
+
+    private static async Task DrainAfterTerminationAsync(params Task[] outputTasks)
+    {
+      try
+      {
+        await Task.WhenAll(outputTasks)
+            .WaitAsync(TimeSpan.FromSeconds(5))
+            .ConfigureAwait(false);
+      }
+      catch (Exception exception)
+      {
+        global::System.Diagnostics.Trace.WriteLine(
+            $"[ProcessRunner] Failed while draining terminated process output: {exception.GetType().Name}");
+      }
+    }
+
+    private static ProcessRunResult SnapshotResult(
+        bool started,
+        int? exitCode,
+        List<string> standardOutput,
+        List<string> standardError) => new(
+            started,
+            exitCode,
+            Array.AsReadOnly(standardOutput.ToArray()),
+            Array.AsReadOnly(standardError.ToArray()));
 
     private bool RunProcessInternal(ProcessStartInfo startInfo, string fileName, Action<string>? onOutput)
     {
