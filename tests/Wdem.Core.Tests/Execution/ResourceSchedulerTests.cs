@@ -88,7 +88,9 @@ public sealed class ResourceSchedulerTests
       Assert.NotNull(blocked.Error);
       Assert.Equal(WdemErrorCode.DependencyError, blocked.Error.Code);
       Assert.False(blocked.Error.IsRetryable);
-      Assert.Contains("a", blocked.Error.Detail, StringComparison.OrdinalIgnoreCase);
+      Assert.Equal(
+          $"Resource '{id}' was not started because dependency 'a' did not succeed.",
+          blocked.Error.Detail);
     });
   }
 
@@ -270,6 +272,9 @@ public sealed class ResourceSchedulerTests
       Assert.Equal(ExecutionState.Completed, resourceResult.State);
       Assert.Equal(ExecutionOutcome.Cancelled, resourceResult.Outcome);
     });
+    Assert.NotNull(result.Results["a"].StartedAtUtc);
+    Assert.Null(result.Results["b"].StartedAtUtc);
+    Assert.Null(result.Results["c"].StartedAtUtc);
   }
 
   [Fact]
@@ -287,6 +292,7 @@ public sealed class ResourceSchedulerTests
     Assert.Equal(ExecutionState.Completed, result.Results["a"].State);
     Assert.Equal(ExecutionOutcome.Failed, result.Results["a"].Outcome);
     Assert.Equal(WdemErrorCode.ProviderError, result.Results["a"].Error?.Code);
+    Assert.NotNull(result.Results["a"].StartedAtUtc);
     Assert.Equal(ExecutionState.Blocked, result.Results["b"].State);
   }
 
@@ -305,8 +311,48 @@ public sealed class ResourceSchedulerTests
     Assert.Equal(ExecutionState.Completed, result.Results["a"].State);
     Assert.Equal(ExecutionOutcome.Cancelled, result.Results["a"].Outcome);
     Assert.Equal(WdemErrorCode.CancellationError, result.Results["a"].Error?.Code);
+    Assert.NotNull(result.Results["a"].StartedAtUtc);
     Assert.Equal(ExecutionState.Blocked, result.Results["b"].State);
     Assert.Equal(ExecutionOutcome.Skipped, result.Results["b"].Outcome);
+  }
+
+  [Theory]
+  [InlineData(null)]
+  [InlineData(999)]
+  public async Task ExecuteAsync_MalformedDelegateOutcome_FailsResourceAndBlocksDependent(
+      int? rawOutcome)
+  {
+    var returnedStartedAtUtc = new DateTimeOffset(2026, 8, 28, 1, 2, 3, TimeSpan.Zero);
+    var returnedEndedAtUtc = returnedStartedAtUtc.AddSeconds(1);
+    var result = await _scheduler.ExecuteAsync(
+        ChainPlan("a", "b"),
+        (resource, _) => Task.FromResult(new ResourceResult
+        {
+          ResourceId = "wrong-id",
+          State = ExecutionState.Running,
+          Outcome = rawOutcome.HasValue ? (ExecutionOutcome)rawOutcome.Value : null,
+          StartedAtUtc = returnedStartedAtUtc,
+          EndedAtUtc = returnedEndedAtUtc
+        }),
+        _ => new ProviderCapabilities(),
+        maximumConcurrency: 1,
+        CancellationToken.None);
+
+    var failed = result.Results["a"];
+    Assert.Equal("a", failed.ResourceId);
+    Assert.Equal(ExecutionState.Completed, failed.State);
+    Assert.Equal(ExecutionOutcome.Failed, failed.Outcome);
+    Assert.Equal(returnedStartedAtUtc, failed.StartedAtUtc);
+    Assert.Equal(returnedEndedAtUtc, failed.EndedAtUtc);
+    Assert.Equal(WdemErrorCode.ProviderError, failed.Error?.Code);
+    Assert.False(failed.Error?.IsRetryable);
+
+    var blocked = result.Results["b"];
+    Assert.Equal(ExecutionState.Blocked, blocked.State);
+    Assert.Equal(ExecutionOutcome.Skipped, blocked.Outcome);
+    Assert.Equal(
+        "Resource 'b' was not started because dependency 'a' did not succeed.",
+        blocked.Error?.Detail);
   }
 
   private static TaskCompletionSource NewGate() =>

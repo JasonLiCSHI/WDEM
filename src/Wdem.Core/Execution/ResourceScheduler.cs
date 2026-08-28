@@ -316,6 +316,7 @@ public sealed class ResourceScheduler : IResourceScheduler
   {
     var providerAcquired = false;
     var globalAcquired = false;
+    DateTimeOffset? startedAt = null;
     var id = resource.Definition.Id;
     try
     {
@@ -325,11 +326,21 @@ public sealed class ResourceScheduler : IResourceScheduler
       globalAcquired = true;
       cancellationToken.ThrowIfCancellationRequested();
 
-      var startedAt = DateTimeOffset.UtcNow;
+      startedAt = DateTimeOffset.UtcNow;
       var returned = await executeAsync(resource, cancellationToken).ConfigureAwait(false);
       if (returned is null)
       {
         throw new InvalidOperationException("The resource execution delegate returned no result.");
+      }
+
+      if (returned.Outcome is not { } outcome || !Enum.IsDefined(outcome))
+      {
+        return new CompletedExecution(id, Failed(
+            id,
+            new InvalidOperationException(
+                "The resource execution delegate returned an invalid outcome."),
+            returned.StartedAtUtc ?? startedAt,
+            returned.EndedAtUtc ?? DateTimeOffset.UtcNow));
       }
 
       var result = returned with
@@ -343,11 +354,11 @@ public sealed class ResourceScheduler : IResourceScheduler
     }
     catch (OperationCanceledException exception)
     {
-      return new CompletedExecution(id, Cancelled(id, exception));
+      return new CompletedExecution(id, Cancelled(id, exception, startedAt));
     }
     catch (Exception exception)
     {
-      return new CompletedExecution(id, Failed(id, exception));
+      return new CompletedExecution(id, Failed(id, exception, startedAt));
     }
     finally
     {
@@ -396,39 +407,48 @@ public sealed class ResourceScheduler : IResourceScheduler
     }
   };
 
-  private static ResourceResult Cancelled(string id, Exception? exception = null) => new()
-  {
-    ResourceId = id,
-    State = ExecutionState.Completed,
-    Outcome = ExecutionOutcome.Cancelled,
-    EndedAtUtc = DateTimeOffset.UtcNow,
-    Error = new StructuredError(
+  private static ResourceResult Cancelled(
+      string id,
+      Exception? exception = null,
+      DateTimeOffset? startedAtUtc = null) => new()
+      {
+        ResourceId = id,
+        State = ExecutionState.Completed,
+        Outcome = ExecutionOutcome.Cancelled,
+        StartedAtUtc = startedAtUtc,
+        EndedAtUtc = DateTimeOffset.UtcNow,
+        Error = new StructuredError(
         WdemErrorCode.CancellationError,
         "Resource execution was cancelled.",
         $"Resource '{id}' did not complete because execution was cancelled.")
-    {
-      ResourceId = id,
-      IsRetryable = false,
-      UnderlyingException = exception
-    }
-  };
+        {
+          ResourceId = id,
+          IsRetryable = false,
+          UnderlyingException = exception
+        }
+      };
 
-  private static ResourceResult Failed(string id, Exception exception) => new()
-  {
-    ResourceId = id,
-    State = ExecutionState.Completed,
-    Outcome = ExecutionOutcome.Failed,
-    EndedAtUtc = DateTimeOffset.UtcNow,
-    Error = new StructuredError(
+  private static ResourceResult Failed(
+      string id,
+      Exception exception,
+      DateTimeOffset? startedAtUtc = null,
+      DateTimeOffset? endedAtUtc = null) => new()
+      {
+        ResourceId = id,
+        State = ExecutionState.Completed,
+        Outcome = ExecutionOutcome.Failed,
+        StartedAtUtc = startedAtUtc,
+        EndedAtUtc = endedAtUtc ?? DateTimeOffset.UtcNow,
+        Error = new StructuredError(
         WdemErrorCode.ProviderError,
         "Resource execution failed.",
         $"The provider failed while executing resource '{id}'.")
-    {
-      ResourceId = id,
-      IsRetryable = false,
-      UnderlyingException = exception
-    }
-  };
+        {
+          ResourceId = id,
+          IsRetryable = false,
+          UnderlyingException = exception
+        }
+      };
 
   private static SchedulerResult Snapshot(
       IReadOnlyDictionary<string, ResourceResult> results) => new()
