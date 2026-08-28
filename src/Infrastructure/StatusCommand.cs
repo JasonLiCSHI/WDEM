@@ -34,7 +34,7 @@ namespace WinHome.Infrastructure
           return 0;
         }
 
-        int succeeded = 0, failed = 0, skipped = 0;
+        int succeeded = 0, failed = 0, cancelled = 0, skipped = 0;
         foreach (var kv in state.OrderBy(k => k.Key))
         {
           var r = kv.Value;
@@ -42,6 +42,7 @@ namespace WinHome.Infrastructure
           {
             StepStatus.Succeeded => "[OK]",
             StepStatus.Failed => "[FAIL]",
+            StepStatus.Cancelled => "[CANCELLED]",
             StepStatus.Skipped => "[SKIP]",
             _ => "[?]"
           };
@@ -53,11 +54,13 @@ namespace WinHome.Infrastructure
 
           if (r.Status == StepStatus.Succeeded) succeeded++;
           else if (r.Status == StepStatus.Failed) failed++;
+          else if (r.Status == StepStatus.Cancelled) cancelled++;
           else if (r.Status == StepStatus.Skipped) skipped++;
         }
 
         Console.WriteLine();
-        Console.WriteLine($"{succeeded} succeeded · {failed} failed · {skipped} skipped");
+        Console.WriteLine(
+            $"{succeeded} succeeded · {failed} failed · {cancelled} cancelled · {skipped} skipped");
         return 0;
       });
 

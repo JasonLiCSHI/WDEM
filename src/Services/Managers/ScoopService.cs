@@ -5,7 +5,7 @@ using WinHome.Services.Bootstrappers;
 namespace WinHome.Services.Managers
 {
   /// <summary>Manages package operations via Scoop.</summary>
-  public class ScoopService : IPackageManager
+  public class ScoopService : ICancellablePackageManager
   {
     private readonly IProcessRunner _processRunner;
     private readonly ILogger _logger;
@@ -77,6 +77,52 @@ namespace WinHome.Services.Managers
         throw new Exception($"Failed to install {app.Id} using Scoop.{(manifestNotFound ? " Manifest not found." : "")}");
       }
       _logger.LogSuccess($"[Success] Installed {app.Id}");
+    }
+
+    public async Task InstallAsync(
+        AppConfig app,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+      ArgumentNullException.ThrowIfNull(app);
+      cancellationToken.ThrowIfCancellationRequested();
+
+      var executable = GetScoopExecutable();
+      progress?.Report($"Installing {app.Id} with Scoop.");
+      _logger.LogInfo($"[Scoop] Installing {app.Id}...");
+
+      var alreadyInstalled = false;
+      var manifestNotFound = false;
+      var success = await _processRunner.RunCommandAsync(
+          executable,
+          new[] { "install", app.Id },
+          false,
+          line =>
+          {
+            _logger.LogInfo($"[Scoop:Install] {line}");
+            progress?.Report(line);
+            if (line.Contains($"'{app.Id}' is already installed", StringComparison.OrdinalIgnoreCase))
+            {
+              alreadyInstalled = true;
+            }
+            if (line.Contains("Couldn't find manifest", StringComparison.OrdinalIgnoreCase))
+            {
+              manifestNotFound = true;
+            }
+          },
+          cancellationToken);
+
+      if ((!success || manifestNotFound) && !alreadyInstalled)
+      {
+        throw new Exception(
+            $"Failed to install {app.Id} using Scoop." +
+            (manifestNotFound ? " Manifest not found." : string.Empty));
+      }
+
+      _logger.LogSuccess(
+          alreadyInstalled
+              ? $"[Success] {app.Id} is already installed (detected during install attempt)."
+              : $"[Success] Installed {app.Id}");
     }
 
     /// <summary>Uninstalls a package via Scoop.</summary>

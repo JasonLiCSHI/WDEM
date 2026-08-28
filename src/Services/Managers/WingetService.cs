@@ -5,7 +5,7 @@ using WinHome.Services.Bootstrappers;
 namespace WinHome.Services.Managers
 {
   /// <summary>Manages package operations via Windows Package Manager (winget).</summary>
-  public class WingetService : IPackageManager
+  public class WingetService : ICancellablePackageManager
   {
     private string _wingetPath = "winget";
     private bool _pathResolved = false;
@@ -57,6 +57,25 @@ namespace WinHome.Services.Managers
 
       _logger.LogInfo("[Winget] Updating package sources...");
       _processRunner.RunCommand(_wingetPath, new[] { "source", "update", "--accept-source-agreements" }, false, line => LogFiltered(line, "SourceUpdate"));
+      _sourceUpdated = true;
+    }
+
+    private async Task UpdateSourceAsync(CancellationToken cancellationToken)
+    {
+      if (_sourceUpdated) return;
+
+      _logger.LogInfo("[Winget] Updating package sources...");
+      var success = await _processRunner.RunCommandAsync(
+          _wingetPath,
+          new[] { "source", "update", "--accept-source-agreements" },
+          false,
+          line => LogFiltered(line, "SourceUpdate"),
+          cancellationToken);
+      if (!success)
+      {
+        throw new Exception("Failed to update Winget package sources.");
+      }
+
       _sourceUpdated = true;
     }
 
@@ -114,6 +133,65 @@ namespace WinHome.Services.Managers
         throw new Exception($"Failed to install {app.Id} using Winget.");
       }
       _logger.LogSuccess($"[Success] Installed {app.Id}");
+    }
+
+    public async Task InstallAsync(
+        AppConfig app,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+      ArgumentNullException.ThrowIfNull(app);
+      cancellationToken.ThrowIfCancellationRequested();
+      ResolveWingetPath();
+      await UpdateSourceAsync(cancellationToken);
+
+      progress?.Report($"Installing {app.Id} with Winget.");
+      _logger.LogInfo($"[Winget] Installing {app.Id}...");
+      var args = new List<string>
+      {
+        "install",
+        "--id",
+        app.Id,
+        "-e",
+        "--silent",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "--disable-interactivity",
+        "--no-upgrade"
+      };
+      if (!string.IsNullOrEmpty(app.Source))
+      {
+        args.Add("--source");
+        args.Add(app.Source);
+      }
+
+      var alreadyInstalled = false;
+      var success = await _processRunner.RunCommandAsync(
+          _wingetPath,
+          args,
+          false,
+          line =>
+          {
+            LogFiltered(line, "Install");
+            progress?.Report(line);
+            if (line.Contains(
+                "A package version is already installed",
+                StringComparison.OrdinalIgnoreCase))
+            {
+              alreadyInstalled = true;
+            }
+          },
+          cancellationToken);
+
+      if (!success && !alreadyInstalled)
+      {
+        throw new Exception($"Failed to install {app.Id} using Winget.");
+      }
+
+      _logger.LogSuccess(
+          alreadyInstalled
+              ? $"[Success] {app.Id} is already installed (detected during install attempt)."
+              : $"[Success] Installed {app.Id}");
     }
 
     /// <summary>Uninstalls a package via winget.</summary>

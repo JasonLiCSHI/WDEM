@@ -5,7 +5,7 @@ using WinHome.Services.Bootstrappers;
 namespace WinHome.Services.Managers
 {
   /// <summary>Manages package operations via Chocolatey (choco).</summary>
-  public class ChocolateyService : IPackageManager
+  public class ChocolateyService : ICancellablePackageManager
   {
     private readonly IProcessRunner _processRunner;
     private readonly ILogger _logger;
@@ -81,6 +81,46 @@ namespace WinHome.Services.Managers
       }
 
       _logger.LogSuccess($"[Success] Installed {app.Id}");
+    }
+
+    public async Task InstallAsync(
+        AppConfig app,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+      ArgumentNullException.ThrowIfNull(app);
+      cancellationToken.ThrowIfCancellationRequested();
+
+      var executable = GetChocoExecutable();
+      progress?.Report($"Installing {app.Id} with Chocolatey.");
+      _logger.LogInfo($"[Choco] Installing {app.Id}...");
+
+      var alreadyInstalled = false;
+      var success = await _processRunner.RunCommandAsync(
+          executable,
+          new[] { "install", app.Id, "-y" },
+          false,
+          line =>
+          {
+            LogFiltered(line, "Install");
+            progress?.Report(line);
+            if (line.Contains("already installed", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains("packages installed currently", StringComparison.OrdinalIgnoreCase))
+            {
+              alreadyInstalled = true;
+            }
+          },
+          cancellationToken);
+
+      if (!success && !alreadyInstalled)
+      {
+        throw new Exception($"Failed to install {app.Id} using Chocolatey.");
+      }
+
+      _logger.LogSuccess(
+          alreadyInstalled
+              ? $"[Success] {app.Id} is already installed (detected during install attempt)."
+              : $"[Success] Installed {app.Id}");
     }
 
     /// <summary>Uninstalls a package via Chocolatey.</summary>

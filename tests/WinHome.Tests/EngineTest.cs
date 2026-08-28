@@ -10,7 +10,7 @@ namespace WinHome.Tests
 {
   public class EngineTests
   {
-    private readonly Mock<IPackageManager> _mockWinget;
+    private readonly Mock<ICancellablePackageManager> _mockWinget;
     private readonly Mock<IDotfileService> _mockDotfiles;
     private readonly Mock<IRegistryService> _mockRegistry;
     private readonly Mock<ISystemSettingsService> _mockSystemSettings;
@@ -28,7 +28,7 @@ namespace WinHome.Tests
     public EngineTests()
     {
       // 1. Create Mocks
-      _mockWinget = new Mock<IPackageManager>();
+      _mockWinget = new Mock<ICancellablePackageManager>();
       _mockDotfiles = new Mock<IDotfileService>();
       _mockRegistry = new Mock<IRegistryService>();
       _mockSystemSettings = new Mock<ISystemSettingsService>();
@@ -426,6 +426,56 @@ namespace WinHome.Tests
     }
 
     [Fact]
+    public async Task RunAsync_UsesCancellableProviderAndPropagatesCancellation()
+    {
+      var config = new Configuration();
+      config.Apps.Add(new AppConfig
+      {
+        Id = "Git.Git",
+        Manager = "winget",
+        ResourceId = "git"
+      });
+      var mockLogger = new Mock<ILogger>();
+      using var cancellation = new CancellationTokenSource();
+      _mockWinget.Setup(manager => manager.IsAvailable()).Returns(true);
+      _mockWinget.Setup(manager => manager.IsInstalled("Git.Git")).Returns(false);
+      _mockWinget
+          .Setup(manager => manager.InstallAsync(
+              It.IsAny<AppConfig>(),
+              It.IsAny<IProgress<string>?>(),
+              cancellation.Token))
+          .Returns(async () =>
+          {
+            cancellation.Cancel();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellation.Token);
+          });
+      var registry = new ResourceProviderRegistry(
+      [
+        new LegacyPackageManagerProviderAdapter("winget", _mockWinget.Object)
+      ]);
+      var engine = CreateEngine(mockLogger, resourceProviders: registry);
+
+      await Assert.ThrowsAsync<OperationCanceledException>(() =>
+          engine.RunAsync(config, false, cancellationToken: cancellation.Token));
+
+      _mockWinget.Verify(
+          manager => manager.InstallAsync(
+              It.Is<AppConfig>(app => app.Id == "Git.Git"),
+              It.IsAny<IProgress<string>?>(),
+              cancellation.Token),
+          Times.Once);
+      _mockWinget.Verify(
+          manager => manager.Install(It.IsAny<AppConfig>(), It.IsAny<bool>()),
+          Times.Never);
+      _mockStateService.Verify(
+          state => state.SaveState(It.Is<StateData>(saved =>
+              saved.AppliedItems.Count == 0 &&
+              saved.StepHistory.ContainsKey("winget:Git.Git") &&
+              saved.StepHistory["winget:Git.Git"].Status == StepStatus.Cancelled)),
+          Times.Once);
+    }
+
+    [Fact]
     public async Task RunAsync_ShouldNotMarkFailedRegistryApplyAsApplied()
     {
       // Arrange
@@ -610,6 +660,9 @@ namespace WinHome.Tests
           Status = StepStatus.Succeeded,
           AppliedAt = DateTime.UtcNow
         });
+        var previousState = new StateData();
+        previousState.AppliedItems.Add("winget:SkipApp");
+        _mockStateService.Setup(service => service.LoadState()).Returns(previousState);
 
         var engine = new Engine(
             _managers, _mockDotfiles.Object, _mockRegistry.Object, _mockSystemSettings.Object,
@@ -622,6 +675,45 @@ namespace WinHome.Tests
 
         // Assert
         _mockWinget.Verify(x => x.Install(It.IsAny<AppConfig>(), It.IsAny<bool>()), Times.Never);
+      }
+      finally
+      {
+        if (File.Exists(tmp)) File.Delete(tmp);
+      }
+    }
+
+    [Fact]
+    public async Task RunAsync_RechecksStepMissingFromMainState()
+    {
+      var config = new Configuration();
+      config.Apps.Add(new AppConfig { Id = "InterruptedApp", Manager = "winget" });
+      var mockLogger = new Mock<ILogger>();
+      var tmp = Path.Combine(Path.GetTempPath(), $"winhome_state_test_{Guid.NewGuid()}.json");
+      try
+      {
+        var stateWriter = new WinHome.Services.StateWriter(tmp);
+        stateWriter.RecordStep(new StepResult
+        {
+          StepId = "winget:InterruptedApp",
+          StepType = "app",
+          StepName = "InterruptedApp",
+          Status = StepStatus.Succeeded,
+          AppliedAt = DateTime.UtcNow
+        });
+        _mockStateService.Setup(service => service.LoadState()).Returns(new StateData());
+        var engine = new Engine(
+            _managers, _mockDotfiles.Object, _mockRegistry.Object, _mockSystemSettings.Object,
+            _mockWsl.Object, _mockGit.Object, _mockEnv.Object, _mockServiceManager.Object,
+            _mockScheduledTaskService.Object, _mockPluginManager.Object, _mockPluginRunner.Object,
+            _mockStateService.Object, mockLogger.Object, _mockRuntimeResolver.Object, stateWriter);
+
+        await engine.RunAsync(config, false);
+
+        _mockWinget.Verify(
+            manager => manager.Install(
+                It.Is<AppConfig>(app => app.Id == "InterruptedApp"),
+                false),
+            Times.Once);
       }
       finally
       {

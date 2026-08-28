@@ -36,8 +36,17 @@ class Program
       }
 
       using IHost host = AppHost.CreateHost(args);
+      using var cancellation = new CancellationTokenSource();
+      ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
+      {
+        eventArgs.Cancel = true;
+        cancellation.Cancel();
+      };
+      Console.CancelKeyPress += cancelHandler;
 
-      var rootCommand = CliBuilder.BuildRootCommand(
+      try
+      {
+        var rootCommand = CliBuilder.BuildRootCommand(
           // Run Action
           async (file, dryRun, profile, debug, diff, json, update, force, continueOnError, autoInstallApps, minLogLevel) =>
           {
@@ -57,7 +66,17 @@ class Program
 
             var runner = host.Services.GetRequiredService<AppRunner>();
 
-            var exitCode = await runner.RunAsync(file, dryRun, profile, debug, diff, json, force, continueOnError, autoInstallApps);
+            var exitCode = await runner.RunAsync(
+                file,
+                dryRun,
+                profile,
+                debug,
+                diff,
+                json,
+                force,
+                continueOnError,
+                autoInstallApps,
+                cancellation.Token);
 
             if (logger is JsonLogger jsonLogger)
             {
@@ -272,10 +291,15 @@ class Program
           }
       );
 
-      // Register status command (reads .winhome-state.json)
-      StatusCommand.Register(rootCommand, host.Services);
+        // Register status command (reads .winhome-state.json)
+        StatusCommand.Register(rootCommand, host.Services);
 
-      return await rootCommand.Parse(args).InvokeAsync();
+        return await rootCommand.Parse(args).InvokeAsync();
+      }
+      finally
+      {
+        Console.CancelKeyPress -= cancelHandler;
+      }
     }
     catch (Exception ex)
     {

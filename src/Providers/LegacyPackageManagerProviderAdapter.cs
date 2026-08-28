@@ -11,11 +11,11 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
   public const string SourceParameter = "source";
   public const string InstallerParametersParameter = "installerParameters";
 
-  private readonly IPackageManager _packageManager;
+  private readonly ICancellablePackageManager _packageManager;
 
   public LegacyPackageManagerProviderAdapter(
       string providerName,
-      IPackageManager packageManager,
+      ICancellablePackageManager packageManager,
       bool supportsSource = false)
   {
     ArgumentException.ThrowIfNullOrWhiteSpace(providerName);
@@ -25,7 +25,8 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
     _packageManager = packageManager;
     Capabilities = new ProviderCapabilities
     {
-      SupportsSource = supportsSource
+      SupportsSource = supportsSource,
+      SupportsInProgressCancellation = true
     };
   }
 
@@ -271,14 +272,31 @@ public sealed class LegacyPackageManagerProviderAdapter : IResourceProvider
     var packageId = resource.Parameters[PackageIdParameter]!;
     progress?.Report(new ProviderProgress("Apply", 0, $"Installing {packageId} with {ProviderName}."));
 
-    _packageManager.Install(new AppConfig
+    var package = new AppConfig
     {
       Id = packageId,
       Manager = ProviderName,
       Source = GetOptionalParameter(resource, SourceParameter),
       ResourceId = resource.Id,
       DependsOn = resource.Dependencies.ToList()
-    }, false);
+    };
+    var packageProgress = progress is null
+        ? null
+        : new Progress<string>(message =>
+            progress.Report(new ProviderProgress("Apply", 0.5, message)));
+
+    try
+    {
+      await _packageManager.InstallAsync(package, packageProgress, cancellationToken);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      return new ResourceApplyResult
+      {
+        ResourceId = resource.Id,
+        Outcome = ApplyOutcome.Cancelled
+      };
+    }
 
     progress?.Report(new ProviderProgress("Apply", 1, $"Installed {packageId} with {ProviderName}."));
 

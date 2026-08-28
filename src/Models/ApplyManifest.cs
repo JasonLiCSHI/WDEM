@@ -9,6 +9,8 @@ namespace WinHome.Models
     Succeeded,
     /// <summary>The step encountered an error.</summary>
     Failed,
+    /// <summary>The step was cancelled before completion.</summary>
+    Cancelled,
     /// <summary>The step was skipped (e.g. dry run or condition not met).</summary>
     Skipped
   }

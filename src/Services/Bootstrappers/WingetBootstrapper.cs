@@ -137,6 +137,75 @@ namespace WinHome.Services.Bootstrappers
       }
     }
 
+    public async Task InstallAsync(bool dryRun, CancellationToken cancellationToken)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      if (dryRun)
+      {
+        _logger.LogWarning($"[DryRun] Would install {Name} by downloading from GitHub.");
+        return;
+      }
+
+      _logger.LogInfo($"[Bootstrapper] Installing {Name}...");
+      string tempDir = Path.Combine(Path.GetTempPath(), "WinHome_" + Path.GetRandomFileName());
+      Directory.CreateDirectory(tempDir);
+
+      try
+      {
+        string version = await GetLatestVersionAsync(cancellationToken);
+        _logger.LogInfo($"[Bootstrapper] Latest Winget version detected: {version}");
+
+        string dependenciesUrl = $"https://github.com/microsoft/winget-cli/releases/download/{version}/DesktopAppInstaller_Dependencies.zip";
+        string msixBundleUrl = $"https://github.com/microsoft/winget-cli/releases/download/{version}/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle";
+        string dependenciesZip = Path.Combine(tempDir, "dependencies.zip");
+        string msixBundle = Path.Combine(tempDir, "Microsoft.DesktopAppInstaller.msixbundle");
+
+        await DownloadFile(dependenciesUrl, dependenciesZip, cancellationToken);
+        await DownloadFile(msixBundleUrl, msixBundle, cancellationToken);
+
+        string extractPath = Path.Combine(tempDir, "dependencies");
+        ZipFile.ExtractToDirectory(dependenciesZip, extractPath);
+        string arch = RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant();
+
+        foreach (string file in Directory.GetFiles(extractPath, "*", SearchOption.AllDirectories))
+        {
+          cancellationToken.ThrowIfCancellationRequested();
+          string fileName = Path.GetFileName(file).ToLowerInvariant();
+          if (!IsAppPackage(fileName) || !MatchesArchitecture(fileName, arch))
+          {
+            continue;
+          }
+
+          _logger.LogInfo($"[Bootstrapper] Installing dependency: {Path.GetFileName(file)}");
+          await InstallAppPackageAsync(file, cancellationToken);
+        }
+
+        _logger.LogInfo("[Bootstrapper] Installing Winget msixbundle...");
+        await InstallAppPackageAsync(msixBundle, cancellationToken);
+        _logger.LogSuccess($"[Bootstrapper] {Name} installation completed.");
+      }
+      catch (OperationCanceledException)
+      {
+        throw;
+      }
+      catch (Exception ex)
+      {
+        throw new Exception($"Failed to install {Name}: {ex.Message}", ex);
+      }
+      finally
+      {
+        try
+        {
+          Directory.Delete(tempDir, true);
+        }
+        catch (Exception ex)
+        {
+          _logger.LogWarning(
+              $"[Bootstrapper] Warning: Could not clean up temp directory: {ex.Message}");
+        }
+      }
+    }
+
     /// <summary>Gets the latest winget-cli version tag from GitHub Releases API.</summary>
     private string GetLatestVersion()
     {
@@ -150,15 +219,21 @@ namespace WinHome.Services.Bootstrappers
     }
 
     /// <summary>Downloads a file from a URL to the specified path with a long timeout for large files.</summary>
-    private async Task DownloadFile(string url, string path)
+    private async Task DownloadFile(
+        string url,
+        string path,
+        CancellationToken cancellationToken = default)
     {
       _logger.LogInfo($"[Bootstrapper] Downloading {url}...");
       using var client = new HttpClient();
       client.Timeout = TimeSpan.FromMinutes(10); // Increase timeout for large files
-      var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+      var response = await client.GetAsync(
+          url,
+          HttpCompletionOption.ResponseHeadersRead,
+          cancellationToken);
       response.EnsureSuccessStatusCode();
       await using var fs = new FileStream(path, FileMode.Create);
-      await response.Content.CopyToAsync(fs);
+      await response.Content.CopyToAsync(fs, cancellationToken);
     }
 
     /// <summary>Installs an .appx/.msix package via PowerShell's Add-AppxPackage.</summary>
@@ -175,6 +250,55 @@ namespace WinHome.Services.Bootstrappers
           _logger.LogWarning($"[Bootstrapper:Error] {output.Trim()}");
         }
       }
+    }
+
+    private async Task<string> GetLatestVersionAsync(CancellationToken cancellationToken)
+      {
+        using var client = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+        client.DefaultRequestHeaders.Add("User-Agent", "WinHome-Bootstrapper");
+        using var response = await client.GetAsync(
+            "https://api.github.com/repos/microsoft/winget-cli/releases/latest",
+            cancellationToken);
+        response.EnsureSuccessStatusCode();
+        using var json = JsonDocument.Parse(
+            await response.Content.ReadAsStringAsync(cancellationToken));
+        return json.RootElement.GetProperty("tag_name").GetString() ?? "v1.12.460";
+      }
+
+    private async Task InstallAppPackageAsync(
+          string path,
+          CancellationToken cancellationToken)
+      {
+        string command = $"Add-AppxPackage -Path \"{path}\"";
+        var output = new List<string>();
+        var success = await _processRunner.RunCommandAsync(
+            "powershell.exe",
+            new[] { "-NoProfile", "-NonInteractive", "-Command", command },
+            false,
+            output.Add,
+            cancellationToken);
+        if (!success)
+        {
+          throw new Exception(
+              $"Package {Path.GetFileName(path)} failed to install: " +
+              string.Join(Environment.NewLine, output));
+        }
+      }
+
+    private static bool IsAppPackage(string fileName) =>
+          fileName.EndsWith(".appx", StringComparison.Ordinal) ||
+          fileName.EndsWith(".msix", StringComparison.Ordinal) ||
+          fileName.EndsWith(".appxbundle", StringComparison.Ordinal) ||
+          fileName.EndsWith(".msixbundle", StringComparison.Ordinal);
+
+    private static bool MatchesArchitecture(string fileName, string architecture)
+      {
+        if (fileName.Contains("arm64", StringComparison.Ordinal) && architecture != "arm64") return false;
+        if (fileName.Contains("x64", StringComparison.Ordinal) && architecture != "x64") return false;
+        if (fileName.Contains("x86", StringComparison.Ordinal) &&
+            architecture != "x86" &&
+            architecture != "x64") return false;
+        return true;
     }
   }
 }

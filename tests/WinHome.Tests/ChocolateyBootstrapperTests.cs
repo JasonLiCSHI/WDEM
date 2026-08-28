@@ -93,6 +93,28 @@ namespace WinHome.Tests
     }
 
     [Fact]
+    public async Task InstallAsync_PropagatesCancellation()
+    {
+      using var cancellation = new CancellationTokenSource();
+      _mockProcessRunner
+          .Setup(runner => runner.RunCommandAsync(
+              "powershell.exe",
+              It.IsAny<IEnumerable<string>>(),
+              false,
+              It.IsAny<Action<string>?>(),
+              cancellation.Token))
+          .Returns(async () =>
+          {
+            cancellation.Cancel();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellation.Token);
+            return true;
+          });
+
+      await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+          _bootstrapper.InstallAsync(false, cancellation.Token));
+    }
+
+    [Fact]
     public void Install_RetryExhausted_ThrowsAfterMaxAttempts()
     {
       _mockProcessRunner.Setup(pr => pr.RunProcessWithStartInfo(It.IsAny<ProcessStartInfo>()))

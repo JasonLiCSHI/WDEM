@@ -34,8 +34,19 @@ public class AppRunner
   /// <param name="force">If <c>true</c>, reapplies steps even if previously succeeded.</param>
   /// <param name="continueOnError">If <c>true</c>, continues applying remaining steps on failure.</param>
   /// <param name="autoInstallApps">If <c>true</c>, automatically installs missing plugin prerequisite applications.</param>
+  /// <param name="cancellationToken">Cancels configuration loading and execution.</param>
   /// <returns>Exit code (0 for success).</returns>
-  public async Task<int> RunAsync(FileInfo configFile, bool dryRun, string? profile, bool debug, bool diff, bool json, bool force = false, bool continueOnError = false, bool autoInstallApps = false)
+  public async Task<int> RunAsync(
+      FileInfo configFile,
+      bool dryRun,
+      string? profile,
+      bool debug,
+      bool diff,
+      bool json,
+      bool force = false,
+      bool continueOnError = false,
+      bool autoInstallApps = false,
+      CancellationToken cancellationToken = default)
   {
     try
     {
@@ -47,7 +58,7 @@ public class AppRunner
         return 1;
       }
 
-      var yamlContent = await File.ReadAllTextAsync(configFile.FullName);
+      var yamlContent = await File.ReadAllTextAsync(configFile.FullName, cancellationToken);
 
       var validation = _validator.Validate(yamlContent);
       if (!validation.IsValid)
@@ -67,8 +78,22 @@ public class AppRunner
       // Resolve Secrets
       _secretResolver.ResolveObject(config);
 
-      await _engine.RunAsync(config, dryRun, profile, debug, diff, force, continueOnError, autoInstallApps);
+      await _engine.RunAsync(
+          config,
+          dryRun,
+          profile,
+          debug,
+          diff,
+          force,
+          continueOnError,
+          autoInstallApps,
+          cancellationToken);
       return 0;
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      _logger.LogWarning("[Cancelled] Configuration was cancelled by the user.");
+      return 130;
     }
     catch (Exception ex)
     {

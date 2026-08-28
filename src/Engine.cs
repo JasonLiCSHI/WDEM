@@ -99,8 +99,19 @@ namespace WinHome
     /// <param name="forceReapply">If <c>true</c>, reapplies steps even if previously succeeded.</param>
     /// <param name="continueOnError">If <c>true</c>, continues with remaining steps when a step fails.</param>
     /// <param name="autoInstallApps">If <c>true</c>, automatically installs missing plugin prerequisite applications.</param>
-    public async Task RunAsync(Configuration config, bool dryRun, string? profileName = null, bool debug = false, bool diff = false, bool forceReapply = false, bool continueOnError = false, bool autoInstallApps = false)
+    /// <param name="cancellationToken">Cancels the active configuration run.</param>
+    public async Task RunAsync(
+        Configuration config,
+        bool dryRun,
+        string? profileName = null,
+        bool debug = false,
+        bool diff = false,
+        bool forceReapply = false,
+        bool continueOnError = false,
+        bool autoInstallApps = false,
+        CancellationToken cancellationToken = default)
     {
+      cancellationToken.ThrowIfCancellationRequested();
       _logger.LogInfo($"--- WinHome v{config.Version} ---");
 
       // Ensure all configured plugins are downloaded/available locally
@@ -112,6 +123,7 @@ namespace WinHome
           .ToList();
 
       await _pluginManager.EnsurePluginsInstalledAsync(configuredPluginNames);
+      cancellationToken.ThrowIfCancellationRequested();
 
       // Load Plugins
       var plugins = _pluginManager.DiscoverPlugins().ToList();
@@ -119,6 +131,7 @@ namespace WinHome
 
       foreach (var plugin in plugins)
       {
+        cancellationToken.ThrowIfCancellationRequested();
         if (plugin.Capabilities.Contains("package_manager"))
         {
           if (!_managers.ContainsKey(plugin.Name))
@@ -152,13 +165,14 @@ namespace WinHome
       // Check network if we have apps to install or WSL update enabled
       if ((config.Apps.Any() || (config.Wsl != null && config.Wsl.Update)) && !dryRun)
       {
-        if (!await WaitForNetwork())
+        if (!await WaitForNetwork(cancellationToken: cancellationToken))
         {
           _logger.LogWarning("[Warning] No internet connection detected. Package manager operations may fail.");
         }
       }
 
       var currentState = await BuildStateFromConfig(config);
+      cancellationToken.ThrowIfCancellationRequested();
 
       var previousState = _stateService.LoadState();
       currentState.SystemSettingOriginals = new Dictionary<string, object>(previousState.SystemSettingOriginals);
@@ -175,34 +189,36 @@ namespace WinHome
       {
         _logger.LogInfo("\n--- Cleaning Up ---");
         var removedItems = new ConcurrentBag<string>();
-        await Task.Run(() => Parallel.ForEach(itemsToRemove, uniqueId =>
-        {
-          if (uniqueId.StartsWith("reg:"))
+        var parallelOptions = new ParallelOptions { CancellationToken = cancellationToken };
+        await Task.Run(() => Parallel.ForEach(itemsToRemove, parallelOptions, uniqueId =>
           {
-            var parts = uniqueId.Substring(4).Split('|', 2);
-            if (parts.Length == 2 && _registry.Revert(parts[0], parts[1], dryRun) && !dryRun)
+            if (uniqueId.StartsWith("reg:"))
             {
-              removedItems.Add(uniqueId);
-              confirmedApplied.TryRemove(uniqueId, out _);
-            }
-          }
-          else
-          {
-            var parts = uniqueId.Split(':', 2);
-            if (parts.Length == 2 && _managers.TryGetValue(parts[0], out var mgr))
-            {
-              mgr.Uninstall(parts[1], dryRun);
-              if (!dryRun)
+              var parts = uniqueId.Substring(4).Split('|', 2);
+              if (parts.Length == 2 && _registry.Revert(parts[0], parts[1], dryRun) && !dryRun)
               {
                 removedItems.Add(uniqueId);
                 confirmedApplied.TryRemove(uniqueId, out _);
               }
             }
-          }
-        }));
+            else
+            {
+              var parts = uniqueId.Split(':', 2);
+              if (parts.Length == 2 && _managers.TryGetValue(parts[0], out var mgr))
+              {
+                mgr.Uninstall(parts[1], dryRun);
+                if (!dryRun)
+                {
+                  removedItems.Add(uniqueId);
+                  confirmedApplied.TryRemove(uniqueId, out _);
+                }
+              }
+            }
+          }), cancellationToken);
 
         foreach (var item in removedItems)
         {
+          cancellationToken.ThrowIfCancellationRequested();
           _stateService.RemoveApplied(item);
           try
           {
@@ -227,8 +243,10 @@ namespace WinHome
           _logger.LogInfo("\n--- Reverting Removed System Settings ---");
           foreach (var settingKey in removedSystemSettings)
           {
+            cancellationToken.ThrowIfCancellationRequested();
             var originalValue = previousState.SystemSettingOriginals[settingKey];
             await _systemSettings.RevertSystemSettingAsync(settingKey, originalValue, dryRun);
+            cancellationToken.ThrowIfCancellationRequested();
             if (!dryRun)
             {
               _stateService.RemoveSystemSettingOriginal(settingKey);
@@ -241,13 +259,14 @@ namespace WinHome
       // 1. Ensure System Managers (Scoop) are ready if needed by plugins
       if (plugins.Any(p => p.Type.ToLower() == "python" || p.Type.ToLower() == "javascript" || p.Type.ToLower() == "typescript"))
       {
+        cancellationToken.ThrowIfCancellationRequested();
         if (_managers.TryGetValue("scoop", out var scoopMgr))
         {
           if (!scoopMgr.IsAvailable())
           {
             _logger.LogInfo("\n--- Bootstrapping System Managers ---");
             _logger.LogInfo("[Engine] Bootstrapping Scoop for plugin runtimes...");
-            scoopMgr.Bootstrapper.Install(dryRun);
+            await scoopMgr.Bootstrapper.InstallAsync(dryRun, cancellationToken);
           }
         }
       }
@@ -268,7 +287,9 @@ namespace WinHome
           _logger.LogInfo("\n--- Reconciling Plugin Runtimes ---");
           foreach (var plugin in usedPluginsNeedingRuntime)
           {
+            cancellationToken.ThrowIfCancellationRequested();
             await _pluginManager.EnsureRuntimeAsync(plugin);
+            cancellationToken.ThrowIfCancellationRequested();
           }
           _env.RefreshPath();
         }
@@ -294,6 +315,7 @@ namespace WinHome
         var sortedApps = DependencyResolver.Sort(config.Apps, globalResourceIds);
         foreach (var app in sortedApps)
         {
+          cancellationToken.ThrowIfCancellationRequested();
           var stepId = $"{app.Manager}:{app.Id}";
           _logger.LogInfo($"[Engine] Processing {stepId}...");
 
@@ -301,19 +323,25 @@ namespace WinHome
           {
             try
             {
-              if (_resourceProviders?.TryGet("package", app.Manager, out var resourceProvider) == true &&
-                  resourceProvider is not null)
+              IResourceProvider? resourceProvider = null;
+              if (_resourceProviders?.TryGet("package", app.Manager, out var resolvedProvider) == true &&
+                  resolvedProvider is not null)
               {
+                resourceProvider = resolvedProvider;
                 var validation = await resourceProvider.ValidateAsync(
                     CreatePackageResourceDefinition(app),
-                    CancellationToken.None);
+                    cancellationToken);
                 if (!validation.IsValid)
                 {
                   throw new InvalidOperationException(string.Join(" ", validation.Errors));
                 }
               }
 
-              if (!forceReapply && !dryRun && applyState.TryGetValue(stepId, out var previous) && previous.Status == StepStatus.Succeeded)
+              if (!forceReapply &&
+                  !dryRun &&
+                  confirmedApplied.ContainsKey(stepId) &&
+                  applyState.TryGetValue(stepId, out var previous) &&
+                  previous.Status == StepStatus.Succeeded)
               {
                 _logger.LogInfo($"[Engine] Skipping previously applied {stepId}.");
                 var skippedResult = new StepResult
@@ -339,7 +367,7 @@ namespace WinHome
               if (!mgr.IsAvailable())
               {
                 _logger.LogInfo($"[Engine] Manager '{app.Manager}' not available. Bootstrapping...");
-                mgr.Bootstrapper.Install(dryRun);
+                await mgr.Bootstrapper.InstallAsync(dryRun, cancellationToken);
                 if (!mgr.IsAvailable())
                 {
                   _logger.LogError($"[Error] Manager '{app.Manager}' not found after attempting to install it.");
@@ -347,7 +375,19 @@ namespace WinHome
                 }
               }
 
-              mgr.Install(app, dryRun);
+              if (resourceProvider is not null)
+              {
+                await ExecutePackageProviderAsync(
+                    resourceProvider,
+                    CreatePackageResourceDefinition(app),
+                    dryRun,
+                    cancellationToken);
+              }
+              else
+              {
+                mgr.Install(app, dryRun);
+                cancellationToken.ThrowIfCancellationRequested();
+              }
 
               if (!dryRun)
               {
@@ -367,6 +407,24 @@ namespace WinHome
               }
 
               _env.RefreshPath();
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+              var cancelledResult = new StepResult
+              {
+                StepId = stepId,
+                StepType = "app",
+                StepName = app.Id,
+                Status = StepStatus.Cancelled,
+                ErrorMessage = "Cancelled by the user.",
+                AppliedAt = DateTime.UtcNow
+              };
+              RecordCancelledStep(
+                  cancelledResult,
+                  applyState,
+                  currentState,
+                  confirmedApplied);
+              throw;
             }
             catch (Exception ex)
             {
@@ -402,12 +460,19 @@ namespace WinHome
         }
       }
 
-      if (config.Git != null) _git.Configure(config.Git, dryRun);
+      cancellationToken.ThrowIfCancellationRequested();
+      if (config.Git != null)
+      {
+        _git.Configure(config.Git, dryRun);
+        cancellationToken.ThrowIfCancellationRequested();
+      }
 
+      cancellationToken.ThrowIfCancellationRequested();
       if (config.Wsl != null)
       {
         _logger.LogInfo("\n--- Configuring WSL ---");
         _wsl.Configure(config.Wsl, dryRun);
+        cancellationToken.ThrowIfCancellationRequested();
       }
 
       if (config.EnvVars.Any())
@@ -416,7 +481,9 @@ namespace WinHome
         var sortedEnvVars = DependencyResolver.Sort(config.EnvVars, globalResourceIds);
         foreach (var env in sortedEnvVars)
         {
+          cancellationToken.ThrowIfCancellationRequested();
           _env.Apply(env, dryRun);
+          cancellationToken.ThrowIfCancellationRequested();
         }
       }
 
@@ -432,6 +499,7 @@ namespace WinHome
         _logger.LogInfo("\n--- Running Plugin Extensions ---");
         foreach (var ext in allExtensions)
         {
+          cancellationToken.ThrowIfCancellationRequested();
           var pluginName = ext.Key;
           var pluginConfig = ext.Value;
 
@@ -445,6 +513,7 @@ namespace WinHome
             }
 
             await _pluginManager.EnsureRuntimeAsync(plugin);
+            cancellationToken.ThrowIfCancellationRequested();
 
             bool isInstalled = true;
             if (autoInstallApps)
@@ -515,6 +584,7 @@ namespace WinHome
 
                 foreach (var mgrName in managersToTry)
                 {
+                  cancellationToken.ThrowIfCancellationRequested();
                   if (_managers.TryGetValue(mgrName, out var mgr))
                   {
                     if (!mgr.IsAvailable())
@@ -522,7 +592,11 @@ namespace WinHome
                       _logger.LogInfo($"[Engine] Manager '{mgrName}' not available. Attempting to bootstrap...");
                       try
                       {
-                        mgr.Bootstrapper.Install(dryRun);
+                        await mgr.Bootstrapper.InstallAsync(dryRun, cancellationToken);
+                      }
+                      catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                      {
+                        throw;
                       }
                       catch (Exception bootEx)
                       {
@@ -544,7 +618,15 @@ namespace WinHome
                 {
                   _logger.LogInfo($"[Plugin] Prerequisite app for '{pluginName}' is not installed. Attempting auto-installation using manager '{selectedMgrName}' (Package: '{packageId}')...");
                   var appConfig = new AppConfig { Id = packageId, Manager = selectedMgrName };
-                  selectedMgr.Install(appConfig, dryRun);
+                  if (!dryRun && selectedMgr is ICancellablePackageManager cancellableManager)
+                  {
+                    await cancellableManager.InstallAsync(appConfig, null, cancellationToken);
+                  }
+                  else
+                  {
+                    selectedMgr.Install(appConfig, dryRun);
+                  }
+                  cancellationToken.ThrowIfCancellationRequested();
                   _logger.LogSuccess($"[Plugin] Prerequisite app '{packageId}' installed successfully.");
                   _env.RefreshPath();
                 }
@@ -557,6 +639,7 @@ namespace WinHome
 
             _logger.LogInfo($"[Plugin] Applying configuration for '{pluginName}'...");
             var result = await _pluginRunner.ExecuteAsync(plugin, "apply", pluginConfig, new { dryRun = dryRun });
+            cancellationToken.ThrowIfCancellationRequested();
 
             if (!result.Success)
             {
@@ -575,6 +658,7 @@ namespace WinHome
       }
 
       var presetTweaks = await _systemSettings.GetTweaksAsync(config.SystemSettings);
+      cancellationToken.ThrowIfCancellationRequested();
       var allTweaks = config.RegistryTweaks.Concat(presetTweaks).ToList();
 
       if (allTweaks.Any() && OperatingSystem.IsWindows())
@@ -583,9 +667,14 @@ namespace WinHome
         var applyState = _stateWriter.Load();
         foreach (var tweak in allTweaks)
         {
+          cancellationToken.ThrowIfCancellationRequested();
           var stepId = $"reg:{tweak.Path}|{tweak.Name}";
 
-          if (!forceReapply && !dryRun && applyState.TryGetValue(stepId, out var previous) && previous.Status == StepStatus.Succeeded)
+          if (!forceReapply &&
+              !dryRun &&
+              confirmedApplied.ContainsKey(stepId) &&
+              applyState.TryGetValue(stepId, out var previous) &&
+              previous.Status == StepStatus.Succeeded)
           {
             _logger.LogInfo($"[Engine] Skipping previously applied registry tweak {tweak.Path}|{tweak.Name}.");
             var skippedResult = new StepResult
@@ -603,6 +692,7 @@ namespace WinHome
           try
           {
             var applied = _registry.Apply(tweak, dryRun);
+            cancellationToken.ThrowIfCancellationRequested();
             if (!applied)
             {
               throw new Exception($"Failed to apply registry tweak {tweak.Path}|{tweak.Name}.");
@@ -624,6 +714,25 @@ namespace WinHome
               confirmedApplied.TryAdd(stepId, (byte)0);
               hadSuccessfulApply = true;
             }
+          }
+          catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+          {
+            var cancelledResult = new StepResult
+            {
+              StepId = stepId,
+              StepType = "registry",
+              StepName = tweak.Name,
+              Status = StepStatus.Cancelled,
+              ErrorMessage = "Cancelled by the user.",
+              AppliedAt = DateTime.UtcNow
+            };
+
+            RecordCancelledStep(
+                cancelledResult,
+                applyState,
+                currentState,
+                confirmedApplied);
+            throw;
           }
           catch (Exception ex)
           {
@@ -661,8 +770,10 @@ namespace WinHome
         if (!dryRun)
         {
           var originals = await _systemSettings.CaptureOriginalSettingsAsync(config.SystemSettings);
+          cancellationToken.ThrowIfCancellationRequested();
           foreach (var kvp in originals)
           {
+            cancellationToken.ThrowIfCancellationRequested();
             if (!currentState.SystemSettingOriginals.ContainsKey(kvp.Key))
             {
               currentState.SystemSettingOriginals[kvp.Key] = kvp.Value;
@@ -672,6 +783,7 @@ namespace WinHome
         }
 
         await _systemSettings.ApplyNonRegistrySettingsAsync(config.SystemSettings, dryRun);
+        cancellationToken.ThrowIfCancellationRequested();
       }
 
       if (config.Dotfiles.Any())
@@ -682,11 +794,25 @@ namespace WinHome
         if (hasDotfileDeps)
         {
           foreach (var dotfile in sortedDotfiles)
+          {
+            cancellationToken.ThrowIfCancellationRequested();
             _dotfiles.Apply(dotfile, dryRun);
+            cancellationToken.ThrowIfCancellationRequested();
+          }
         }
         else
         {
-          await Task.Run(() => Parallel.ForEach(sortedDotfiles, dotfile => _dotfiles.Apply(dotfile, dryRun)));
+          var parallelOptions = new ParallelOptions { CancellationToken = cancellationToken };
+          await Task.Run(
+              () => Parallel.ForEach(
+                  sortedDotfiles,
+                  parallelOptions,
+                  dotfile =>
+                  {
+                    _dotfiles.Apply(dotfile, dryRun);
+                    parallelOptions.CancellationToken.ThrowIfCancellationRequested();
+                  }),
+              cancellationToken);
         }
       }
 
@@ -698,11 +824,25 @@ namespace WinHome
         if (hasServiceDeps)
         {
           foreach (var service in sortedServices)
+          {
+            cancellationToken.ThrowIfCancellationRequested();
             _serviceManager.Apply(service, dryRun);
+            cancellationToken.ThrowIfCancellationRequested();
+          }
         }
         else
         {
-          await Task.Run(() => Parallel.ForEach(sortedServices, service => _serviceManager.Apply(service, dryRun)));
+          var parallelOptions = new ParallelOptions { CancellationToken = cancellationToken };
+          await Task.Run(
+              () => Parallel.ForEach(
+                  sortedServices,
+                  parallelOptions,
+                  service =>
+                  {
+                    _serviceManager.Apply(service, dryRun);
+                    parallelOptions.CancellationToken.ThrowIfCancellationRequested();
+                  }),
+              cancellationToken);
         }
       }
 
@@ -714,14 +854,29 @@ namespace WinHome
         if (hasTaskDeps)
         {
           foreach (var task in sortedTasks)
+          {
+            cancellationToken.ThrowIfCancellationRequested();
             _scheduledTaskService.Apply(task, dryRun);
+            cancellationToken.ThrowIfCancellationRequested();
+          }
         }
         else
         {
-          await Task.Run(() => Parallel.ForEach(sortedTasks, task => _scheduledTaskService.Apply(task, dryRun)));
+          var parallelOptions = new ParallelOptions { CancellationToken = cancellationToken };
+          await Task.Run(
+              () => Parallel.ForEach(
+                  sortedTasks,
+                  parallelOptions,
+                  task =>
+                  {
+                    _scheduledTaskService.Apply(task, dryRun);
+                    parallelOptions.CancellationToken.ThrowIfCancellationRequested();
+                  }),
+              cancellationToken);
         }
       }
 
+      cancellationToken.ThrowIfCancellationRequested();
       if (!dryRun)
       {
         if (hadSuccessfulApply)
@@ -766,6 +921,74 @@ namespace WinHome
         Parameters = parameters,
         PrivilegeRequirement = PrivilegeRequirement.Administrator
       };
+    }
+
+    private async Task ExecutePackageProviderAsync(
+        IResourceProvider provider,
+        ResourceDefinition resource,
+        bool dryRun,
+        CancellationToken cancellationToken)
+    {
+      var detectedState = await provider.DetectAsync(resource, cancellationToken);
+      var plan = await provider.PlanAsync(resource, detectedState, cancellationToken);
+      if (!plan.IsExecutable)
+      {
+        throw new InvalidOperationException(
+            $"Resource '{resource.Id}' cannot be applied: {plan.Error}");
+      }
+
+      if (dryRun || !plan.RequiresApply)
+      {
+        return;
+      }
+
+      var result = await provider.ApplyAsync(resource, plan, null, cancellationToken);
+      if (result.Outcome == ApplyOutcome.Cancelled)
+      {
+        throw new OperationCanceledException(cancellationToken);
+      }
+
+      var verification = await provider.VerifyAsync(resource, cancellationToken);
+      if (verification.Compliance != ComplianceStatus.Satisfied)
+      {
+        throw new InvalidOperationException(
+            verification.Message ??
+            $"Resource '{resource.Id}' failed verification with status '{verification.Compliance}'.");
+      }
+    }
+
+    private void RecordCancelledStep(
+        StepResult cancelledResult,
+        Dictionary<string, StepResult> applyState,
+        StateData currentState,
+        ConcurrentDictionary<string, byte> confirmedApplied)
+    {
+      try
+      {
+        _stateWriter.RecordStep(cancelledResult);
+        applyState[cancelledResult.StepId] = cancelledResult;
+      }
+      catch (Exception stateError)
+      {
+        _logger.LogWarning(
+            $"[Engine] Failed to write cancelled step status for {cancelledResult.StepId}: " +
+            stateError.Message);
+      }
+
+      try
+      {
+        currentState.AppliedItems = new HashSet<string>(
+            confirmedApplied.Keys,
+            StringComparer.OrdinalIgnoreCase);
+        currentState.StepHistory[cancelledResult.StepId] = cancelledResult;
+        _stateService.SaveState(currentState);
+      }
+      catch (Exception stateError)
+      {
+        _logger.LogWarning(
+            $"[Engine] Failed to synchronize cancelled step status for {cancelledResult.StepId}: " +
+            stateError.Message);
+      }
     }
 
     /// <summary>Prints a diff of what will change compared to the previously applied state.</summary>

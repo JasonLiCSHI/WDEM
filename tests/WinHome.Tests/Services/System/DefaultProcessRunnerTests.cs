@@ -136,6 +136,69 @@ namespace WinHome.Tests.Services.System
       Assert.True(result);
     }
 
+    [Fact]
+    public async Task RunCommandAsync_CancellationTerminatesProcess()
+    {
+      var runner = new DefaultProcessRunner();
+      using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+      var stopwatch = global::System.Diagnostics.Stopwatch.StartNew();
+      var executable = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "cmd" : "sh";
+      var arguments = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+          ? new[] { "/c", "ping 127.0.0.1 -n 30 > nul" }
+          : new[] { "-c", "sleep 30" };
+
+      await Assert.ThrowsAsync<OperationCanceledException>(() =>
+          runner.RunCommandAsync(executable, arguments, false, null, cancellation.Token));
+
+      Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task RunCommandAsync_CancellationTerminatesChildAfterParentExits()
+    {
+      if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+
+      var runner = new DefaultProcessRunner();
+      var testDirectory = Path.Combine(
+          Path.GetTempPath(),
+          $"winhome_job_test_{Guid.NewGuid():N}");
+      Directory.CreateDirectory(testDirectory);
+      var markerPath = Path.Combine(testDirectory, "child-survived.txt");
+      var childScript = Path.Combine(testDirectory, "child.cmd");
+      var parentScript = Path.Combine(testDirectory, "parent.cmd");
+
+      try
+      {
+        File.WriteAllText(
+            childScript,
+            $"@ping 127.0.0.1 -n 4 >nul{Environment.NewLine}@echo survived>\"{markerPath}\"");
+        File.WriteAllText(
+            parentScript,
+            $"@start \"\" /b cmd /c \"\"{childScript}\"\"");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            runner.RunCommandAsync(
+                "cmd",
+                new[] { "/c", parentScript },
+                false,
+                null,
+                cancellation.Token));
+
+        await Task.Delay(TimeSpan.FromSeconds(4));
+        Assert.False(
+            File.Exists(markerPath),
+            "A child process survived after the cancelled Job Object was closed.");
+      }
+      finally
+      {
+        if (Directory.Exists(testDirectory))
+        {
+          Directory.Delete(testDirectory, recursive: true);
+        }
+      }
+    }
+
     /// <summary>RunCommandWithOutput returns non-empty stdout for dotnet --version.</summary>
     [Fact]
     public void RunCommandWithOutput_ReturnsStdoutFromDotnetVersion()

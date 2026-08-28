@@ -10,5 +10,14 @@ namespace WinHome.Interfaces
     /// <summary>Installs the package manager.</summary>
     /// <param name="dryRun">If <c>true</c>, simulates the installation without making changes.</param>
     void Install(bool dryRun);
+
+    /// <summary>Installs the package manager and observes cancellation when supported.</summary>
+    Task InstallAsync(bool dryRun, CancellationToken cancellationToken)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      Install(dryRun);
+      cancellationToken.ThrowIfCancellationRequested();
+      return Task.CompletedTask;
+    }
   }
 }

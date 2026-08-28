@@ -9,7 +9,7 @@ namespace WinHome.Tests;
 
 public sealed class LegacyPackageManagerProviderAdapterTests
 {
-  private readonly Mock<IPackageManager> _packageManager = new();
+  private readonly Mock<ICancellablePackageManager> _packageManager = new();
 
   [Fact]
   public async Task ValidateAsync_RejectsMissingPackageId()
@@ -89,12 +89,13 @@ public sealed class LegacyPackageManagerProviderAdapterTests
     Assert.Single(plan.Steps);
     Assert.Equal(ApplyOutcome.Succeeded, applied.Outcome);
     Assert.Equal(ComplianceStatus.Satisfied, verified.Compliance);
-    _packageManager.Verify(manager => manager.Install(
+    _packageManager.Verify(manager => manager.InstallAsync(
         It.Is<AppConfig>(app =>
             app.Id == "Git.Git" &&
             app.Manager == "winget" &&
             app.ResourceId == "git"),
-        false), Times.Once);
+        It.IsAny<IProgress<string>?>(),
+        CancellationToken.None), Times.Once);
   }
 
   [Fact]
@@ -113,7 +114,10 @@ public sealed class LegacyPackageManagerProviderAdapterTests
     Assert.False(plan.RequiresApply);
     Assert.Equal(ApplyOutcome.NotRequired, result.Outcome);
     _packageManager.Verify(
-        manager => manager.Install(It.IsAny<AppConfig>(), It.IsAny<bool>()),
+        manager => manager.InstallAsync(
+            It.IsAny<AppConfig>(),
+            It.IsAny<IProgress<string>?>(),
+            It.IsAny<CancellationToken>()),
         Times.Never);
   }
 
@@ -185,8 +189,40 @@ public sealed class LegacyPackageManagerProviderAdapterTests
     await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         await adapter.ApplyAsync(changedResource, plan, null, CancellationToken.None));
     _packageManager.Verify(
-        manager => manager.Install(It.IsAny<AppConfig>(), It.IsAny<bool>()),
+        manager => manager.InstallAsync(
+            It.IsAny<AppConfig>(),
+            It.IsAny<IProgress<string>?>(),
+            It.IsAny<CancellationToken>()),
         Times.Never);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_ReturnsCancelledWhenInstallationIsCancelled()
+  {
+    var adapter = CreateAdapter();
+    var resource = CreateResource();
+    var detected = new DetectedState
+    {
+      ResourceId = resource.Id,
+      Outcome = DetectionOutcome.Succeeded,
+      Exists = false
+    };
+    var plan = await adapter.PlanAsync(resource, detected, CancellationToken.None);
+    using var cancellation = new CancellationTokenSource();
+    _packageManager
+        .Setup(manager => manager.InstallAsync(
+            It.IsAny<AppConfig>(),
+            It.IsAny<IProgress<string>?>(),
+            cancellation.Token))
+        .Returns(async () =>
+        {
+          cancellation.Cancel();
+          await Task.Delay(Timeout.InfiniteTimeSpan, cancellation.Token);
+        });
+
+    var result = await adapter.ApplyAsync(resource, plan, null, cancellation.Token);
+
+    Assert.Equal(ApplyOutcome.Cancelled, result.Outcome);
   }
 
   private LegacyPackageManagerProviderAdapter CreateAdapter() =>

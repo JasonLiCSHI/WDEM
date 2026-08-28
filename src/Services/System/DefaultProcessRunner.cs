@@ -42,6 +42,144 @@ namespace WinHome.Services.System
       return RunProcessInternal(startInfo, fileName, onOutput);
     }
 
+    public async Task<bool> RunCommandAsync(
+        string fileName,
+        IEnumerable<string> args,
+        bool dryRun,
+        Action<string>? onOutput,
+        CancellationToken cancellationToken)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      if (dryRun) return true;
+
+      var startInfo = new ProcessStartInfo
+      {
+        FileName = fileName,
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true
+      };
+      foreach (var arg in args)
+      {
+        startInfo.ArgumentList.Add(arg);
+      }
+
+      try
+      {
+        using var process = new Process { StartInfo = startInfo };
+        var outputClosed = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var errorClosed = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        process.OutputDataReceived += (_, eventArgs) =>
+        {
+          if (eventArgs.Data is null)
+          {
+            outputClosed.TrySetResult();
+          }
+          else
+          {
+            onOutput?.Invoke(eventArgs.Data);
+          }
+        };
+        process.ErrorDataReceived += (_, eventArgs) =>
+        {
+          if (eventArgs.Data is null)
+          {
+            errorClosed.TrySetResult();
+          }
+          else
+          {
+            onOutput?.Invoke(eventArgs.Data);
+          }
+        };
+
+        if (!process.Start())
+        {
+          return false;
+        }
+        using var processJob = WindowsProcessJob.TryCreateAndAssign(process);
+
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+        using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            timeout.Token);
+
+        try
+        {
+          await process.WaitForExitAsync(linkedCancellation.Token);
+          if (processJob is not null)
+          {
+            await processJob.WaitForEmptyAsync(linkedCancellation.Token);
+          }
+          try
+          {
+            await Task.WhenAll(outputClosed.Task, errorClosed.Task)
+                .WaitAsync(TimeSpan.FromSeconds(5), linkedCancellation.Token);
+          }
+          catch (TimeoutException)
+          {
+            global::System.Diagnostics.Trace.WriteLine(
+                $"[ProcessRunner] Timed out draining output for {fileName}.");
+            return false;
+          }
+
+          return process.ExitCode == 0;
+        }
+        catch (OperationCanceledException)
+        {
+          processJob?.Terminate();
+          try
+          {
+            if (!process.HasExited)
+            {
+              process.Kill(entireProcessTree: true);
+            }
+          }
+          catch (InvalidOperationException)
+          {
+            // The process exited between HasExited and Kill.
+          }
+          catch (Exception cleanupError)
+          {
+            global::System.Diagnostics.Trace.WriteLine(
+                $"[ProcessRunner] Failed to terminate {fileName}: {cleanupError.Message}");
+          }
+
+          try
+          {
+            await process.WaitForExitAsync(CancellationToken.None)
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            await Task.WhenAll(outputClosed.Task, errorClosed.Task)
+                .WaitAsync(TimeSpan.FromSeconds(5));
+          }
+          catch (Exception cleanupError)
+          {
+            global::System.Diagnostics.Trace.WriteLine(
+                $"[ProcessRunner] Failed while waiting for {fileName} cleanup: {cleanupError.Message}");
+          }
+
+          cancellationToken.ThrowIfCancellationRequested();
+          return false;
+        }
+      }
+      catch (OperationCanceledException)
+      {
+        throw;
+      }
+      catch (Exception ex)
+      {
+        onOutput?.Invoke($"[ProcessRunner] Error starting {fileName}: {ex.Message}");
+        global::System.Diagnostics.Trace.WriteLine(
+            $"[ProcessRunner] Error starting {fileName}: {ex.Message}");
+        return false;
+      }
+    }
+
     private bool RunProcessInternal(ProcessStartInfo startInfo, string fileName, Action<string>? onOutput)
     {
 

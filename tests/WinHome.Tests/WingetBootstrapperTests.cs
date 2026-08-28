@@ -52,5 +52,23 @@ namespace WinHome.Tests
       string name = _bootstrapper.Name;
       Assert.Equal("Winget", name);
     }
+
+    [Fact]
+    public async Task InstallAsync_RejectsPreCancelledOperation()
+    {
+      using var cancellation = new CancellationTokenSource();
+      cancellation.Cancel();
+
+      await Assert.ThrowsAsync<OperationCanceledException>(() =>
+          _bootstrapper.InstallAsync(false, cancellation.Token));
+      _mockProcessRunner.Verify(
+          runner => runner.RunCommandAsync(
+              It.IsAny<string>(),
+              It.IsAny<IEnumerable<string>>(),
+              It.IsAny<bool>(),
+              It.IsAny<Action<string>?>(),
+              It.IsAny<CancellationToken>()),
+          Times.Never);
+    }
   }
 }

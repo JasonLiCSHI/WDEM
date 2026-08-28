@@ -14,6 +14,14 @@ namespace WinHome.Interfaces
     /// <summary>Runs a command with individual argument tokens to prevent injection.</summary>
     bool RunCommand(string fileName, IEnumerable<string> arguments, bool dryRun, Action<string>? onOutput = null);
 
+    /// <summary>Runs a command asynchronously and terminates its process tree when cancelled.</summary>
+    Task<bool> RunCommandAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        bool dryRun,
+        Action<string>? onOutput,
+        CancellationToken cancellationToken);
+
     /// <summary>Runs a command and captures output using a raw argument string (deprecated).</summary>
     [Obsolete("Use the IEnumerable<string> overload instead to prevent command injection.")]
     string RunCommandWithOutput(string fileName, string args);
