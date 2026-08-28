@@ -132,15 +132,20 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
     {
       cancellationToken.ThrowIfCancellationRequested();
       var schemaErrors = ValidateSchema(json.RootElement, sourcePath);
-      if (schemaErrors.Count > 0)
+      var structuralErrors = ValidateRawSemanticGuards(json.RootElement, sourcePath);
+      if (schemaErrors.Count > 0 || structuralErrors.Count > 0)
       {
-        return new ProfileLoadResult { SourcePath = sourcePath, Errors = schemaErrors };
+        return new ProfileLoadResult
+        {
+          SourcePath = sourcePath,
+          Errors = schemaErrors.Concat(structuralErrors).ToArray()
+        };
       }
 
-      DeveloperProfile profile;
+      ProfileDocument document;
       try
       {
-        profile = BuildProfile(json.RootElement);
+        document = BuildDocument(json.RootElement);
       }
       catch (Exception exception) when (exception is JsonException or InvalidOperationException)
       {
@@ -149,12 +154,13 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
             "The profile could not be materialized.",
             exception.Message,
             string.Empty,
-            exception);
+          exception);
       }
 
+      var profile = document.Profile;
       var errors = await ValidateSemanticsAsync(
           json.RootElement,
-          profile,
+          document,
           sourcePath,
           cancellationToken).ConfigureAwait(false);
       return new ProfileLoadResult
@@ -261,7 +267,128 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
             string.Empty)];
   }
 
-  private static DeveloperProfile BuildProfile(JsonElement root)
+  private static IReadOnlyList<StructuredError> ValidateRawSemanticGuards(
+      JsonElement root,
+      string sourcePath)
+  {
+    var errors = new List<StructuredError>();
+    if (root.ValueKind != JsonValueKind.Object)
+    {
+      return errors;
+    }
+
+    if (root.TryGetProperty("profile", out var profile) && profile.ValueKind == JsonValueKind.Object)
+    {
+      AddWhitespaceError(profile, "id", "/profile/id", "profile id", sourcePath, errors);
+      AddReferenceWhitespaceErrors(profile, "requiredResources", sourcePath, errors);
+      AddReferenceWhitespaceErrors(profile, "optionalResources", sourcePath, errors);
+    }
+
+    if (!root.TryGetProperty("resources", out var resources) || resources.ValueKind != JsonValueKind.Object)
+    {
+      return errors;
+    }
+
+    var resourceIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var property in resources.EnumerateObject())
+    {
+      var resourcePointer = $"/resources/{ProfileValueExpander.EscapePointer(property.Name)}";
+      if (string.IsNullOrWhiteSpace(property.Name))
+      {
+        errors.Add(CreateError(sourcePath, "The resource id cannot be blank.",
+            "Resource ids must contain at least one non-whitespace character.", resourcePointer));
+      }
+
+      if (!resourceIds.Add(property.Name))
+      {
+        errors.Add(CreateError(sourcePath, "A resource id is duplicated.",
+            $"Resource id '{property.Name}' conflicts with another id when compared case-insensitively.",
+            resourcePointer));
+      }
+
+      if (property.Value.ValueKind != JsonValueKind.Object)
+      {
+        continue;
+      }
+
+      AddWhitespaceError(property.Value, "type", $"{resourcePointer}/type", "resource type", sourcePath, errors);
+      AddWhitespaceError(
+          property.Value,
+          "provider",
+          $"{resourcePointer}/provider",
+          "resource provider",
+          sourcePath,
+          errors);
+
+      if (!property.Value.TryGetProperty("parameters", out var parameters) ||
+          parameters.ValueKind != JsonValueKind.Object)
+      {
+        continue;
+      }
+
+      var parameterKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+      foreach (var parameter in parameters.EnumerateObject())
+      {
+        if (!parameterKeys.Add(parameter.Name))
+        {
+          errors.Add(CreateError(sourcePath, "A parameter key is duplicated.",
+              $"Parameter key '{parameter.Name}' conflicts with another key when compared case-insensitively.",
+              $"{resourcePointer}/parameters/{ProfileValueExpander.EscapePointer(parameter.Name)}"));
+        }
+      }
+    }
+
+    return errors;
+  }
+
+  private static void AddReferenceWhitespaceErrors(
+      JsonElement profile,
+      string propertyName,
+      string sourcePath,
+      List<StructuredError> errors)
+  {
+    if (!profile.TryGetProperty(propertyName, out var references) ||
+        references.ValueKind != JsonValueKind.Array)
+    {
+      return;
+    }
+
+    var index = 0;
+    foreach (var reference in references.EnumerateArray())
+    {
+      if (reference.ValueKind == JsonValueKind.Object)
+      {
+        AddWhitespaceError(
+            reference,
+            "id",
+            $"/profile/{propertyName}/{index}/id",
+            "resource reference id",
+            sourcePath,
+            errors);
+      }
+
+      index++;
+    }
+  }
+
+  private static void AddWhitespaceError(
+      JsonElement element,
+      string propertyName,
+      string pointer,
+      string fieldName,
+      string sourcePath,
+      List<StructuredError> errors)
+  {
+    if (element.TryGetProperty(propertyName, out var value) &&
+        value.ValueKind == JsonValueKind.String &&
+        string.IsNullOrWhiteSpace(value.GetString()))
+    {
+      errors.Add(CreateError(sourcePath, $"The {fieldName} cannot be blank.",
+          $"The {fieldName} must contain at least one non-whitespace character.", pointer));
+    }
+  }
+
+  private static ProfileDocument BuildDocument(JsonElement root)
   {
     var profileElement = root.GetProperty("profile");
     var resources = new Dictionary<string, ResourceDefinition>(StringComparer.OrdinalIgnoreCase);
@@ -285,7 +412,7 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
       });
     }
 
-    return new DeveloperProfile
+    var profile = new DeveloperProfile
     {
       Id = profileElement.GetProperty("id").GetString()!,
       Version = profileElement.GetProperty("version").GetString()!,
@@ -295,15 +422,30 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
       OptionalResources = GetReferences(profileElement, "optionalResources"),
       Resources = resources
     };
+
+    return new ProfileDocument
+    {
+      SchemaVersion = root.GetProperty("schemaVersion").GetString()!,
+      Profile = profile,
+      Resources = resources
+    };
   }
 
   private async Task<IReadOnlyList<StructuredError>> ValidateSemanticsAsync(
       JsonElement root,
-      DeveloperProfile profile,
+      ProfileDocument document,
       string sourcePath,
       CancellationToken cancellationToken)
   {
+    cancellationToken.ThrowIfCancellationRequested();
+    var profile = document.Profile;
     var errors = new List<StructuredError>();
+    if (string.IsNullOrWhiteSpace(profile.Id))
+    {
+      errors.Add(CreateError(sourcePath, "The profile id cannot be blank.",
+          "The profile id must contain at least one non-whitespace character.", "/profile/id"));
+    }
+
     if (!SemanticVersion.TryParse(profile.Version, out _))
     {
       errors.Add(CreateError(sourcePath, "The profile version is invalid.",
@@ -318,13 +460,22 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
     var referenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     foreach (var item in allReferences)
     {
+      cancellationToken.ThrowIfCancellationRequested();
+      if (string.IsNullOrWhiteSpace(item.reference.Id))
+      {
+        errors.Add(CreateError(sourcePath, "The resource reference id cannot be blank.",
+            "Resource reference ids must contain at least one non-whitespace character.",
+            $"{item.pointer}/id"));
+        continue;
+      }
+
       if (!referenced.Add(item.reference.Id))
       {
         errors.Add(CreateError(sourcePath, "A resource is referenced more than once.",
             $"Resource '{item.reference.Id}' is duplicated.", $"{item.pointer}/id"));
       }
 
-      if (!profile.Resources.ContainsKey(item.reference.Id))
+      if (!document.Resources.ContainsKey(item.reference.Id))
       {
         errors.Add(CreateError(sourcePath, "A resource reference is unknown.",
             $"Resource '{item.reference.Id}' is not defined in the resources map.", $"{item.pointer}/id"));
@@ -341,6 +492,7 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
     var seenResourceIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     foreach (var property in root.GetProperty("resources").EnumerateObject())
     {
+      cancellationToken.ThrowIfCancellationRequested();
       if (!seenResourceIds.Add(property.Name))
       {
         errors.Add(CreateError(sourcePath, "A resource id is duplicated.",
@@ -349,14 +501,37 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
         continue;
       }
 
-      var resource = profile.Resources[property.Name];
+      var resource = document.Resources[property.Name];
       var resourcePointer = $"/resources/{ProfileValueExpander.EscapePointer(property.Name)}";
+      if (string.IsNullOrWhiteSpace(property.Name))
+      {
+        errors.Add(CreateError(sourcePath, "The resource id cannot be blank.",
+            "Resource ids must contain at least one non-whitespace character.", resourcePointer));
+        continue;
+      }
+
+      var hasBlankProviderIdentity = false;
+      if (string.IsNullOrWhiteSpace(resource.Type))
+      {
+        errors.Add(CreateError(sourcePath, "The resource type cannot be blank.",
+            "Resource types must contain at least one non-whitespace character.", $"{resourcePointer}/type"));
+        hasBlankProviderIdentity = true;
+      }
+
+      if (string.IsNullOrWhiteSpace(resource.Provider))
+      {
+        errors.Add(CreateError(sourcePath, "The resource provider cannot be blank.",
+            "Resource providers must contain at least one non-whitespace character.",
+            $"{resourcePointer}/provider"));
+        hasBlankProviderIdentity = true;
+      }
+
       ValidateVersions(resource.VersionConstraint, resource.PreferredVersion, resourcePointer, sourcePath, errors);
 
       for (var index = 0; index < resource.Dependencies.Count; index++)
       {
         var dependency = resource.Dependencies[index];
-        if (!profile.Resources.ContainsKey(dependency))
+        if (!document.Resources.ContainsKey(dependency))
         {
           errors.Add(CreateError(sourcePath, "A resource dependency is unknown.",
               $"Dependency '{dependency}' is not defined in the resources map.",
@@ -364,6 +539,12 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
         }
       }
 
+      if (hasBlankProviderIdentity)
+      {
+        continue;
+      }
+
+      cancellationToken.ThrowIfCancellationRequested();
       if (!_providerRegistry.TryGet(resource.Type, resource.Provider, out var provider) || provider is null)
       {
         errors.Add(CreateError(sourcePath, "The resource provider is not registered.",
@@ -376,8 +557,9 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
       try
       {
         validation = await provider.ValidateAsync(resource, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
       }
-      catch (OperationCanceledException)
+      catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
       {
         throw;
       }
@@ -390,11 +572,13 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
 
       foreach (var validationError in validation.Errors)
       {
+        cancellationToken.ThrowIfCancellationRequested();
         errors.Add(CreateError(sourcePath, "The resource provider rejected the resource.",
             validationError, resourcePointer));
       }
     }
 
+    cancellationToken.ThrowIfCancellationRequested();
     return errors;
   }
 
@@ -455,10 +639,15 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
       return new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
     }
 
-    return parameters.EnumerateObject().ToDictionary(
-        property => property.Name,
-        property => property.Value.ValueKind == JsonValueKind.Null ? null : property.Value.GetString(),
-        StringComparer.OrdinalIgnoreCase);
+    var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+    foreach (var property in parameters.EnumerateObject())
+    {
+      result.TryAdd(
+          property.Name,
+          property.Value.ValueKind == JsonValueKind.Null ? null : property.Value.GetString());
+    }
+
+    return result;
   }
 
   private static string? GetOptionalString(JsonElement element, string propertyName) =>

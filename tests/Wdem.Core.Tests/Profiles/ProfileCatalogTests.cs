@@ -128,6 +128,98 @@ public sealed class ProfileCatalogTests
     Assert.Contains("/resources/git/provider", error.Detail, StringComparison.Ordinal);
   }
 
+  [Fact]
+  public async Task LoadFileAsync_JsonRejectsWhitespaceOnlyIdentifiersWithPointers()
+  {
+    using var directory = new TemporaryDirectory();
+    var contents = """
+        {
+          "schemaVersion": "1.0",
+          "profile": {
+            "id": "   ",
+            "version": "1.0.0",
+            "displayName": "Whitespace",
+            "description": "Whitespace identifiers",
+            "optionalResources": [{ "id": "\t" }]
+          },
+          "resources": {
+            "   ": { "type": "\n", "provider": "\u00a0" }
+          }
+        }
+        """;
+
+    var result = await CreateCatalog(directory.Path)
+        .LoadFileAsync(directory.Write("whitespace.json", contents));
+
+    Assert.False(result.IsValid);
+    Assert.All(result.Errors, error => Assert.Equal(WdemErrorCode.ProfileError, error.Code));
+    Assert.Contains(result.Errors, error => error.Detail.Contains("/profile/id", StringComparison.Ordinal));
+    Assert.Contains(result.Errors, error => error.Detail.Contains("/profile/optionalResources/0/id", StringComparison.Ordinal));
+    Assert.Contains(result.Errors, error => error.Detail.Contains("/resources/   ", StringComparison.Ordinal));
+  }
+
+  [Fact]
+  public async Task LoadFileAsync_YamlRejectsWhitespaceOnlyReferenceTypeAndProviderWithPointers()
+  {
+    using var directory = new TemporaryDirectory();
+    var contents = """
+        schemaVersion: "1.0"
+        profile:
+          id: whitespace-yaml
+          version: "1.0.0"
+          displayName: Whitespace
+          description: Whitespace values
+          requiredResources:
+            - id: "  "
+        resources:
+          git:
+            type: "  "
+            provider: "  "
+        """;
+
+    var result = await CreateCatalog(directory.Path)
+        .LoadFileAsync(directory.Write("whitespace.yaml", contents));
+
+    Assert.False(result.IsValid);
+    Assert.Contains(result.Errors, error => error.Detail.Contains("/profile/requiredResources/0/id", StringComparison.Ordinal));
+    Assert.Contains(result.Errors, error => error.Detail.Contains("/resources/git/type", StringComparison.Ordinal));
+    Assert.Contains(result.Errors, error => error.Detail.Contains("/resources/git/provider", StringComparison.Ordinal));
+  }
+
+  [Fact]
+  public async Task LoadFileAsync_ReportsCaseInsensitiveParameterKeyConflictAtConflictingKey()
+  {
+    using var directory = new TemporaryDirectory();
+    var contents = """
+        {
+          "schemaVersion": "1.0",
+          "profile": {
+            "id": "duplicate-parameters",
+            "version": "1.0.0",
+            "displayName": "Duplicate parameters",
+            "description": "Duplicate parameter keys",
+            "requiredResources": [{ "id": "git/tools~beta" }]
+          },
+          "resources": {
+            "git/tools~beta": {
+              "type": "package",
+              "provider": "winget",
+              "parameters": { "Path": "one", "path": "two", "a/b~c": "three", "A/B~C": "four" }
+            }
+          }
+        }
+        """;
+
+    var result = await CreateCatalog(directory.Path)
+        .LoadFileAsync(directory.Write("duplicate-parameters.json", contents));
+
+    Assert.False(result.IsValid);
+    Assert.Contains(result.Errors, error =>
+        error.Detail.Contains("/resources/git~1tools~0beta/parameters/path", StringComparison.Ordinal));
+    Assert.Contains(result.Errors, error =>
+        error.Detail.Contains("/resources/git~1tools~0beta/parameters/A~1B~0C", StringComparison.Ordinal));
+  }
+
   [Theory]
   [InlineData("unknown-field.json", "{\"schemaVersion\":\"1.0\",\"profile\":{\"id\":\"p\",\"version\":\"1.0.0\",\"displayName\":\"P\",\"description\":\"D\",\"surprise\":true},\"resources\":{}}", "/profile")]
   [InlineData("missing-type.json", "{\"schemaVersion\":\"1.0\",\"profile\":{\"id\":\"p\",\"version\":\"1.0.0\",\"displayName\":\"P\",\"description\":\"D\",\"requiredResources\":[{\"id\":\"git\"}]},\"resources\":{\"git\":{\"provider\":\"winget\"}}}", "/resources/git")]
@@ -171,6 +263,42 @@ public sealed class ProfileCatalogTests
     var error = Assert.Single(result.Errors);
     Assert.Contains("/resources/git", error.Detail, StringComparison.Ordinal);
     Assert.Contains("package unavailable", error.Detail, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task LoadFileAsync_SpuriousProviderCancellationReturnsStructuredError()
+  {
+    using var directory = new TemporaryDirectory();
+    var path = directory.Write("spurious-cancellation.json", ValidSingleResourceJson("spurious-cancellation"));
+    var registry = new ResourceProviderRegistry([
+      new DelegateProvider((_, _) => throw new OperationCanceledException("provider cancelled itself"))
+    ]);
+
+    var result = await new DirectoryProfileCatalog(directory.Path, registry).LoadFileAsync(path);
+
+    var error = Assert.Single(result.Errors);
+    Assert.Equal(WdemErrorCode.ProfileError, error.Code);
+    Assert.Contains("/resources/git", error.Detail, StringComparison.Ordinal);
+    Assert.Contains("provider cancelled itself", error.Detail, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task LoadFileAsync_ThrowsWhenCallerCancelsDuringProviderValidation()
+  {
+    using var directory = new TemporaryDirectory();
+    using var cancellation = new CancellationTokenSource();
+    var path = directory.Write("caller-cancellation.json", ValidSingleResourceJson("caller-cancellation"));
+    var registry = new ResourceProviderRegistry([
+      new DelegateProvider((_, _) =>
+      {
+        cancellation.Cancel();
+        return ValueTask.FromResult(ProviderValidationResult.Valid);
+      })
+    ]);
+
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+        new DirectoryProfileCatalog(directory.Path, registry)
+            .LoadFileAsync(path, cancellation.Token));
   }
 
   [Fact]
@@ -376,6 +504,27 @@ public sealed class ProfileCatalogTests
               ? ProviderValidationResult.Valid
               : ProviderValidationResult.Invalid(validationErrors));
     }
+
+    public ValueTask<DetectedState> DetectAsync(ResourceDefinition resource, CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
+    public ValueTask<ResourcePlan> PlanAsync(ResourceDefinition resource, DetectedState currentState, CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
+    public ValueTask<ResourceApplyResult> ApplyAsync(ResourceDefinition resource, ResourcePlan plan, IProgress<ProviderProgress>? progress, CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
+    public ValueTask<VerificationResult> VerifyAsync(ResourceDefinition resource, CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
+  }
+
+  private sealed class DelegateProvider(
+      Func<ResourceDefinition, CancellationToken, ValueTask<ProviderValidationResult>> validate) : IResourceProvider
+  {
+    public string ResourceType => "package";
+    public string ProviderName => "winget";
+    public ProviderCapabilities Capabilities { get; } = new();
+
+    public ValueTask<ProviderValidationResult> ValidateAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) => validate(resource, cancellationToken);
 
     public ValueTask<DetectedState> DetectAsync(ResourceDefinition resource, CancellationToken cancellationToken) =>
         throw new NotSupportedException();

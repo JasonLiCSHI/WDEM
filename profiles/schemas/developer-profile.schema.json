@@ -10,6 +10,7 @@
     "profile": { "$ref": "#/$defs/profile" },
     "resources": {
       "type": "object",
+      "propertyNames": { "pattern": "\\S" },
       "additionalProperties": { "$ref": "#/$defs/resource" }
     }
   },
@@ -19,7 +20,7 @@
       "additionalProperties": false,
       "required": ["id", "version", "displayName", "description"],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "minLength": 1, "pattern": "\\S" },
         "version": { "type": "string", "minLength": 1 },
         "displayName": { "type": "string", "minLength": 1 },
         "description": { "type": "string" },
@@ -40,7 +41,7 @@
       "additionalProperties": false,
       "required": ["id"],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "minLength": 1, "pattern": "\\S" },
         "versionConstraint": { "type": "string", "minLength": 1 },
         "preferredVersion": { "type": "string", "minLength": 1 },
         "defaultSelected": { "type": "boolean", "default": false }
@@ -51,8 +52,8 @@
       "additionalProperties": false,
       "required": ["type", "provider"],
       "properties": {
-        "type": { "type": "string", "minLength": 1 },
-        "provider": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "minLength": 1, "pattern": "\\S" },
+        "provider": { "type": "string", "minLength": 1, "pattern": "\\S" },
         "versionConstraint": { "type": "string", "minLength": 1 },
         "preferredVersion": { "type": "string", "minLength": 1 },
         "dependsOn": {
