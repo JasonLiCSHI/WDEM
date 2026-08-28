@@ -88,7 +88,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
   public async Task RecoverAsync_DoesNotApplyAfterConcurrentAbandonWins()
   {
     var provider = new GatedProvider();
-    var recoveryStore = new GatedTrySaveStore(CreateStore());
+    var recoveryStore = new GatedRecoveryOperationStore(CreateStore());
     var recoveryService = CreateService(provider, recoveryStore);
     var abandonService = CreateService(provider, CreateStore());
     var prior = InterruptedRun();
@@ -97,10 +97,10 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
         recoveryService,
         prior.RunId,
         Task.CompletedTask);
-    await recoveryStore.TrySaveEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await recoveryStore.AcquireEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
     await abandonService.AbandonAsync(prior.RunId, CancellationToken.None);
-    recoveryStore.ReleaseTrySave.TrySetResult();
+    recoveryStore.ReleaseAcquire.TrySetResult();
     var attempt = await recovery.WaitAsync(TimeSpan.FromSeconds(5));
 
     var persisted = await CreateStore().GetAsync(prior.RunId, CancellationToken.None);
@@ -142,7 +142,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
   }
 
   [Fact]
-  public async Task FindRecoveryCandidatesAsync_HidesUnexpiredClaim()
+  public async Task FindRecoveryCandidatesAsync_HidesActiveRecoveryOperation()
   {
     var store = CreateStore();
     var service = CreateService(new GatedProvider(), store);
@@ -153,6 +153,10 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
       RecoveryClaimedAtUtc = DateTimeOffset.UtcNow
     };
     await store.CreateAsync(claimed, CancellationToken.None);
+    await using var operation = await store.TryAcquireRecoveryOperationAsync(
+        claimed.RunId,
+        CancellationToken.None);
+    Assert.NotNull(operation);
 
     var candidates = await service.FindRecoveryCandidatesAsync(CancellationToken.None);
 
@@ -160,7 +164,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
   }
 
   [Fact]
-  public async Task RecoverAsync_ReclaimsExpiredClaimAcrossJsonStores()
+  public async Task RecoverAsync_ReclaimsOrphanedClaimAcrossJsonStores()
   {
     var provider = new GatedProvider { WaitForRelease = false };
     var firstStore = CreateStore();
@@ -168,7 +172,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     {
       Revision = 1,
       RecoveryClaimId = Guid.NewGuid(),
-      RecoveryClaimedAtUtc = DateTimeOffset.UtcNow.AddHours(-1)
+      RecoveryClaimedAtUtc = DateTimeOffset.UtcNow
     };
     await firstStore.CreateAsync(claimed, CancellationToken.None);
     var service = CreateService(provider, CreateStore());
@@ -186,12 +190,60 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
   }
 
   [Fact]
-  public async Task RecoveryClaim_BecomesRecoverableWhenControlledLeaseExpires()
+  public async Task RecoverAsync_ReclaimsMaxValueTimestampClaimWithoutOverflow()
+  {
+    var clock = new MutableTimeProvider(DateTimeOffset.MaxValue);
+    var provider = new GatedProvider { WaitForRelease = false };
+    var store = CreateStore(clock);
+    var claimed = InterruptedRun() with
+    {
+      Revision = 1,
+      RecoveryClaimId = Guid.NewGuid(),
+      RecoveryClaimedAtUtc = DateTimeOffset.MaxValue
+    };
+    await store.CreateAsync(claimed, CancellationToken.None);
+    var service = CreateService(provider, CreateStore(clock), clock);
+
+    var candidates = await service.FindRecoveryCandidatesAsync(CancellationToken.None);
+    var recovered = await service.RecoverAsync(claimed.RunId, CancellationToken.None);
+
+    var persisted = await CreateStore(clock).GetAsync(claimed.RunId, CancellationToken.None);
+    Assert.Contains(candidates, candidate => candidate.RunId == claimed.RunId);
+    Assert.Equal(ExecutionOutcome.Succeeded, recovered.Outcome);
+    Assert.Equal(1, provider.ApplyCalls);
+    Assert.Equal(ExecutionState.Completed, persisted!.State);
+    Assert.Null(persisted.RecoveryClaimId);
+    Assert.Null(persisted.RecoveryClaimedAtUtc);
+  }
+
+  [Fact]
+  public async Task AbandonAsync_ClearsOrphanedRecoveryClaim()
+  {
+    var store = CreateStore();
+    var claimed = InterruptedRun() with
+    {
+      Revision = 4,
+      RecoveryClaimId = Guid.NewGuid(),
+      RecoveryClaimedAtUtc = DateTimeOffset.UtcNow
+    };
+    await store.CreateAsync(claimed, CancellationToken.None);
+    var service = CreateService(new GatedProvider(), CreateStore());
+
+    await service.AbandonAsync(claimed.RunId, CancellationToken.None);
+
+    var persisted = await CreateStore().GetAsync(claimed.RunId, CancellationToken.None);
+    Assert.Equal(ExecutionState.Completed, persisted!.State);
+    Assert.Null(persisted.RecoveryClaimId);
+    Assert.Null(persisted.RecoveryClaimedAtUtc);
+  }
+
+  [Fact]
+  public async Task RecoveryClaim_BecomesImmediatelyRecoverableWhenOperationLeaseIsDisposed()
   {
     var clock = new MutableTimeProvider(
         new DateTimeOffset(2030, 1, 2, 3, 4, 5, TimeSpan.Zero));
     var provider = new GatedProvider { WaitForRelease = false };
-    var store = CreateStore();
+    var store = CreateStore(clock);
     var claimed = InterruptedRun() with
     {
       Revision = 1,
@@ -199,10 +251,14 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
       RecoveryClaimedAtUtc = clock.GetUtcNow()
     };
     await store.CreateAsync(claimed, CancellationToken.None);
-    var service = CreateService(provider, CreateStore(), clock);
+    var service = CreateService(provider, CreateStore(clock), clock);
+    var operation = await store.TryAcquireRecoveryOperationAsync(
+        claimed.RunId,
+        CancellationToken.None);
+    Assert.NotNull(operation);
 
     Assert.Empty(await service.FindRecoveryCandidatesAsync(CancellationToken.None));
-    clock.Advance(TimeSpan.FromMinutes(6));
+    await operation!.DisposeAsync();
     Assert.Contains(
         await service.FindRecoveryCandidatesAsync(CancellationToken.None),
         candidate => candidate.RunId == claimed.RunId);
@@ -213,12 +269,57 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
   }
 
   [Fact]
-  public async Task RecoverAsync_ReconcilesSuccessfulReplacementAfterClaimFinalizationFailure()
+  public async Task ActiveRecoveryOperationCannotBeStolenAfterClaimTimestampAges()
+  {
+    var clock = new MutableTimeProvider(
+        new DateTimeOffset(2030, 1, 2, 3, 4, 5, TimeSpan.Zero));
+    var provider = new GatedProvider();
+    var firstStore = CreateStore(clock);
+    var prior = InterruptedRun();
+    await firstStore.CreateAsync(prior, CancellationToken.None);
+    var firstService = CreateService(provider, firstStore, clock);
+    var secondService = CreateService(provider, CreateStore(clock), clock);
+    var firstRecovery = AttemptRecoveryAsync(
+        firstService,
+        prior.RunId,
+        Task.CompletedTask);
+    await provider.FirstApplyEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    clock.Advance(TimeSpan.FromMinutes(6));
+    try
+    {
+      Assert.DoesNotContain(
+          await secondService.FindRecoveryCandidatesAsync(CancellationToken.None),
+          candidate => candidate.RunId == prior.RunId);
+      var secondRecovery = AttemptRecoveryAsync(
+          secondService,
+          prior.RunId,
+          Task.CompletedTask);
+      var abandon = AttemptAbandonAsync(secondService, prior.RunId);
+      await Task.WhenAll((Task)secondRecovery, abandon)
+          .WaitAsync(TimeSpan.FromSeconds(2));
+      Assert.IsType<InvalidOperationException>((await secondRecovery).Error);
+      Assert.IsType<InvalidOperationException>(await abandon);
+      Assert.Equal(1, provider.ApplyCalls);
+      var persisted = await CreateStore(clock).GetAsync(prior.RunId, CancellationToken.None);
+      Assert.Equal(ExecutionState.Running, persisted!.State);
+    }
+    finally
+    {
+      provider.ReleaseApply.TrySetResult();
+    }
+
+    var owner = await firstRecovery.WaitAsync(TimeSpan.FromSeconds(5));
+    Assert.Null(owner.Error);
+    Assert.Equal(ExecutionOutcome.Succeeded, owner.Run!.Outcome);
+  }
+
+  [Fact]
+  public async Task RecoverAsync_ImmediatelyReconcilesAfterClaimFinalizationFailure()
   {
     var clock = new MutableTimeProvider(
         new DateTimeOffset(2030, 1, 2, 3, 4, 5, TimeSpan.Zero));
     var provider = new GatedProvider { WaitForRelease = false };
-    var backingStore = CreateStore();
+    var backingStore = CreateStore(clock);
     var prior = InterruptedRun();
     await backingStore.CreateAsync(prior, CancellationToken.None);
     var faultingStore = new ThrowOnTrySaveCallStore(backingStore, throwOnCall: 2);
@@ -227,25 +328,20 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     await Assert.ThrowsAsync<IOException>(() =>
         firstService.RecoverAsync(prior.RunId, CancellationToken.None));
 
-    var runsAfterFailure = await CreateStore().ListAsync(CancellationToken.None);
+    var runsAfterFailure = await CreateStore(clock).ListAsync(CancellationToken.None);
     var replacement = Assert.Single(
         runsAfterFailure,
         run => run.RetriedFromRunId == prior.RunId &&
             run.Outcome == ExecutionOutcome.Succeeded);
     var claimedPrior = Assert.Single(runsAfterFailure, run => run.RunId == prior.RunId);
     Assert.NotNull(claimedPrior.RecoveryClaimId);
-    var secondService = CreateService(provider, CreateStore(), clock);
-    Assert.DoesNotContain(
-        await secondService.FindRecoveryCandidatesAsync(CancellationToken.None),
-        candidate => candidate.RunId == prior.RunId);
-
-    clock.Advance(TimeSpan.FromMinutes(6));
+    var secondService = CreateService(provider, CreateStore(clock), clock);
     Assert.Contains(
         await secondService.FindRecoveryCandidatesAsync(CancellationToken.None),
         candidate => candidate.RunId == prior.RunId);
     var recovered = await secondService.RecoverAsync(prior.RunId, CancellationToken.None);
 
-    var persistedPrior = await CreateStore().GetAsync(prior.RunId, CancellationToken.None);
+    var persistedPrior = await CreateStore(clock).GetAsync(prior.RunId, CancellationToken.None);
     Assert.Equal(replacement.RunId, recovered.RunId);
     Assert.Equal(1, provider.ApplyCalls);
     Assert.Equal(ExecutionState.Completed, persistedPrior!.State);
@@ -282,9 +378,10 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     }
   }
 
-  private JsonExecutionRunStore CreateStore() => new(
+  private JsonExecutionRunStore CreateStore(TimeProvider? timeProvider = null) => new(
       new WdemDataPaths(_directory),
-      new LogRedactor());
+      new LogRedactor(),
+      timeProvider);
 
   private static EnvironmentRunService CreateService(
       IResourceProvider provider,
@@ -320,6 +417,21 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     catch (Exception exception)
     {
       return new RecoveryAttempt(null, exception);
+    }
+  }
+
+  private static async Task<Exception?> AttemptAbandonAsync(
+      IEnvironmentRunService service,
+      Guid runId)
+  {
+    try
+    {
+      await service.AbandonAsync(runId, CancellationToken.None);
+      return null;
+    }
+    catch (Exception exception)
+    {
+      return exception;
     }
   }
 
@@ -382,76 +494,34 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     public void Advance(TimeSpan duration) => _utcNow += duration;
   }
 
-  private sealed class GatedTrySaveStore(IExecutionRunStore inner) : IExecutionRunStore
+  private sealed class GatedRecoveryOperationStore(IExecutionRunStore inner) :
+      ForwardingRunStore(inner)
   {
-    public IReadOnlyList<StructuredError> Diagnostics => inner.Diagnostics;
-    public TaskCompletionSource TrySaveEntered { get; } = new(
+    public TaskCompletionSource AcquireEntered { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
-    public TaskCompletionSource ReleaseTrySave { get; } = new(
+    public TaskCompletionSource ReleaseAcquire { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
 
-    public Task CreateAsync(ExecutionRun run, CancellationToken cancellationToken) =>
-        inner.CreateAsync(run, cancellationToken);
-
-    public Task<ExecutionRun?> GetAsync(Guid runId, CancellationToken cancellationToken) =>
-        inner.GetAsync(runId, cancellationToken);
-
-    public Task<IReadOnlyList<ExecutionRun>> ListAsync(CancellationToken cancellationToken) =>
-        inner.ListAsync(cancellationToken);
-
-    public Task<IReadOnlyList<ExecutionRun>> ListIncompleteAsync(
-        CancellationToken cancellationToken) =>
-        inner.ListIncompleteAsync(cancellationToken);
-
-    public Task SaveAsync(ExecutionRun run, CancellationToken cancellationToken) =>
-        inner.SaveAsync(run, cancellationToken);
-
-    public async Task<bool> TrySaveAsync(
-        ExecutionRun run,
-        long expectedRevision,
-        Guid? expectedRecoveryClaimId,
+    public override async Task<IAsyncDisposable?> TryAcquireRecoveryOperationAsync(
+        Guid runId,
         CancellationToken cancellationToken)
     {
-      TrySaveEntered.TrySetResult();
-      await ReleaseTrySave.Task.WaitAsync(cancellationToken);
-      return await inner.TrySaveAsync(
-          run,
-          expectedRevision,
-          expectedRecoveryClaimId,
-          cancellationToken);
+      AcquireEntered.TrySetResult();
+      await ReleaseAcquire.Task.WaitAsync(cancellationToken);
+      return await Inner.TryAcquireRecoveryOperationAsync(runId, cancellationToken);
     }
-
-    public Task AppendLogAsync(
-        Guid runId,
-        RunLogEntry entry,
-        CancellationToken cancellationToken) =>
-        inner.AppendLogAsync(runId, entry, cancellationToken);
-
-    public Task<IReadOnlyList<RunLogEntry>> ReadLogPageAsync(
-        Guid runId,
-        long afterSequence,
-        int take,
-        CancellationToken cancellationToken) =>
-        inner.ReadLogPageAsync(runId, afterSequence, take, cancellationToken);
   }
 
   private sealed class ThrowOnTrySaveCallStore(
       IExecutionRunStore inner,
       int throwOnCall,
-      Exception? listException = null) : IExecutionRunStore
+      Exception? listException = null) : ForwardingRunStore(inner)
   {
     private int _trySaveCalls;
     private Exception? _listException = listException;
 
-    public IReadOnlyList<StructuredError> Diagnostics => inner.Diagnostics;
-
-    public Task CreateAsync(ExecutionRun run, CancellationToken cancellationToken) =>
-        inner.CreateAsync(run, cancellationToken);
-
-    public Task<ExecutionRun?> GetAsync(Guid runId, CancellationToken cancellationToken) =>
-        inner.GetAsync(runId, cancellationToken);
-
-    public Task<IReadOnlyList<ExecutionRun>> ListAsync(CancellationToken cancellationToken)
+    public override Task<IReadOnlyList<ExecutionRun>> ListAsync(
+        CancellationToken cancellationToken)
     {
       var exception = Interlocked.Exchange(ref _listException, null);
       if (exception is not null)
@@ -459,17 +529,10 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
         throw exception;
       }
 
-      return inner.ListAsync(cancellationToken);
+      return Inner.ListAsync(cancellationToken);
     }
 
-    public Task<IReadOnlyList<ExecutionRun>> ListIncompleteAsync(
-        CancellationToken cancellationToken) =>
-        inner.ListIncompleteAsync(cancellationToken);
-
-    public Task SaveAsync(ExecutionRun run, CancellationToken cancellationToken) =>
-        inner.SaveAsync(run, cancellationToken);
-
-    public Task<bool> TrySaveAsync(
+    public override Task<bool> TrySaveAsync(
         ExecutionRun run,
         long expectedRevision,
         Guid? expectedRecoveryClaimId,
@@ -480,25 +543,66 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
         throw new IOException("Injected recovery claim persistence failure.");
       }
 
-      return inner.TrySaveAsync(
+      return Inner.TrySaveAsync(
           run,
           expectedRevision,
           expectedRecoveryClaimId,
           cancellationToken);
     }
+  }
+
+  private abstract class ForwardingRunStore(IExecutionRunStore inner) : IExecutionRunStore
+  {
+    protected IExecutionRunStore Inner { get; } = inner;
+    public IReadOnlyList<StructuredError> Diagnostics => Inner.Diagnostics;
+
+    public Task CreateAsync(ExecutionRun run, CancellationToken cancellationToken) =>
+        Inner.CreateAsync(run, cancellationToken);
+
+    public Task<ExecutionRun?> GetAsync(Guid runId, CancellationToken cancellationToken) =>
+        Inner.GetAsync(runId, cancellationToken);
+
+    public virtual Task<IReadOnlyList<ExecutionRun>> ListAsync(
+        CancellationToken cancellationToken) =>
+        Inner.ListAsync(cancellationToken);
+
+    public Task<IReadOnlyList<ExecutionRun>> ListIncompleteAsync(
+        CancellationToken cancellationToken) =>
+        Inner.ListIncompleteAsync(cancellationToken);
+
+    public virtual Task<IAsyncDisposable?> TryAcquireRecoveryOperationAsync(
+        Guid runId,
+        CancellationToken cancellationToken) =>
+        Inner.TryAcquireRecoveryOperationAsync(runId, cancellationToken);
+
+    public Task<ExecutionRun> SaveAsync(
+        ExecutionRun run,
+        CancellationToken cancellationToken) =>
+        Inner.SaveAsync(run, cancellationToken);
+
+    public virtual Task<bool> TrySaveAsync(
+        ExecutionRun run,
+        long expectedRevision,
+        Guid? expectedRecoveryClaimId,
+        CancellationToken cancellationToken) =>
+        Inner.TrySaveAsync(
+            run,
+            expectedRevision,
+            expectedRecoveryClaimId,
+            cancellationToken);
 
     public Task AppendLogAsync(
         Guid runId,
         RunLogEntry entry,
         CancellationToken cancellationToken) =>
-        inner.AppendLogAsync(runId, entry, cancellationToken);
+        Inner.AppendLogAsync(runId, entry, cancellationToken);
 
     public Task<IReadOnlyList<RunLogEntry>> ReadLogPageAsync(
         Guid runId,
         long afterSequence,
         int take,
         CancellationToken cancellationToken) =>
-        inner.ReadLogPageAsync(runId, afterSequence, take, cancellationToken);
+        Inner.ReadLogPageAsync(runId, afterSequence, take, cancellationToken);
   }
 
   private sealed class FixedProfileCatalog(DeveloperProfile profile) : IProfileCatalog

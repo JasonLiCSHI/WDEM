@@ -16,6 +16,7 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
 {
   private const int MaximumLogPageSize = 1000;
   private const int LogIndexRecordSize = sizeof(long) * 3;
+  private static readonly TimeSpan MaximumClaimClockSkew = TimeSpan.FromMinutes(5);
   private static readonly UTF8Encoding Utf8WithoutBom = new(false);
   private readonly object _diagnosticsGate = new();
   private readonly object _logIndexGate = new();
@@ -26,13 +27,18 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
   private readonly LogRedactor _redactor;
   private readonly JsonSerializerOptions _snapshotJsonOptions;
   private readonly JsonSerializerOptions _logJsonOptions;
+  private readonly TimeProvider _timeProvider;
 
-  public JsonExecutionRunStore(WdemDataPaths paths, LogRedactor redactor)
+  public JsonExecutionRunStore(
+      WdemDataPaths paths,
+      LogRedactor redactor,
+      TimeProvider? timeProvider = null)
   {
     _paths = paths ?? throw new ArgumentNullException(nameof(paths));
     _redactor = redactor ?? throw new ArgumentNullException(nameof(redactor));
     _snapshotJsonOptions = CreateJsonOptions(writeIndented: true);
     _logJsonOptions = CreateJsonOptions(writeIndented: false);
+    _timeProvider = timeProvider ?? TimeProvider.System;
   }
 
   public IReadOnlyList<StructuredError> Diagnostics
@@ -122,7 +128,33 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
     return runs;
   }
 
-  public async Task SaveAsync(ExecutionRun run, CancellationToken cancellationToken)
+  public Task<IAsyncDisposable?> TryAcquireRecoveryOperationAsync(
+      Guid runId,
+      CancellationToken cancellationToken)
+  {
+    cancellationToken.ThrowIfCancellationRequested();
+    Directory.CreateDirectory(_paths.RunsDirectory);
+    var lockPath = Path.Combine(_paths.RunsDirectory, $"{runId:D}.recovery.lock");
+    try
+    {
+      IAsyncDisposable lease = new FileStream(
+          lockPath,
+          FileMode.OpenOrCreate,
+          FileAccess.ReadWrite,
+          FileShare.None,
+          1,
+          FileOptions.Asynchronous);
+      return Task.FromResult<IAsyncDisposable?>(lease);
+    }
+    catch (IOException)
+    {
+      return Task.FromResult<IAsyncDisposable?>(null);
+    }
+  }
+
+  public async Task<ExecutionRun> SaveAsync(
+      ExecutionRun run,
+      CancellationToken cancellationToken)
   {
     ArgumentNullException.ThrowIfNull(run);
     ValidateRunForPersistence(run);
@@ -135,14 +167,16 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
     EnsureRunExists(run.RunId, path);
     var current = await ReadSnapshotAsync(run.RunId, cancellationToken).ConfigureAwait(false) ??
         throw new KeyNotFoundException($"Execution run '{run.RunId:D}' does not exist.");
-    if (current.Revision != run.Revision)
+    if (current.Revision != run.Revision ||
+        current.RecoveryClaimId != run.RecoveryClaimId)
     {
       throw new InvalidOperationException(
-          $"Execution run '{run.RunId:D}' revision {run.Revision} is stale; " +
-          $"the current revision is {current.Revision}.");
+          $"Execution run '{run.RunId:D}' revision or recovery claim is stale.");
     }
 
-    await WriteSnapshotAsync(path, Redact(run), cancellationToken).ConfigureAwait(false);
+    var saved = run with { Revision = checked(run.Revision + 1) };
+    await WriteSnapshotAsync(path, Redact(saved), cancellationToken).ConfigureAwait(false);
+    return saved;
   }
 
   public async Task<bool> TrySaveAsync(
@@ -855,7 +889,7 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
     }
   }
 
-  private static void ValidateRunForPersistence(ExecutionRun run)
+  private void ValidateRunForPersistence(ExecutionRun run)
   {
     if (run.Revision < 0)
     {
@@ -869,6 +903,17 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
       throw new ArgumentException(
           "A recovery claim requires both an identifier and a claim timestamp.",
           nameof(run));
+    }
+
+    if (run.RecoveryClaimedAtUtc is { } claimedAt)
+    {
+      var now = _timeProvider.GetUtcNow();
+      if (claimedAt > now && claimedAt - now > MaximumClaimClockSkew)
+      {
+        throw new ArgumentException(
+            "A recovery claim timestamp cannot be excessively far in the future.",
+            nameof(run));
+      }
     }
 
     ValidateEnum(run.Mode, "run mode");

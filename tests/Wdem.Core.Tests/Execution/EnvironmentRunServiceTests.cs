@@ -277,6 +277,10 @@ public sealed class EnvironmentRunServiceTests
         snapshot.State == ExecutionState.Running &&
         snapshot.ResourceResults["git"].State == ExecutionState.Completed &&
         snapshot.ResourceResults["git"].Outcome == ExecutionOutcome.Succeeded);
+    Assert.Equal(
+        Enumerable.Range(0, store.SavedSnapshots.Count).Select(revision => (long)revision),
+        store.SavedSnapshots.Select(snapshot => snapshot.Revision));
+    Assert.Equal(store.SavedSnapshots[^1].Revision, run.Revision);
   }
 
   [Fact]
@@ -1048,6 +1052,7 @@ public sealed class EnvironmentRunServiceTests
 
   private sealed class InMemoryRunStore : IExecutionRunStore
   {
+    private readonly Dictionary<Guid, bool> _recoveryOperations = [];
     private readonly Dictionary<Guid, ExecutionRun> _runs;
 
     public InMemoryRunStore(Dictionary<Guid, ExecutionRun>? runs = null)
@@ -1089,17 +1094,54 @@ public sealed class EnvironmentRunServiceTests
       return Task.FromResult<IReadOnlyList<ExecutionRun>>(_runs.Values.ToArray());
     }
 
-    public Task SaveAsync(ExecutionRun run, CancellationToken cancellationToken)
+    public Task<IAsyncDisposable?> TryAcquireRecoveryOperationAsync(
+        Guid runId,
+        CancellationToken cancellationToken)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      lock (_recoveryOperations)
+      {
+        if (_recoveryOperations.ContainsKey(runId))
+        {
+          return Task.FromResult<IAsyncDisposable?>(null);
+        }
+
+        _recoveryOperations.Add(runId, true);
+        return Task.FromResult<IAsyncDisposable?>(
+            new AsyncAction(() =>
+            {
+              lock (_recoveryOperations)
+              {
+                _recoveryOperations.Remove(runId);
+              }
+            }));
+      }
+    }
+
+    public async Task<ExecutionRun> SaveAsync(
+        ExecutionRun run,
+        CancellationToken cancellationToken)
     {
       cancellationToken.ThrowIfCancellationRequested();
       if (SaveOperation is not null)
       {
-        return SaveOperation(run, cancellationToken);
+        await SaveOperation(run, cancellationToken);
       }
 
-      _runs[run.RunId] = run;
-      SavedSnapshots.Add(run);
-      return Task.CompletedTask;
+      lock (_runs)
+      {
+        if (!_runs.TryGetValue(run.RunId, out var current) ||
+            current.Revision != run.Revision ||
+            current.RecoveryClaimId != run.RecoveryClaimId)
+        {
+          throw new InvalidOperationException("The execution run snapshot is stale.");
+        }
+
+        var saved = run with { Revision = checked(run.Revision + 1) };
+        _runs[run.RunId] = saved;
+        SavedSnapshots.Add(saved);
+        return saved;
+      }
     }
 
     public Task<bool> TrySaveAsync(
@@ -1140,5 +1182,14 @@ public sealed class EnvironmentRunServiceTests
         int take,
         CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<RunLogEntry>>([]);
+
+    private sealed class AsyncAction(Action action) : IAsyncDisposable
+    {
+      public ValueTask DisposeAsync()
+      {
+        action();
+        return ValueTask.CompletedTask;
+      }
+    }
   }
 }

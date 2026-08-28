@@ -14,7 +14,6 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
 {
   private static readonly StringComparer IdComparer = StringComparer.OrdinalIgnoreCase;
   private static readonly TimeSpan PersistenceTimeout = TimeSpan.FromSeconds(10);
-  private static readonly TimeSpan RecoveryClaimLease = TimeSpan.FromMinutes(5);
   private readonly IProfileCatalog _profiles;
   private readonly ResourceGraphBuilder _graphBuilder;
   private readonly IResourceProviderRegistry _providers;
@@ -90,17 +89,33 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       CancellationToken cancellationToken)
   {
     var runs = await _runStore.ListAsync(cancellationToken).ConfigureAwait(false);
-    var now = _timeProvider.GetUtcNow();
-    return runs
-        .Where(run => IsRecoverableState(run) && !HasActiveRecoveryClaim(run, now))
-        .Select(run => new RecoveryCandidate
-        {
-          RunId = run.RunId,
-          ProfileSourcePath = run.ProfileSourcePath,
-          StartedAtUtc = run.StartedAtUtc,
-          PendingResourceIds = PendingResourceIds(run)
-        })
-        .Where(candidate => candidate.PendingResourceIds.Count > 0)
+    var candidates = new List<RecoveryCandidate>();
+    foreach (var run in runs.Where(IsRecoverableState))
+    {
+      var pending = PendingResourceIds(run);
+      if (pending.Count == 0)
+      {
+        continue;
+      }
+
+      await using var operation = await _runStore.TryAcquireRecoveryOperationAsync(
+          run.RunId,
+          cancellationToken).ConfigureAwait(false);
+      if (operation is null)
+      {
+        continue;
+      }
+
+      candidates.Add(new RecoveryCandidate
+      {
+        RunId = run.RunId,
+        ProfileSourcePath = run.ProfileSourcePath,
+        StartedAtUtc = run.StartedAtUtc,
+        PendingResourceIds = pending
+      });
+    }
+
+    return candidates
         .OrderBy(candidate => candidate.StartedAtUtc)
         .ToArray();
   }
@@ -109,9 +124,18 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     Guid priorRunId,
     CancellationToken cancellationToken)
   {
+    await using var operation = await _runStore.TryAcquireRecoveryOperationAsync(
+        priorRunId,
+        cancellationToken).ConfigureAwait(false);
+    if (operation is null)
+    {
+      throw new InvalidOperationException(
+          $"Execution run '{priorRunId:D}' already has an active recovery operation.");
+    }
+
     var prior = await GetRequiredRunAsync(priorRunId, cancellationToken).ConfigureAwait(false);
     var now = _timeProvider.GetUtcNow();
-    if (!IsRecoverableState(prior) || HasActiveRecoveryClaim(prior, now))
+    if (!IsRecoverableState(prior))
     {
       throw new InvalidOperationException(
           $"Execution run '{priorRunId:D}' is not eligible for recovery.");
@@ -187,13 +211,16 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
 
   public async Task AbandonAsync(Guid priorRunId, CancellationToken cancellationToken)
   {
-    var prior = await GetRequiredRunAsync(priorRunId, cancellationToken).ConfigureAwait(false);
-    if (HasActiveRecoveryClaim(prior, _timeProvider.GetUtcNow()))
+    await using var operation = await _runStore.TryAcquireRecoveryOperationAsync(
+        priorRunId,
+        cancellationToken).ConfigureAwait(false);
+    if (operation is null)
     {
       throw new InvalidOperationException(
-          $"Execution run '{priorRunId:D}' is currently claimed for recovery.");
+          $"Execution run '{priorRunId:D}' already has an active recovery operation.");
     }
 
+    var prior = await GetRequiredRunAsync(priorRunId, cancellationToken).ConfigureAwait(false);
     if (prior.State == ExecutionState.Completed)
     {
       var pending = PendingResourceIds(prior);
@@ -203,7 +230,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
                   result.RestartRequirement != RestartPolicy.NoRestart)
               .Select(result => result.ResourceId))
           .ToHashSet(IdComparer);
-      if (acknowledged.SetEquals(prior.AcknowledgedRestartResourceIds))
+      if (acknowledged.SetEquals(prior.AcknowledgedRestartResourceIds) &&
+          prior.RecoveryClaimId is null)
       {
         return;
       }
@@ -211,7 +239,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       var updated = prior with
       {
         Revision = checked(prior.Revision + 1),
-        AcknowledgedRestartResourceIds = acknowledged
+        AcknowledgedRestartResourceIds = acknowledged,
+        RecoveryClaimId = null,
+        RecoveryClaimedAtUtc = null
       };
       if (!await TryPersistClaimTransitionAsync(
               updated,
@@ -258,7 +288,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       Outcome = ExecutionOutcome.Cancelled,
       EndedAtUtc = endedAt,
       ResourceResults = results,
-      AcknowledgedRestartResourceIds = acknowledgedRestartResourceIds
+      AcknowledgedRestartResourceIds = acknowledgedRestartResourceIds,
+      RecoveryClaimId = null,
+      RecoveryClaimedAtUtc = null
     };
     if (!await TryPersistClaimTransitionAsync(
             abandoned,
@@ -358,8 +390,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         Outcome = ExecutionOutcome.Succeeded,
         EndedAtUtc = DateTimeOffset.UtcNow
       };
-      await PersistTerminalAsync(completed).ConfigureAwait(false);
-      return completed;
+      return await PersistTerminalAsync(completed).ConfigureAwait(false);
     }
 
     if (!plan.IsExecutable)
@@ -401,8 +432,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           .Select(result => $"Resource '{result.ResourceId}' requires a restart.")
           .ToArray()
     };
-    await PersistTerminalAsync(completedRun).ConfigureAwait(false);
-    return completedRun;
+    return await PersistTerminalAsync(completedRun).ConfigureAwait(false);
   }
 
   private async Task<ResourceResult> ExecuteResourceAsync(
@@ -654,14 +684,13 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       EndedAtUtc = endedAt,
       ResourceResults = results
     };
-    await PersistTerminalAsync(completed).ConfigureAwait(false);
-    return completed;
+    return await PersistTerminalAsync(completed).ConfigureAwait(false);
   }
 
-  private async Task PersistTerminalAsync(ExecutionRun run)
+  private async Task<ExecutionRun> PersistTerminalAsync(ExecutionRun run)
   {
     using var timeout = new CancellationTokenSource(PersistenceTimeout);
-    await _runStore.SaveAsync(run, timeout.Token).ConfigureAwait(false);
+    return await _runStore.SaveAsync(run, timeout.Token).ConfigureAwait(false);
   }
 
   private async Task<ExecutionRun> PersistPreparationFailureAsync(
@@ -901,11 +930,6 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       run.State is ExecutionState.Pending or ExecutionState.Ready or ExecutionState.Running ||
       run.RestartRequirements.Count > 0 && PendingResourceIds(run).Count > 0;
 
-  private static bool HasActiveRecoveryClaim(ExecutionRun run, DateTimeOffset now) =>
-      run.RecoveryClaimId is not null &&
-      run.RecoveryClaimedAtUtc is { } claimedAt &&
-      claimedAt + RecoveryClaimLease > now;
-
   private async Task<ExecutionRun> GetRequiredRunAsync(
       Guid runId,
       CancellationToken cancellationToken) =>
@@ -1045,8 +1069,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       try
       {
         var next = _current with { State = ExecutionState.Running };
-        await store.SaveAsync(next, cancellationToken).ConfigureAwait(false);
-        _current = next;
+        _current = await store.SaveAsync(next, cancellationToken).ConfigureAwait(false);
       }
       finally
       {
@@ -1071,8 +1094,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           DetectedBefore = result.DetectedBefore ?? previous?.DetectedBefore
         };
         var next = _current with { ResourceResults = results };
-        await store.SaveAsync(next, cancellationToken).ConfigureAwait(false);
-        _current = next;
+        _current = await store.SaveAsync(next, cancellationToken).ConfigureAwait(false);
       }
       finally
       {

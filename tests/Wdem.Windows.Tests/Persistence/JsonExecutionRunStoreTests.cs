@@ -76,6 +76,10 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   {
     var claimId = Guid.NewGuid();
     var claimedAt = new DateTimeOffset(2030, 1, 2, 3, 4, 5, TimeSpan.Zero);
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new MutableTimeProvider(claimedAt));
     var run = SampleRun() with
     {
       Revision = 7,
@@ -93,10 +97,10 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
       }
     };
 
-    await _store.CreateAsync(run, CancellationToken.None);
+    await store.CreateAsync(run, CancellationToken.None);
 
-    var disk = await File.ReadAllTextAsync(_store.SnapshotPath(run.RunId));
-    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+    var disk = await File.ReadAllTextAsync(store.SnapshotPath(run.RunId));
+    var restored = await store.GetAsync(run.RunId, CancellationToken.None);
     Assert.Equal(7, restored!.Revision);
     Assert.Equal(claimId, restored.RecoveryClaimId);
     Assert.Equal(claimedAt, restored.RecoveryClaimedAtUtc);
@@ -127,6 +131,34 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     await Assert.ThrowsAsync<ArgumentException>(() =>
         _store.CreateAsync(run, CancellationToken.None));
     Assert.False(File.Exists(_store.SnapshotPath(run.RunId)));
+  }
+
+  [Fact]
+  public async Task CreateAsync_RejectsRecoveryClaimTimestampBeyondClockSkew()
+  {
+    var now = new DateTimeOffset(2030, 1, 2, 3, 4, 5, TimeSpan.Zero);
+    var clock = new MutableTimeProvider(now);
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        clock);
+    var valid = SampleRun() with
+    {
+      RecoveryClaimId = Guid.NewGuid(),
+      RecoveryClaimedAtUtc = now.AddMinutes(5)
+    };
+    await store.CreateAsync(valid, CancellationToken.None);
+    var invalid = SampleRun() with
+    {
+      RecoveryClaimId = Guid.NewGuid(),
+      RecoveryClaimedAtUtc = DateTimeOffset.MaxValue
+    };
+
+    await Assert.ThrowsAsync<ArgumentException>(() =>
+        store.CreateAsync(invalid, CancellationToken.None));
+
+    Assert.NotNull(await store.GetAsync(valid.RunId, CancellationToken.None));
+    Assert.False(File.Exists(store.SnapshotPath(invalid.RunId)));
   }
 
   [Fact]
@@ -260,6 +292,28 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task LegacySnapshotWithoutRecoveryMetadataStartsAtRevisionZero()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    var snapshotPath = _store.SnapshotPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(snapshotPath))!.AsObject();
+    document.Remove("revision");
+    document.Remove("recoveryClaimId");
+    document.Remove("recoveryClaimedAtUtc");
+    await File.WriteAllTextAsync(snapshotPath, document.ToJsonString());
+
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+    var saved = await _store.SaveAsync(
+        restored! with { RestartReasons = ["legacy upgraded"] },
+        CancellationToken.None);
+
+    Assert.Equal(0, restored.Revision);
+    Assert.Equal(1, saved.Revision);
+    Assert.Equal(1, (await _store.GetAsync(run.RunId, CancellationToken.None))!.Revision);
+  }
+
+  [Fact]
   public async Task GetAsync_RestoresGraphAndParameterCaseInsensitivityAndImmutability()
   {
     var run = SampleRun();
@@ -345,16 +399,19 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     await _store.CreateAsync(incomplete, CancellationToken.None);
     await _store.CreateAsync(complete, CancellationToken.None);
 
-    var saves = Enumerable.Range(1, 8).Select(index =>
-        _store.SaveAsync(
-            incomplete with { RestartReasons = [$"save-{index}"] },
-            CancellationToken.None));
-    await Task.WhenAll(saves);
+    var current = incomplete;
+    foreach (var index in Enumerable.Range(1, 8))
+    {
+      current = await _store.SaveAsync(
+          current with { RestartReasons = [$"save-{index}"] },
+          CancellationToken.None);
+    }
 
     var discovered = await _store.ListIncompleteAsync(CancellationToken.None);
 
     Assert.Single(discovered);
     Assert.Equal(incomplete.RunId, discovered[0].RunId);
+    Assert.Equal(8, discovered[0].Revision);
     Assert.False(File.Exists(_store.SnapshotPath(incomplete.RunId) + ".tmp"));
     Assert.NotNull(await _store.GetAsync(incomplete.RunId, CancellationToken.None));
   }
@@ -458,21 +515,80 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
         new LogRedactor());
     var payload = new string('x', 256 * 1024);
     var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    var saves = Enumerable.Range(1, 16).Select(async index =>
+    var saves = Enumerable.Range(1, 16).Select(index =>
     {
-      await start.Task;
       var store = index % 2 == 0 ? _store : otherStore;
-      await store.SaveAsync(
+      return AttemptSaveAsync(
+          store,
           run with { RestartReasons = [$"{index}:{payload}"] },
-          CancellationToken.None);
+          start.Task);
     }).ToArray();
 
     start.SetResult();
-    await Task.WhenAll(saves);
+    var errors = await Task.WhenAll(saves);
 
     var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+    Assert.Single(errors, error => error is null);
+    Assert.Equal(15, errors.Count(error => error is InvalidOperationException));
     Assert.NotNull(restored);
+    Assert.Equal(1, restored.Revision);
     Assert.Single(restored.RestartReasons);
+  }
+
+  [Fact]
+  public async Task SaveAsync_ConcurrentSameRevisionHasSingleWinner()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    var otherStore = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor());
+    var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var saves = new[]
+    {
+      AttemptSaveAsync(
+          _store,
+          run with { RestartReasons = ["first"] },
+          start.Task),
+      AttemptSaveAsync(
+          otherStore,
+          run with { RestartReasons = ["second"] },
+          start.Task)
+    };
+
+    start.SetResult();
+    var errors = await Task.WhenAll(saves);
+
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+    Assert.Single(errors, error => error is null);
+    Assert.Single(errors, error => error is InvalidOperationException);
+    Assert.Equal(1, restored!.Revision);
+    Assert.Single(restored.RestartReasons);
+  }
+
+  [Fact]
+  public async Task SaveAsync_WithoutClaimOwnerCannotClearActiveClaim()
+  {
+    var claimId = Guid.NewGuid();
+    var claimed = SampleRun() with
+    {
+      Revision = 3,
+      RecoveryClaimId = claimId,
+      RecoveryClaimedAtUtc = DateTimeOffset.UtcNow
+    };
+    await _store.CreateAsync(claimed, CancellationToken.None);
+
+    await Assert.ThrowsAsync<InvalidOperationException>(() => _store.SaveAsync(
+        claimed with
+        {
+          RecoveryClaimId = null,
+          RecoveryClaimedAtUtc = null
+        },
+        CancellationToken.None));
+
+    var restored = await _store.GetAsync(claimed.RunId, CancellationToken.None);
+    Assert.Equal(3, restored!.Revision);
+    Assert.Equal(claimId, restored.RecoveryClaimId);
   }
 
   [Fact]
@@ -1269,6 +1385,23 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
       "git:install",
       $"message-{sequence}");
 
+  private static async Task<Exception?> AttemptSaveAsync(
+      IExecutionRunStore store,
+      ExecutionRun run,
+      Task start)
+  {
+    await start;
+    try
+    {
+      await store.SaveAsync(run, CancellationToken.None);
+      return null;
+    }
+    catch (Exception exception)
+    {
+      return exception;
+    }
+  }
+
   private static void AssertReadOnly<T>(IReadOnlyList<T> values)
   {
     var collection = Assert.IsAssignableFrom<ICollection<T>>(values);
@@ -1282,5 +1415,10 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     public string Architecture => "Arm64";
     public string ComputerName => "TESTBOX";
     public string UserName => "test-user";
+  }
+
+  private sealed class MutableTimeProvider(DateTimeOffset utcNow) : TimeProvider
+  {
+    public override DateTimeOffset GetUtcNow() => utcNow;
   }
 }

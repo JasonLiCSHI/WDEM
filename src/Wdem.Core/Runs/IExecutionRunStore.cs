@@ -10,7 +10,10 @@ public interface IExecutionRunStore
   Task<ExecutionRun?> GetAsync(Guid runId, CancellationToken cancellationToken);
   Task<IReadOnlyList<ExecutionRun>> ListAsync(CancellationToken cancellationToken);
   Task<IReadOnlyList<ExecutionRun>> ListIncompleteAsync(CancellationToken cancellationToken);
-  Task SaveAsync(ExecutionRun run, CancellationToken cancellationToken);
+  Task<IAsyncDisposable?> TryAcquireRecoveryOperationAsync(
+      Guid runId,
+      CancellationToken cancellationToken);
+  Task<ExecutionRun> SaveAsync(ExecutionRun run, CancellationToken cancellationToken);
   Task<bool> TrySaveAsync(
       ExecutionRun run,
       long expectedRevision,
