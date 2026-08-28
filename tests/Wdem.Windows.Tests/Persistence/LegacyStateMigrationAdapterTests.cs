@@ -52,7 +52,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     var result = await adapter.MigrateAsync(CancellationToken.None);
 
     Assert.Equal(
-        ["First step", "step-two", "array-step"],
+        ["First step", "step-two", "array-step", "Legacy item 1 (redacted)"],
         result.ImportedStepNames);
   }
 
@@ -95,7 +95,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
   [InlineData("{")]
   [InlineData("{ \"schemaVersion\": 2, \"recordKind\": \"legacy-step-name-reference\", \"sourceProduct\": \"WinHome\", \"importedAtUtc\": \"2026-08-29T00:00:00Z\", \"importedStepNames\": [] }")]
   [InlineData("{ \"schemaVersion\": 1, \"recordKind\": \"unrelated\", \"sourceProduct\": \"Other\", \"importedAtUtc\": \"2026-08-29T00:00:00Z\", \"importedStepNames\": [] }")]
-  public async Task MigrateAsync_InvalidMarkerIsQuarantinedAndMigrationIsRetried(
+  public async Task MigrateAsync_InvalidMarkerIsQuarantinedWithoutRereadingLegacy(
       string invalidMarker)
   {
     var markerDirectory = Path.Combine(_root, "WDEM");
@@ -103,20 +103,34 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     var markerPath = Path.Combine(markerDirectory, "migration-v1.json");
     await File.WriteAllTextAsync(markerPath, invalidMarker);
     WriteLegacy("state.json", "[\"recovered-step\"]");
+    var legacyPath = Path.Combine(_root, "WinHome", "state.json");
+    var firstResolver = new RecordingFinalPathResolver(legacyPath);
 
-    var result = await new LegacyStateMigrationAdapter(_root)
+    var result = await new LegacyStateMigrationAdapter(_root, firstResolver)
         .MigrateAsync(CancellationToken.None);
 
-    Assert.True(result.MigrationPerformed);
-    Assert.Equal(["recovered-step"], result.ImportedStepNames);
+    Assert.False(result.MigrationPerformed);
+    Assert.Empty(result.ImportedStepNames);
+    Assert.False(firstResolver.ObservedOpenReadableStream);
     Assert.Single(Directory.EnumerateFiles(
         markerDirectory,
         "migration-v1.invalid-*.json"));
-    using var marker = JsonDocument.Parse(await File.ReadAllTextAsync(markerPath));
+    var repairedMarker = await File.ReadAllTextAsync(markerPath);
+    using var marker = JsonDocument.Parse(repairedMarker);
     Assert.Equal(1, marker.RootElement.GetProperty("schemaVersion").GetInt32());
     Assert.Equal(
         "legacy-step-name-reference",
         marker.RootElement.GetProperty("recordKind").GetString());
+    Assert.Empty(marker.RootElement.GetProperty("importedStepNames").EnumerateArray());
+
+    var secondResolver = new RecordingFinalPathResolver(legacyPath);
+    var second = await new LegacyStateMigrationAdapter(_root, secondResolver)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.False(second.MigrationPerformed);
+    Assert.Empty(second.ImportedStepNames);
+    Assert.False(secondResolver.ObservedOpenReadableStream);
+    Assert.Equal(repairedMarker, await File.ReadAllTextAsync(markerPath));
   }
 
   [Fact]
@@ -254,6 +268,66 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
   }
 
   [Fact]
+  public async Task MigrateAsync_RedactsFilteredDiscoveredNamesAndDoesNotRereadLegacy()
+  {
+    const string unsafeCandidate = "banana-coconut-20240829";
+    WriteLegacy("state.json", JsonSerializer.Serialize(new[] { unsafeCandidate }));
+
+    var first = await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.True(first.MigrationPerformed);
+    Assert.Equal(["Legacy item 1 (redacted)"], first.ImportedStepNames);
+    var marker = await File.ReadAllTextAsync(first.MarkerPath);
+    Assert.Contains("Legacy item 1 (redacted)", marker, StringComparison.Ordinal);
+    Assert.DoesNotContain(unsafeCandidate, marker, StringComparison.Ordinal);
+    Assert.DoesNotContain(
+        unsafeCandidate.Length.ToString(),
+        Assert.Single(first.ImportedStepNames),
+        StringComparison.Ordinal);
+
+    var resolver = new RecordingFinalPathResolver(
+        Path.Combine(_root, "WinHome", "state.json"));
+    var second = await new LegacyStateMigrationAdapter(_root, resolver)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.False(second.MigrationPerformed);
+    Assert.Empty(second.ImportedStepNames);
+    Assert.False(resolver.ObservedOpenReadableStream);
+    Assert.Equal(marker, await File.ReadAllTextAsync(first.MarkerPath));
+  }
+
+  [Fact]
+  public async Task MigrateAsync_DeduplicatesAndCapsRedactedPlaceholders()
+  {
+    const string repeatedUnsafeCandidate = "banana-coconut-20240829";
+    WriteLegacy("state.json", JsonSerializer.Serialize(new
+    {
+      applied_items = new[] { repeatedUnsafeCandidate },
+      step_history = new Dictionary<string, object>
+      {
+        ["explicit-name"] = new { stepName = repeatedUnsafeCandidate },
+        [repeatedUnsafeCandidate] = new { status = "Failed" }
+      }
+    }));
+    var unsafeCandidates = new[] { repeatedUnsafeCandidate }
+        .Concat(Enumerable.Range(0, LegacyStateMigrationAdapter.MaximumImportedStepNames + 5)
+            .Select(index => $"opaque-candidate-{index:D3}-20240829"));
+    WriteLegacy("winhome.state.json", JsonSerializer.Serialize(unsafeCandidates));
+
+    var result = await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.Equal(
+        Enumerable.Range(1, LegacyStateMigrationAdapter.MaximumImportedStepNames)
+            .Select(index => $"Legacy item {index} (redacted)"),
+        result.ImportedStepNames);
+    var marker = await File.ReadAllTextAsync(result.MarkerPath);
+    Assert.DoesNotContain(repeatedUnsafeCandidate, marker, StringComparison.Ordinal);
+    Assert.DoesNotContain("opaque-candidate", marker, StringComparison.Ordinal);
+  }
+
+  [Fact]
   public async Task MigrateAsync_RejectsUnsafeLabelsWithoutPersistingSensitiveOrPathData()
   {
     var overlong = new string('x', 257);
@@ -291,7 +365,10 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
 
     Assert.Equal(
         ["Configure Shell", "Install Git", "configure-shell", "Git.Git"],
-        result.ImportedStepNames);
+        result.ImportedStepNames.Where(name => !name.StartsWith("Legacy item ")));
+    Assert.Equal(
+        Enumerable.Range(1, 16).Select(index => $"Legacy item {index} (redacted)"),
+        result.ImportedStepNames.Where(name => name.StartsWith("Legacy item ")));
     var marker = await File.ReadAllTextAsync(result.MarkerPath);
     foreach (var forbidden in new[]
     {
@@ -326,7 +403,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     var result = await new LegacyStateMigrationAdapter(_root)
         .MigrateAsync(CancellationToken.None);
 
-    Assert.Empty(result.ImportedStepNames);
+    Assert.Equal(["Legacy item 1 (redacted)"], result.ImportedStepNames);
     Assert.DoesNotContain(
         credential,
         await File.ReadAllTextAsync(result.MarkerPath),
@@ -353,7 +430,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     var result = await new LegacyStateMigrationAdapter(_root)
         .MigrateAsync(CancellationToken.None);
 
-    Assert.Empty(result.ImportedStepNames);
+    Assert.Equal(["Legacy item 1 (redacted)"], result.ImportedStepNames);
     Assert.DoesNotContain(
         credential,
         await File.ReadAllTextAsync(result.MarkerPath),
@@ -431,7 +508,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     var result = await new LegacyStateMigrationAdapter(_root)
         .MigrateAsync(CancellationToken.None);
 
-    Assert.Empty(result.ImportedStepNames);
+    Assert.Equal(["Legacy item 1 (redacted)"], result.ImportedStepNames);
     Assert.DoesNotContain(
         identifier,
         await File.ReadAllTextAsync(result.MarkerPath),
@@ -559,19 +636,23 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
       importedStepNames = new[] { credential }
     }));
     WriteLegacy("state.json", "[\"recovered-step\"]");
+    var legacyPath = Path.Combine(_root, "WinHome", "state.json");
+    var resolver = new RecordingFinalPathResolver(legacyPath);
 
-    var result = await new LegacyStateMigrationAdapter(_root)
+    var result = await new LegacyStateMigrationAdapter(_root, resolver)
         .MigrateAsync(CancellationToken.None);
 
-    Assert.True(result.MigrationPerformed);
-    Assert.Equal(["recovered-step"], result.ImportedStepNames);
+    Assert.False(result.MigrationPerformed);
+    Assert.Empty(result.ImportedStepNames);
+    Assert.False(resolver.ObservedOpenReadableStream);
     Assert.Single(Directory.EnumerateFiles(
         markerDirectory,
         "migration-v1.invalid-*.json"));
-    Assert.DoesNotContain(
-        credential,
-        await File.ReadAllTextAsync(markerPath),
-        StringComparison.Ordinal);
+    var repairedMarker = await File.ReadAllTextAsync(markerPath);
+    Assert.DoesNotContain(credential, repairedMarker, StringComparison.Ordinal);
+    Assert.DoesNotContain("recovered-step", repairedMarker, StringComparison.Ordinal);
+    using var marker = JsonDocument.Parse(repairedMarker);
+    Assert.Empty(marker.RootElement.GetProperty("importedStepNames").EnumerateArray());
   }
 
   [Fact]

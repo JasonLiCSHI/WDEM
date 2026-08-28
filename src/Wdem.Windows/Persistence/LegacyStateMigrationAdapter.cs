@@ -109,21 +109,22 @@ public sealed class LegacyStateMigrationAdapter
         .ConfigureAwait(false);
     try
     {
-      if (await IsValidMarkerAsync(cancellationToken).ConfigureAwait(false))
+      if (File.Exists(_markerPath))
       {
+        if (!await IsValidMarkerAsync(cancellationToken).ConfigureAwait(false))
+        {
+          QuarantineInvalidMarker();
+          await WriteMarkerAtomicallyAsync(
+              CreateMarker(Array.AsReadOnly(Array.Empty<string>())),
+              cancellationToken).ConfigureAwait(false);
+        }
+
         return NotPerformed();
       }
 
-      QuarantineInvalidMarker();
-
       var importedStepNames = await DiscoverStepNamesAsync(cancellationToken)
           .ConfigureAwait(false);
-      var marker = new LegacyMigrationMarker(
-          1,
-          "legacy-step-name-reference",
-          "WinHome",
-          DateTimeOffset.UtcNow,
-          importedStepNames);
+      var marker = CreateMarker(importedStepNames);
       await WriteMarkerAtomicallyAsync(marker, cancellationToken).ConfigureAwait(false);
       return new LegacyStateMigrationResult(true, importedStepNames, _markerPath);
     }
@@ -137,6 +138,14 @@ public sealed class LegacyStateMigrationAdapter
       false,
       Array.AsReadOnly(Array.Empty<string>()),
       _markerPath);
+
+  private static LegacyMigrationMarker CreateMarker(
+      IReadOnlyList<string> importedStepNames) => new(
+      1,
+      "legacy-step-name-reference",
+      "WinHome",
+      DateTimeOffset.UtcNow,
+      importedStepNames);
 
   private async Task<FileStream> AcquireLockAsync(CancellationToken cancellationToken)
   {
@@ -272,7 +281,9 @@ public sealed class LegacyStateMigrationAdapter
     }
 
     var names = new List<string>();
-    var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var seenCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var redactedItemNumber = 0;
     foreach (var fileName in LegacyStateFileNames.Take(MaximumCandidateFiles))
     {
       if (names.Count >= MaximumImportedStepNames)
@@ -309,7 +320,12 @@ public sealed class LegacyStateMigrationAdapter
             stream,
             new JsonDocumentOptions { MaxDepth = 32 },
             cancellationToken: cancellationToken).ConfigureAwait(false);
-        ExtractNames(document.RootElement, names, seen);
+        ExtractNames(
+            document.RootElement,
+            names,
+            seenCandidates,
+            seenNames,
+            ref redactedItemNumber);
       }
       catch (JsonException)
       {
@@ -377,7 +393,9 @@ public sealed class LegacyStateMigrationAdapter
   private static void ExtractNames(
       JsonElement root,
       List<string> names,
-      HashSet<string> seen)
+      HashSet<string> seenCandidates,
+      HashSet<string> seenNames,
+      ref int redactedItemNumber)
   {
     if (root.ValueKind == JsonValueKind.Array)
     {
@@ -390,7 +408,13 @@ public sealed class LegacyStateMigrationAdapter
 
         if (item.ValueKind == JsonValueKind.String)
         {
-          AddName(item.GetString(), LegacyNameSource.AppliedItem, names, seen);
+          AddName(
+              item.GetString(),
+              LegacyNameSource.AppliedItem,
+              names,
+              seenCandidates,
+              seenNames,
+              ref redactedItemNumber);
         }
       }
 
@@ -416,7 +440,13 @@ public sealed class LegacyStateMigrationAdapter
 
         if (item.ValueKind == JsonValueKind.String)
         {
-          AddName(item.GetString(), LegacyNameSource.AppliedItem, names, seen);
+          AddName(
+              item.GetString(),
+              LegacyNameSource.AppliedItem,
+              names,
+              seenCandidates,
+              seenNames,
+              ref redactedItemNumber);
         }
       }
     }
@@ -425,20 +455,32 @@ public sealed class LegacyStateMigrationAdapter
         stepHistory.ValueKind == JsonValueKind.Object)
     {
       recognizedContainer = true;
-      ExtractStepDictionary(stepHistory, names, seen);
+      ExtractStepDictionary(
+          stepHistory,
+          names,
+          seenCandidates,
+          seenNames,
+          ref redactedItemNumber);
     }
 
     if (!recognizedContainer && root.EnumerateObject().All(
             property => property.Value.ValueKind == JsonValueKind.Object))
     {
-      ExtractStepDictionary(root, names, seen);
+      ExtractStepDictionary(
+          root,
+          names,
+          seenCandidates,
+          seenNames,
+          ref redactedItemNumber);
     }
   }
 
   private static void ExtractStepDictionary(
       JsonElement dictionary,
       List<string> names,
-      HashSet<string> seen)
+      HashSet<string> seenCandidates,
+      HashSet<string> seenNames,
+      ref int redactedItemNumber)
   {
     foreach (var property in dictionary.EnumerateObject())
     {
@@ -471,7 +513,13 @@ public sealed class LegacyStateMigrationAdapter
         source = LegacyNameSource.StepHistoryKey;
       }
 
-      AddName(name, source, names, seen);
+      AddName(
+          name,
+          source,
+          names,
+          seenCandidates,
+          seenNames,
+          ref redactedItemNumber);
     }
   }
 
@@ -497,7 +545,9 @@ public sealed class LegacyStateMigrationAdapter
       string? candidate,
       LegacyNameSource source,
       List<string> names,
-      HashSet<string> seen)
+      HashSet<string> seenCandidates,
+      HashSet<string> seenNames,
+      ref int redactedItemNumber)
   {
     if (names.Count >= MaximumImportedStepNames ||
         string.IsNullOrWhiteSpace(candidate))
@@ -506,9 +556,34 @@ public sealed class LegacyStateMigrationAdapter
     }
 
     var sanitized = candidate.Trim();
-    if (IsSafeMigratedName(sanitized, source) && seen.Add(sanitized))
+    var isSafe = IsSafeMigratedName(sanitized, source);
+    var classificationKey = (isSafe ? "safe:" : "redacted:") + sanitized;
+    if (!seenCandidates.Add(classificationKey))
     {
-      names.Add(sanitized);
+      return;
+    }
+
+    if (isSafe)
+    {
+      if (seenNames.Add(sanitized))
+      {
+        names.Add(sanitized);
+      }
+
+      return;
+    }
+
+    string placeholder;
+    do
+    {
+      redactedItemNumber++;
+      placeholder = $"Legacy item {redactedItemNumber} (redacted)";
+    }
+    while (!seenNames.Add(placeholder));
+
+    if (names.Count < MaximumImportedStepNames)
+    {
+      names.Add(placeholder);
     }
   }
 
