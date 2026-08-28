@@ -41,6 +41,33 @@ public sealed class LegacyStateMigrationAdapter
 
   private static readonly LogRedactor StepNameRedactor = new();
 
+  private static readonly HashSet<string> KnownLegacyAppliedItemIdentifiers = new(
+      StringComparer.OrdinalIgnoreCase)
+  {
+    "1Password",
+    "Git.Git",
+    "winget:Git.Git",
+    "Microsoft.VisualStudio.2022.BuildTools",
+    "Microsoft.VisualStudio.BuildTools-2022",
+    "com.microsoft.visualstudiobuildtools",
+    "ai.openai.chatgptdesktop",
+    "visual-studio-build-tools-2022",
+    "visual-studio-build-tools-v2022",
+    "visual-studio-build-tools-rc1",
+    "visual-studio-build-tools-x64",
+    "visual-studio-build-tools-win11",
+    "VisualStudioBuildTools2022",
+    "VisualStudio17BuildTools2022x64"
+  };
+
+  private enum LegacyNameSource
+  {
+    AppliedItem,
+    StepName,
+    StepHistoryKey,
+    PersistedMarker
+  }
+
   private readonly string _legacyDirectory;
   private readonly string _markerDirectory;
   private readonly string _markerPath;
@@ -189,7 +216,7 @@ public sealed class LegacyStateMigrationAdapter
       {
         if (item.ValueKind != JsonValueKind.String ||
             item.GetString() is not { } name ||
-            !IsSafeStepName(name) ||
+            !IsSafeMigratedName(name, LegacyNameSource.PersistedMarker) ||
             !string.Equals(name, name.Trim(), StringComparison.Ordinal))
         {
           return false;
@@ -361,7 +388,7 @@ public sealed class LegacyStateMigrationAdapter
 
         if (item.ValueKind == JsonValueKind.String)
         {
-          AddName(item.GetString(), names, seen);
+          AddName(item.GetString(), LegacyNameSource.AppliedItem, names, seen);
         }
       }
 
@@ -387,7 +414,7 @@ public sealed class LegacyStateMigrationAdapter
 
         if (item.ValueKind == JsonValueKind.String)
         {
-          AddName(item.GetString(), names, seen);
+          AddName(item.GetString(), LegacyNameSource.AppliedItem, names, seen);
         }
       }
     }
@@ -424,6 +451,7 @@ public sealed class LegacyStateMigrationAdapter
       }
 
       string? name;
+      LegacyNameSource source;
       if (TryGetProperty(property.Value, "stepName", out var stepName) ||
           TryGetProperty(property.Value, "step_name", out stepName))
       {
@@ -433,13 +461,15 @@ public sealed class LegacyStateMigrationAdapter
         }
 
         name = stepName.GetString();
+        source = LegacyNameSource.StepName;
       }
       else
       {
         name = property.Name;
+        source = LegacyNameSource.StepHistoryKey;
       }
 
-      AddName(name, names, seen);
+      AddName(name, source, names, seen);
     }
   }
 
@@ -463,6 +493,7 @@ public sealed class LegacyStateMigrationAdapter
 
   private static void AddName(
       string? candidate,
+      LegacyNameSource source,
       List<string> names,
       HashSet<string> seen)
   {
@@ -473,14 +504,17 @@ public sealed class LegacyStateMigrationAdapter
     }
 
     var sanitized = candidate.Trim();
-    if (IsSafeStepName(sanitized) && seen.Add(sanitized))
+    if (IsSafeMigratedName(sanitized, source) && seen.Add(sanitized))
     {
       names.Add(sanitized);
     }
   }
 
-  private static bool IsSafeStepName(string value)
+  private static bool IsSafeMigratedName(string value, LegacyNameSource source)
   {
+    var isKnownAppliedItem =
+        source is LegacyNameSource.AppliedItem or LegacyNameSource.PersistedMarker &&
+        KnownLegacyAppliedItemIdentifiers.Contains(value);
     if (value.Length is 0 or > MaximumStepNameLength ||
         value.Any(character => char.IsControl(character)) ||
         value.Contains("..", StringComparison.Ordinal) ||
@@ -488,8 +522,7 @@ public sealed class LegacyStateMigrationAdapter
         !string.Equals(StepNameRedactor.Redact(value), value, StringComparison.Ordinal) ||
         HasKnownCredentialPrefix(value) ||
         HasExplicitCompoundCredentialKey(value) ||
-        LooksLikeJsonWebToken(value) ||
-        LooksLikeUnclassifiedOpaqueToken(value))
+        LooksLikeJsonWebToken(value))
     {
       return false;
     }
@@ -497,7 +530,8 @@ public sealed class LegacyStateMigrationAdapter
     if (value.Any(character =>
             !(char.IsLetterOrDigit(character) ||
               char.IsWhiteSpace(character) ||
-              character is '-' or '_' or '.' or '(' or ')' or '+' or '#')))
+              character is '-' or '_' or '.' or '(' or ')' or '+' or '#' ||
+              character == ':' && isKnownAppliedItem)))
     {
       return false;
     }
@@ -505,12 +539,17 @@ public sealed class LegacyStateMigrationAdapter
     var words = value.Split(
         [' ', '-', '_', '.', '(', ')', '+', '#'],
         StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-    return !words.Any(word => word.Equals("token", StringComparison.OrdinalIgnoreCase) ||
+    if (words.Any(word => word.Equals("token", StringComparison.OrdinalIgnoreCase) ||
         word.Equals("secret", StringComparison.OrdinalIgnoreCase) ||
         word.Equals("password", StringComparison.OrdinalIgnoreCase) ||
         word.Equals("apikey", StringComparison.OrdinalIgnoreCase) ||
         word.Equals("credential", StringComparison.OrdinalIgnoreCase) ||
-        word.Equals("authorization", StringComparison.OrdinalIgnoreCase));
+        word.Equals("authorization", StringComparison.OrdinalIgnoreCase)))
+    {
+      return false;
+    }
+
+    return !LooksLikeUnclassifiedOpaqueToken(value) || isKnownAppliedItem;
   }
 
   private static bool HasKnownCredentialPrefix(string value) =>
@@ -550,53 +589,14 @@ public sealed class LegacyStateMigrationAdapter
     var segments = value.Split(
         ['.', '-', '_'],
         StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    if (segments.Any(LooksLikeOpaqueTokenSegment))
+    {
+      return true;
+    }
+
     var compactValue = string.Concat(segments);
-    var hasOpaqueTokenStructure =
-        segments.Any(LooksLikeOpaqueTokenSegment) ||
-        LooksLikeOpaqueTokenSegment(compactValue);
-    return hasOpaqueTokenStructure && !HasLegitimatePackageLabelStructure(value);
+    return LooksLikeOpaqueTokenSegment(compactValue);
   }
-
-  private static bool HasLegitimatePackageLabelStructure(string value)
-  {
-    var segments = value.Split(['.', '-', '_'], StringSplitOptions.None);
-    if (segments.Length < 2 || segments.Any(string.IsNullOrEmpty))
-    {
-      return false;
-    }
-
-    var wordCount = segments.Count(IsWordLikeLexicalSegment);
-    return wordCount >= 2 && segments.All(segment =>
-        IsWordLikeLexicalSegment(segment) || IsShortVersionSegment(segment));
-  }
-
-  private static bool IsWordLikeLexicalSegment(string value)
-  {
-    if (value.Length == 0 || !value.All(char.IsAsciiLetter))
-    {
-      return false;
-    }
-
-    var hasVowel = false;
-    var vowelRun = 0;
-    var consonantRun = 0;
-    foreach (var character in value)
-    {
-      var isVowel = char.ToLowerInvariant(character) is 'a' or 'e' or 'i' or 'o' or 'u';
-      hasVowel |= isVowel;
-      vowelRun = isVowel ? vowelRun + 1 : 0;
-      consonantRun = isVowel ? 0 : consonantRun + 1;
-      if (vowelRun > 3 || consonantRun > 5)
-      {
-        return false;
-      }
-    }
-
-    return hasVowel;
-  }
-
-  private static bool IsShortVersionSegment(string value) =>
-      value.Length is > 0 and <= 8 && value.All(char.IsAsciiDigit);
 
   private static bool LooksLikeOpaqueTokenSegment(string value)
   {

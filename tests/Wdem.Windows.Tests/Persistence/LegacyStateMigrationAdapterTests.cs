@@ -317,9 +317,38 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
   [InlineData("qzxvbnmasdfghjkl-1234567890123456-plmoknijbuhvygct")]
   [InlineData("com.k7m2q9v4x8n3p6r1t5w0y2z7c4b9d6f3.pkg")]
   [InlineData("com.k7m2q9v4x8n3p6r1-t5w0y2z7c4b9d6f3.pkg")]
+  [InlineData("banana-coconut-20240829")]
+  [InlineData("zaneku-morapi-tuvexo-20240829")]
   public async Task MigrateAsync_RejectsDelimitedOpaqueCredentials(string credential)
   {
     WriteLegacy("state.json", JsonSerializer.Serialize(new[] { credential }));
+
+    var result = await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.Empty(result.ImportedStepNames);
+    Assert.DoesNotContain(
+        credential,
+        await File.ReadAllTextAsync(result.MarkerPath),
+        StringComparison.Ordinal);
+  }
+
+  [Theory]
+  [InlineData("banana-coconut-20240829")]
+  [InlineData("zaneku-morapi-tuvexo-20240829")]
+  public async Task MigrateAsync_RejectsOpaqueCredentialsFromEveryLegacyNameSource(
+      string credential)
+  {
+    WriteLegacy("state.json", JsonSerializer.Serialize(new
+    {
+      applied_items = new[] { credential },
+      step_history = new Dictionary<string, object>
+      {
+        ["explicit-name"] = new { stepName = credential },
+        [credential] = new { status = "Failed" }
+      }
+    }));
+    WriteLegacy("winhome.state.json", JsonSerializer.Serialize(new[] { credential }));
 
     var result = await new LegacyStateMigrationAdapter(_root)
         .MigrateAsync(CancellationToken.None);
@@ -337,15 +366,22 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     var legitimateLabels = new[]
     {
       "1Password",
+      "winget:Git.Git",
       "Microsoft.VisualStudio.2022.BuildTools",
       "Microsoft.VisualStudio.BuildTools-2022",
       "com.microsoft.visualstudiobuildtools",
       "ai.openai.chatgptdesktop",
       "visual-studio-build-tools-2022",
+      "visual-studio-build-tools-v2022",
+      "visual-studio-build-tools-rc1",
+      "visual-studio-build-tools-x64",
+      "visual-studio-build-tools-win11",
       "VisualStudioBuildTools2022",
       "VisualStudio17BuildTools2022x64"
     };
-    WriteLegacy("state.json", JsonSerializer.Serialize(legitimateLabels));
+    WriteLegacy(
+        "state.json",
+        JsonSerializer.Serialize(new { applied_items = legitimateLabels }));
 
     var result = await new LegacyStateMigrationAdapter(_root)
         .MigrateAsync(CancellationToken.None);
@@ -367,11 +403,16 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
           "importedAtUtc": "2026-08-29T00:00:00Z",
           "importedStepNames": [
             "1Password",
+            "winget:Git.Git",
             "Microsoft.VisualStudio.2022.BuildTools",
             "Microsoft.VisualStudio.BuildTools-2022",
             "com.microsoft.visualstudiobuildtools",
             "ai.openai.chatgptdesktop",
             "visual-studio-build-tools-2022",
+            "visual-studio-build-tools-v2022",
+            "visual-studio-build-tools-rc1",
+            "visual-studio-build-tools-x64",
+            "visual-studio-build-tools-win11",
             "VisualStudioBuildTools2022",
             "VisualStudio17BuildTools2022x64"
           ]
@@ -387,6 +428,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
         markerDirectory,
         "migration-v1.invalid-*.json"));
     Assert.Contains("1Password", await File.ReadAllTextAsync(markerPath));
+    Assert.Contains("winget:Git.Git", await File.ReadAllTextAsync(markerPath));
     Assert.Contains(
         "VisualStudio17BuildTools2022x64",
         await File.ReadAllTextAsync(markerPath));
@@ -402,6 +444,51 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     Assert.Contains(
         "visual-studio-build-tools-2022",
         await File.ReadAllTextAsync(markerPath));
+    Assert.Contains(
+        "visual-studio-build-tools-v2022",
+        await File.ReadAllTextAsync(markerPath));
+    Assert.Contains(
+        "visual-studio-build-tools-rc1",
+        await File.ReadAllTextAsync(markerPath));
+    Assert.Contains(
+        "visual-studio-build-tools-x64",
+        await File.ReadAllTextAsync(markerPath));
+    Assert.Contains(
+        "visual-studio-build-tools-win11",
+        await File.ReadAllTextAsync(markerPath));
+  }
+
+  [Theory]
+  [InlineData("banana-coconut-20240829")]
+  [InlineData("zaneku-morapi-tuvexo-20240829")]
+  public async Task MigrateAsync_QuarantinesMarkerContainingOpaqueCredential(
+      string credential)
+  {
+    var markerDirectory = Path.Combine(_root, "WDEM");
+    Directory.CreateDirectory(markerDirectory);
+    var markerPath = Path.Combine(markerDirectory, "migration-v1.json");
+    await File.WriteAllTextAsync(markerPath, JsonSerializer.Serialize(new
+    {
+      schemaVersion = 1,
+      recordKind = "legacy-step-name-reference",
+      sourceProduct = "WinHome",
+      importedAtUtc = "2026-08-29T00:00:00Z",
+      importedStepNames = new[] { credential }
+    }));
+    WriteLegacy("state.json", "[\"recovered-step\"]");
+
+    var result = await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.True(result.MigrationPerformed);
+    Assert.Equal(["recovered-step"], result.ImportedStepNames);
+    Assert.Single(Directory.EnumerateFiles(
+        markerDirectory,
+        "migration-v1.invalid-*.json"));
+    Assert.DoesNotContain(
+        credential,
+        await File.ReadAllTextAsync(markerPath),
+        StringComparison.Ordinal);
   }
 
   private sealed class RecordingFinalPathResolver(string finalPath) :
