@@ -1419,6 +1419,31 @@ public sealed class ExecutionPlannerTests
   }
 
   [Fact]
+  public async Task CreateAsync_OversizedResourceIdentity_IsNotReplayedIntoDiagnosticsOrFingerprint()
+  {
+    var oversizedId = new string('\u754c', ExecutionPlanner.MaxTextFieldByteCount);
+    var provider = new StubProvider();
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(Resource(oversizedId)),
+        States(State(oversizedId, false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    var error = Assert.Single(plan.Errors);
+    Assert.False(plan.IsExecutable);
+    Assert.Empty(plan.Resources);
+    Assert.Null(error.ResourceId);
+    Assert.DoesNotContain(oversizedId, error.Summary, StringComparison.Ordinal);
+    Assert.DoesNotContain(oversizedId, error.Detail, StringComparison.Ordinal);
+    Assert.Equal(64, plan.Fingerprint.Length);
+    Assert.DoesNotContain(oversizedId, plan.Fingerprint, StringComparison.Ordinal);
+    Assert.Equal(0, provider.ValidationCalls);
+    Assert.Equal(0, provider.PlanCalls);
+  }
+
+  [Fact]
   public async Task CreateAsync_StructuredDiagnosticsWithSameDetailUseFullAuditIdentity()
   {
     var provider = new StubProvider(validation: resource => new ProviderValidationResult

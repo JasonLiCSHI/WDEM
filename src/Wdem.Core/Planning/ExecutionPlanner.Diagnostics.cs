@@ -274,7 +274,13 @@ public sealed partial class ExecutionPlanner
       value is null ? 0 : Encoding.UTF8.GetByteCount(value);
 
   private static string? NormalizeResourceId(string? value) =>
-      IsValidResourceId(value) ? value : null;
+      IsSafeDiagnosticResourceId(value) ? value : null;
+
+  private static bool IsSafeDiagnosticResourceId(string? value) =>
+      value is not null &&
+      IsValidResourceId(value) &&
+      !value.Any(char.IsControl) &&
+      Utf8ByteCount(value) <= MaxTextFieldByteCount;
 
   private sealed record DiagnosticAuditIdentity(
       WdemErrorCode Code,
