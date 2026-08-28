@@ -67,6 +67,15 @@ namespace WinHome.Services.System
 
       try
       {
+        if (OperatingSystem.IsWindows())
+        {
+          return await RunWindowsJobCommandAsync(
+              fileName,
+              args,
+              onOutput,
+              cancellationToken);
+        }
+
         using var process = new Process { StartInfo = startInfo };
         var outputClosed = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
@@ -99,7 +108,6 @@ namespace WinHome.Services.System
         {
           return false;
         }
-        using var processJob = WindowsProcessJob.TryCreateAndAssign(process);
 
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
@@ -112,10 +120,6 @@ namespace WinHome.Services.System
         try
         {
           await process.WaitForExitAsync(linkedCancellation.Token);
-          if (processJob is not null)
-          {
-            await processJob.WaitForEmptyAsync(linkedCancellation.Token);
-          }
           try
           {
             await Task.WhenAll(outputClosed.Task, errorClosed.Task)
@@ -132,7 +136,6 @@ namespace WinHome.Services.System
         }
         catch (OperationCanceledException)
         {
-          processJob?.Terminate();
           try
           {
             if (!process.HasExited)
@@ -140,6 +143,7 @@ namespace WinHome.Services.System
               process.Kill(entireProcessTree: true);
             }
           }
+
           catch (InvalidOperationException)
           {
             // The process exited between HasExited and Kill.
@@ -177,6 +181,58 @@ namespace WinHome.Services.System
         global::System.Diagnostics.Trace.WriteLine(
             $"[ProcessRunner] Error starting {fileName}: {ex.Message}");
         return false;
+      }
+    }
+
+    private static async Task<bool> RunWindowsJobCommandAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        Action<string>? onOutput,
+        CancellationToken cancellationToken)
+    {
+      using var processJob = WindowsProcessJob.Start(fileName, arguments);
+      var outputTask = DrainOutputAsync(processJob.StandardOutput, onOutput);
+      var errorTask = DrainOutputAsync(processJob.StandardError, onOutput);
+      using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+      using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+          cancellationToken,
+          timeout.Token);
+
+      try
+      {
+        await processJob.Process.WaitForExitAsync(linkedCancellation.Token);
+        int exitCode = processJob.Process.ExitCode;
+        await processJob.WaitForEmptyAsync(linkedCancellation.Token);
+        await Task.WhenAll(outputTask, errorTask)
+            .WaitAsync(TimeSpan.FromSeconds(5), linkedCancellation.Token);
+        return exitCode == 0;
+      }
+      catch (OperationCanceledException)
+      {
+        processJob.Terminate();
+        try
+        {
+          await Task.WhenAll(outputTask, errorTask)
+              .WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (Exception cleanupError)
+        {
+          global::System.Diagnostics.Trace.WriteLine(
+              $"[ProcessRunner] Failed while draining cancelled process output: {cleanupError.Message}");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return false;
+      }
+    }
+
+    private static async Task DrainOutputAsync(
+        StreamReader reader,
+        Action<string>? onOutput)
+    {
+      while (await reader.ReadLineAsync() is { } line)
+      {
+        onOutput?.Invoke(line);
       }
     }
 
