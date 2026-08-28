@@ -172,6 +172,47 @@ namespace Wdem.LegacySource.Tests.Services.System
       _mockLogger.Verify(l => l.LogWarning(It.Is<string>(s => s.Contains("Failed to check for updates"))), Times.Once);
     }
 
+    [Fact]
+    public async Task CheckForUpdatesAsync_IgnoresLegacyGitHubToken()
+    {
+      var originalWdemToken = Environment.GetEnvironmentVariable("WDEM_GITHUB_TOKEN");
+      var originalGitHubToken = Environment.GetEnvironmentVariable("GITHUB_TOKEN");
+      var originalLegacyToken = Environment.GetEnvironmentVariable("WINHOME_GITHUB_TOKEN");
+      string? authorizationToken = null;
+      try
+      {
+        Environment.SetEnvironmentVariable("WDEM_GITHUB_TOKEN", null);
+        Environment.SetEnvironmentVariable("GITHUB_TOKEN", null);
+        Environment.SetEnvironmentVariable("WINHOME_GITHUB_TOKEN", "legacy-token");
+        var releaseJson = JsonSerializer.Serialize(new GitHubRelease { TagName = "v1.0.0" });
+        var handlerMock = new Mock<HttpMessageHandler>();
+        handlerMock.Protected()
+            .Setup<Task<HttpResponseMessage>>(
+                "SendAsync",
+                ItExpr.IsAny<HttpRequestMessage>(),
+                ItExpr.IsAny<CancellationToken>())
+            .Callback<HttpRequestMessage, CancellationToken>((request, _) =>
+                authorizationToken = request.Headers.Authorization?.Parameter)
+            .ReturnsAsync(new HttpResponseMessage
+            {
+              StatusCode = HttpStatusCode.OK,
+              Content = new StringContent(releaseJson)
+            });
+        using var httpClient = new HttpClient(handlerMock.Object);
+        var service = new UpdateService(_mockLogger.Object, _mockLifetime.Object, httpClient);
+
+        await service.CheckForUpdatesAsync("1.0.0");
+
+        Assert.Null(authorizationToken);
+      }
+      finally
+      {
+        Environment.SetEnvironmentVariable("WDEM_GITHUB_TOKEN", originalWdemToken);
+        Environment.SetEnvironmentVariable("GITHUB_TOKEN", originalGitHubToken);
+        Environment.SetEnvironmentVariable("WINHOME_GITHUB_TOKEN", originalLegacyToken);
+      }
+    }
+
     #endregion
 
     #region UpdateAsync Tests

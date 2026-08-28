@@ -221,7 +221,7 @@ public class CliBuilderTests
   }
 
   [Fact]
-  public async Task RootCommand_DefaultConfig_UsesLegacyEnvironmentAsMigrationFallback()
+  public async Task RootCommand_DefaultConfig_IgnoresLegacyEnvironmentVariable()
   {
     var originalWdem = Environment.GetEnvironmentVariable("WDEM_CONFIG_PATH");
     var originalLegacy = Environment.GetEnvironmentVariable("WINHOME_CONFIG_PATH");
@@ -240,7 +240,7 @@ public class CliBuilderTests
 
       Assert.Equal(0, exitCode);
       Assert.NotNull(capturedFile);
-      Assert.EndsWith($"{Path.DirectorySeparatorChar}legacy-config.yaml", capturedFile.FullName);
+      Assert.EndsWith($"{Path.DirectorySeparatorChar}config.yaml", capturedFile.FullName);
     }
     finally
     {

@@ -58,7 +58,7 @@ RegistryGuard helps by:
 - Reducing the risk of system misconfiguration
 - Enforcing safer registry interaction patterns
 
-Contributors can review the implementation in [`src/Infrastructure/Helpers/RegistryGuard.cs`](../src/Infrastructure/Helpers/RegistryGuard.cs).
+Contributors can review the implementation in [`src/Wdem.LegacySource/Infrastructure/Helpers/RegistryGuard.cs`](src/Wdem.LegacySource/Infrastructure/Helpers/RegistryGuard.cs).
 
 ---
 

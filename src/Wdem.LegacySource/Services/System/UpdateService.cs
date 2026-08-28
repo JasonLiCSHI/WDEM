@@ -235,8 +235,6 @@ namespace Wdem.LegacySource.Services.System
 
       // Authenticated requests get 5000/hr vs 60/hr for unauthenticated
       string? token = Environment.GetEnvironmentVariable("WDEM_GITHUB_TOKEN")
-                      // Migration fallback for existing local automation; not a WDEM contract.
-                      ?? Environment.GetEnvironmentVariable("WINHOME_GITHUB_TOKEN")
                       ?? Environment.GetEnvironmentVariable("GITHUB_TOKEN");
       if (!string.IsNullOrEmpty(token))
       {
