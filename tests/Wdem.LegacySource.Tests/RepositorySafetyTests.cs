@@ -16,6 +16,7 @@ public class RepositorySafetyTests
     Assert.Contains("*.migrated-*", contents);
     Assert.Contains("*.migration-backup.*", contents);
     Assert.Contains("*.backup.*", contents);
+    Assert.Contains("*.invalid.*", contents);
   }
 
   [Theory]

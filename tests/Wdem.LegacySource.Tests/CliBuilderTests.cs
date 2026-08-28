@@ -10,13 +10,13 @@ namespace Wdem.LegacySource.Tests;
 
 public class CliBuilderTests
 {
-  private static Func<FileInfo, bool, string?, bool, bool, bool, bool, bool, bool, bool, LogLevel, Task<int>> NoOpRunAction()
+  private static Func<FileInfo, bool, string?, bool, bool, bool, bool, bool, bool, LogLevel, Task<int>> NoOpRunAction()
   {
-    return (_, _, _, _, _, _, _, _, _, _, _) => Task.FromResult(0);
+    return (_, _, _, _, _, _, _, _, _, _) => Task.FromResult(0);
   }
 
   private static RootCommand BuildRootCommand(
-      Func<FileInfo, bool, string?, bool, bool, bool, bool, bool, bool, bool, LogLevel, Task<int>> runAction,
+      Func<FileInfo, bool, string?, bool, bool, bool, bool, bool, bool, LogLevel, Task<int>> runAction,
       Func<FileInfo?, LogLevel, Task<int>>? generateAction = null,
       Func<string, string?, LogLevel, Task<int>>? stateAction = null)
   {
@@ -37,13 +37,12 @@ public class CliBuilderTests
     bool capturedDebug = false;
     bool capturedDiff = false;
     bool capturedJson = false;
-    bool capturedUpdate = false;
     bool capturedForce = false;
     bool capturedContinueOnError = false;
     bool capturedAutoInstall = false;
     LogLevel capturedLevel = LogLevel.Info;
 
-    var root = BuildRootCommand((file, dryRun, profile, debug, diff, json, update, force, continueOnError, autoInstall, level) =>
+    var root = BuildRootCommand((file, dryRun, profile, debug, diff, json, force, continueOnError, autoInstall, level) =>
     {
       capturedFile = file;
       capturedDryRun = dryRun;
@@ -51,7 +50,6 @@ public class CliBuilderTests
       capturedDebug = debug;
       capturedDiff = diff;
       capturedJson = json;
-      capturedUpdate = update;
       capturedForce = force;
       capturedContinueOnError = continueOnError;
       capturedAutoInstall = autoInstall;
@@ -68,7 +66,6 @@ public class CliBuilderTests
             "--debug",
             "--diff",
             "--json",
-            "--update",
             "--force",
             "--continue-on-error",
             "--auto-install-apps",
@@ -84,7 +81,6 @@ public class CliBuilderTests
     Assert.True(capturedDebug);
     Assert.True(capturedDiff);
     Assert.True(capturedJson);
-    Assert.True(capturedUpdate);
     Assert.True(capturedForce);
     Assert.True(capturedContinueOnError);
     Assert.True(capturedAutoInstall);
@@ -97,27 +93,33 @@ public class CliBuilderTests
     // Arrange
     bool capturedDryRun = false;
     string? capturedProfile = null;
-    bool capturedUpdate = false;
     bool capturedAutoInstall = false;
 
-    var root = BuildRootCommand((_, dryRun, profile, _, _, _, update, _, _, autoInstall, _) =>
+    var root = BuildRootCommand((_, dryRun, profile, _, _, _, _, _, autoInstall, _) =>
     {
       capturedDryRun = dryRun;
       capturedProfile = profile;
-      capturedUpdate = update;
       capturedAutoInstall = autoInstall;
       return Task.FromResult(0);
     });
 
     // Act
-    var exitCode = await root.Parse(new[] { "-d", "-p", "dev", "-u", "-i" }).InvokeAsync();
+    var exitCode = await root.Parse(new[] { "-d", "-p", "dev", "-i" }).InvokeAsync();
 
     // Assert
     Assert.Equal(0, exitCode);
     Assert.True(capturedDryRun);
     Assert.Equal("dev", capturedProfile);
-    Assert.True(capturedUpdate);
     Assert.True(capturedAutoInstall);
+  }
+
+  [Fact]
+  public void RootCommand_DoesNotExposeRemovedSelfUpdateOptions()
+  {
+    var root = BuildRootCommand(NoOpRunAction());
+
+    Assert.NotEmpty(root.Parse(new[] { "--update" }).Errors);
+    Assert.NotEmpty(root.Parse(new[] { "-u" }).Errors);
   }
 
   [Theory]
@@ -130,7 +132,7 @@ public class CliBuilderTests
     // Arrange
     LogLevel capturedLevel = LogLevel.Info;
 
-    var root = BuildRootCommand((_, _, _, _, _, _, _, _, _, _, level) =>
+    var root = BuildRootCommand((_, _, _, _, _, _, _, _, _, level) =>
     {
       capturedLevel = level;
       return Task.FromResult(0);
@@ -153,20 +155,18 @@ public class CliBuilderTests
     bool capturedDebug = true;
     bool capturedDiff = true;
     bool capturedJson = true;
-    bool capturedUpdate = true;
     bool capturedForce = true;
     bool capturedContinueOnError = true;
     bool capturedAutoInstall = true;
     LogLevel capturedLevel = LogLevel.Trace;
 
-    var root = BuildRootCommand((file, dryRun, profile, debug, diff, json, update, force, continueOnError, autoInstall, level) =>
+    var root = BuildRootCommand((file, dryRun, profile, debug, diff, json, force, continueOnError, autoInstall, level) =>
     {
       capturedDryRun = dryRun;
       capturedProfile = profile;
       capturedDebug = debug;
       capturedDiff = diff;
       capturedJson = json;
-      capturedUpdate = update;
       capturedForce = force;
       capturedContinueOnError = continueOnError;
       capturedAutoInstall = autoInstall;
@@ -184,7 +184,6 @@ public class CliBuilderTests
     Assert.False(capturedDebug);
     Assert.False(capturedDiff);
     Assert.False(capturedJson);
-    Assert.False(capturedUpdate);
     Assert.False(capturedForce);
     Assert.False(capturedContinueOnError);
     Assert.False(capturedAutoInstall);
@@ -201,7 +200,7 @@ public class CliBuilderTests
       Environment.SetEnvironmentVariable("WDEM_CONFIG_PATH", "env-config.yaml");
       FileInfo? capturedFile = null;
 
-      var root = BuildRootCommand((file, _, _, _, _, _, _, _, _, _, _) =>
+      var root = BuildRootCommand((file, _, _, _, _, _, _, _, _, _) =>
       {
         capturedFile = file;
         return Task.FromResult(0);
@@ -230,7 +229,7 @@ public class CliBuilderTests
       Environment.SetEnvironmentVariable("WDEM_CONFIG_PATH", null);
       Environment.SetEnvironmentVariable("WINHOME_CONFIG_PATH", "legacy-config.yaml");
       FileInfo? capturedFile = null;
-      var root = BuildRootCommand((file, _, _, _, _, _, _, _, _, _, _) =>
+      var root = BuildRootCommand((file, _, _, _, _, _, _, _, _, _) =>
       {
         capturedFile = file;
         return Task.FromResult(0);
@@ -259,7 +258,7 @@ public class CliBuilderTests
       Environment.SetEnvironmentVariable("WDEM_CONFIG_PATH", null);
       FileInfo? capturedFile = null;
 
-      var root = BuildRootCommand((file, _, _, _, _, _, _, _, _, _, _) =>
+      var root = BuildRootCommand((file, _, _, _, _, _, _, _, _, _) =>
       {
         capturedFile = file;
         return Task.FromResult(0);
@@ -284,7 +283,7 @@ public class CliBuilderTests
     // Arrange
     bool runCalled = false;
 
-    var root = BuildRootCommand((_, _, _, _, _, _, _, _, _, _, _) =>
+    var root = BuildRootCommand((_, _, _, _, _, _, _, _, _, _) =>
     {
       runCalled = true;
       return Task.FromResult(0);

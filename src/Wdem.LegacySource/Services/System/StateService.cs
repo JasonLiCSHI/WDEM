@@ -79,8 +79,7 @@ namespace Wdem.LegacySource.Services.System
           {
             if (candidate.Format == LegacyStateFormat.StateData)
             {
-              var legacyState = JsonSerializer.Deserialize<StateData>(File.ReadAllText(candidate.Path))
-                  ?? throw new JsonException("Legacy state contained JSON null.");
+              var legacyState = DeserializeLegacyStateData(File.ReadAllText(candidate.Path));
               MergeStateData(_inMemoryState, legacyState);
             }
             else
@@ -121,6 +120,46 @@ namespace Wdem.LegacySource.Services.System
       }
     }
 
+    private static StateData DeserializeLegacyStateData(string json)
+    {
+      JsonException? stateDataError;
+      try
+      {
+        var state = JsonSerializer.Deserialize<StateData>(json)
+            ?? throw new JsonException("Legacy state contained JSON null.");
+        ValidateLegacyStateData(state);
+        return state;
+      }
+      catch (JsonException ex)
+      {
+        stateDataError = ex;
+      }
+
+      try
+      {
+        var appliedItems = JsonSerializer.Deserialize<HashSet<string>>(json)
+            ?? throw new JsonException("Legacy applied-items state contained JSON null.");
+        return new StateData { AppliedItems = appliedItems };
+      }
+      catch (JsonException ex)
+      {
+        throw new JsonException(
+            $"Legacy state did not match a supported format: {stateDataError.Message}", ex);
+      }
+    }
+
+    private static void ValidateLegacyStateData(StateData state)
+    {
+      if (state.AppliedItems is null)
+        throw new JsonException("Legacy state property 'applied_items' must be a collection.");
+      if (state.SystemSettingOriginals is null)
+        throw new JsonException("Legacy state property 'system_setting_originals' must be a collection.");
+      if (state.StepHistory is null)
+        throw new JsonException("Legacy state property 'step_history' must be a collection.");
+      if (state.LegacyMigrationSources is null)
+        throw new JsonException("Legacy state property 'legacy_migration_sources' must be a collection.");
+    }
+
     private void AddCandidate(
         Dictionary<string, LegacyStateCandidate> candidates,
         string? path,
@@ -157,11 +196,6 @@ namespace Wdem.LegacySource.Services.System
       foreach (var step in source.StepHistory)
       {
         destination.StepHistory.TryAdd(step.Key, step.Value);
-      }
-
-      foreach (var migrationSource in source.LegacyMigrationSources)
-      {
-        destination.LegacyMigrationSources.TryAdd(migrationSource.Key, migrationSource.Value);
       }
     }
 
@@ -204,7 +238,7 @@ namespace Wdem.LegacySource.Services.System
       try
       {
         var stateData = JsonSerializer.Deserialize<StateData>(json);
-        if (stateData != null) return stateData;
+        if (stateData != null) return NormalizeLoadedState(stateData);
       }
       catch (JsonException)
       {
@@ -243,16 +277,30 @@ namespace Wdem.LegacySource.Services.System
       return new StateData();
     }
 
+    private static StateData NormalizeLoadedState(StateData state)
+    {
+      state.AppliedItems ??= new HashSet<string>();
+      state.SystemSettingOriginals ??= new Dictionary<string, object>();
+      state.StepHistory ??= new Dictionary<string, StepResult>();
+      state.LegacyMigrationSources = state.LegacyMigrationSources is null
+          ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+          : new Dictionary<string, string>(state.LegacyMigrationSources, StringComparer.OrdinalIgnoreCase);
+      return state;
+    }
+
     public void SaveState(StateData state)
     {
       lock (_sync)
       {
+        var legacyMigrationSources = new Dictionary<string, string>(
+            _inMemoryState.LegacyMigrationSources,
+            StringComparer.OrdinalIgnoreCase);
         _inMemoryState = new StateData
         {
           AppliedItems = new HashSet<string>(state.AppliedItems),
           SystemSettingOriginals = new Dictionary<string, object>(state.SystemSettingOriginals),
           StepHistory = new Dictionary<string, StepResult>(state.StepHistory),
-          LegacyMigrationSources = new Dictionary<string, string>(state.LegacyMigrationSources, StringComparer.OrdinalIgnoreCase),
+          LegacyMigrationSources = legacyMigrationSources,
         };
         FlushToDisk();
       }

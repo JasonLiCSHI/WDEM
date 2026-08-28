@@ -19,7 +19,6 @@ public class ShellCompletionGeneratorTests
     rootCommand.Options.Add(new Option<bool>("--verbose") { Description = "Show detailed log output" });
     rootCommand.Options.Add(new Option<bool>("--quiet") { Description = "Suppress non-essential output" });
     rootCommand.Options.Add(new Option<bool>("--json") { Description = "Output results as JSON" });
-    rootCommand.Options.Add(new Option<bool>("--update") { Description = "Check for updates" });
 
     var stateCommand = new Command("state") { Description = "Manage state" };
     stateCommand.Subcommands.Add(new Command("list") { Description = "List managed items" });
@@ -41,7 +40,7 @@ public class ShellCompletionGeneratorTests
   private static RootCommand BuildRealRootCommand()
   {
     return CliBuilder.BuildRootCommand(
-        runAction: (_, _, _, _, _, _, _, _, _, _, _) => Task.FromResult(0),
+        runAction: (_, _, _, _, _, _, _, _, _, _) => Task.FromResult(0),
         generateAction: (output, logLevel) => Task.FromResult(0),
         stateAction: (command, path, logLevel) => Task.FromResult(0)
     );
@@ -151,7 +150,7 @@ public class ShellCompletionGeneratorTests
     Assert.Contains("--verbose", script);
     Assert.Contains("--quiet", script);
     Assert.Contains("--json", script);
-    Assert.Contains("--update", script);
+    Assert.DoesNotContain("--update", script);
   }
 
   [Fact]
@@ -199,7 +198,7 @@ public class ShellCompletionGeneratorTests
     Assert.Contains("--verbose", script);
     Assert.Contains("--quiet", script);
     Assert.Contains("--json", script);
-    Assert.Contains("--update", script);
+    Assert.DoesNotContain("--update", script);
   }
 
   [Fact]

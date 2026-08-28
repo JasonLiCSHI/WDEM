@@ -29,6 +29,7 @@ winhome.state.json
 *.migrated-*
 *.migration-backup.*
 *.backup.*
+*.invalid.*
 config.yaml
 files/
 coverage/

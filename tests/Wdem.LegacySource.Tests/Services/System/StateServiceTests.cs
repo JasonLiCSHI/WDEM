@@ -279,6 +279,175 @@ namespace Wdem.LegacySource.Tests.Services.System
       }
     }
 
+    [Fact]
+    public void SaveState_AfterFailedLegacyBackup_PreservesMigrationLedgerAndPreventsReplay()
+    {
+      if (!OperatingSystem.IsWindows()) return;
+
+      var legacyStatePath = Path.Combine(_testDir, "save-after-locked-winhome-state.json");
+      var originalLegacyPath = Environment.GetEnvironmentVariable("WINHOME_STATE_PATH");
+      File.WriteAllText(legacyStatePath, JsonSerializer.Serialize(
+          new StateData { AppliedItems = new HashSet<string> { "first-package" } }));
+
+      try
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", legacyStatePath);
+
+        using (File.Open(legacyStatePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+          var service = CreateService();
+          service.SaveState(new StateData
+          {
+            AppliedItems = new HashSet<string> { "first-package", "normal-save-package" },
+            LegacyMigrationSources = new Dictionary<string, string>
+            {
+              ["caller-controlled"] = "invalid"
+            }
+          });
+
+          Assert.True(File.Exists(legacyStatePath));
+          var savedState = JsonSerializer.Deserialize<StateData>(File.ReadAllText(_stateFilePath));
+          Assert.DoesNotContain("caller-controlled", savedState!.LegacyMigrationSources.Keys);
+        }
+
+        File.WriteAllText(legacyStatePath, JsonSerializer.Serialize(
+            new StateData { AppliedItems = new HashSet<string> { "first-package", "replayed-package" } }));
+
+        var reloadedState = CreateService().LoadState();
+
+        Assert.Contains("normal-save-package", reloadedState.AppliedItems);
+        Assert.DoesNotContain("replayed-package", reloadedState.AppliedItems);
+        Assert.False(File.Exists(legacyStatePath));
+        Assert.Single(Directory.GetFiles(_testDir, "save-after-locked-winhome-state.json.migration-backup.*"));
+      }
+      finally
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", originalLegacyPath);
+      }
+    }
+
+    [Fact]
+    public void LegacyState_CannotPreMarkAnotherMigrationSource()
+    {
+      var originalDirectory = Directory.GetCurrentDirectory();
+      var originalLegacyPath = Environment.GetEnvironmentVariable("WINHOME_STATE_PATH");
+      var injectingStatePath = Path.Combine(_testDir, "winhome.state.json");
+      var secondStatePath = Path.Combine(_testDir, "second-winhome-state.json");
+      File.WriteAllText(injectingStatePath, JsonSerializer.Serialize(new StateData
+      {
+        AppliedItems = new HashSet<string> { "first-source-package" },
+        LegacyMigrationSources = new Dictionary<string, string>
+        {
+          [Path.GetFullPath(secondStatePath)] = "migration-backup"
+        }
+      }));
+      File.WriteAllText(secondStatePath, JsonSerializer.Serialize(
+          new StateData { AppliedItems = new HashSet<string> { "second-source-package" } }));
+
+      try
+      {
+        Directory.SetCurrentDirectory(_testDir);
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", secondStatePath);
+
+        var state = CreateService().LoadState();
+
+        Assert.Contains("first-source-package", state.AppliedItems);
+        Assert.Contains("second-source-package", state.AppliedItems);
+        Assert.Single(Directory.GetFiles(_testDir, "winhome.state.json.backup.*"));
+        Assert.Single(Directory.GetFiles(_testDir, "second-winhome-state.json.migration-backup.*"));
+      }
+      finally
+      {
+        Directory.SetCurrentDirectory(originalDirectory);
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", originalLegacyPath);
+      }
+    }
+
+    [Fact]
+    public void LegacyStateEnvironment_SerializedHashSetIsMigratedAndBackedUp()
+    {
+      var legacyStatePath = Path.Combine(_testDir, "hashset-winhome-state.json");
+      var originalLegacyPath = Environment.GetEnvironmentVariable("WINHOME_STATE_PATH");
+      File.WriteAllText(legacyStatePath, JsonSerializer.Serialize(
+          new HashSet<string> { "historical-package" }));
+
+      try
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", legacyStatePath);
+
+        var state = CreateService().LoadState();
+
+        Assert.Contains("historical-package", state.AppliedItems);
+        Assert.False(File.Exists(legacyStatePath));
+        Assert.Single(Directory.GetFiles(_testDir, "hashset-winhome-state.json.migration-backup.*"));
+      }
+      finally
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", originalLegacyPath);
+      }
+    }
+
+    [Fact]
+    public void LegacyStateEnvironment_NullAppliedItemsIsQuarantinedOnceWithOriginalBytes()
+    {
+      var legacyStatePath = Path.Combine(_testDir, "null-items-winhome-state.json");
+      var originalLegacyPath = Environment.GetEnvironmentVariable("WINHOME_STATE_PATH");
+      var originalBytes = "{\"applied_items\":null}"u8.ToArray();
+      File.WriteAllBytes(legacyStatePath, originalBytes);
+
+      try
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", legacyStatePath);
+
+        CreateService();
+        CreateService();
+
+        Assert.False(File.Exists(legacyStatePath));
+        var quarantinePath = Assert.Single(
+            Directory.GetFiles(_testDir, "null-items-winhome-state.json.invalid.*"));
+        Assert.Equal(originalBytes, File.ReadAllBytes(quarantinePath));
+      }
+      finally
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", originalLegacyPath);
+      }
+    }
+
+    [Fact]
+    public void ReloadedMigrationLedger_UsesCaseInsensitivePathLookup()
+    {
+      if (!OperatingSystem.IsWindows()) return;
+
+      var legacyStatePath = Path.Combine(_testDir, "case-winhome-state.json");
+      var originalLegacyPath = Environment.GetEnvironmentVariable("WINHOME_STATE_PATH");
+      File.WriteAllText(_stateFilePath, JsonSerializer.Serialize(new StateData
+      {
+        AppliedItems = new HashSet<string> { "already-imported-package" },
+        LegacyMigrationSources = new Dictionary<string, string>
+        {
+          [Path.GetFullPath(legacyStatePath).ToLowerInvariant()] = "migration-backup"
+        }
+      }));
+      File.WriteAllText(legacyStatePath, JsonSerializer.Serialize(
+          new StateData { AppliedItems = new HashSet<string> { "replayed-package" } }));
+
+      try
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", legacyStatePath.ToUpperInvariant());
+
+        var state = CreateService().LoadState();
+
+        Assert.Contains("already-imported-package", state.AppliedItems);
+        Assert.DoesNotContain("replayed-package", state.AppliedItems);
+        Assert.False(File.Exists(legacyStatePath));
+        Assert.Single(Directory.GetFiles(_testDir, "case-winhome-state.json.migration-backup.*"));
+      }
+      finally
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", originalLegacyPath);
+      }
+    }
+
     // ── Corrupted JSON ─────────────────────────────────────────────────────────
 
     [Fact]

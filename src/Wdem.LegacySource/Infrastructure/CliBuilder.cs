@@ -19,7 +19,7 @@ public static class CliBuilder
   /// <param name="stateAction">Handler for the state subcommand (manages tracking state).</param>
   /// <returns>The configured root <see cref="RootCommand"/>.</returns>
   public static RootCommand BuildRootCommand(
-    Func<FileInfo, bool, string?, bool, bool, bool, bool, bool, bool, bool, LogLevel, Task<int>> runAction,
+    Func<FileInfo, bool, string?, bool, bool, bool, bool, bool, bool, LogLevel, Task<int>> runAction,
     Func<FileInfo?, LogLevel, Task<int>> generateAction,
     Func<string, string?, LogLevel, Task<int>> stateAction,
     Func<string, string?, string?, LogLevel, Task<int>>? configAction = null)
@@ -31,11 +31,6 @@ public static class CliBuilder
       var configPath = Environment.GetEnvironmentVariable("WDEM_CONFIG_PATH");
       return new FileInfo(string.IsNullOrEmpty(configPath) ? "config.yaml" : configPath);
     };
-
-    var updateOption = new Option<bool>("--update");
-    updateOption.Description = "Check for updates and upgrade if available";
-    updateOption.DefaultValueFactory = _ => false;
-    updateOption.Aliases.Add("-u");
 
     var dryRunOption = new Option<bool>("--dry-run");
     dryRunOption.Description = "Preview changes without applying them";
@@ -86,7 +81,6 @@ public static class CliBuilder
 
     var rootCommand = new RootCommand("Wdem.LegacySource: Windows Setup Tool");
     rootCommand.Options.Add(configOption);
-    rootCommand.Options.Add(updateOption);
     rootCommand.Options.Add(dryRunOption);
     rootCommand.Options.Add(profileOption);
     rootCommand.Options.Add(debugOption);
@@ -102,7 +96,6 @@ public static class CliBuilder
     rootCommand.SetAction(async (ParseResult result) =>
     {
       FileInfo file = result.GetValue(configOption)!;
-      bool update = result.GetValue(updateOption);
       bool dryRun = result.GetValue(dryRunOption);
       string? profile = result.GetValue(profileOption);
       bool debug = result.GetValue(debugOption);
@@ -118,7 +111,7 @@ public static class CliBuilder
       int conflict = RejectConflictingFlags(verbose, quiet);
       if (conflict != 0) return conflict;
 
-      return await runAction(file, dryRun, profile, debug, diff, json, update, force, continueOnError, autoInstallApps, ComputeLogLevel(quiet, verbose));
+      return await runAction(file, dryRun, profile, debug, diff, json, force, continueOnError, autoInstallApps, ComputeLogLevel(quiet, verbose));
     });
 
     // Generate Command
