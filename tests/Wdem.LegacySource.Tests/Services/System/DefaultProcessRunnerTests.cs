@@ -118,6 +118,104 @@ namespace Wdem.LegacySource.Tests.Services.System
       Assert.Null(result.ExitCode);
       Assert.Empty(result.StandardOutput);
       Assert.Empty(result.StandardError);
+      Assert.Equal(ProcessFailureKind.StartFailed, result.FailureKind);
+    }
+
+    [Fact]
+    public async Task RunCommandDetailedAsync_TimeoutRetainsStartedStateAndCollectedEvidence()
+    {
+      var runner = new DefaultProcessRunner(new ProcessRunnerTestHooks
+      {
+        ProcessTimeout = TimeSpan.FromMilliseconds(100),
+        WaitForExitAsync = (_, cancellationToken) =>
+            Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
+      });
+      var (executable, arguments) = Echo("before-timeout");
+
+      var result = await runner.RunCommandDetailedAsync(
+          executable,
+          arguments,
+          null,
+          CancellationToken.None);
+
+      Assert.True(result.Started);
+      Assert.Null(result.ExitCode);
+      Assert.Contains("before-timeout", result.StandardOutput);
+      Assert.Equal(ProcessFailureKind.TimedOut, result.FailureKind);
+      Assert.Equal("Process execution timed out.", result.FailureMessage);
+    }
+
+    [Fact]
+    public async Task RunCommandDetailedAsync_DrainFailureRetainsExitCodeAndCollectedEvidence()
+    {
+      var runner = new DefaultProcessRunner(new ProcessRunnerTestHooks
+      {
+        DrainOutputAsync = async (tasks, cancellationToken) =>
+        {
+          await Task.WhenAll(tasks).WaitAsync(cancellationToken);
+          throw new IOException("secret drain implementation detail");
+        }
+      });
+      var (executable, arguments) = Echo("before-drain-failure");
+
+      var result = await runner.RunCommandDetailedAsync(
+          executable,
+          arguments,
+          null,
+          CancellationToken.None);
+
+      Assert.True(result.Started);
+      Assert.Equal(0, result.ExitCode);
+      Assert.Contains("before-drain-failure", result.StandardOutput);
+      Assert.Equal(ProcessFailureKind.OutputDrainFailed, result.FailureKind);
+      Assert.Equal("Process output could not be completely collected.", result.FailureMessage);
+      Assert.DoesNotContain("secret", result.FailureMessage, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task RunCommandAsync_DrainFailureDoesNotReportSuccess()
+    {
+      var runner = new DefaultProcessRunner(new ProcessRunnerTestHooks
+      {
+        DrainOutputAsync = async (tasks, cancellationToken) =>
+        {
+          await Task.WhenAll(tasks).WaitAsync(cancellationToken);
+          throw new IOException("injected");
+        }
+      });
+      var (executable, arguments) = Echo("output");
+
+      var succeeded = await runner.RunCommandAsync(
+          executable,
+          arguments,
+          false,
+          null,
+          CancellationToken.None);
+
+      Assert.False(succeeded);
+    }
+
+    [Fact]
+    public async Task RunCommandDetailedAsync_PostStartFailureRetainsKnownExitCode()
+    {
+      var runner = new DefaultProcessRunner(new ProcessRunnerTestHooks
+      {
+        AfterExitAsync = (_, _) => throw new InvalidOperationException("secret job detail")
+      });
+      var (executable, arguments) = Echo("before-post-start-failure");
+
+      var result = await runner.RunCommandDetailedAsync(
+          executable,
+          arguments,
+          null,
+          CancellationToken.None);
+
+      Assert.True(result.Started);
+      Assert.Equal(0, result.ExitCode);
+      Assert.Contains("before-post-start-failure", result.StandardOutput);
+      Assert.Equal(ProcessFailureKind.PostStartFailed, result.FailureKind);
+      Assert.Equal("Process completion could not be verified.", result.FailureMessage);
+      Assert.DoesNotContain("secret", result.FailureMessage, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

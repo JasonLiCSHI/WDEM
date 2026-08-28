@@ -127,6 +127,41 @@ public sealed class LegacySourceProcessExecutorAdapterTests
     Assert.Equal("Process could not be started.", result.Error.Summary);
   }
 
+  [Theory]
+  [InlineData(ProcessFailureKind.TimedOut, "Process execution timed out.", true)]
+  [InlineData(ProcessFailureKind.OutputDrainFailed, "Process output collection failed.", true)]
+  [InlineData(ProcessFailureKind.PostStartFailed, "Process completion could not be verified.", false)]
+  public async Task ExecuteAsync_PostStartFailurePreservesEvidenceAndMapsSafeError(
+      ProcessFailureKind failureKind,
+      string expectedSummary,
+      bool expectedRetryable)
+  {
+    var legacy = new RecordingProcessRunner
+    {
+      Handler = (_, _, _, _, _) => Task.FromResult(
+          new ProcessRunResult(true, 23, ["safe-output"], ["safe-error"])
+          {
+            FailureKind = failureKind,
+            FailureMessage = "secret implementation detail"
+          })
+    };
+    var adapter = new LegacySourceProcessExecutorAdapter(legacy);
+
+    var result = await adapter.ExecuteAsync(
+        new ProcessExecutionRequest("tool.exe", []),
+        null,
+        CancellationToken.None);
+
+    Assert.True(result.Started);
+    Assert.Equal(23, result.ExitCode);
+    Assert.Equal(["safe-output"], result.StandardOutput);
+    Assert.Equal(["safe-error"], result.StandardError);
+    Assert.NotNull(result.Error);
+    Assert.Equal(expectedSummary, result.Error.Summary);
+    Assert.Equal(expectedRetryable, result.Error.IsRetryable);
+    Assert.DoesNotContain("secret", result.Error.Detail, StringComparison.OrdinalIgnoreCase);
+  }
+
   private sealed class RecordingProgress : IProgress<string>
   {
     public List<string> Lines { get; } = [];

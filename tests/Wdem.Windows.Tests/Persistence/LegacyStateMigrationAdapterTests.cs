@@ -79,7 +79,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     Directory.CreateDirectory(markerDirectory);
     var markerPath = Path.Combine(markerDirectory, "migration-v1.json");
     await File.WriteAllTextAsync(markerPath, """
-        { "schemaVersion": 1, "recordKind": "legacy-step-name-reference", "sourceProduct": "WinHome", "importedStepNames": [] }
+        { "schemaVersion": 1, "recordKind": "legacy-step-name-reference", "sourceProduct": "WinHome", "importedAtUtc": "2026-08-29T00:00:00Z", "importedStepNames": [] }
         """);
     WriteLegacy("state.json", "[\"must-not-import\"]");
     var adapter = new LegacyStateMigrationAdapter(_root);
@@ -88,6 +88,35 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
 
     Assert.False(result.MigrationPerformed);
     Assert.Empty(result.ImportedStepNames);
+  }
+
+  [Theory]
+  [InlineData("")]
+  [InlineData("{")]
+  [InlineData("{ \"schemaVersion\": 2, \"recordKind\": \"legacy-step-name-reference\", \"sourceProduct\": \"WinHome\", \"importedAtUtc\": \"2026-08-29T00:00:00Z\", \"importedStepNames\": [] }")]
+  [InlineData("{ \"schemaVersion\": 1, \"recordKind\": \"unrelated\", \"sourceProduct\": \"Other\", \"importedAtUtc\": \"2026-08-29T00:00:00Z\", \"importedStepNames\": [] }")]
+  public async Task MigrateAsync_InvalidMarkerIsQuarantinedAndMigrationIsRetried(
+      string invalidMarker)
+  {
+    var markerDirectory = Path.Combine(_root, "WDEM");
+    Directory.CreateDirectory(markerDirectory);
+    var markerPath = Path.Combine(markerDirectory, "migration-v1.json");
+    await File.WriteAllTextAsync(markerPath, invalidMarker);
+    WriteLegacy("state.json", "[\"recovered-step\"]");
+
+    var result = await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.True(result.MigrationPerformed);
+    Assert.Equal(["recovered-step"], result.ImportedStepNames);
+    Assert.Single(Directory.EnumerateFiles(
+        markerDirectory,
+        "migration-v1.invalid-*.json"));
+    using var marker = JsonDocument.Parse(await File.ReadAllTextAsync(markerPath));
+    Assert.Equal(1, marker.RootElement.GetProperty("schemaVersion").GetInt32());
+    Assert.Equal(
+        "legacy-step-name-reference",
+        marker.RootElement.GetProperty("recordKind").GetString());
   }
 
   [Fact]
@@ -121,22 +150,14 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     Assert.Empty(Directory.EnumerateFiles(Path.Combine(_root, "WDEM"), "*.tmp"));
   }
 
-  [Fact]
+  [Fact(Skip = "Requires an environment that permits directory symlink creation; deterministic handle-path coverage is mandatory below.")]
   public async Task MigrateAsync_DoesNotFollowReparsePointOutsideLegacyRoot()
   {
     var outside = Path.Combine(Path.GetTempPath(), $"wdem-outside-{Guid.NewGuid():N}");
     Directory.CreateDirectory(outside);
     await File.WriteAllTextAsync(Path.Combine(outside, "state.json"), "[\"outside-step\"]");
     Directory.CreateDirectory(_root);
-    try
-    {
-      Directory.CreateSymbolicLink(Path.Combine(_root, "WinHome"), outside);
-    }
-    catch (Exception exception) when (exception is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
-    {
-      Directory.Delete(outside, recursive: true);
-      return;
-    }
+    Directory.CreateSymbolicLink(Path.Combine(_root, "WinHome"), outside);
 
     try
     {
@@ -149,6 +170,87 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     {
       Directory.Delete(outside, recursive: true);
     }
+  }
+
+  [Fact]
+  public async Task MigrateAsync_ValidatesFinalPathFromOpenedHandleBeforeReading()
+  {
+    WriteLegacy("state.json", "[\"must-not-import\"]");
+    var outsidePath = Path.Combine(Path.GetTempPath(), "outside", "state.json");
+    var resolver = new RecordingFinalPathResolver(outsidePath);
+    var adapter = new LegacyStateMigrationAdapter(_root, resolver);
+
+    var result = await adapter.MigrateAsync(CancellationToken.None);
+
+    Assert.True(resolver.ObservedOpenReadableStream);
+    Assert.Empty(result.ImportedStepNames);
+    Assert.DoesNotContain(
+        "must-not-import",
+        await File.ReadAllTextAsync(result.MarkerPath),
+        StringComparison.Ordinal);
+  }
+
+  [Theory]
+  [InlineData(@"C:\Data\WinHome", @"\\?\C:\DATA\WinHome\state.json", true)]
+  [InlineData(@"C:\Data\WinHome", @"\\?\C:\Data\WinHomeOther\state.json", false)]
+  [InlineData(@"\\server\share\WinHome", @"\\?\UNC\SERVER\share\WinHome\state.json", true)]
+  [InlineData(@"\\server\share\WinHome", @"\\?\UNC\server\share\WinHome2\state.json", false)]
+  public void IsFinalPathWithinRoot_NormalizesExtendedCaseAndRootBoundary(
+      string root,
+      string candidate,
+      bool expected)
+  {
+    Assert.Equal(
+        expected,
+        LegacyStateMigrationAdapter.IsFinalPathWithinRoot(root, candidate));
+  }
+
+  [Fact]
+  public async Task MigrateAsync_FileAtMaximumSizeIsAccepted()
+  {
+    var json = "[\"boundary-step\"]";
+    WriteLegacy(
+        "state.json",
+        json + new string(' ', LegacyStateMigrationAdapter.MaximumLegacyFileBytes - json.Length));
+
+    var result = await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.Equal(["boundary-step"], result.ImportedStepNames);
+  }
+
+  [Fact]
+  public async Task MigrateAsync_FileOverMaximumSizeIsRejected()
+  {
+    var json = "[\"oversized-step\"]";
+    WriteLegacy(
+        "state.json",
+        json + new string(
+            ' ',
+            LegacyStateMigrationAdapter.MaximumLegacyFileBytes + 1 - json.Length));
+
+    var result = await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.Empty(result.ImportedStepNames);
+  }
+
+  [Fact]
+  public async Task MigrateAsync_ImportedNamesAreCappedInDeterministicSourceOrder()
+  {
+    var candidates = Enumerable.Range(
+            0,
+            LegacyStateMigrationAdapter.MaximumImportedStepNames + 5)
+        .Select(index => $"step-{index:D3}")
+        .ToArray();
+    WriteLegacy("state.json", JsonSerializer.Serialize(candidates));
+
+    var result = await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.Equal(
+        candidates.Take(LegacyStateMigrationAdapter.MaximumImportedStepNames),
+        result.ImportedStepNames);
   }
 
   [Fact]
@@ -167,7 +269,12 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
       @"\\server\share\secret.txt",
       "/home/jane/.ssh/id_rsa",
       "control\u0001name",
-      overlong
+      overlong,
+      "ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+      "github_pat_1234567890_abcdefghijklmnopqrstuvwxyz",
+      "AKIAIOSFODNN7EXAMPLE",
+      "myAccessToken",
+      "a8F3kP9zQ2mN7vR4xT6cL1wY"
     }));
     WriteLegacy(".winhome-state.json", """
         {
@@ -187,10 +294,23 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     foreach (var forbidden in new[]
     {
       "super-secret", "quoted-secret", "abc.def.ghi", "Jane", "server", "jane",
-      "control", "nested", overlong
+      "control", "nested", overlong, "ghp_", "github_pat_", "AKIA",
+      "myAccessToken", "a8F3kP9zQ2mN7vR4xT6cL1wY"
     })
     {
       Assert.DoesNotContain(forbidden, marker, StringComparison.OrdinalIgnoreCase);
+    }
+  }
+
+  private sealed class RecordingFinalPathResolver(string finalPath) :
+      ILegacyFileFinalPathResolver
+  {
+    public bool ObservedOpenReadableStream { get; private set; }
+
+    public string ResolveFinalPath(FileStream stream, string requestedPath)
+    {
+      ObservedOpenReadableStream = stream.CanRead && !stream.SafeFileHandle.IsClosed;
+      return finalPath;
     }
   }
 

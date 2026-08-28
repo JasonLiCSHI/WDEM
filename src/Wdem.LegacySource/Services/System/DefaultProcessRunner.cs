@@ -7,6 +7,18 @@ namespace Wdem.LegacySource.Services.System
   /// <summary>Default implementation of <see cref="IProcessRunner"/> that spawns real OS processes.</summary>
   public class DefaultProcessRunner : IProcessRunner
   {
+    private readonly ProcessRunnerTestHooks _hooks;
+
+    public DefaultProcessRunner()
+        : this(new ProcessRunnerTestHooks())
+    {
+    }
+
+    internal DefaultProcessRunner(ProcessRunnerTestHooks hooks)
+    {
+      _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
+    }
+
     [Obsolete("Use the IEnumerable<string> overload instead to prevent command injection.")]
     public bool RunCommand(string fileName, string args, bool dryRun, Action<string>? onOutput = null)
     {
@@ -62,7 +74,9 @@ namespace Wdem.LegacySource.Services.System
         onOutput?.Invoke($"[ProcessRunner] Error starting {fileName}.");
       }
 
-      return result.Started && result.ExitCode == 0;
+      return result.Started &&
+          result.ExitCode == 0 &&
+          result.FailureKind == ProcessFailureKind.None;
     }
 
     public Task<ProcessRunResult> RunCommandDetailedAsync(
@@ -88,42 +102,50 @@ namespace Wdem.LegacySource.Services.System
       cancellationToken.ThrowIfCancellationRequested();
       var argumentSnapshot = arguments.ToArray();
 
-      try
-      {
-        return OperatingSystem.IsWindows()
-            ? await RunWindowsJobCommandDetailedAsync(
-                fileName,
-                argumentSnapshot,
-                workingDirectory,
-                onOutput,
-                cancellationToken).ConfigureAwait(false)
-            : await RunPortableCommandDetailedAsync(
-                fileName,
-                argumentSnapshot,
-                workingDirectory,
-                onOutput,
-                cancellationToken).ConfigureAwait(false);
-      }
-      catch (OperationCanceledException)
-      {
-        throw;
-      }
-      catch (Exception exception)
-      {
-        global::System.Diagnostics.Trace.WriteLine(
-            $"[ProcessRunner] Could not start process: {exception.GetType().Name}");
-        return new ProcessRunResult(false, null, [], []);
-      }
+      return OperatingSystem.IsWindows()
+          ? await RunWindowsJobCommandDetailedAsync(
+              fileName,
+              argumentSnapshot,
+              workingDirectory,
+              onOutput,
+              cancellationToken).ConfigureAwait(false)
+          : await RunPortableCommandDetailedAsync(
+              fileName,
+              argumentSnapshot,
+              workingDirectory,
+              onOutput,
+              cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task<ProcessRunResult> RunWindowsJobCommandDetailedAsync(
+    private async Task<ProcessRunResult> RunWindowsJobCommandDetailedAsync(
         string fileName,
         IReadOnlyList<string> arguments,
         string? workingDirectory,
         Action<ProcessOutputLine>? onOutput,
         CancellationToken cancellationToken)
     {
-      using var processJob = WindowsProcessJob.Start(fileName, arguments, workingDirectory);
+      WindowsProcessJob processJob;
+      try
+      {
+        processJob = WindowsProcessJob.Start(fileName, arguments, workingDirectory);
+      }
+      catch (WindowsProcessJobPostStartException exception)
+      {
+        global::System.Diagnostics.Trace.WriteLine(
+            $"[ProcessRunner] Post-start process setup failure: {exception.GetType().Name}");
+        return SnapshotFailure(
+            ProcessFailureKind.PostStartFailed,
+            "Process completion could not be verified.",
+            null,
+            [],
+            []);
+      }
+      catch (Exception exception) when (exception is not OperationCanceledException)
+      {
+        return StartFailure(exception);
+      }
+
+      using var processJobScope = processJob;
       var standardOutput = new List<string>();
       var standardError = new List<string>();
       var outputGate = new object();
@@ -139,31 +161,63 @@ namespace Wdem.LegacySource.Services.System
           standardError,
           outputGate,
           onOutput);
-      using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+      using var timeout = new CancellationTokenSource(_hooks.ProcessTimeout);
       using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
           cancellationToken,
           timeout.Token);
+      int? exitCode = null;
 
       try
       {
-        await processJob.Process.WaitForExitAsync(linkedCancellation.Token).ConfigureAwait(false);
-        var exitCode = processJob.Process.ExitCode;
+        await WaitForExitAsync(
+            token => processJob.Process.WaitForExitAsync(token),
+            linkedCancellation.Token).ConfigureAwait(false);
+        exitCode = processJob.Process.ExitCode;
+        if (_hooks.AfterExitAsync is not null)
+        {
+          await _hooks.AfterExitAsync(exitCode, linkedCancellation.Token).ConfigureAwait(false);
+        }
         await processJob.WaitForEmptyAsync(linkedCancellation.Token).ConfigureAwait(false);
-        await Task.WhenAll(outputTask, errorTask)
-            .WaitAsync(TimeSpan.FromSeconds(5), linkedCancellation.Token)
-            .ConfigureAwait(false);
-        return SnapshotResult(true, exitCode, standardOutput, standardError);
       }
       catch (OperationCanceledException)
       {
         processJob.Terminate();
         await DrainAfterTerminationAsync(outputTask, errorTask).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
-        return SnapshotResult(true, null, standardOutput, standardError);
+        return SnapshotFailure(
+            ProcessFailureKind.TimedOut,
+            "Process execution timed out.",
+            exitCode,
+            standardOutput,
+            standardError,
+            outputGate);
       }
+      catch (Exception exception)
+      {
+        global::System.Diagnostics.Trace.WriteLine(
+            $"[ProcessRunner] Post-start process failure: {exception.GetType().Name}");
+        processJob.Terminate();
+        await DrainAfterTerminationAsync(outputTask, errorTask).ConfigureAwait(false);
+        return SnapshotFailure(
+            ProcessFailureKind.PostStartFailed,
+            "Process completion could not be verified.",
+            exitCode,
+            standardOutput,
+            standardError,
+            outputGate);
+      }
+
+      return await CompleteOutputDrainAsync(
+          exitCode,
+          standardOutput,
+          standardError,
+          outputTask,
+          errorTask,
+          outputGate,
+          cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task<ProcessRunResult> RunPortableCommandDetailedAsync(
+    private async Task<ProcessRunResult> RunPortableCommandDetailedAsync(
         string fileName,
         IReadOnlyList<string> arguments,
         string? workingDirectory,
@@ -185,9 +239,16 @@ namespace Wdem.LegacySource.Services.System
       }
 
       using var process = new Process { StartInfo = startInfo };
-      if (!process.Start())
+      try
       {
-        return new ProcessRunResult(false, null, [], []);
+        if (!process.Start())
+        {
+          return StartFailure(null);
+        }
+      }
+      catch (Exception exception) when (exception is not OperationCanceledException)
+      {
+        return StartFailure(exception);
       }
 
       var standardOutput = new List<string>();
@@ -205,38 +266,146 @@ namespace Wdem.LegacySource.Services.System
           standardError,
           outputGate,
           onOutput);
-      using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+      using var timeout = new CancellationTokenSource(_hooks.ProcessTimeout);
       using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
           cancellationToken,
           timeout.Token);
+      int? exitCode = null;
 
       try
       {
-        await process.WaitForExitAsync(linkedCancellation.Token).ConfigureAwait(false);
-        var exitCode = process.ExitCode;
-        await Task.WhenAll(outputTask, errorTask)
-            .WaitAsync(TimeSpan.FromSeconds(5), linkedCancellation.Token)
-            .ConfigureAwait(false);
-        return SnapshotResult(true, exitCode, standardOutput, standardError);
+        await WaitForExitAsync(
+            token => process.WaitForExitAsync(token),
+            linkedCancellation.Token).ConfigureAwait(false);
+        exitCode = process.ExitCode;
+        if (_hooks.AfterExitAsync is not null)
+        {
+          await _hooks.AfterExitAsync(exitCode, linkedCancellation.Token).ConfigureAwait(false);
+        }
       }
       catch (OperationCanceledException)
       {
-        try
-        {
-          if (!process.HasExited)
-          {
-            process.Kill(entireProcessTree: true);
-          }
-        }
-        catch (InvalidOperationException)
-        {
-          // The process exited between HasExited and Kill.
-        }
+        TerminateProcess(process);
 
         await DrainAfterTerminationAsync(outputTask, errorTask).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
-        return SnapshotResult(true, null, standardOutput, standardError);
+        return SnapshotFailure(
+            ProcessFailureKind.TimedOut,
+            "Process execution timed out.",
+            exitCode,
+            standardOutput,
+            standardError,
+            outputGate);
       }
+      catch (Exception exception)
+      {
+        global::System.Diagnostics.Trace.WriteLine(
+            $"[ProcessRunner] Post-start process failure: {exception.GetType().Name}");
+        TerminateProcess(process);
+        await DrainAfterTerminationAsync(outputTask, errorTask).ConfigureAwait(false);
+        return SnapshotFailure(
+            ProcessFailureKind.PostStartFailed,
+            "Process completion could not be verified.",
+            exitCode,
+            standardOutput,
+            standardError,
+            outputGate);
+      }
+
+      return await CompleteOutputDrainAsync(
+          exitCode,
+          standardOutput,
+          standardError,
+          outputTask,
+          errorTask,
+          outputGate,
+          cancellationToken).ConfigureAwait(false);
+    }
+
+    private static void TerminateProcess(Process process)
+    {
+      try
+      {
+        if (!process.HasExited)
+        {
+          process.Kill(entireProcessTree: true);
+        }
+      }
+      catch (Exception exception)
+      {
+        global::System.Diagnostics.Trace.WriteLine(
+            $"[ProcessRunner] Process termination failed: {exception.GetType().Name}");
+      }
+    }
+
+    private Task WaitForExitAsync(
+        Func<CancellationToken, Task> waitForExit,
+        CancellationToken cancellationToken) => _hooks.WaitForExitAsync is null
+            ? waitForExit(cancellationToken)
+            : _hooks.WaitForExitAsync(waitForExit, cancellationToken);
+
+    private async Task<ProcessRunResult> CompleteOutputDrainAsync(
+        int? exitCode,
+        List<string> standardOutput,
+        List<string> standardError,
+        Task outputTask,
+        Task errorTask,
+        object outputGate,
+        CancellationToken cancellationToken)
+    {
+      var tasks = new[] { outputTask, errorTask };
+      try
+      {
+        var drain = _hooks.DrainOutputAsync is null
+            ? Task.WhenAll(tasks)
+            : _hooks.DrainOutputAsync(tasks, cancellationToken);
+        await drain.WaitAsync(_hooks.OutputDrainTimeout, cancellationToken)
+            .ConfigureAwait(false);
+        return SnapshotResult(
+            true,
+            exitCode,
+            standardOutput,
+            standardError,
+            outputGate);
+      }
+      catch (OperationCanceledException)
+      {
+        cancellationToken.ThrowIfCancellationRequested();
+        return SnapshotFailure(
+            ProcessFailureKind.OutputDrainFailed,
+            "Process output could not be completely collected.",
+            exitCode,
+            standardOutput,
+            standardError,
+            outputGate);
+      }
+      catch (Exception exception)
+      {
+        global::System.Diagnostics.Trace.WriteLine(
+            $"[ProcessRunner] Output drain failure: {exception.GetType().Name}");
+        return SnapshotFailure(
+            ProcessFailureKind.OutputDrainFailed,
+            "Process output could not be completely collected.",
+            exitCode,
+            standardOutput,
+            standardError,
+            outputGate);
+      }
+    }
+
+    private static ProcessRunResult StartFailure(Exception? exception)
+    {
+      if (exception is not null)
+      {
+        global::System.Diagnostics.Trace.WriteLine(
+            $"[ProcessRunner] Could not start process: {exception.GetType().Name}");
+      }
+
+      return new ProcessRunResult(false, null, [], [])
+      {
+        FailureKind = ProcessFailureKind.StartFailed,
+        FailureMessage = "Process could not be started."
+      };
     }
 
     private static async Task CaptureOutputAsync(
@@ -283,11 +452,48 @@ namespace Wdem.LegacySource.Services.System
         bool started,
         int? exitCode,
         List<string> standardOutput,
-        List<string> standardError) => new(
-            started,
+        List<string> standardError,
+        object? outputGate = null)
+    {
+      string[] outputSnapshot;
+      string[] errorSnapshot;
+      if (outputGate is null)
+      {
+        outputSnapshot = standardOutput.ToArray();
+        errorSnapshot = standardError.ToArray();
+      }
+      else
+      {
+        lock (outputGate)
+        {
+          outputSnapshot = standardOutput.ToArray();
+          errorSnapshot = standardError.ToArray();
+        }
+      }
+
+      return new ProcessRunResult(
+          started,
+          exitCode,
+          Array.AsReadOnly(outputSnapshot),
+          Array.AsReadOnly(errorSnapshot));
+    }
+
+    private static ProcessRunResult SnapshotFailure(
+        ProcessFailureKind failureKind,
+        string failureMessage,
+        int? exitCode,
+        List<string> standardOutput,
+        List<string> standardError,
+        object? outputGate = null) => SnapshotResult(
+            true,
             exitCode,
-            Array.AsReadOnly(standardOutput.ToArray()),
-            Array.AsReadOnly(standardError.ToArray()));
+            standardOutput,
+            standardError,
+            outputGate) with
+        {
+          FailureKind = failureKind,
+          FailureMessage = failureMessage
+        };
 
     private bool RunProcessInternal(ProcessStartInfo startInfo, string fileName, Action<string>? onOutput)
     {

@@ -39,19 +39,30 @@ internal sealed class WindowsProcessJob : IDisposable
   public static WindowsProcessJob Start(
       string fileName,
       IEnumerable<string> arguments,
-      string? workingDirectory = null)
+      string? workingDirectory = null) => Start(
+          fileName,
+          arguments,
+          workingDirectory,
+          DefaultNativeResources.Instance);
+
+  internal static WindowsProcessJob Start(
+      string fileName,
+      IEnumerable<string> arguments,
+      string? workingDirectory,
+      IWindowsProcessJobNativeResources native)
   {
     if (!OperatingSystem.IsWindows())
     {
       throw new PlatformNotSupportedException();
     }
 
-    using var standardInput = OpenNullInput();
-    CreateOutputPipe(out var outputRead, out var outputWrite);
-    CreateOutputPipe(out var errorRead, out var errorWrite);
-    var outputReadTransferred = false;
-    var errorReadTransferred = false;
-    var jobHandle = CreateConfiguredJob();
+    ArgumentNullException.ThrowIfNull(native);
+    NativeHandleOwner? standardInput = null;
+    NativeHandleOwner? outputRead = null;
+    NativeHandleOwner? outputWrite = null;
+    NativeHandleOwner? errorRead = null;
+    NativeHandleOwner? errorWrite = null;
+    NativeHandleOwner? jobHandle = null;
     IntPtr attributeList = IntPtr.Zero;
     IntPtr jobHandleList = IntPtr.Zero;
     IntPtr inheritedHandleList = IntPtr.Zero;
@@ -59,12 +70,22 @@ internal sealed class WindowsProcessJob : IDisposable
     Process? managedProcess = null;
     StreamReader? outputReader = null;
     StreamReader? errorReader = null;
+    var processCreated = false;
 
     try
     {
+      native.BeforeStage(WindowsProcessJobConstructionStage.StandardInput);
+      standardInput = native.OpenNullInput();
+      native.BeforeStage(WindowsProcessJobConstructionStage.OutputPipe);
+      (outputRead, outputWrite) = native.CreateOutputPipe();
+      native.BeforeStage(WindowsProcessJobConstructionStage.ErrorPipe);
+      (errorRead, errorWrite) = native.CreateOutputPipe();
+      native.BeforeStage(WindowsProcessJobConstructionStage.Job);
+      jobHandle = native.CreateConfiguredJob();
+      native.BeforeStage(WindowsProcessJobConstructionStage.AttributeList);
       attributeList = CreateAttributeList(2);
       jobHandleList = Marshal.AllocHGlobal(IntPtr.Size);
-      Marshal.WriteIntPtr(jobHandleList, jobHandle.DangerousGetHandle());
+      Marshal.WriteIntPtr(jobHandleList, jobHandle.Handle.DangerousGetHandle());
       UpdateAttribute(
           attributeList,
           ProcThreadAttributeJobList,
@@ -72,9 +93,9 @@ internal sealed class WindowsProcessJob : IDisposable
           (nuint)IntPtr.Size);
 
       inheritedHandleList = Marshal.AllocHGlobal(IntPtr.Size * 3);
-      Marshal.WriteIntPtr(inheritedHandleList, 0, standardInput.DangerousGetHandle());
-      Marshal.WriteIntPtr(inheritedHandleList, IntPtr.Size, outputWrite.DangerousGetHandle());
-      Marshal.WriteIntPtr(inheritedHandleList, IntPtr.Size * 2, errorWrite.DangerousGetHandle());
+      Marshal.WriteIntPtr(inheritedHandleList, 0, standardInput.Handle.DangerousGetHandle());
+      Marshal.WriteIntPtr(inheritedHandleList, IntPtr.Size, outputWrite.Handle.DangerousGetHandle());
+      Marshal.WriteIntPtr(inheritedHandleList, IntPtr.Size * 2, errorWrite.Handle.DangerousGetHandle());
       UpdateAttribute(
           attributeList,
           ProcThreadAttributeHandleList,
@@ -87,9 +108,9 @@ internal sealed class WindowsProcessJob : IDisposable
         {
           Size = Marshal.SizeOf<StartupInfoEx>(),
           Flags = StartfUseStdHandles,
-          StandardInput = standardInput.DangerousGetHandle(),
-          StandardOutput = outputWrite.DangerousGetHandle(),
-          StandardError = errorWrite.DangerousGetHandle()
+          StandardInput = standardInput.Handle.DangerousGetHandle(),
+          StandardOutput = outputWrite.Handle.DangerousGetHandle(),
+          StandardError = errorWrite.Handle.DangerousGetHandle()
         },
         AttributeList = attributeList
       };
@@ -110,31 +131,41 @@ internal sealed class WindowsProcessJob : IDisposable
         throw new Win32Exception(Marshal.GetLastWin32Error());
       }
 
+      processCreated = true;
+      native.BeforeStage(WindowsProcessJobConstructionStage.ManagedProcess);
       outputWrite.Dispose();
       errorWrite.Dispose();
 
       managedProcess = Process.GetProcessById((int)processInformation.ProcessId);
-      outputReader = new StreamReader(new FileStream(outputRead, FileAccess.Read));
-      outputReadTransferred = true;
-      errorReader = new StreamReader(new FileStream(errorRead, FileAccess.Read));
-      errorReadTransferred = true;
+      outputReader = CreateReader(outputRead.Detach());
+      errorReader = CreateReader(errorRead.Detach());
 
-      return new WindowsProcessJob(jobHandle, managedProcess, outputReader, errorReader);
+      return new WindowsProcessJob(
+          jobHandle.Detach(),
+          managedProcess,
+          outputReader,
+          errorReader);
     }
-    catch
+    catch (Exception exception)
     {
       outputReader?.Dispose();
       errorReader?.Dispose();
       managedProcess?.Dispose();
-      jobHandle.Dispose();
+      if (processCreated)
+      {
+        throw new WindowsProcessJobPostStartException(exception);
+      }
+
       throw;
     }
     finally
     {
-      if (!outputReadTransferred) outputRead.Dispose();
-      outputWrite.Dispose();
-      if (!errorReadTransferred) errorRead.Dispose();
-      errorWrite.Dispose();
+      standardInput?.Dispose();
+      outputRead?.Dispose();
+      outputWrite?.Dispose();
+      errorRead?.Dispose();
+      errorWrite?.Dispose();
+      jobHandle?.Dispose();
       if (processInformation.ProcessHandle != IntPtr.Zero)
       {
         CloseHandle(processInformation.ProcessHandle);
@@ -156,6 +187,19 @@ internal sealed class WindowsProcessJob : IDisposable
       {
         Marshal.FreeHGlobal(inheritedHandleList);
       }
+    }
+  }
+
+  private static StreamReader CreateReader(SafeFileHandle handle)
+  {
+    try
+    {
+      return new StreamReader(new FileStream(handle, FileAccess.Read));
+    }
+    catch
+    {
+      handle.Dispose();
+      throw;
     }
   }
 
@@ -260,6 +304,26 @@ internal sealed class WindowsProcessJob : IDisposable
     }
 
     readHandle = read;
+  }
+
+  internal sealed class DefaultNativeResources : IWindowsProcessJobNativeResources
+  {
+    public static readonly DefaultNativeResources Instance = new();
+
+    public void BeforeStage(WindowsProcessJobConstructionStage stage)
+    {
+    }
+
+    public NativeHandleOwner OpenNullInput() => new(WindowsProcessJob.OpenNullInput());
+
+    public (NativeHandleOwner Read, NativeHandleOwner Write) CreateOutputPipe()
+    {
+      WindowsProcessJob.CreateOutputPipe(out var read, out var write);
+      return (new NativeHandleOwner(read), new NativeHandleOwner(write));
+    }
+
+    public NativeHandleOwner CreateConfiguredJob() =>
+        new(WindowsProcessJob.CreateConfiguredJob());
   }
 
   private static SecurityAttributes CreateInheritableSecurityAttributes() =>

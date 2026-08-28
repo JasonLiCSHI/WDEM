@@ -1,5 +1,10 @@
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Win32.SafeHandles;
+using Wdem.Core.Runs;
 
 namespace Wdem.Windows.Persistence;
 
@@ -8,8 +13,19 @@ public sealed record LegacyStateMigrationResult(
     IReadOnlyList<string> ImportedStepNames,
     string MarkerPath);
 
+internal interface ILegacyFileFinalPathResolver
+{
+  string ResolveFinalPath(FileStream stream, string requestedPath);
+}
+
 public sealed class LegacyStateMigrationAdapter
 {
+  internal const int MaximumLegacyFileBytes = 1024 * 1024;
+  internal const int MaximumImportedStepNames = 128;
+  private const int MaximumCandidateFiles = 3;
+  private const int MaximumMarkerBytes = 128 * 1024;
+  private const int MaximumStepNameLength = 128;
+
   private static readonly string[] LegacyStateFileNames =
   [
     ".winhome-state.json",
@@ -23,10 +39,13 @@ public sealed class LegacyStateMigrationAdapter
     WriteIndented = true
   };
 
+  private static readonly LogRedactor StepNameRedactor = new();
+
   private readonly string _legacyDirectory;
   private readonly string _markerDirectory;
   private readonly string _markerPath;
   private readonly string _lockPath;
+  private readonly ILegacyFileFinalPathResolver _finalPathResolver;
 
   public LegacyStateMigrationAdapter()
       : this(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData))
@@ -34,8 +53,17 @@ public sealed class LegacyStateMigrationAdapter
   }
 
   public LegacyStateMigrationAdapter(string localApplicationData)
+      : this(localApplicationData, WindowsLegacyFileFinalPathResolver.Instance)
+  {
+  }
+
+  internal LegacyStateMigrationAdapter(
+      string localApplicationData,
+      ILegacyFileFinalPathResolver finalPathResolver)
   {
     ArgumentException.ThrowIfNullOrWhiteSpace(localApplicationData);
+    _finalPathResolver = finalPathResolver ??
+        throw new ArgumentNullException(nameof(finalPathResolver));
     var localRoot = Path.GetFullPath(localApplicationData);
     _legacyDirectory = Path.Combine(localRoot, "WinHome");
     _markerDirectory = Path.Combine(localRoot, "WDEM");
@@ -47,20 +75,17 @@ public sealed class LegacyStateMigrationAdapter
       CancellationToken cancellationToken)
   {
     cancellationToken.ThrowIfCancellationRequested();
-    if (File.Exists(_markerPath))
-    {
-      return NotPerformed();
-    }
-
     Directory.CreateDirectory(_markerDirectory);
     await using var migrationLock = await AcquireLockAsync(cancellationToken)
         .ConfigureAwait(false);
     try
     {
-      if (File.Exists(_markerPath))
+      if (await IsValidMarkerAsync(cancellationToken).ConfigureAwait(false))
       {
         return NotPerformed();
       }
+
+      QuarantineInvalidMarker();
 
       var importedStepNames = await DiscoverStepNamesAsync(cancellationToken)
           .ConfigureAwait(false);
@@ -101,21 +126,112 @@ public sealed class LegacyStateMigrationAdapter
       }
       catch (IOException)
       {
-        if (File.Exists(_markerPath))
-        {
-          return new FileStream(
-              _markerPath,
-              FileMode.Open,
-              FileAccess.Read,
-              FileShare.ReadWrite | FileShare.Delete,
-              1,
-              FileOptions.Asynchronous);
-        }
-
         await Task.Delay(TimeSpan.FromMilliseconds(20), cancellationToken)
             .ConfigureAwait(false);
       }
     }
+  }
+
+  private async Task<bool> IsValidMarkerAsync(CancellationToken cancellationToken)
+  {
+    if (!File.Exists(_markerPath))
+    {
+      return false;
+    }
+
+    try
+    {
+      await using var stream = new FileStream(
+          _markerPath,
+          FileMode.Open,
+          FileAccess.Read,
+          FileShare.Read,
+          4096,
+          FileOptions.Asynchronous | FileOptions.SequentialScan);
+      if (stream.Length is 0 or > MaximumMarkerBytes)
+      {
+        return false;
+      }
+
+      using var document = await JsonDocument.ParseAsync(
+          stream,
+          new JsonDocumentOptions { MaxDepth = 16 },
+          cancellationToken).ConfigureAwait(false);
+      var root = document.RootElement;
+      var expectedProperties = new HashSet<string>(StringComparer.Ordinal)
+      {
+        "schemaVersion",
+        "recordKind",
+        "sourceProduct",
+        "importedAtUtc",
+        "importedStepNames"
+      };
+      if (root.ValueKind != JsonValueKind.Object ||
+          root.EnumerateObject().Count() != expectedProperties.Count ||
+          root.EnumerateObject().Any(property => !expectedProperties.Contains(property.Name)) ||
+          !root.TryGetProperty("schemaVersion", out var schemaVersion) ||
+          schemaVersion.ValueKind != JsonValueKind.Number ||
+          !schemaVersion.TryGetInt32(out var version) ||
+          version != 1 ||
+          !TryGetExactMarkerString(root, "recordKind", "legacy-step-name-reference") ||
+          !TryGetExactMarkerString(root, "sourceProduct", "WinHome") ||
+          !root.TryGetProperty("importedAtUtc", out var importedAtUtc) ||
+          importedAtUtc.ValueKind != JsonValueKind.String ||
+          !importedAtUtc.TryGetDateTimeOffset(out _) ||
+          !root.TryGetProperty("importedStepNames", out var importedNames) ||
+          importedNames.ValueKind != JsonValueKind.Array ||
+          importedNames.GetArrayLength() > MaximumImportedStepNames)
+      {
+        return false;
+      }
+
+      foreach (var item in importedNames.EnumerateArray())
+      {
+        if (item.ValueKind != JsonValueKind.String ||
+            item.GetString() is not { } name ||
+            !IsSafeStepName(name) ||
+            !string.Equals(name, name.Trim(), StringComparison.Ordinal))
+        {
+          return false;
+        }
+      }
+
+      return true;
+    }
+    catch (JsonException)
+    {
+      return false;
+    }
+    catch (IOException)
+    {
+      return false;
+    }
+    catch (UnauthorizedAccessException)
+    {
+      return false;
+    }
+  }
+
+  private static bool TryGetExactMarkerString(
+      JsonElement element,
+      string propertyName,
+      string expected) => element.TryGetProperty(propertyName, out var value) &&
+      value.ValueKind == JsonValueKind.String &&
+      string.Equals(value.GetString(), expected, StringComparison.Ordinal);
+
+  private void QuarantineInvalidMarker()
+  {
+    if (!File.Exists(_markerPath))
+    {
+      return;
+    }
+
+    var quarantinePath = Path.Combine(
+        _markerDirectory,
+        $"migration-v1.invalid-{Guid.NewGuid():N}.json");
+    File.Move(_markerPath, quarantinePath, overwrite: false);
+    global::System.Diagnostics.Trace.WriteLine(
+        "[LegacyMigration] Invalid completion marker was quarantined.");
   }
 
   private async Task<IReadOnlyList<string>> DiscoverStepNamesAsync(
@@ -128,8 +244,13 @@ public sealed class LegacyStateMigrationAdapter
 
     var names = new List<string>();
     var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-    foreach (var fileName in LegacyStateFileNames)
+    foreach (var fileName in LegacyStateFileNames.Take(MaximumCandidateFiles))
     {
+      if (names.Count >= MaximumImportedStepNames)
+      {
+        break;
+      }
+
       cancellationToken.ThrowIfCancellationRequested();
       var path = Path.Combine(_legacyDirectory, fileName);
       if (!File.Exists(path) || IsReparsePoint(path))
@@ -143,11 +264,21 @@ public sealed class LegacyStateMigrationAdapter
             path,
             FileMode.Open,
             FileAccess.Read,
-            FileShare.Read,
+            FileShare.Read | FileShare.Delete,
             4096,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var finalPath = _finalPathResolver.ResolveFinalPath(stream, path);
+        if (!IsFinalPathWithinRoot(_legacyDirectory, finalPath) ||
+            stream.Length > MaximumLegacyFileBytes)
+        {
+          global::System.Diagnostics.Trace.WriteLine(
+              "[LegacyMigration] A transition-source candidate was skipped by safety limits.");
+          continue;
+        }
+
         using var document = await JsonDocument.ParseAsync(
             stream,
+            new JsonDocumentOptions { MaxDepth = 32 },
             cancellationToken: cancellationToken).ConfigureAwait(false);
         ExtractNames(document.RootElement, names, seen);
       }
@@ -163,9 +294,55 @@ public sealed class LegacyStateMigrationAdapter
       {
         // Access failures do not expose source paths or contents in product diagnostics.
       }
+      catch (Win32Exception)
+      {
+        // Final-path resolution failures make the candidate untrusted.
+      }
+      catch (ArgumentException)
+      {
+        // Invalid canonical paths are not migration evidence.
+      }
+      catch (NotSupportedException)
+      {
+        // Unsupported canonical paths are not migration evidence.
+      }
     }
 
     return Array.AsReadOnly(names.ToArray());
+  }
+
+  internal static bool IsFinalPathWithinRoot(string rootPath, string finalPath)
+  {
+    try
+    {
+      var root = NormalizeFinalPath(rootPath)
+          .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+      var candidate = NormalizeFinalPath(finalPath);
+      var prefix = root + Path.DirectorySeparatorChar;
+      return candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+    }
+    catch (Exception exception) when (
+        exception is ArgumentException or NotSupportedException or PathTooLongException)
+    {
+      return false;
+    }
+  }
+
+  private static string NormalizeFinalPath(string path)
+  {
+    const string extendedUncPrefix = @"\\?\UNC\";
+    const string extendedPrefix = @"\\?\";
+    if (path.StartsWith(extendedUncPrefix, StringComparison.OrdinalIgnoreCase))
+    {
+      path = @"\\" + path[extendedUncPrefix.Length..];
+    }
+    else if (path.StartsWith(extendedPrefix, StringComparison.OrdinalIgnoreCase))
+    {
+      path = path[extendedPrefix.Length..];
+    }
+
+    return Path.GetFullPath(path)
+        .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
   }
 
   private static void ExtractNames(
@@ -177,6 +354,11 @@ public sealed class LegacyStateMigrationAdapter
     {
       foreach (var item in root.EnumerateArray())
       {
+        if (names.Count >= MaximumImportedStepNames)
+        {
+          break;
+        }
+
         if (item.ValueKind == JsonValueKind.String)
         {
           AddName(item.GetString(), names, seen);
@@ -198,6 +380,11 @@ public sealed class LegacyStateMigrationAdapter
       recognizedContainer = true;
       foreach (var item in appliedItems.EnumerateArray())
       {
+        if (names.Count >= MaximumImportedStepNames)
+        {
+          break;
+        }
+
         if (item.ValueKind == JsonValueKind.String)
         {
           AddName(item.GetString(), names, seen);
@@ -226,6 +413,11 @@ public sealed class LegacyStateMigrationAdapter
   {
     foreach (var property in dictionary.EnumerateObject())
     {
+      if (names.Count >= MaximumImportedStepNames)
+      {
+        break;
+      }
+
       if (property.Value.ValueKind != JsonValueKind.Object)
       {
         continue;
@@ -274,7 +466,8 @@ public sealed class LegacyStateMigrationAdapter
       List<string> names,
       HashSet<string> seen)
   {
-    if (string.IsNullOrWhiteSpace(candidate))
+    if (names.Count >= MaximumImportedStepNames ||
+        string.IsNullOrWhiteSpace(candidate))
     {
       return;
     }
@@ -288,11 +481,14 @@ public sealed class LegacyStateMigrationAdapter
 
   private static bool IsSafeStepName(string value)
   {
-    const int MaximumStepNameLength = 128;
     if (value.Length is 0 or > MaximumStepNameLength ||
         value.Any(character => char.IsControl(character)) ||
         value.Contains("..", StringComparison.Ordinal) ||
-        value.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+        value.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(StepNameRedactor.Redact(value), value, StringComparison.Ordinal) ||
+        HasKnownCredentialPrefix(value) ||
+        ContainsSensitiveKeyFragment(value) ||
+        LooksLikeHighEntropyCredential(value))
     {
       return false;
     }
@@ -316,10 +512,68 @@ public sealed class LegacyStateMigrationAdapter
         word.Equals("authorization", StringComparison.OrdinalIgnoreCase));
   }
 
+  private static bool HasKnownCredentialPrefix(string value) =>
+      value.StartsWith("ghp_", StringComparison.OrdinalIgnoreCase) ||
+      value.StartsWith("gho_", StringComparison.OrdinalIgnoreCase) ||
+      value.StartsWith("ghu_", StringComparison.OrdinalIgnoreCase) ||
+      value.StartsWith("ghs_", StringComparison.OrdinalIgnoreCase) ||
+      value.StartsWith("ghr_", StringComparison.OrdinalIgnoreCase) ||
+      value.StartsWith("github_pat_", StringComparison.OrdinalIgnoreCase) ||
+      value.StartsWith("AKIA", StringComparison.OrdinalIgnoreCase) ||
+      value.StartsWith("ASIA", StringComparison.OrdinalIgnoreCase);
+
+  private static bool ContainsSensitiveKeyFragment(string value)
+  {
+    var normalized = new string(value
+        .Where(char.IsLetterOrDigit)
+        .Select(char.ToLowerInvariant)
+        .ToArray());
+    return normalized.Contains("token", StringComparison.Ordinal) ||
+        normalized.Contains("secret", StringComparison.Ordinal) ||
+        normalized.Contains("password", StringComparison.Ordinal) ||
+        normalized.Contains("apikey", StringComparison.Ordinal) ||
+        normalized.Contains("credential", StringComparison.Ordinal) ||
+        normalized.Contains("authorization", StringComparison.Ordinal) ||
+        normalized.Contains("accesskey", StringComparison.Ordinal) ||
+        normalized.Contains("privatekey", StringComparison.Ordinal);
+  }
+
+  private static bool LooksLikeHighEntropyCredential(string value)
+  {
+    if (value.Any(char.IsWhiteSpace))
+    {
+      return false;
+    }
+
+    var tokenCharacters = value.Where(char.IsLetterOrDigit).ToArray();
+    if (tokenCharacters.Length < 20 ||
+        tokenCharacters.Length < value.Length * 0.9 ||
+        !tokenCharacters.Any(char.IsLetter) ||
+        !tokenCharacters.Any(char.IsDigit))
+    {
+      return false;
+    }
+
+    var entropy = tokenCharacters
+        .GroupBy(character => character)
+        .Sum(group =>
+        {
+          var probability = (double)group.Count() / tokenCharacters.Length;
+          return -probability * Math.Log2(probability);
+        });
+    return entropy >= 3.5;
+  }
+
   private async Task WriteMarkerAtomicallyAsync(
       LegacyMigrationMarker marker,
       CancellationToken cancellationToken)
   {
+    var markerBytes = JsonSerializer.SerializeToUtf8Bytes(marker, MarkerJsonOptions);
+    if (markerBytes.Length > MaximumMarkerBytes)
+    {
+      throw new InvalidDataException("The migration marker exceeded its safe size limit.");
+    }
+
     var temporaryPath = Path.Combine(
         _markerDirectory,
         $".migration-v1.{Guid.NewGuid():N}.tmp");
@@ -333,11 +587,7 @@ public sealed class LegacyStateMigrationAdapter
           4096,
           FileOptions.Asynchronous | FileOptions.WriteThrough))
       {
-        await JsonSerializer.SerializeAsync(
-            stream,
-            marker,
-            MarkerJsonOptions,
-            cancellationToken).ConfigureAwait(false);
+        await stream.WriteAsync(markerBytes, cancellationToken).ConfigureAwait(false);
         await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
         stream.Flush(flushToDisk: true);
       }
@@ -401,4 +651,50 @@ public sealed class LegacyStateMigrationAdapter
       DateTimeOffset ImportedAtUtc,
       [property: JsonPropertyName("importedStepNames")]
       IReadOnlyList<string> ImportedStepNames);
+}
+
+internal sealed class WindowsLegacyFileFinalPathResolver : ILegacyFileFinalPathResolver
+{
+  private const uint FileNameNormalized = 0;
+
+  public static readonly WindowsLegacyFileFinalPathResolver Instance = new();
+
+  public string ResolveFinalPath(FileStream stream, string requestedPath)
+  {
+    ArgumentNullException.ThrowIfNull(stream);
+    ArgumentException.ThrowIfNullOrWhiteSpace(requestedPath);
+    if (!OperatingSystem.IsWindows())
+    {
+      return Path.GetFullPath(requestedPath);
+    }
+
+    var capacity = 512;
+    while (true)
+    {
+      var buffer = new StringBuilder(capacity);
+      var result = GetFinalPathNameByHandle(
+          stream.SafeFileHandle,
+          buffer,
+          (uint)buffer.Capacity,
+          FileNameNormalized);
+      if (result == 0)
+      {
+        throw new Win32Exception(Marshal.GetLastWin32Error());
+      }
+
+      if (result < buffer.Capacity)
+      {
+        return buffer.ToString();
+      }
+
+      capacity = checked((int)result + 1);
+    }
+  }
+
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern uint GetFinalPathNameByHandle(
+      SafeFileHandle file,
+      StringBuilder filePath,
+      uint filePathLength,
+      uint flags);
 }

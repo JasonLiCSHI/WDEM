@@ -30,15 +30,48 @@ public sealed class LegacySourceProcessExecutorAdapter(IProcessRunner legacy) : 
         result.ExitCode,
         result.StandardOutput,
         result.StandardError,
-        result.Started
-            ? null
-            : new StructuredError(
-                WdemErrorCode.ProviderError,
-                "Process could not be started.",
-                "The requested external process could not be started.")
-            {
-              IsRetryable = false
-            });
+        MapError(result));
+  }
+
+  private static StructuredError? MapError(
+      Wdem.LegacySource.Models.ProcessRunResult result)
+  {
+    if (!result.Started)
+    {
+      return new StructuredError(
+          WdemErrorCode.ProviderError,
+          "Process could not be started.",
+          "The requested external process could not be started.")
+      {
+        IsRetryable = false
+      };
+    }
+
+    return result.FailureKind switch
+    {
+      Wdem.LegacySource.Models.ProcessFailureKind.None => null,
+      Wdem.LegacySource.Models.ProcessFailureKind.TimedOut => new StructuredError(
+          WdemErrorCode.ProviderError,
+          "Process execution timed out.",
+          "The external process exceeded its execution time limit.")
+      {
+        IsRetryable = true
+      },
+      Wdem.LegacySource.Models.ProcessFailureKind.OutputDrainFailed => new StructuredError(
+          WdemErrorCode.ProviderError,
+          "Process output collection failed.",
+          "The process exited, but its output could not be completely collected.")
+      {
+        IsRetryable = true
+      },
+      _ => new StructuredError(
+          WdemErrorCode.ProviderError,
+          "Process completion could not be verified.",
+          "The process started, but its final completion state could not be verified.")
+      {
+        IsRetryable = false
+      }
+    };
   }
 
   private static void ReportSafely(IProgress<string>? output, string line)
