@@ -13,6 +13,7 @@ namespace Wdem.Core.Execution;
 public sealed class EnvironmentRunService : IEnvironmentRunService
 {
   private static readonly StringComparer IdComparer = StringComparer.OrdinalIgnoreCase;
+  private static readonly TimeSpan PersistenceTimeout = TimeSpan.FromSeconds(10);
   private readonly IProfileCatalog _profiles;
   private readonly ResourceGraphBuilder _graphBuilder;
   private readonly IResourceProviderRegistry _providers;
@@ -84,7 +85,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
   public async Task<IReadOnlyList<RecoveryCandidate>> FindRecoveryCandidatesAsync(
       CancellationToken cancellationToken)
   {
-    var runs = await _runStore.ListIncompleteAsync(cancellationToken).ConfigureAwait(false);
+    var runs = await _runStore.ListAsync(cancellationToken).ConfigureAwait(false);
     return runs
         .Where(IsRecoverableState)
         .Select(run => new RecoveryCandidate
@@ -175,7 +176,21 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         .ConfigureAwait(false);
     if (!loaded.IsValid || loaded.Profile is null)
     {
-      return await PersistPreparationFailureAsync(request, mode, loaded, cancellationToken)
+      var diagnostics = loaded.Errors.Count > 0
+          ? loaded.Errors
+          :
+          [
+            new StructuredError(
+                WdemErrorCode.ProfileError,
+                "Profile validation failed.",
+                "The profile catalog did not return a valid profile.")
+          ];
+      return await PersistPreparationFailureAsync(
+          request,
+          mode,
+          loaded,
+          diagnostics,
+          cancellationToken)
           .ConfigureAwait(false);
     }
 
@@ -190,10 +205,13 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           request,
           mode,
           loaded with { SourcePath = sourcePath },
+          graphResult.Errors,
           cancellationToken).ConfigureAwait(false);
     }
 
-    var graph = graphResult.Graph;
+    var graph = resourceFilter is null
+        ? graphResult.Graph
+        : FilterGraph(graphResult.Graph, resourceFilter);
     var detected = await DetectAsync(graph, cancellationToken).ConfigureAwait(false);
     var compliance = graph.Nodes.ToDictionary(
         pair => pair.Key,
@@ -205,11 +223,6 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         profile.Id,
         profile.Version,
         cancellationToken).ConfigureAwait(false);
-    if (resourceFilter is not null)
-    {
-      plan = FilterPlan(plan, resourceFilter);
-    }
-
     var initialResults = CreateInitialResults(mode, plan, detected, compliance);
     var run = new ExecutionRun
     {
@@ -237,7 +250,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         Outcome = ExecutionOutcome.Succeeded,
         EndedAtUtc = DateTimeOffset.UtcNow
       };
-      await _runStore.SaveAsync(completed, cancellationToken).ConfigureAwait(false);
+      await PersistTerminalAsync(completed).ConfigureAwait(false);
       return completed;
     }
 
@@ -251,7 +264,6 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     var scheduled = await _scheduler.ExecuteAsync(
         plan,
         (planned, token) => ExecuteResourceAsync(
-            transitions,
             graph.Nodes[planned.Definition.Id].Definition,
             planned,
             detected[planned.Definition.Id],
@@ -261,7 +273,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
             planned.Definition.Type,
             planned.Definition.Provider).Capabilities,
         request.MaximumConcurrency,
-        cancellationToken).ConfigureAwait(false);
+        cancellationToken,
+        transitions.PersistSchedulerTransitionAsync).ConfigureAwait(false);
 
     var completedRun = transitions.Current with
     {
@@ -280,12 +293,11 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           .Select(result => $"Resource '{result.ResourceId}' requires a restart.")
           .ToArray()
     };
-    await _runStore.SaveAsync(completedRun, cancellationToken).ConfigureAwait(false);
+    await PersistTerminalAsync(completedRun).ConfigureAwait(false);
     return completedRun;
   }
 
   private async Task<ResourceResult> ExecuteResourceAsync(
-      RunTransitions transitions,
       ResourceDefinition definition,
       PlannedResource planned,
       DetectedState detectedBefore,
@@ -296,21 +308,10 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     if (planned.Status == PlannedResourceStatus.AlreadySatisfied ||
         !planned.ResourcePlan.RequiresApply)
     {
-      var notRequired = CompletedNotRequired(id, detectedBefore, complianceBefore.Status);
-      await transitions.SetResourceAsync(notRequired, cancellationToken).ConfigureAwait(false);
-      return notRequired;
+      return CompletedNotRequired(id, detectedBefore, complianceBefore.Status);
     }
 
     var startedAt = DateTimeOffset.UtcNow;
-    await transitions.SetResourceAsync(new ResourceResult
-    {
-      ResourceId = id,
-      State = ExecutionState.Running,
-      DetectedBefore = detectedBefore,
-      StartedAtUtc = startedAt,
-      Message = "Applying the planned remediation."
-    }, cancellationToken).ConfigureAwait(false);
-
     var provider = _providers.GetRequired(definition.Type, definition.Provider);
     ResourceApplyResult applied;
     try
@@ -328,9 +329,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     }
     catch (Exception exception)
     {
-      var failed = FailedApply(id, detectedBefore, planned, startedAt, exception);
-      await transitions.SetResourceAsync(failed, cancellationToken).ConfigureAwait(false);
-      return failed;
+      return FailedApply(id, detectedBefore, planned, startedAt, exception);
     }
 
     var stepResults = ToStepResults(planned, applied, startedAt);
@@ -345,14 +344,15 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           detectedBefore,
           startedAt,
           cancellationToken).ConfigureAwait(false);
-      await transitions.SetResourceAsync(verified, cancellationToken).ConfigureAwait(false);
       return verified;
     }
 
     var outcome = applied.Outcome switch
     {
       ApplyOutcome.Cancelled => ExecutionOutcome.Cancelled,
-      ApplyOutcome.NotRequired => ExecutionOutcome.NotRequired,
+      ApplyOutcome.NotRequired when complianceBefore.Status == ComplianceStatus.Satisfied =>
+        ExecutionOutcome.NotRequired,
+      ApplyOutcome.NotRequired => ExecutionOutcome.Failed,
       _ => ExecutionOutcome.Failed
     };
     var completed = new ResourceResult
@@ -366,12 +366,15 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       StartedAtUtc = startedAt,
       EndedAtUtc = DateTimeOffset.UtcNow,
       Error = outcome is ExecutionOutcome.Failed or ExecutionOutcome.Cancelled
-          ? applied.Error ?? ApplyError(id, outcome)
+          ? applied.Error ?? (applied.Outcome == ApplyOutcome.NotRequired
+              ? VerificationError(
+                  id,
+                  $"The provider reported no work was required, but compliance remained '{complianceBefore.Status}'.")
+              : ApplyError(id, outcome))
           : null,
       RestartRequirement = RestartPolicy.NoRestart,
       StepResults = stepResults
     };
-    await transitions.SetResourceAsync(completed, cancellationToken).ConfigureAwait(false);
     return completed;
   }
 
@@ -504,6 +507,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
             {
               ResourceId = planned.Definition.Id,
               State = ExecutionState.Pending,
+              FinalCompliance = compliance[planned.Definition.Id].Status,
               DetectedBefore = detected[planned.Definition.Id]
             },
         IdComparer);
@@ -542,17 +546,25 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       EndedAtUtc = endedAt,
       ResourceResults = results
     };
-    await _runStore.SaveAsync(completed, cancellationToken).ConfigureAwait(false);
+    await PersistTerminalAsync(completed).ConfigureAwait(false);
     return completed;
+  }
+
+  private async Task PersistTerminalAsync(ExecutionRun run)
+  {
+    using var timeout = new CancellationTokenSource(PersistenceTimeout);
+    await _runStore.SaveAsync(run, timeout.Token).ConfigureAwait(false);
   }
 
   private async Task<ExecutionRun> PersistPreparationFailureAsync(
       RunRequest request,
       RunMode mode,
       ProfileLoadResult loaded,
+      IReadOnlyList<StructuredError> diagnostics,
       CancellationToken cancellationToken)
   {
     var now = DateTimeOffset.UtcNow;
+    var planId = Guid.NewGuid();
     var run = new ExecutionRun
     {
       RunId = Guid.NewGuid(),
@@ -567,30 +579,38 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       Outcome = ExecutionOutcome.Failed,
       RetriedFromRunId = request.RetriedFromRunId,
       Machine = CurrentMachine(),
+      Plan = new ExecutionPlan
+      {
+        PlanId = planId,
+        Fingerprint = planId.ToString("N").ToUpperInvariant(),
+        ProfileId = loaded.Profile?.Id ?? Path.GetFileNameWithoutExtension(request.ProfilePath),
+        ProfileVersion = loaded.Profile?.Version ?? "unknown",
+        Layers = [],
+        Resources = [],
+        IsExecutable = false,
+        Errors = diagnostics
+      },
       ResourceResults = new Dictionary<string, ResourceResult>(IdComparer)
     };
     await _runStore.CreateAsync(run, cancellationToken).ConfigureAwait(false);
     return run;
   }
 
-  private static ExecutionPlan FilterPlan(
-      ExecutionPlan plan,
+  private static ResourceGraph FilterGraph(
+      ResourceGraph graph,
       IReadOnlySet<string> requestedIds)
   {
-    var byId = plan.Resources.ToDictionary(
-        resource => resource.Definition.Id,
-        IdComparer);
     var included = new HashSet<string>(requestedIds, IdComparer);
     var pending = new Stack<string>(included);
     while (pending.Count > 0)
     {
       var id = pending.Pop();
-      if (!byId.TryGetValue(id, out var resource))
+      if (!graph.Nodes.TryGetValue(id, out var resource))
       {
         throw new ArgumentException($"Resource '{id}' is not present in the current profile.");
       }
 
-      foreach (var dependency in resource.Dependencies)
+      foreach (var dependency in resource.Definition.Dependencies)
       {
         if (included.Add(dependency))
         {
@@ -599,22 +619,25 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       }
     }
 
-    var resources = plan.Resources
-        .Where(resource => included.Contains(resource.Definition.Id))
-        .ToArray();
-    var layers = plan.Layers
+    var nodes = graph.Nodes
+        .Where(pair => included.Contains(pair.Key))
+        .ToFrozenDictionary(
+            pair => pair.Key,
+            pair => pair.Value with
+            {
+              RequiredBy = pair.Value.RequiredBy
+                  .Where(included.Contains)
+                  .ToFrozenSet(IdComparer)
+            },
+            IdComparer);
+    var layers = graph.TopologicalLayers
         .Select(layer => layer with
         {
           ResourceIds = layer.ResourceIds.Where(included.Contains).ToArray()
         })
         .Where(layer => layer.ResourceIds.Count > 0)
         .ToArray();
-    return plan with
-    {
-      Resources = resources,
-      Layers = layers,
-      IsExecutable = resources.Length > 0 && plan.IsExecutable
-    };
+    return new ResourceGraph(nodes, layers);
   }
 
   private static IReadOnlySet<string> PendingResourceIds(ExecutionRun run)
@@ -623,7 +646,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         .Where(result => result.State != ExecutionState.Completed ||
             result.Outcome is ExecutionOutcome.Failed or
                 ExecutionOutcome.Cancelled or
-                ExecutionOutcome.Skipped)
+                ExecutionOutcome.Skipped ||
+            result.RestartRequirement != RestartPolicy.NoRestart)
         .Select(result => result.ResourceId)
         .ToHashSet(IdComparer);
     if (ids.Count == 0 && run.Plan is not null)
@@ -802,7 +826,11 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
             pair => pair.Key,
             pair => pair.Value,
             IdComparer);
-        results[result.ResourceId] = result;
+        var previous = results.GetValueOrDefault(result.ResourceId);
+        results[result.ResourceId] = result with
+        {
+          DetectedBefore = result.DetectedBefore ?? previous?.DetectedBefore
+        };
         _current = _current with { ResourceResults = results };
         await store.SaveAsync(_current, cancellationToken).ConfigureAwait(false);
       }
@@ -810,6 +838,12 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       {
         _gate.Release();
       }
+    }
+
+    public async Task PersistSchedulerTransitionAsync(ResourceResult result)
+    {
+      using var timeout = new CancellationTokenSource(PersistenceTimeout);
+      await SetResourceAsync(result, timeout.Token).ConfigureAwait(false);
     }
   }
 }

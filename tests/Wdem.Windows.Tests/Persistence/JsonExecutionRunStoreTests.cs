@@ -302,6 +302,32 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task ListAsync_ReturnsCompletedAndIncompleteRunsAcrossStoreInstances()
+  {
+    var incomplete = SampleRun();
+    var complete = SampleRun() with
+    {
+      RunId = Guid.NewGuid(),
+      State = ExecutionState.Completed,
+      Outcome = ExecutionOutcome.Succeeded,
+      EndedAtUtc = DateTimeOffset.UtcNow
+    };
+    await _store.CreateAsync(incomplete, CancellationToken.None);
+    await _store.CreateAsync(complete, CancellationToken.None);
+    var otherStore = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor());
+
+    var allRuns = await otherStore.ListAsync(CancellationToken.None);
+    var incompleteRuns = await otherStore.ListIncompleteAsync(CancellationToken.None);
+
+    Assert.Equal(
+        new[] { complete.RunId, incomplete.RunId }.Order().ToArray(),
+        allRuns.Select(run => run.RunId).Order().ToArray());
+    Assert.Equal(incomplete.RunId, Assert.Single(incompleteRuns).RunId);
+  }
+
+  [Fact]
   public async Task SaveAsync_CoordinatesAcrossStoreInstances()
   {
     var run = SampleRun();

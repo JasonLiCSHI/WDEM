@@ -12,6 +12,36 @@ public sealed class ResourceSchedulerTests
 {
   private readonly IResourceScheduler _scheduler = new ResourceScheduler();
 
+  [Fact]
+  public async Task ExecuteAsync_ReportsReadyRunningCompletedAndBlockedBeforeAdvancing()
+  {
+    var transitions = new List<(string Id, ExecutionState State, ExecutionOutcome? Outcome)>();
+
+    var result = await _scheduler.ExecuteAsync(
+        ChainPlan("a", "b"),
+        (resource, _) => Task.FromResult(Result(
+            resource.Definition.Id,
+            ExecutionOutcome.Failed)),
+        _ => new ProviderCapabilities(),
+        maximumConcurrency: 1,
+        CancellationToken.None,
+        transition =>
+        {
+          transitions.Add((transition.ResourceId, transition.State, transition.Outcome));
+          return Task.CompletedTask;
+        });
+
+    Assert.Equal(ExecutionOutcome.Failed, result.Results["a"].Outcome);
+    Assert.Equal(
+        [
+          ("a", ExecutionState.Ready, null),
+          ("a", ExecutionState.Running, null),
+          ("a", ExecutionState.Completed, ExecutionOutcome.Failed),
+          ("b", ExecutionState.Blocked, ExecutionOutcome.Skipped)
+        ],
+        transitions);
+  }
+
   [Theory]
   [InlineData(0)]
   [InlineData(33)]
@@ -248,6 +278,7 @@ public sealed class ResourceSchedulerTests
     using var cancellation = new CancellationTokenSource();
     var firstStarted = NewGate();
     var invoked = 0;
+    var transitions = new List<ResourceResult>();
 
     var execution = _scheduler.ExecuteAsync(
         IndependentPlan("a", "b", "c"),
@@ -260,7 +291,12 @@ public sealed class ResourceSchedulerTests
         },
         _ => new ProviderCapabilities { MaxConcurrentOperations = 3 },
         maximumConcurrency: 1,
-        cancellation.Token);
+        cancellation.Token,
+        transition =>
+        {
+          transitions.Add(transition);
+          return Task.CompletedTask;
+        });
 
     await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
     await cancellation.CancelAsync();
@@ -275,6 +311,14 @@ public sealed class ResourceSchedulerTests
     Assert.NotNull(result.Results["a"].StartedAtUtc);
     Assert.Null(result.Results["b"].StartedAtUtc);
     Assert.Null(result.Results["c"].StartedAtUtc);
+    Assert.Contains(transitions, transition =>
+        transition.ResourceId == "b" &&
+        transition.State == ExecutionState.Completed &&
+        transition.Outcome == ExecutionOutcome.Cancelled);
+    Assert.Contains(transitions, transition =>
+        transition.ResourceId == "c" &&
+        transition.State == ExecutionState.Completed &&
+        transition.Outcome == ExecutionOutcome.Cancelled);
   }
 
   [Fact]

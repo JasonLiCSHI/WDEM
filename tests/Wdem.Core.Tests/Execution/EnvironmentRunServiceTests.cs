@@ -29,6 +29,52 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task InspectAsync_InvalidProfilePreservesValidationDiagnostics()
+  {
+    var error = new StructuredError(
+        WdemErrorCode.ProfileError,
+        "Profile validation failed.",
+        "The profile version is required.");
+    var provider = new ScriptedProvider(Missing("git"));
+    var catalog = new FixedProfileCatalog(new ProfileLoadResult
+    {
+      SourcePath = CanonicalProfilePath,
+      Errors = [error]
+    });
+    var (service, store) = CreateService(provider, catalog: catalog);
+
+    var run = await service.InspectAsync(Request(), CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.Failed, run.Outcome);
+    Assert.Equal(error, Assert.Single(Assert.IsType<ExecutionPlan>(run.Plan).Errors));
+    var stored = await store.GetAsync(
+        run.RunId,
+        CancellationToken.None);
+    Assert.Equal(error, Assert.Single(Assert.IsType<ExecutionPlan>(stored!.Plan).Errors));
+  }
+
+  [Fact]
+  public async Task InspectAsync_InvalidDagPreservesDependencyDiagnostics()
+  {
+    var provider = new ScriptedProvider(Missing("git"));
+    var profile = Profile() with
+    {
+      Resources = new Dictionary<string, ResourceDefinition>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = Profile().Resources["git"] with { Dependencies = ["missing"] }
+      }
+    };
+    var (service, _) = CreateService(provider, profile);
+
+    var run = await service.InspectAsync(Request(), CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.Failed, run.Outcome);
+    var error = Assert.Single(Assert.IsType<ExecutionPlan>(run.Plan).Errors);
+    Assert.Equal(WdemErrorCode.DependencyError, error.Code);
+    Assert.Contains("undefined resource 'missing'", error.Detail, StringComparison.Ordinal);
+  }
+
+  [Fact]
   public async Task RetryAsync_CreatesNewRunAndRedetectsBeforePlanning()
   {
     var provider = new ScriptedProvider(
@@ -56,6 +102,35 @@ public sealed class EnvironmentRunServiceTests
     Assert.True(provider.DetectCalls >= 2);
     Assert.Equal(ExecutionOutcome.NotRequired, retried.ResourceResults["git"].Outcome);
     Assert.Equal(ComplianceStatus.Satisfied, retried.ResourceResults["git"].FinalCompliance);
+  }
+
+  [Fact]
+  public async Task RetryAsync_PlansOnlyRequestedResourcesAndTheirDependencies()
+  {
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      DetectState = resource => resource.Id == "git"
+          ? Missing("git")
+          : new DetectedState
+          {
+            ResourceId = resource.Id,
+            Outcome = DetectionOutcome.Failed,
+            Error = "unrelated detection failed"
+          }
+    };
+    var (service, store) = CreateService(provider, Profile(includeBrokenResource: true));
+    var prior = FailedRun("git", "broken");
+    await store.CreateAsync(prior, CancellationToken.None);
+
+    var retried = await service.RetryAsync(
+        prior.RunId,
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "git" },
+        CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.Succeeded, retried.ResourceResults["git"].Outcome);
+    Assert.Equal(["git"], provider.DetectedResourceIds);
+    Assert.Equal(["git"], retried.Plan!.Resources.Select(resource => resource.Definition.Id));
+    Assert.Equal(1, provider.ApplyCalls);
   }
 
   [Fact]
@@ -88,6 +163,50 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task ApplyAsync_NotRequiredCannotSucceedWhenResourceStillNeedsRemediation()
+  {
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyResult = new ResourceApplyResult
+      {
+        ResourceId = "git",
+        Outcome = ApplyOutcome.NotRequired
+      }
+    };
+    var (service, _) = CreateService(provider);
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.Failed, run.Outcome);
+    Assert.Equal(ExecutionOutcome.Failed, run.ResourceResults["git"].Outcome);
+    Assert.Equal(ComplianceStatus.Missing, run.ResourceResults["git"].FinalCompliance);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_UnexecutablePlanPreservesSatisfiedResourceEvidence()
+  {
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      DetectState = resource => resource.Id == "git"
+          ? Satisfied("git", "2.52.1")
+          : new DetectedState
+          {
+            ResourceId = resource.Id,
+            Outcome = DetectionOutcome.Failed,
+            Error = "detection failed"
+          }
+    };
+    var (service, _) = CreateService(provider, Profile(includeBrokenResource: true));
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.NotRequired, run.ResourceResults["git"].Outcome);
+    Assert.Equal(ComplianceStatus.Satisfied, run.ResourceResults["git"].FinalCompliance);
+    Assert.Equal(ExecutionOutcome.Failed, run.ResourceResults["broken"].Outcome);
+    Assert.Equal(ComplianceStatus.DetectionFailed, run.ResourceResults["broken"].FinalCompliance);
+  }
+
+  [Fact]
   public async Task ApplyAsync_PersistsVerifiedResultBeforeCompletingRun()
   {
     var provider = new ScriptedProvider(Missing("git"));
@@ -100,6 +219,57 @@ public sealed class EnvironmentRunServiceTests
         snapshot.State == ExecutionState.Running &&
         snapshot.ResourceResults["git"].State == ExecutionState.Completed &&
         snapshot.ResourceResults["git"].Outcome == ExecutionOutcome.Succeeded);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_PersistsSchedulerReadyAndBlockedTransitions()
+  {
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      DetectState = resource => Missing(resource.Id),
+      ApplyResult = new ResourceApplyResult
+      {
+        ResourceId = "git",
+        Outcome = ApplyOutcome.Failed,
+        Error = ProviderError("git", "apply failed")
+      }
+    };
+    var (service, store) = CreateService(provider, Profile(includeDependentResource: true));
+
+    await service.ApplyAsync(Request(), CancellationToken.None);
+
+    Assert.Contains(store.SavedSnapshots, snapshot =>
+        snapshot.State == ExecutionState.Running &&
+        snapshot.ResourceResults["git"].State == ExecutionState.Ready);
+    Assert.Contains(store.SavedSnapshots, snapshot =>
+        snapshot.State == ExecutionState.Running &&
+        snapshot.ResourceResults["dependent"].State == ExecutionState.Blocked);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_PersistsCancelledTerminalStateWithIndependentIoToken()
+  {
+    using var cancellation = new CancellationTokenSource();
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyOperation = _ =>
+      {
+        cancellation.Cancel();
+        return ValueTask.FromResult(new ResourceApplyResult
+        {
+          ResourceId = "git",
+          Outcome = ApplyOutcome.Cancelled
+        });
+      }
+    };
+    var (service, store) = CreateService(provider);
+
+    var run = await service.ApplyAsync(Request(), cancellation.Token);
+
+    Assert.Equal(ExecutionState.Completed, run.State);
+    Assert.Equal(ExecutionOutcome.Cancelled, run.Outcome);
+    Assert.Equal(ExecutionOutcome.Cancelled, run.ResourceResults["git"].Outcome);
+    Assert.Equal(run, await store.GetAsync(run.RunId, CancellationToken.None));
   }
 
   [Fact]
@@ -124,6 +294,91 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task FindRecoveryCandidatesAsync_IncludesCompletedRunWithPendingRestart()
+  {
+    var provider = new ScriptedProvider(Satisfied("git", "2.52.1"));
+    var (service, store) = CreateService(provider);
+    var completedAt = DateTimeOffset.UtcNow;
+    var pendingRestart = FailedRun("git") with
+    {
+      State = ExecutionState.Completed,
+      Outcome = ExecutionOutcome.Succeeded,
+      EndedAtUtc = completedAt,
+      RestartRequirements = [RestartPolicy.RestartRequired],
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = new()
+        {
+          ResourceId = "git",
+          State = ExecutionState.Completed,
+          Outcome = ExecutionOutcome.Succeeded,
+          FinalCompliance = ComplianceStatus.Satisfied,
+          EndedAtUtc = completedAt,
+          RestartRequirement = RestartPolicy.RestartRequired
+        }
+      }
+    };
+    await store.CreateAsync(pendingRestart, CancellationToken.None);
+
+    var candidates = await service.FindRecoveryCandidatesAsync(CancellationToken.None);
+
+    var candidate = Assert.Single(candidates);
+    Assert.Equal(pendingRestart.RunId, candidate.RunId);
+    Assert.Equal(["git"], candidate.PendingResourceIds);
+  }
+
+  [Fact]
+  public async Task FindRecoveryCandidatesAsync_DiscoversRunPersistedBeforeProviderCompletes()
+  {
+    var applyEntered = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var releaseApply = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyOperation = async cancellationToken =>
+      {
+        applyEntered.SetResult();
+        await releaseApply.Task.WaitAsync(cancellationToken);
+        return new ResourceApplyResult
+        {
+          ResourceId = "git",
+          Outcome = ApplyOutcome.Succeeded
+        };
+      }
+    };
+    var sharedRuns = new Dictionary<Guid, ExecutionRun>();
+    var firstStore = new InMemoryRunStore(sharedRuns);
+    var (service, _) = CreateService(provider, store: firstStore);
+    var applyTask = service.ApplyAsync(Request(), CancellationToken.None);
+
+    try
+    {
+      await applyEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+      var secondStore = new InMemoryRunStore(sharedRuns);
+      var (recoveryService, _) = CreateService(
+          new ScriptedProvider(Missing("git")),
+          store: secondStore);
+      var persisted = Assert.Single(
+          await secondStore.ListAsync(CancellationToken.None));
+      var candidates = await recoveryService.FindRecoveryCandidatesAsync(
+          CancellationToken.None);
+
+      Assert.Equal(ExecutionState.Running, persisted.State);
+      Assert.Equal(ExecutionState.Running, persisted.ResourceResults["git"].State);
+      var candidate = Assert.Single(candidates);
+      Assert.Equal(persisted.RunId, candidate.RunId);
+      Assert.Equal(["git"], candidate.PendingResourceIds);
+    }
+    finally
+    {
+      releaseApply.TrySetResult();
+      await applyTask;
+    }
+  }
+
+  [Fact]
   public async Task AbandonAsync_CompletesInterruptedRunAsCancelledWithoutApplying()
   {
     var provider = new ScriptedProvider(Missing("git"));
@@ -141,12 +396,15 @@ public sealed class EnvironmentRunServiceTests
   }
 
   private static (EnvironmentRunService Service, InMemoryRunStore Store) CreateService(
-      ScriptedProvider provider)
+      ScriptedProvider provider,
+      DeveloperProfile? profile = null,
+      IProfileCatalog? catalog = null,
+      InMemoryRunStore? store = null)
   {
-    var catalog = new FakeProfileCatalog(Profile(), CanonicalProfilePath);
+    catalog ??= new FakeProfileCatalog(profile ?? Profile(), CanonicalProfilePath);
     var registry = new ResourceProviderRegistry([provider]);
     var compliance = new ComplianceEvaluator();
-    var store = new InMemoryRunStore();
+    store ??= new InMemoryRunStore();
     return (
         new EnvironmentRunService(
             catalog,
@@ -164,24 +422,87 @@ public sealed class EnvironmentRunServiceTests
       "input/profile.yaml",
       new HashSet<string>(StringComparer.OrdinalIgnoreCase));
 
-  private static DeveloperProfile Profile() => new()
+  private static DeveloperProfile Profile(
+      bool includeBrokenResource = false,
+      bool includeDependentResource = false)
   {
-    Id = "developer",
-    Version = "1.0.0",
-    DisplayName = "Developer",
-    Description = "Developer workstation",
-    RequiredResources = [new ProfileResourceReference { Id = "git" }],
-    Resources = new Dictionary<string, ResourceDefinition>(StringComparer.OrdinalIgnoreCase)
+    var required = new List<ProfileResourceReference>
     {
-      ["git"] = new()
+      new() { Id = "git" }
+    };
+    var resources = new Dictionary<string, ResourceDefinition>(StringComparer.OrdinalIgnoreCase)
+    {
+      ["git"] = new ResourceDefinition
       {
         Id = "git",
         Type = "package",
         Provider = "fake",
         VersionConstraint = ">=2.50.0"
       }
+    };
+    if (includeBrokenResource)
+    {
+      required.Add(new ProfileResourceReference { Id = "broken" });
+      resources.Add("broken", new ResourceDefinition
+      {
+        Id = "broken",
+        Type = "package",
+        Provider = "fake"
+      });
     }
-  };
+
+    if (includeDependentResource)
+    {
+      required.Add(new ProfileResourceReference { Id = "dependent" });
+      resources.Add("dependent", new ResourceDefinition
+      {
+        Id = "dependent",
+        Type = "package",
+        Provider = "fake",
+        Dependencies = ["git"]
+      });
+    }
+
+    return new DeveloperProfile
+    {
+      Id = "developer",
+      Version = "1.0.0",
+      DisplayName = "Developer",
+      Description = "Developer workstation",
+      RequiredResources = required,
+      Resources = resources
+    };
+  }
+
+  private static ExecutionRun FailedRun(params string[] resourceIds)
+  {
+    var endedAt = DateTimeOffset.UtcNow;
+    return new ExecutionRun
+    {
+      RunId = Guid.NewGuid(),
+      Mode = RunMode.Apply,
+      ProfileSourcePath = CanonicalProfilePath,
+      ProfileId = "developer",
+      ProfileVersion = "1.0.0",
+      SelectedOptionalResourceIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+      StartedAtUtc = endedAt.AddMinutes(-1),
+      EndedAtUtc = endedAt,
+      State = ExecutionState.Completed,
+      Outcome = ExecutionOutcome.Failed,
+      Machine = new MachineInformation("test", "x64", "test", "test"),
+      ResourceResults = resourceIds.ToDictionary(
+          id => id,
+          id => new ResourceResult
+          {
+            ResourceId = id,
+            State = ExecutionState.Completed,
+            Outcome = ExecutionOutcome.Failed,
+            FinalCompliance = ComplianceStatus.Missing,
+            EndedAtUtc = endedAt
+          },
+          StringComparer.OrdinalIgnoreCase)
+    };
+  }
 
   private static ExecutionRun InterruptedRun() => new()
   {
@@ -263,6 +584,26 @@ public sealed class EnvironmentRunServiceTests
         [await LoadFileAsync(sourcePath, cancellationToken)];
   }
 
+  private sealed class FixedProfileCatalog(ProfileLoadResult result) : IProfileCatalog
+  {
+    public Task<ProfileLoadResult> LoadAsync(
+        string id,
+        CancellationToken cancellationToken = default) =>
+        LoadFileAsync(result.SourcePath, cancellationToken);
+
+    public Task<ProfileLoadResult> LoadFileAsync(
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      return Task.FromResult(result);
+    }
+
+    public Task<IReadOnlyList<ProfileLoadResult>> LoadAllAsync(
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<ProfileLoadResult>>([result]);
+  }
+
   private sealed class ScriptedProvider(params DetectedState[] states) : IResourceProvider
   {
     private readonly Queue<DetectedState> _states = new(states);
@@ -276,6 +617,9 @@ public sealed class EnvironmentRunServiceTests
     public int DetectCalls { get; private set; }
     public int ApplyCalls { get; private set; }
     public int VerifyCalls { get; private set; }
+    public Func<ResourceDefinition, DetectedState>? DetectState { get; init; }
+    public Func<CancellationToken, ValueTask<ResourceApplyResult>>? ApplyOperation { get; init; }
+    public List<string> DetectedResourceIds { get; } = [];
     public ResourceApplyResult ApplyResult { get; init; } = new()
     {
       ResourceId = "git",
@@ -306,6 +650,12 @@ public sealed class EnvironmentRunServiceTests
     {
       cancellationToken.ThrowIfCancellationRequested();
       DetectCalls++;
+      DetectedResourceIds.Add(resource.Id);
+      if (DetectState is not null)
+      {
+        return ValueTask.FromResult(DetectState(resource));
+      }
+
       if (_states.Count > 1)
       {
         return ValueTask.FromResult(_states.Dequeue());
@@ -319,16 +669,19 @@ public sealed class EnvironmentRunServiceTests
         DetectedState currentState,
         CancellationToken cancellationToken)
     {
-      var satisfied = currentState.Exists;
+      var detectionSucceeded = currentState.Outcome == DetectionOutcome.Succeeded;
+      var satisfied = detectionSucceeded && currentState.Exists;
       return ValueTask.FromResult(new ResourcePlan
       {
         ResourceId = resource.Id,
         ResourceType = resource.Type,
         ProviderName = resource.Provider,
         DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(resource),
-        Compliance = satisfied ? ComplianceStatus.Satisfied : ComplianceStatus.Missing,
-        IsExecutable = true,
-        Steps = satisfied
+        Compliance = !detectionSucceeded
+            ? ComplianceStatus.DetectionFailed
+            : satisfied ? ComplianceStatus.Satisfied : ComplianceStatus.Missing,
+        IsExecutable = detectionSucceeded,
+        Steps = satisfied || !detectionSucceeded
             ? []
             :
             [
@@ -351,7 +704,7 @@ public sealed class EnvironmentRunServiceTests
         CancellationToken cancellationToken)
     {
       ApplyCalls++;
-      return ValueTask.FromResult(ApplyResult);
+      return ApplyOperation?.Invoke(cancellationToken) ?? ValueTask.FromResult(ApplyResult);
     }
 
     public ValueTask<VerificationResult> VerifyAsync(
@@ -365,7 +718,12 @@ public sealed class EnvironmentRunServiceTests
 
   private sealed class InMemoryRunStore : IExecutionRunStore
   {
-    private readonly Dictionary<Guid, ExecutionRun> _runs = [];
+    private readonly Dictionary<Guid, ExecutionRun> _runs;
+
+    public InMemoryRunStore(Dictionary<Guid, ExecutionRun>? runs = null)
+    {
+      _runs = runs ?? [];
+    }
 
     public IReadOnlyList<StructuredError> Diagnostics => [];
     public List<ExecutionRun> SavedSnapshots { get; } = [];
@@ -392,6 +750,12 @@ public sealed class EnvironmentRunServiceTests
           .Where(run => run.State != ExecutionState.Completed)
           .ToArray();
       return Task.FromResult(result);
+    }
+
+    public Task<IReadOnlyList<ExecutionRun>> ListAsync(CancellationToken cancellationToken)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      return Task.FromResult<IReadOnlyList<ExecutionRun>>(_runs.Values.ToArray());
     }
 
     public Task SaveAsync(ExecutionRun run, CancellationToken cancellationToken)

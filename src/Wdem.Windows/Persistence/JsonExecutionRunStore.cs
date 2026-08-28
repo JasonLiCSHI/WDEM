@@ -88,6 +88,13 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
   public async Task<IReadOnlyList<ExecutionRun>> ListIncompleteAsync(
       CancellationToken cancellationToken)
   {
+    var runs = await ListAsync(cancellationToken).ConfigureAwait(false);
+    return runs.Where(run => run.State != ExecutionState.Completed).ToArray();
+  }
+
+  public async Task<IReadOnlyList<ExecutionRun>> ListAsync(
+      CancellationToken cancellationToken)
+  {
     cancellationToken.ThrowIfCancellationRequested();
     if (!Directory.Exists(_paths.RunsDirectory))
     {
@@ -101,18 +108,18 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
         .Select(runId => runId!.Value)
         .OrderBy(runId => runId)
         .ToArray();
-    var incomplete = new List<ExecutionRun>();
+    var runs = new List<ExecutionRun>();
     foreach (var runId in runIds)
     {
       cancellationToken.ThrowIfCancellationRequested();
       var run = await GetAsync(runId, cancellationToken).ConfigureAwait(false);
-      if (run is not null && run.State != ExecutionState.Completed)
+      if (run is not null)
       {
-        incomplete.Add(run);
+        runs.Add(run);
       }
     }
 
-    return incomplete;
+    return runs;
   }
 
   public async Task SaveAsync(ExecutionRun run, CancellationToken cancellationToken)

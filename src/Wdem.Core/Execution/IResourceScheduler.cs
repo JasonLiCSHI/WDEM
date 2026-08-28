@@ -11,5 +11,6 @@ public interface IResourceScheduler
       Func<PlannedResource, CancellationToken, Task<ResourceResult>> executeAsync,
       Func<PlannedResource, ProviderCapabilities> capabilitiesFor,
       int maximumConcurrency,
-      CancellationToken cancellationToken);
+      CancellationToken cancellationToken,
+      Func<ResourceResult, Task>? transitionAsync = null);
 }

@@ -14,7 +14,8 @@ public sealed class ResourceScheduler : IResourceScheduler
       Func<PlannedResource, CancellationToken, Task<ResourceResult>> executeAsync,
       Func<PlannedResource, ProviderCapabilities> capabilitiesFor,
       int maximumConcurrency,
-      CancellationToken cancellationToken)
+      CancellationToken cancellationToken,
+      Func<ResourceResult, Task>? transitionAsync = null)
   {
     ArgumentNullException.ThrowIfNull(plan);
     ArgumentNullException.ThrowIfNull(executeAsync);
@@ -71,19 +72,28 @@ public sealed class ResourceScheduler : IResourceScheduler
       {
         if (cancellationToken.IsCancellationRequested)
         {
-          CompleteRemainingAsCancelled(resources, remaining, results);
+          await CompleteRemainingAsCancelledAsync(
+              resources,
+              remaining,
+              results,
+              transitionAsync).ConfigureAwait(false);
         }
         else
         {
-          var madeProgress = BlockFailedDependents(
+          var madeProgress = await BlockFailedDependentsAsync(
               resources,
               resourcesById,
               remaining,
               results,
-              rootFailures);
+              rootFailures,
+              transitionAsync).ConfigureAwait(false);
           if (cancellationToken.IsCancellationRequested)
           {
-            CompleteRemainingAsCancelled(resources, remaining, results);
+            await CompleteRemainingAsCancelledAsync(
+                resources,
+                remaining,
+                results,
+                transitionAsync).ConfigureAwait(false);
           }
           else
           {
@@ -99,19 +109,26 @@ public sealed class ResourceScheduler : IResourceScheduler
               }
 
               var id = resource.Definition.Id;
-              results[id] = Ready(id);
+              var readyResult = Ready(id);
+              await NotifyTransitionAsync(transitionAsync, readyResult).ConfigureAwait(false);
+              results[id] = readyResult;
               remaining.Remove(id);
               running.Add(id, ExecuteOneAsync(
                   resource,
                   executeAsync,
                   globalSemaphore,
                   providerSemaphores[scheduling.GroupsByResource[id]],
-                  cancellationToken));
+                  cancellationToken,
+                  transitionAsync));
             }
 
             if (cancellationToken.IsCancellationRequested)
             {
-              CompleteRemainingAsCancelled(resources, remaining, results);
+              await CompleteRemainingAsCancelledAsync(
+                  resources,
+                  remaining,
+                  results,
+                  transitionAsync).ConfigureAwait(false);
             }
             else if (ready.Length == 0 && running.Count == 0 && remaining.Count > 0)
             {
@@ -120,7 +137,12 @@ public sealed class ResourceScheduler : IResourceScheduler
                 continue;
               }
 
-              BlockUnsatisfiedResources(resources, remaining, results, rootFailures);
+              await BlockUnsatisfiedResourcesAsync(
+                  resources,
+                  remaining,
+                  results,
+                  rootFailures,
+                  transitionAsync).ConfigureAwait(false);
               break;
             }
           }
@@ -141,6 +163,7 @@ public sealed class ResourceScheduler : IResourceScheduler
         {
           var execution = await running[id].ConfigureAwait(false);
           running.Remove(id);
+          await NotifyTransitionAsync(transitionAsync, execution.Result).ConfigureAwait(false);
           results[id] = execution.Result;
           if (IsBlockingOutcome(execution.Result.Outcome))
           {
@@ -221,12 +244,13 @@ public sealed class ResourceScheduler : IResourceScheduler
     return ordered;
   }
 
-  private static bool BlockFailedDependents(
+  private static async Task<bool> BlockFailedDependentsAsync(
       IReadOnlyList<PlannedResource> resources,
       IReadOnlyDictionary<string, PlannedResource> resourcesById,
       ISet<string> remaining,
       IDictionary<string, ResourceResult> results,
-      IDictionary<string, string> rootFailures)
+      IDictionary<string, string> rootFailures,
+      Func<ResourceResult, Task>? transitionAsync)
   {
     var madeProgress = false;
     bool blockedInPass;
@@ -253,7 +277,9 @@ public sealed class ResourceScheduler : IResourceScheduler
         var rootFailure = rootFailures.TryGetValue(failedDependency, out var root)
             ? root
             : failedDependency;
-        results[id] = Blocked(id, rootFailure);
+        var blocked = Blocked(id, rootFailure);
+        await NotifyTransitionAsync(transitionAsync, blocked).ConfigureAwait(false);
+        results[id] = blocked;
         rootFailures[id] = rootFailure;
         remaining.Remove(id);
         madeProgress = true;
@@ -273,11 +299,12 @@ public sealed class ResourceScheduler : IResourceScheduler
           result.State == ExecutionState.Completed &&
           result.Outcome is ExecutionOutcome.Succeeded or ExecutionOutcome.NotRequired);
 
-  private static void BlockUnsatisfiedResources(
+  private static async Task BlockUnsatisfiedResourcesAsync(
       IReadOnlyList<PlannedResource> resources,
       ISet<string> remaining,
       IDictionary<string, ResourceResult> results,
-      IDictionary<string, string> rootFailures)
+      IDictionary<string, string> rootFailures,
+      Func<ResourceResult, Task>? transitionAsync)
   {
     foreach (var resource in resources)
     {
@@ -288,21 +315,26 @@ public sealed class ResourceScheduler : IResourceScheduler
       }
 
       var dependency = resource.Dependencies.FirstOrDefault() ?? id;
-      results[id] = Blocked(id, dependency);
+      var blocked = Blocked(id, dependency);
+      await NotifyTransitionAsync(transitionAsync, blocked).ConfigureAwait(false);
+      results[id] = blocked;
       rootFailures[id] = dependency;
     }
   }
 
-  private static void CompleteRemainingAsCancelled(
+  private static async Task CompleteRemainingAsCancelledAsync(
       IReadOnlyList<PlannedResource> resources,
       ISet<string> remaining,
-      IDictionary<string, ResourceResult> results)
+      IDictionary<string, ResourceResult> results,
+      Func<ResourceResult, Task>? transitionAsync)
   {
     foreach (var resource in resources)
     {
       if (remaining.Remove(resource.Definition.Id))
       {
-        results[resource.Definition.Id] = Cancelled(resource.Definition.Id);
+        var cancelled = Cancelled(resource.Definition.Id);
+        await NotifyTransitionAsync(transitionAsync, cancelled).ConfigureAwait(false);
+        results[resource.Definition.Id] = cancelled;
       }
     }
   }
@@ -312,7 +344,8 @@ public sealed class ResourceScheduler : IResourceScheduler
       Func<PlannedResource, CancellationToken, Task<ResourceResult>> executeAsync,
       SemaphoreSlim globalSemaphore,
       SemaphoreSlim providerSemaphore,
-      CancellationToken cancellationToken)
+      CancellationToken cancellationToken,
+      Func<ResourceResult, Task>? transitionAsync)
   {
     var providerAcquired = false;
     var globalAcquired = false;
@@ -327,6 +360,7 @@ public sealed class ResourceScheduler : IResourceScheduler
       cancellationToken.ThrowIfCancellationRequested();
 
       startedAt = DateTimeOffset.UtcNow;
+      await NotifyTransitionAsync(transitionAsync, Running(id, startedAt.Value)).ConfigureAwait(false);
       var returned = await executeAsync(resource, cancellationToken).ConfigureAwait(false);
       if (returned is null)
       {
@@ -411,6 +445,17 @@ public sealed class ResourceScheduler : IResourceScheduler
     ResourceId = id,
     State = ExecutionState.Ready
   };
+
+  private static ResourceResult Running(string id, DateTimeOffset startedAtUtc) => new()
+  {
+    ResourceId = id,
+    State = ExecutionState.Running,
+    StartedAtUtc = startedAtUtc
+  };
+
+  private static Task NotifyTransitionAsync(
+      Func<ResourceResult, Task>? transitionAsync,
+      ResourceResult result) => transitionAsync?.Invoke(result) ?? Task.CompletedTask;
 
   private static ResourceResult Blocked(string id, string failedDependency) => new()
   {
