@@ -448,6 +448,58 @@ namespace Wdem.LegacySource.Tests.Services.System
       }
     }
 
+    [Fact]
+    public void FailedMigrationFlush_RollsBackInMemoryStateBeforeEngineSaveAndRestart()
+    {
+      var legacyStatePath = Path.Combine(_testDir, "flush-failure-winhome-state.json");
+      var originalLegacyPath = Environment.GetEnvironmentVariable("WINHOME_STATE_PATH");
+      File.WriteAllText(legacyStatePath, JsonSerializer.Serialize(new StateData
+      {
+        AppliedItems = new HashSet<string> { "legacy-package" },
+        SystemSettingOriginals = new Dictionary<string, object> { ["legacy-setting"] = 7 },
+        StepHistory = new Dictionary<string, StepResult>
+        {
+          ["legacy-step"] = new() { StepId = "legacy-step", Status = StepStatus.Succeeded }
+        }
+      }));
+      Directory.CreateDirectory(_stateFilePath);
+
+      try
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", legacyStatePath);
+
+        var serviceWithFailedMigration = CreateService();
+        Assert.True(File.Exists(legacyStatePath));
+
+        Directory.Delete(_stateFilePath);
+        var engineState = serviceWithFailedMigration.LoadState();
+        engineState.AppliedItems.Add("engine-package");
+        serviceWithFailedMigration.SaveState(engineState);
+
+        var migratedState = CreateService().LoadState();
+
+        Assert.Contains("engine-package", migratedState.AppliedItems);
+        Assert.Contains("legacy-package", migratedState.AppliedItems);
+        Assert.Equal("7", migratedState.SystemSettingOriginals["legacy-setting"].ToString());
+        Assert.Equal(StepStatus.Succeeded, migratedState.StepHistory["legacy-step"].Status);
+        Assert.False(File.Exists(legacyStatePath));
+        Assert.Single(Directory.GetFiles(_testDir, "flush-failure-winhome-state.json.migration-backup.*"));
+
+        File.WriteAllText(legacyStatePath, JsonSerializer.Serialize(
+            new StateData { AppliedItems = new HashSet<string> { "replayed-package" } }));
+
+        var restartedState = CreateService().LoadState();
+
+        Assert.Contains("legacy-package", restartedState.AppliedItems);
+        Assert.DoesNotContain("replayed-package", restartedState.AppliedItems);
+        Assert.Equal(2, Directory.GetFiles(_testDir, "flush-failure-winhome-state.json.migration-backup.*").Length);
+      }
+      finally
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", originalLegacyPath);
+      }
+    }
+
     // ── Corrupted JSON ─────────────────────────────────────────────────────────
 
     [Fact]
@@ -590,6 +642,89 @@ namespace Wdem.LegacySource.Tests.Services.System
 
       var written = JsonSerializer.Deserialize<StateData>(File.ReadAllText(_stateFilePath));
       Assert.Equal(items, written?.AppliedItems);
+    }
+
+    [Fact]
+    public void RestoreState_CraftedLedgerCannotPreMarkAnotherMigrationSource()
+    {
+      var backupPath = Path.Combine(_testDir, "crafted-backup.json");
+      var legacyStatePath = Path.Combine(_testDir, "restore-target-winhome-state.json");
+      var originalLegacyPath = Environment.GetEnvironmentVariable("WINHOME_STATE_PATH");
+      File.WriteAllText(backupPath, JsonSerializer.Serialize(new StateData
+      {
+        AppliedItems = new HashSet<string> { "restored-package" },
+        LegacyMigrationSources = new Dictionary<string, string>
+        {
+          [Path.GetFullPath(legacyStatePath)] = "migration-backup"
+        }
+      }));
+      File.WriteAllText(legacyStatePath, JsonSerializer.Serialize(
+          new StateData { AppliedItems = new HashSet<string> { "legacy-source-package" } }));
+
+      try
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", null);
+        var service = CreateService();
+        service.RestoreState(backupPath);
+
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", legacyStatePath);
+        var restartedState = CreateService().LoadState();
+
+        Assert.Contains("restored-package", restartedState.AppliedItems);
+        Assert.Contains("legacy-source-package", restartedState.AppliedItems);
+        Assert.False(File.Exists(legacyStatePath));
+        Assert.Single(Directory.GetFiles(_testDir, "restore-target-winhome-state.json.migration-backup.*"));
+      }
+      finally
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", originalLegacyPath);
+      }
+    }
+
+    [Fact]
+    public void RestoreState_OldBackupCannotEraseExistingMigrationDisposition()
+    {
+      if (!OperatingSystem.IsWindows()) return;
+
+      var backupPath = Path.Combine(_testDir, "old-backup.json");
+      var legacyStatePath = Path.Combine(_testDir, "restore-locked-winhome-state.json");
+      var originalLegacyPath = Environment.GetEnvironmentVariable("WINHOME_STATE_PATH");
+      File.WriteAllText(backupPath, JsonSerializer.Serialize(
+          new StateData { AppliedItems = new HashSet<string> { "restored-package" } }));
+      File.WriteAllText(legacyStatePath, JsonSerializer.Serialize(
+          new StateData { AppliedItems = new HashSet<string> { "initial-legacy-package" } }));
+
+      try
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", legacyStatePath);
+
+        StateService service;
+        using (File.Open(legacyStatePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+          service = CreateService();
+          Assert.True(File.Exists(legacyStatePath));
+        }
+
+        service.RestoreState(backupPath);
+        var restoredOnDisk = JsonSerializer.Deserialize<StateData>(File.ReadAllText(_stateFilePath));
+        Assert.Contains(Path.GetFullPath(legacyStatePath), restoredOnDisk!.LegacyMigrationSources.Keys);
+
+        File.WriteAllText(legacyStatePath, JsonSerializer.Serialize(new StateData
+        {
+          AppliedItems = new HashSet<string> { "initial-legacy-package", "replayed-package" }
+        }));
+
+        var restartedState = CreateService().LoadState();
+
+        Assert.Contains("restored-package", restartedState.AppliedItems);
+        Assert.DoesNotContain("replayed-package", restartedState.AppliedItems);
+        Assert.False(File.Exists(legacyStatePath));
+        Assert.Single(Directory.GetFiles(_testDir, "restore-locked-winhome-state.json.migration-backup.*"));
+      }
+      finally
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", originalLegacyPath);
+      }
     }
 
     // ── Partial-write / incomplete JSON ───────────────────────────────────────

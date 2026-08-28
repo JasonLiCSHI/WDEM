@@ -64,6 +64,7 @@ namespace Wdem.LegacySource.Services.System
 
       lock (_sync)
       {
+        var stateBeforeMigration = CloneStateData(_inMemoryState);
         var pendingMoves = new Dictionary<string, (string Description, string Suffix)>(StringComparer.OrdinalIgnoreCase);
         bool stateChanged = false;
 
@@ -109,6 +110,7 @@ namespace Wdem.LegacySource.Services.System
 
         if (stateChanged && !TryFlushToDisk())
         {
+          _inMemoryState = stateBeforeMigration;
           _logger.LogWarning("[State] Legacy state was not moved because the migration result could not be persisted.");
           return;
         }
@@ -118,6 +120,19 @@ namespace Wdem.LegacySource.Services.System
           BackupMigratedFile(pendingMove.Key, pendingMove.Value.Description, pendingMove.Value.Suffix);
         }
       }
+    }
+
+    private static StateData CloneStateData(StateData state)
+    {
+      return new StateData
+      {
+        AppliedItems = new HashSet<string>(state.AppliedItems),
+        SystemSettingOriginals = new Dictionary<string, object>(state.SystemSettingOriginals),
+        StepHistory = new Dictionary<string, StepResult>(state.StepHistory),
+        LegacyMigrationSources = new Dictionary<string, string>(
+            state.LegacyMigrationSources,
+            StringComparer.OrdinalIgnoreCase)
+      };
     }
 
     private static StateData DeserializeLegacyStateData(string json)
@@ -150,14 +165,47 @@ namespace Wdem.LegacySource.Services.System
 
     private static void ValidateLegacyStateData(StateData state)
     {
-      if (state.AppliedItems is null)
-        throw new JsonException("Legacy state property 'applied_items' must be a collection.");
-      if (state.SystemSettingOriginals is null)
-        throw new JsonException("Legacy state property 'system_setting_originals' must be a collection.");
-      if (state.StepHistory is null)
-        throw new JsonException("Legacy state property 'step_history' must be a collection.");
+      ValidateBusinessStateData(state, "Legacy state");
       if (state.LegacyMigrationSources is null)
         throw new JsonException("Legacy state property 'legacy_migration_sources' must be a collection.");
+    }
+
+    private static StateData DeserializeRestoreStateData(string json)
+    {
+      JsonException? stateDataError;
+      try
+      {
+        var state = JsonSerializer.Deserialize<StateData>(json)
+            ?? throw new JsonException("State backup contained JSON null.");
+        ValidateBusinessStateData(state, "State backup");
+        return state;
+      }
+      catch (JsonException ex)
+      {
+        stateDataError = ex;
+      }
+
+      try
+      {
+        var appliedItems = JsonSerializer.Deserialize<HashSet<string>>(json)
+            ?? throw new JsonException("State backup applied-items data contained JSON null.");
+        return new StateData { AppliedItems = appliedItems };
+      }
+      catch (JsonException ex)
+      {
+        throw new JsonException(
+            $"State backup did not match a supported format: {stateDataError.Message}", ex);
+      }
+    }
+
+    private static void ValidateBusinessStateData(StateData state, string description)
+    {
+      if (state.AppliedItems is null)
+        throw new JsonException($"{description} property 'applied_items' must be a collection.");
+      if (state.SystemSettingOriginals is null)
+        throw new JsonException($"{description} property 'system_setting_originals' must be a collection.");
+      if (state.StepHistory is null)
+        throw new JsonException($"{description} property 'step_history' must be a collection.");
     }
 
     private void AddCandidate(
@@ -446,22 +494,36 @@ namespace Wdem.LegacySource.Services.System
 
     public void RestoreState(string backupPath)
     {
-      try
+      lock (_sync)
       {
-        if (File.Exists(backupPath))
+        try
         {
-          File.Copy(backupPath, _stateFilePath, true);
+          if (!File.Exists(backupPath))
+          {
+            _logger.LogError($"[State] Backup file not found: {backupPath}");
+            return;
+          }
+
+          var restoredState = DeserializeRestoreStateData(File.ReadAllText(backupPath));
+          var stateBeforeRestore = CloneStateData(_inMemoryState);
+          restoredState.LegacyMigrationSources = new Dictionary<string, string>(
+              stateBeforeRestore.LegacyMigrationSources,
+              StringComparer.OrdinalIgnoreCase);
+          _inMemoryState = CloneStateData(restoredState);
+
+          if (!TryFlushToDisk())
+          {
+            _inMemoryState = stateBeforeRestore;
+            _logger.LogError($"[State] Restore failed: Could not persist backup '{backupPath}'.");
+            return;
+          }
+
           _logger.LogSuccess($"[State] State restored from: {backupPath}");
-          _inMemoryState = LoadState();
         }
-        else
+        catch (Exception ex)
         {
-          _logger.LogError($"[State] Backup file not found: {backupPath}");
+          _logger.LogError($"[State] Restore failed: {ex.Message}");
         }
-      }
-      catch (Exception ex)
-      {
-        _logger.LogError($"[State] Restore failed: {ex.Message}");
       }
     }
 
