@@ -355,6 +355,88 @@ public sealed class ResourceSchedulerTests
         blocked.Error?.Detail);
   }
 
+  [Fact]
+  public async Task ExecuteAsync_SucceededResultWithCancelledStep_FailsAndBlocksDependent()
+  {
+    var invoked = new List<string>();
+    var stepStartedAtUtc = new DateTimeOffset(2026, 8, 28, 2, 3, 4, TimeSpan.Zero);
+    var stepEndedAtUtc = stepStartedAtUtc.AddSeconds(1);
+    var result = await _scheduler.ExecuteAsync(
+        ChainPlan("a", "b"),
+        (resource, _) =>
+        {
+          invoked.Add(resource.Definition.Id);
+          return Task.FromResult(Result(resource.Definition.Id, ExecutionOutcome.Succeeded) with
+          {
+            StepResults =
+            [
+              new StepResult
+              {
+                StepId = "install",
+                Name = "Install",
+                State = ExecutionState.Completed,
+                Outcome = ExecutionOutcome.Cancelled,
+                StartedAtUtc = stepStartedAtUtc,
+                EndedAtUtc = stepEndedAtUtc
+              }
+            ]
+          });
+        },
+        _ => new ProviderCapabilities(),
+        maximumConcurrency: 1,
+        CancellationToken.None);
+
+    Assert.Equal(["a"], invoked);
+    var failed = result.Results["a"];
+    Assert.Equal(ExecutionOutcome.Failed, failed.Outcome);
+    Assert.Equal(WdemErrorCode.ProviderError, failed.Error?.Code);
+    Assert.False(failed.Error?.IsRetryable);
+    var step = Assert.Single(failed.StepResults);
+    Assert.Equal(ExecutionOutcome.Cancelled, step.Outcome);
+    Assert.Equal(stepStartedAtUtc, step.StartedAtUtc);
+    Assert.Equal(stepEndedAtUtc, step.EndedAtUtc);
+    Assert.Equal(ExecutionState.Blocked, result.Results["b"].State);
+    Assert.Equal(ExecutionOutcome.Skipped, result.Results["b"].Outcome);
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_SucceededResultWithNonZeroExitCode_FailsAndBlocksDependent()
+  {
+    var invoked = new List<string>();
+    var result = await _scheduler.ExecuteAsync(
+        ChainPlan("a", "b"),
+        (resource, _) =>
+        {
+          invoked.Add(resource.Definition.Id);
+          return Task.FromResult(Result(resource.Definition.Id, ExecutionOutcome.Succeeded) with
+          {
+            StepResults =
+            [
+              new StepResult
+              {
+                StepId = "install",
+                Name = "Install",
+                State = ExecutionState.Completed,
+                Outcome = ExecutionOutcome.Succeeded,
+                ProcessExitCode = 1603
+              }
+            ]
+          });
+        },
+        _ => new ProviderCapabilities(),
+        maximumConcurrency: 1,
+        CancellationToken.None);
+
+    Assert.Equal(["a"], invoked);
+    var failed = result.Results["a"];
+    Assert.Equal(ExecutionOutcome.Failed, failed.Outcome);
+    Assert.Equal(WdemErrorCode.ProviderError, failed.Error?.Code);
+    Assert.False(failed.Error?.IsRetryable);
+    Assert.Equal(1603, Assert.Single(failed.StepResults).ProcessExitCode);
+    Assert.Equal(ExecutionState.Blocked, result.Results["b"].State);
+    Assert.Equal(ExecutionOutcome.Skipped, result.Results["b"].Outcome);
+  }
+
   private static TaskCompletionSource NewGate() =>
       new(TaskCreationOptions.RunContinuationsAsynchronously);
 

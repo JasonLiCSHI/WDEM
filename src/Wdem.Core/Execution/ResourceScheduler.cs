@@ -340,7 +340,19 @@ public sealed class ResourceScheduler : IResourceScheduler
             new InvalidOperationException(
                 "The resource execution delegate returned an invalid outcome."),
             returned.StartedAtUtc ?? startedAt,
-            returned.EndedAtUtc ?? DateTimeOffset.UtcNow));
+            returned.EndedAtUtc ?? DateTimeOffset.UtcNow,
+            returned));
+      }
+
+      if (outcome == ExecutionOutcome.Succeeded && HasUnsuccessfulStepEvidence(returned))
+      {
+        return new CompletedExecution(id, Failed(
+            id,
+            new InvalidOperationException(
+                "The resource execution delegate returned unsuccessful step evidence for a successful outcome."),
+            returned.StartedAtUtc ?? startedAt,
+            returned.EndedAtUtc ?? DateTimeOffset.UtcNow,
+            returned));
       }
 
       var result = returned with
@@ -378,6 +390,11 @@ public sealed class ResourceScheduler : IResourceScheduler
       outcome is ExecutionOutcome.Failed or
           ExecutionOutcome.Cancelled or
           ExecutionOutcome.Skipped;
+
+  private static bool HasUnsuccessfulStepEvidence(ResourceResult result) =>
+      result.StepResults.Any(step =>
+          IsBlockingOutcome(step.Outcome) ||
+          step.ProcessExitCode is { } exitCode && exitCode != 0);
 
   private static ResourceResult Pending(string id) => new()
   {
@@ -432,23 +449,32 @@ public sealed class ResourceScheduler : IResourceScheduler
       string id,
       Exception exception,
       DateTimeOffset? startedAtUtc = null,
-      DateTimeOffset? endedAtUtc = null) => new()
+      DateTimeOffset? endedAtUtc = null,
+      ResourceResult? returned = null)
+  {
+    var result = returned ?? new ResourceResult
+    {
+      ResourceId = id,
+      State = ExecutionState.Completed
+    };
+    return result with
+    {
+      ResourceId = id,
+      State = ExecutionState.Completed,
+      Outcome = ExecutionOutcome.Failed,
+      StartedAtUtc = startedAtUtc,
+      EndedAtUtc = endedAtUtc ?? DateTimeOffset.UtcNow,
+      Error = new StructuredError(
+          WdemErrorCode.ProviderError,
+          "Resource execution failed.",
+          $"The provider failed while executing resource '{id}'.")
       {
         ResourceId = id,
-        State = ExecutionState.Completed,
-        Outcome = ExecutionOutcome.Failed,
-        StartedAtUtc = startedAtUtc,
-        EndedAtUtc = endedAtUtc ?? DateTimeOffset.UtcNow,
-        Error = new StructuredError(
-        WdemErrorCode.ProviderError,
-        "Resource execution failed.",
-        $"The provider failed while executing resource '{id}'.")
-        {
-          ResourceId = id,
-          IsRetryable = false,
-          UnderlyingException = exception
-        }
-      };
+        IsRetryable = false,
+        UnderlyingException = exception
+      }
+    };
+  }
 
   private static SchedulerResult Snapshot(
       IReadOnlyDictionary<string, ResourceResult> results) => new()
