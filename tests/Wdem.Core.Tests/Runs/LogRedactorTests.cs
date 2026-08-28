@@ -21,6 +21,18 @@ public sealed class LogRedactorTests
   }
 
   [Theory]
+  [InlineData("clientSecret=hunter2", "clientSecret=***")]
+  [InlineData("access_token=abc123", "access_token=***")]
+  [InlineData("refresh-token=refresh-value", "refresh-token=***")]
+  [InlineData("passwd: legacy-value", "passwd: ***")]
+  [InlineData("pwd='short-value'", "pwd='***'")]
+  [InlineData("secret=generic-value", "secret=***")]
+  public void Redact_UsesDiagnosticSecretKeySemantics(string input, string expected)
+  {
+    Assert.Equal(expected, _redactor.Redact(input));
+  }
+
+  [Theory]
   [InlineData("Bearer abc.def.ghi", "Bearer ***")]
   [InlineData("using bEaReR ABC123-token", "using bEaReR ***")]
   [InlineData("Bearer abc.def.ghi, retry scheduled", "Bearer ***, retry scheduled")]
@@ -35,6 +47,12 @@ public sealed class LogRedactorTests
       string expected)
   {
     Assert.Equal(expected, _redactor.Redact(input));
+  }
+
+  [Fact]
+  public void Redact_RemovesBearerCredentialFromEqualsAuthorizationHeader()
+  {
+    Assert.Equal("Authorization=Bearer ***", _redactor.Redact("Authorization=Bearer short"));
   }
 
   [Theory]
@@ -66,6 +84,19 @@ public sealed class LogRedactorTests
     Assert.DoesNotContain("certificate-body", result, StringComparison.Ordinal);
     Assert.Contains("provider diagnostic before", result, StringComparison.Ordinal);
     Assert.Contains("provider diagnostic after", result, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void Redact_BoundsRepeatedUnterminatedPemBlocksAndRemovesTheirPayloads()
+  {
+    var input = string.Concat(Enumerable.Repeat(
+        "-----BEGIN PRIVATE KEY-----\nprivate-line\n",
+        1024));
+
+    var result = _redactor.Redact(input);
+
+    Assert.Equal("-----BEGIN PRIVATE KEY-----\n***", result);
+    Assert.DoesNotContain("private-line", result, StringComparison.Ordinal);
   }
 
   [Fact]

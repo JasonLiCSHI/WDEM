@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Wdem.Core.Execution;
 using Wdem.Core.Graph;
 using Wdem.Core.Planning;
@@ -19,6 +21,14 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   public JsonExecutionRunStoreTests()
   {
     _store = new JsonExecutionRunStore(new WdemDataPaths(_directory), new LogRedactor());
+  }
+
+  [Fact]
+  public void Diagnostics_AreAvailableThroughStoreContract()
+  {
+    IExecutionRunStore store = _store;
+
+    Assert.Empty(store.Diagnostics);
   }
 
   [Fact]
@@ -162,6 +172,21 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task GetAsync_RestoresGraphAndParameterCaseInsensitivityAndImmutability()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+
+    var nodes = restored!.Graph!.Nodes;
+    var parameters = nodes["GIT"].Definition.Parameters;
+    Assert.Equal("user", parameters["SCOPE"]);
+    Assert.True(((ICollection<KeyValuePair<string, ResolvedResource>>)nodes).IsReadOnly);
+    Assert.True(((ICollection<KeyValuePair<string, string?>>)parameters).IsReadOnly);
+  }
+
+  [Fact]
   public async Task SaveAsync_AtomicallyReplacesSnapshotAndListsOnlyIncompleteRuns()
   {
     var incomplete = SampleRun();
@@ -190,6 +215,33 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task SaveAsync_CoordinatesAcrossStoreInstances()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    var otherStore = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor());
+    var payload = new string('x', 256 * 1024);
+    var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var saves = Enumerable.Range(1, 16).Select(async index =>
+    {
+      await start.Task;
+      var store = index % 2 == 0 ? _store : otherStore;
+      await store.SaveAsync(
+          run with { RestartReasons = [$"{index}:{payload}"] },
+          CancellationToken.None);
+    }).ToArray();
+
+    start.SetResult();
+    await Task.WhenAll(saves);
+
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+    Assert.NotNull(restored);
+    Assert.Single(restored.RestartReasons);
+  }
+
+  [Fact]
   public async Task ReadLogPageAsync_OrdersAndPagesByExclusiveSequence()
   {
     var run = SampleRun();
@@ -208,6 +260,27 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task ReadLogPageAsync_SeeksFromCursorWithoutParsingEarlierPages()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    foreach (var sequence in Enumerable.Range(1, 3))
+    {
+      await _store.AppendLogAsync(run.RunId, SampleLog(sequence), CancellationToken.None);
+    }
+
+    await using (var stream = new FileStream(
+        _store.LogPath(run.RunId), FileMode.Open, FileAccess.Write, FileShare.Read))
+    {
+      stream.WriteByte((byte)'!');
+    }
+
+    var page = await _store.ReadLogPageAsync(run.RunId, 2, 10, CancellationToken.None);
+
+    Assert.Equal(3, Assert.Single(page).Sequence);
+  }
+
+  [Fact]
   public async Task AppendLogAsync_RejectsDuplicateOrOutOfOrderSequence()
   {
     var run = SampleRun();
@@ -218,6 +291,94 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
         _store.AppendLogAsync(run.RunId, SampleLog(2), CancellationToken.None));
     await Assert.ThrowsAsync<InvalidOperationException>(() =>
         _store.AppendLogAsync(run.RunId, SampleLog(1), CancellationToken.None));
+  }
+
+  [Fact]
+  public async Task AppendLogAsync_CoordinatesLogAndIndexAcrossStoreInstances()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    var otherStore = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor());
+    var payload = new string('x', 256 * 1024);
+
+    foreach (var sequence in Enumerable.Range(1, 16))
+    {
+      var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      async Task AppendAfterStartAsync(JsonExecutionRunStore store)
+      {
+        await start.Task;
+        await store.AppendLogAsync(
+            run.RunId,
+            SampleLog(sequence) with { Message = payload },
+            CancellationToken.None);
+      }
+
+      var attempts = new[]
+      {
+        Record.ExceptionAsync(() => AppendAfterStartAsync(_store)),
+        Record.ExceptionAsync(() => AppendAfterStartAsync(otherStore))
+      };
+      start.SetResult();
+      var errors = await Task.WhenAll(attempts);
+
+      Assert.Single(errors, error => error is null);
+      Assert.Single(errors, error => error is InvalidOperationException);
+    }
+
+    var page = await _store.ReadLogPageAsync(run.RunId, 0, 100, CancellationToken.None);
+    Assert.Equal(Enumerable.Range(1, 16).Select(value => (long)value),
+        page.Select(entry => entry.Sequence));
+  }
+
+  [Fact]
+  public async Task AppendLogAsync_TrimsCrashPartialTailBeforeAppending()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    await _store.AppendLogAsync(run.RunId, SampleLog(1), CancellationToken.None);
+    await File.AppendAllTextAsync(_store.LogPath(run.RunId), "{\"sequence\":");
+
+    await _store.AppendLogAsync(run.RunId, SampleLog(2), CancellationToken.None);
+
+    var page = await _store.ReadLogPageAsync(run.RunId, 0, 10, CancellationToken.None);
+    Assert.Equal([1L, 2L], page.Select(entry => entry.Sequence));
+  }
+
+  [Fact]
+  public async Task AppendLogAsync_PreservesCompleteTailMissingFinalNewline()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    await _store.AppendLogAsync(run.RunId, SampleLog(1), CancellationToken.None);
+    var logPath = _store.LogPath(run.RunId);
+    var existing = (await File.ReadAllTextAsync(logPath)).TrimEnd('\r', '\n');
+    await File.WriteAllTextAsync(logPath, existing);
+
+    await _store.AppendLogAsync(run.RunId, SampleLog(2), CancellationToken.None);
+
+    var page = await _store.ReadLogPageAsync(run.RunId, 0, 10, CancellationToken.None);
+    Assert.Equal([1L, 2L], page.Select(entry => entry.Sequence));
+  }
+
+  [Fact]
+  public async Task AppendLogAsync_UsesPersistedTailMetadataInsteadOfRescanningHistory()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    await _store.AppendLogAsync(run.RunId, SampleLog(1), CancellationToken.None);
+    await _store.AppendLogAsync(run.RunId, SampleLog(2), CancellationToken.None);
+    await using (var stream = new FileStream(
+        _store.LogPath(run.RunId), FileMode.Open, FileAccess.Write, FileShare.Read))
+    {
+      stream.WriteByte((byte)'!');
+    }
+
+    await _store.AppendLogAsync(run.RunId, SampleLog(3), CancellationToken.None);
+
+    var tail = File.ReadLines(_store.LogPath(run.RunId)).Last();
+    Assert.Contains("\"sequence\":3", tail, StringComparison.Ordinal);
   }
 
   [Theory]
@@ -243,6 +404,40 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
         _store.SaveAsync(run with { RunId = Guid.NewGuid() }, CancellationToken.None));
     await Assert.ThrowsAsync<KeyNotFoundException>(() =>
         _store.AppendLogAsync(Guid.NewGuid(), SampleLog(1), CancellationToken.None));
+  }
+
+  [Theory]
+  [InlineData(null, true)]
+  [InlineData(ExecutionOutcome.Succeeded, false)]
+  public async Task CreateAsync_RejectsCompletedRunMissingTerminalFields(
+      ExecutionOutcome? outcome,
+      bool includeEndedAt)
+  {
+    var run = SampleRun() with
+    {
+      State = ExecutionState.Completed,
+      Outcome = outcome,
+      EndedAtUtc = includeEndedAt ? DateTimeOffset.UtcNow : null
+    };
+
+    await Assert.ThrowsAsync<ArgumentException>(() =>
+        _store.CreateAsync(run, CancellationToken.None));
+    Assert.False(File.Exists(_store.SnapshotPath(run.RunId)));
+  }
+
+  [Fact]
+  public async Task SaveAsync_RejectsTerminalFieldsOnIncompleteRun()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+
+    await Assert.ThrowsAsync<ArgumentException>(() => _store.SaveAsync(
+        run with
+        {
+          Outcome = ExecutionOutcome.Succeeded,
+          EndedAtUtc = DateTimeOffset.UtcNow
+        },
+        CancellationToken.None));
   }
 
   [Fact]
@@ -275,6 +470,50 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     Assert.Contains(runId.ToString("D"), diagnostic.Detail, StringComparison.OrdinalIgnoreCase);
   }
 
+  [Theory]
+  [InlineData("selectedOptionalResourceIds")]
+  [InlineData("profileId")]
+  public async Task GetAsync_PreservesSnapshotWithNullRequiredMember(string propertyName)
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    var snapshotPath = _store.SnapshotPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(snapshotPath))!.AsObject();
+    document[propertyName] = null;
+    await File.WriteAllTextAsync(
+        snapshotPath,
+        document.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+
+    Assert.Null(restored);
+    Assert.False(File.Exists(snapshotPath));
+    Assert.Single(Directory.GetFiles(
+        Path.GetDirectoryName(snapshotPath)!, $"{run.RunId:D}.json.corrupted.*"));
+    Assert.Single(_store.Diagnostics);
+  }
+
+  [Fact]
+  public async Task GetAsync_PreservesSnapshotWithInvalidStateCombination()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    var snapshotPath = _store.SnapshotPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(snapshotPath))!.AsObject();
+    document["state"] = "Completed";
+    await File.WriteAllTextAsync(
+        snapshotPath,
+        document.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+
+    Assert.Null(restored);
+    Assert.False(File.Exists(snapshotPath));
+    Assert.Single(Directory.GetFiles(
+        Path.GetDirectoryName(snapshotPath)!, $"{run.RunId:D}.json.corrupted.*"));
+    Assert.Single(_store.Diagnostics);
+  }
+
   [Fact]
   public async Task CreateAndSave_RedactSnapshotMessagesAndErrors()
   {
@@ -301,6 +540,44 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     Assert.DoesNotContain("snapshot-summary", disk, StringComparison.Ordinal);
     Assert.DoesNotContain("snapshot.detail.token", disk, StringComparison.Ordinal);
     Assert.Equal("password=***", restored!.ResourceResults["git"].Message);
+  }
+
+  [Fact]
+  public async Task CreateAsync_RedactsSensitiveProfileParametersByKey()
+  {
+    var definition = SampleDefinition() with
+    {
+      Parameters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["clientSecret"] = "hunter2",
+        ["access_token"] = "abc123",
+        ["scope"] = "user"
+      }
+    };
+    var run = SampleRun() with
+    {
+      Graph = new ResourceGraph(
+          new Dictionary<string, ResolvedResource>(StringComparer.OrdinalIgnoreCase)
+          {
+            ["git"] = new(
+                definition,
+                ResourceOrigin.Required,
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase))
+          },
+          [new ResourceGraphLayer(0, ["git"])])
+    };
+
+    await _store.CreateAsync(run, CancellationToken.None);
+
+    var disk = await File.ReadAllTextAsync(_store.SnapshotPath(run.RunId));
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+    var parameters = restored!.Graph!.Nodes["git"].Definition.Parameters;
+
+    Assert.DoesNotContain("hunter2", disk, StringComparison.Ordinal);
+    Assert.DoesNotContain("abc123", disk, StringComparison.Ordinal);
+    Assert.Equal("***", parameters["clientSecret"]);
+    Assert.Equal("***", parameters["access_token"]);
+    Assert.Equal("user", parameters["scope"]);
   }
 
   [Fact]

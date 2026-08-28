@@ -1,7 +1,11 @@
+using Wdem.Core.Execution;
+
 namespace Wdem.Core.Runs;
 
 public interface IExecutionRunStore
 {
+  IReadOnlyList<StructuredError> Diagnostics { get; }
+
   Task CreateAsync(ExecutionRun run, CancellationToken cancellationToken);
   Task<ExecutionRun?> GetAsync(Guid runId, CancellationToken cancellationToken);
   Task<IReadOnlyList<ExecutionRun>> ListIncompleteAsync(CancellationToken cancellationToken);

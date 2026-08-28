@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.RegularExpressions;
 using Wdem.Core.Execution;
 
@@ -37,14 +38,10 @@ public sealed partial class LogRedactor
   {
     ArgumentNullException.ThrowIfNull(value);
 
-    var redacted = SecretBlockPattern().Replace(value, match =>
-        $"-----BEGIN {match.Groups["type"].Value}-----\n***\n-----END {match.Groups["type"].Value}-----");
+    var redacted = RedactSecretBlocks(value);
     redacted = AuthorizationBearerPattern().Replace(redacted, "${prefix}***");
     redacted = StandaloneBearerCandidatePattern().Replace(redacted, RedactStandaloneBearer);
-    redacted = QuotedAssignmentPattern().Replace(
-        redacted,
-        "${prefix}${quote}***${quote}");
-    redacted = UnquotedAssignmentPattern().Replace(redacted, "${prefix}***");
+    redacted = SensitiveTextRedactor.RedactAssignments(redacted, "***");
 
     string[] sensitiveValues;
     lock (_sensitiveValuesGate)
@@ -77,6 +74,14 @@ public sealed partial class LogRedactor
         RedactNullable(error.UnderlyingExceptionMessage));
   }
 
+  public string? RedactNamedValue(string name, string? value)
+  {
+    ArgumentNullException.ThrowIfNull(name);
+    return value is null
+        ? null
+        : SensitiveTextRedactor.IsSensitiveKey(name) ? "***" : Redact(value);
+  }
+
   public RunLogEntry Redact(RunLogEntry entry)
   {
     ArgumentNullException.ThrowIfNull(entry);
@@ -104,7 +109,7 @@ public sealed partial class LogRedactor
   private string? RedactNullable(string? value) => value is null ? null : Redact(value);
 
   [GeneratedRegex(
-      @"(?<prefix>\bauthorization\s*:\s*bearer\s+)[^\s,;]+",
+      @"(?<prefix>\bauthorization\s*[:=]\s*bearer\s+)[^\s,;]+",
       RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
   private static partial Regex AuthorizationBearerPattern();
 
@@ -112,21 +117,6 @@ public sealed partial class LogRedactor
       @"(?<prefix>\bbearer[ \t]+)(?<token>[a-z0-9._~+/=-]+)",
       RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking)]
   private static partial Regex StandaloneBearerCandidatePattern();
-
-  [GeneratedRegex(
-      "(?<prefix>(?<![a-z0-9_-])[\\\"']?(?:password|token|api[-_]?key|thumbprint)(?![a-z0-9_-])[\\\"']?\\s*[:=]\\s*)(?<quote>[\\\"'])(?:\\\\.|(?!\\k<quote>).)*?\\k<quote>",
-      RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-  private static partial Regex QuotedAssignmentPattern();
-
-  [GeneratedRegex(
-      @"(?<prefix>(?<![a-z0-9_-])[""']?(?:password|token|api[-_]?key|thumbprint)(?![a-z0-9_-])[""']?\s*[:=]\s*)[^\s;,""']+",
-      RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-  private static partial Regex UnquotedAssignmentPattern();
-
-  [GeneratedRegex(
-      @"-----BEGIN (?<type>(?:[A-Z0-9 ]*PRIVATE KEY|CERTIFICATE))-----[\s\S]*?-----END \k<type>-----",
-      RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-  private static partial Regex SecretBlockPattern();
 
   private static string RedactStandaloneBearer(Match match)
   {
@@ -165,4 +155,66 @@ public sealed partial class LogRedactor
   private static bool IsBase64UrlSegment(string segment) =>
       segment.Length > 0
       && segment.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
+
+  private static string RedactSecretBlocks(string value)
+  {
+    const string beginPrefix = "-----BEGIN ";
+    const string markerSuffix = "-----";
+    var searchIndex = 0;
+    var copyIndex = 0;
+    StringBuilder? result = null;
+    while (searchIndex < value.Length)
+    {
+      var beginIndex = value.IndexOf(beginPrefix, searchIndex, StringComparison.OrdinalIgnoreCase);
+      if (beginIndex < 0)
+      {
+        break;
+      }
+
+      var typeStart = beginIndex + beginPrefix.Length;
+      var typeEnd = value.IndexOf(markerSuffix, typeStart, StringComparison.Ordinal);
+      if (typeEnd < 0)
+      {
+        break;
+      }
+
+      var type = value[typeStart..typeEnd];
+      if (!IsSecretBlockType(type))
+      {
+        searchIndex = typeEnd + markerSuffix.Length;
+        continue;
+      }
+
+      result ??= new StringBuilder(value.Length);
+      result.Append(value, copyIndex, beginIndex - copyIndex);
+      result.Append("-----BEGIN ").Append(type).Append("-----\n***");
+
+      var endMarker = $"-----END {type}-----";
+      var endIndex = value.IndexOf(
+          endMarker,
+          typeEnd + markerSuffix.Length,
+          StringComparison.OrdinalIgnoreCase);
+      if (endIndex < 0)
+      {
+        return result.ToString();
+      }
+
+      result.Append('\n').Append(endMarker);
+      copyIndex = endIndex + endMarker.Length;
+      searchIndex = copyIndex;
+    }
+
+    if (result is null)
+    {
+      return value;
+    }
+
+    result.Append(value, copyIndex, value.Length - copyIndex);
+    return result.ToString();
+  }
+
+  private static bool IsSecretBlockType(string type) =>
+      (type.Equals("CERTIFICATE", StringComparison.OrdinalIgnoreCase)
+          || type.EndsWith("PRIVATE KEY", StringComparison.OrdinalIgnoreCase))
+      && type.All(character => char.IsAsciiLetterOrDigit(character) || character == ' ');
 }

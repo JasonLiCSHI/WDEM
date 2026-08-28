@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+using System.Buffers.Binary;
 using System.Collections.Frozen;
 using System.Text;
 using System.Text.Json;
@@ -15,8 +15,8 @@ namespace Wdem.Windows.Persistence;
 public sealed class JsonExecutionRunStore : IExecutionRunStore
 {
   private const int MaximumLogPageSize = 1000;
+  private const int LogIndexRecordSize = sizeof(long) * 3;
   private static readonly UTF8Encoding Utf8WithoutBom = new(false);
-  private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _runLocks = new();
   private readonly object _diagnosticsGate = new();
   private readonly List<StructuredError> _diagnostics = [];
   private readonly WdemDataPaths _paths;
@@ -49,42 +49,35 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
   public string LogPath(Guid runId) =>
       Path.Combine(_paths.RunsDirectory, $"{runId:D}.ndjson");
 
+  public string LogIndexPath(Guid runId) => LogPath(runId) + ".index";
+
   public async Task CreateAsync(ExecutionRun run, CancellationToken cancellationToken)
   {
     ArgumentNullException.ThrowIfNull(run);
+    ValidateRunForPersistence(run);
     cancellationToken.ThrowIfCancellationRequested();
-    var gate = GetRunLock(run.RunId);
-    await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-    try
+    await using var runLock = await AcquireRunLockAsync(run.RunId, cancellationToken)
+        .ConfigureAwait(false);
+    var path = SnapshotPath(run.RunId);
+    if (File.Exists(path))
     {
-      var path = SnapshotPath(run.RunId);
-      if (File.Exists(path))
-      {
-        throw new InvalidOperationException($"Execution run '{run.RunId:D}' already exists.");
-      }
+      throw new InvalidOperationException($"Execution run '{run.RunId:D}' already exists.");
+    }
 
-      Directory.CreateDirectory(_paths.RunsDirectory);
-      await WriteSnapshotAsync(path, Redact(run), cancellationToken).ConfigureAwait(false);
-    }
-    finally
-    {
-      gate.Release();
-    }
+    await WriteSnapshotAsync(path, Redact(run), cancellationToken).ConfigureAwait(false);
   }
 
   public async Task<ExecutionRun?> GetAsync(Guid runId, CancellationToken cancellationToken)
   {
     cancellationToken.ThrowIfCancellationRequested();
-    var gate = GetRunLock(runId);
-    await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-    try
+    if (!Directory.Exists(_paths.RunsDirectory))
     {
-      return await ReadSnapshotAsync(runId, cancellationToken).ConfigureAwait(false);
+      return null;
     }
-    finally
-    {
-      gate.Release();
-    }
+
+    await using var runLock = await AcquireRunLockAsync(runId, cancellationToken)
+        .ConfigureAwait(false);
+    return await ReadSnapshotAsync(runId, cancellationToken).ConfigureAwait(false);
   }
 
   public async Task<IReadOnlyList<ExecutionRun>> ListIncompleteAsync(
@@ -120,19 +113,13 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
   public async Task SaveAsync(ExecutionRun run, CancellationToken cancellationToken)
   {
     ArgumentNullException.ThrowIfNull(run);
+    ValidateRunForPersistence(run);
     cancellationToken.ThrowIfCancellationRequested();
-    var gate = GetRunLock(run.RunId);
-    await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-    try
-    {
-      var path = SnapshotPath(run.RunId);
-      EnsureRunExists(run.RunId, path);
-      await WriteSnapshotAsync(path, Redact(run), cancellationToken).ConfigureAwait(false);
-    }
-    finally
-    {
-      gate.Release();
-    }
+    await using var runLock = await AcquireRunLockAsync(run.RunId, cancellationToken)
+        .ConfigureAwait(false);
+    var path = SnapshotPath(run.RunId);
+    EnsureRunExists(run.RunId, path);
+    await WriteSnapshotAsync(path, Redact(run), cancellationToken).ConfigureAwait(false);
   }
 
   public async Task AppendLogAsync(
@@ -142,39 +129,36 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
   {
     ArgumentNullException.ThrowIfNull(entry);
     cancellationToken.ThrowIfCancellationRequested();
-    var gate = GetRunLock(runId);
-    await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-    try
+    await using var runLock = await AcquireRunLockAsync(runId, cancellationToken)
+        .ConfigureAwait(false);
+    EnsureRunExists(runId, SnapshotPath(runId));
+    var logPath = LogPath(runId);
+    var index = await ReconcileLogIndexAsync(logPath, cancellationToken)
+        .ConfigureAwait(false);
+    if (entry.Sequence <= index.LastSequence)
     {
-      EnsureRunExists(runId, SnapshotPath(runId));
-      var logPath = LogPath(runId);
-      var lastSequence = await ReadLastSequenceAsync(logPath, cancellationToken)
-          .ConfigureAwait(false);
-      if (entry.Sequence <= lastSequence)
-      {
-        throw new InvalidOperationException(
-            $"Log sequence {entry.Sequence} must be greater than {lastSequence} for run '{runId:D}'.");
-      }
+      throw new InvalidOperationException(
+          $"Log sequence {entry.Sequence} must be greater than {index.LastSequence} for run '{runId:D}'.");
+    }
 
-      var persistedEntry = _redactor.Redact(entry);
-      var line = JsonSerializer.Serialize(persistedEntry, _logJsonOptions);
-      await using var stream = new FileStream(
-          logPath,
-          FileMode.Append,
-          FileAccess.Write,
-          FileShare.Read,
-          4096,
-          FileOptions.Asynchronous | FileOptions.WriteThrough);
-      await using var writer = new StreamWriter(stream, Utf8WithoutBom, leaveOpen: true);
-      await writer.WriteLineAsync(line.AsMemory(), cancellationToken).ConfigureAwait(false);
-      await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
-      await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-      stream.Flush(flushToDisk: true);
-    }
-    finally
-    {
-      gate.Release();
-    }
+    var persistedEntry = _redactor.Redact(entry);
+    var line = JsonSerializer.Serialize(persistedEntry, _logJsonOptions) + "\n";
+    var bytes = Utf8WithoutBom.GetBytes(line);
+    await using var stream = new FileStream(
+        logPath,
+        FileMode.Append,
+        FileAccess.Write,
+        FileShare.Read,
+        4096,
+        FileOptions.Asynchronous | FileOptions.WriteThrough);
+    var startOffset = stream.Length;
+    await stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+    await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+    stream.Flush(flushToDisk: true);
+    await AppendLogIndexRecordAsync(
+        logPath,
+        new LogIndexRecord(entry.Sequence, startOffset, stream.Length),
+        cancellationToken).ConfigureAwait(false);
   }
 
   public async Task<IReadOnlyList<RunLogEntry>> ReadLogPageAsync(
@@ -194,48 +178,23 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
     }
 
     cancellationToken.ThrowIfCancellationRequested();
-    var gate = GetRunLock(runId);
-    await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-    try
+    await using var runLock = await AcquireRunLockAsync(runId, cancellationToken)
+        .ConfigureAwait(false);
+    EnsureRunExists(runId, SnapshotPath(runId));
+    var logPath = LogPath(runId);
+    if (!File.Exists(logPath))
     {
-      EnsureRunExists(runId, SnapshotPath(runId));
-      var logPath = LogPath(runId);
-      if (!File.Exists(logPath))
-      {
-        return [];
-      }
-
-      var entries = new List<RunLogEntry>(take);
-      await using var stream = new FileStream(
-          logPath,
-          FileMode.Open,
-          FileAccess.Read,
-          FileShare.ReadWrite,
-          4096,
-          FileOptions.Asynchronous | FileOptions.SequentialScan);
-      using var reader = new StreamReader(stream, Encoding.UTF8);
-      while (entries.Count < take)
-      {
-        cancellationToken.ThrowIfCancellationRequested();
-        var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-        if (line is null)
-        {
-          break;
-        }
-
-        var entry = DeserializeLogEntry(line, logPath);
-        if (entry.Sequence > afterSequence)
-        {
-          entries.Add(entry);
-        }
-      }
-
-      return entries;
+      return [];
     }
-    finally
-    {
-      gate.Release();
-    }
+
+    var index = await ReconcileLogIndexAsync(logPath, cancellationToken)
+        .ConfigureAwait(false);
+    return await ReadIndexedLogPageAsync(
+        logPath,
+        index.Count,
+        afterSequence,
+        take,
+        cancellationToken).ConfigureAwait(false);
   }
 
   private static JsonSerializerOptions CreateJsonOptions(bool writeIndented)
@@ -244,6 +203,8 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
     {
       PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
       PropertyNameCaseInsensitive = true,
+      RespectNullableAnnotations = true,
+      RespectRequiredConstructorParameters = true,
       WriteIndented = writeIndented
     };
     options.Converters.Add(new JsonStringEnumConverter());
@@ -251,8 +212,32 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
     return options;
   }
 
-  private SemaphoreSlim GetRunLock(Guid runId) =>
-      _runLocks.GetOrAdd(runId, static _ => new SemaphoreSlim(1, 1));
+  private async Task<FileStream> AcquireRunLockAsync(
+      Guid runId,
+      CancellationToken cancellationToken)
+  {
+    Directory.CreateDirectory(_paths.RunsDirectory);
+    var lockPath = Path.Combine(_paths.RunsDirectory, $"{runId:D}.lock");
+    while (true)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      try
+      {
+        return new FileStream(
+            lockPath,
+            FileMode.OpenOrCreate,
+            FileAccess.ReadWrite,
+            FileShare.None,
+            1,
+            FileOptions.Asynchronous);
+      }
+      catch (IOException)
+      {
+        await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken)
+            .ConfigureAwait(false);
+      }
+    }
+  }
 
   private async Task<ExecutionRun?> ReadSnapshotAsync(
       Guid runId,
@@ -282,10 +267,14 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
         throw new JsonException("The execution run snapshot has no matching run identifier.");
       }
 
-      return run;
+      ValidateRunForPersistence(run);
+      return SnapshotRestoredRun(run);
     }
     catch (Exception exception) when (
-        exception is JsonException or NotSupportedException or InvalidOperationException)
+        exception is JsonException
+            or NotSupportedException
+            or InvalidOperationException
+            or ArgumentException)
     {
       PreserveCorruptedSnapshot(runId, path, exception);
       return null;
@@ -325,7 +314,7 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
       ExecutionRun run,
       CancellationToken cancellationToken)
   {
-    var temporaryPath = path + ".tmp";
+    var temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
     try
     {
       var bytes = JsonSerializer.SerializeToUtf8Bytes(run, _snapshotJsonOptions);
@@ -361,35 +350,249 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
     }
   }
 
-  private async Task<long> ReadLastSequenceAsync(
+  private async Task<LogIndexState> ReconcileLogIndexAsync(
       string logPath,
       CancellationToken cancellationToken)
   {
     if (!File.Exists(logPath))
     {
-      return 0;
+      return new LogIndexState(0, 0);
     }
 
-    long lastSequence = 0;
-    await using var stream = new FileStream(
+    await using var log = new FileStream(
+        logPath,
+        FileMode.Open,
+        FileAccess.ReadWrite,
+        FileShare.Read,
+        4096,
+        FileOptions.Asynchronous | FileOptions.WriteThrough);
+    await using var index = new FileStream(
+        logPath + ".index",
+        FileMode.OpenOrCreate,
+        FileAccess.ReadWrite,
+        FileShare.Read,
+        4096,
+        FileOptions.Asynchronous | FileOptions.WriteThrough);
+
+    var completeIndexLength = index.Length - (index.Length % LogIndexRecordSize);
+    if (completeIndexLength != index.Length)
+    {
+      index.SetLength(completeIndexLength);
+    }
+
+    var count = completeIndexLength / LogIndexRecordSize;
+    var lastSequence = 0L;
+    var indexedLength = 0L;
+    if (count > 0)
+    {
+      var last = await ReadLogIndexRecordAsync(index, count - 1, cancellationToken)
+          .ConfigureAwait(false);
+      if (last.StartOffset < 0
+          || last.EndOffset <= last.StartOffset
+          || last.EndOffset > log.Length)
+      {
+        index.SetLength(0);
+        count = 0;
+      }
+      else
+      {
+        lastSequence = last.Sequence;
+        indexedLength = last.EndOffset;
+      }
+    }
+
+    log.Position = indexedLength;
+    index.Position = count * LogIndexRecordSize;
+    while (log.Position < log.Length)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      var startOffset = log.Position;
+      var (lineBytes, terminated) = ReadRawLogLine(log, cancellationToken);
+      if (lineBytes.Length == 0 && !terminated)
+      {
+        break;
+      }
+
+      RunLogEntry entry;
+      try
+      {
+        entry = DeserializeLogEntry(DecodeLogLine(lineBytes), logPath);
+      }
+      catch (InvalidDataException) when (!terminated)
+      {
+        log.SetLength(startOffset);
+        break;
+      }
+
+      if (entry.Sequence <= lastSequence)
+      {
+        throw new InvalidDataException(
+            $"Run log '{logPath}' contains a non-increasing sequence.");
+      }
+
+      if (!terminated)
+      {
+        log.Position = log.Length;
+        await log.WriteAsync("\n"u8.ToArray(), cancellationToken).ConfigureAwait(false);
+      }
+
+      var record = new LogIndexRecord(entry.Sequence, startOffset, log.Position);
+      await WriteLogIndexRecordAsync(index, record, cancellationToken).ConfigureAwait(false);
+      count++;
+      lastSequence = entry.Sequence;
+    }
+
+    await log.FlushAsync(cancellationToken).ConfigureAwait(false);
+    log.Flush(flushToDisk: true);
+    await index.FlushAsync(cancellationToken).ConfigureAwait(false);
+    index.Flush(flushToDisk: true);
+    return new LogIndexState(count, lastSequence);
+  }
+
+  private async Task<IReadOnlyList<RunLogEntry>> ReadIndexedLogPageAsync(
+      string logPath,
+      long recordCount,
+      long afterSequence,
+      int take,
+      CancellationToken cancellationToken)
+  {
+    await using var index = new FileStream(
+        logPath + ".index",
+        FileMode.Open,
+        FileAccess.Read,
+        FileShare.ReadWrite,
+        4096,
+        FileOptions.Asynchronous | FileOptions.RandomAccess);
+    var low = 0L;
+    var high = recordCount;
+    while (low < high)
+    {
+      var middle = low + ((high - low) / 2);
+      var record = await ReadLogIndexRecordAsync(index, middle, cancellationToken)
+          .ConfigureAwait(false);
+      if (record.Sequence <= afterSequence)
+      {
+        low = middle + 1;
+      }
+      else
+      {
+        high = middle;
+      }
+    }
+
+    var entries = new List<RunLogEntry>(take);
+    await using var log = new FileStream(
         logPath,
         FileMode.Open,
         FileAccess.Read,
         FileShare.ReadWrite,
         4096,
-        FileOptions.Asynchronous | FileOptions.SequentialScan);
-    using var reader = new StreamReader(stream, Encoding.UTF8);
+        FileOptions.Asynchronous | FileOptions.RandomAccess);
+    for (var ordinal = low; ordinal < recordCount && entries.Count < take; ordinal++)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      var record = await ReadLogIndexRecordAsync(index, ordinal, cancellationToken)
+          .ConfigureAwait(false);
+      var byteCount = record.EndOffset - record.StartOffset;
+      if (byteCount is <= 0 or > int.MaxValue)
+      {
+        throw new InvalidDataException($"Run log index for '{logPath}' is invalid.");
+      }
+
+      var bytes = new byte[(int)byteCount];
+      log.Position = record.StartOffset;
+      await log.ReadExactlyAsync(bytes, cancellationToken).ConfigureAwait(false);
+      var entry = DeserializeLogEntry(DecodeLogLine(bytes), logPath);
+      if (entry.Sequence != record.Sequence)
+      {
+        throw new InvalidDataException($"Run log index for '{logPath}' is inconsistent.");
+      }
+
+      entries.Add(entry);
+    }
+
+    return entries;
+  }
+
+  private static (byte[] Bytes, bool Terminated) ReadRawLogLine(
+      FileStream stream,
+      CancellationToken cancellationToken)
+  {
+    using var line = new MemoryStream();
     while (true)
     {
       cancellationToken.ThrowIfCancellationRequested();
-      var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-      if (line is null)
+      var value = stream.ReadByte();
+      if (value < 0)
       {
-        return lastSequence;
+        return (line.ToArray(), false);
       }
 
-      lastSequence = DeserializeLogEntry(line, logPath).Sequence;
+      if (value == '\n')
+      {
+        return (line.ToArray(), true);
+      }
+
+      line.WriteByte((byte)value);
     }
+  }
+
+  private static string DecodeLogLine(byte[] bytes)
+  {
+    var length = bytes.Length;
+    while (length > 0 && bytes[length - 1] is (byte)'\r' or (byte)'\n')
+    {
+      length--;
+    }
+
+    return Utf8WithoutBom.GetString(bytes, 0, length);
+  }
+
+  private static async Task AppendLogIndexRecordAsync(
+      string logPath,
+      LogIndexRecord record,
+      CancellationToken cancellationToken)
+  {
+    await using var index = new FileStream(
+        logPath + ".index",
+        FileMode.Append,
+        FileAccess.Write,
+        FileShare.Read,
+        4096,
+        FileOptions.Asynchronous | FileOptions.WriteThrough);
+    await WriteLogIndexRecordAsync(index, record, cancellationToken).ConfigureAwait(false);
+    await index.FlushAsync(cancellationToken).ConfigureAwait(false);
+    index.Flush(flushToDisk: true);
+  }
+
+  private static async Task<LogIndexRecord> ReadLogIndexRecordAsync(
+      FileStream index,
+      long ordinal,
+      CancellationToken cancellationToken)
+  {
+    var bytes = new byte[LogIndexRecordSize];
+    index.Position = ordinal * LogIndexRecordSize;
+    await index.ReadExactlyAsync(bytes, cancellationToken).ConfigureAwait(false);
+    return new LogIndexRecord(
+        BinaryPrimitives.ReadInt64LittleEndian(bytes.AsSpan(0, sizeof(long))),
+        BinaryPrimitives.ReadInt64LittleEndian(bytes.AsSpan(sizeof(long), sizeof(long))),
+        BinaryPrimitives.ReadInt64LittleEndian(bytes.AsSpan(sizeof(long) * 2, sizeof(long))));
+  }
+
+  private static async Task WriteLogIndexRecordAsync(
+      FileStream index,
+      LogIndexRecord record,
+      CancellationToken cancellationToken)
+  {
+    var bytes = new byte[LogIndexRecordSize];
+    BinaryPrimitives.WriteInt64LittleEndian(bytes.AsSpan(0, sizeof(long)), record.Sequence);
+    BinaryPrimitives.WriteInt64LittleEndian(
+        bytes.AsSpan(sizeof(long), sizeof(long)),
+        record.StartOffset);
+    BinaryPrimitives.WriteInt64LittleEndian(
+        bytes.AsSpan(sizeof(long) * 2, sizeof(long)),
+        record.EndOffset);
+    await index.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
   }
 
   private RunLogEntry DeserializeLogEntry(string line, string logPath)
@@ -412,6 +615,56 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
       throw new KeyNotFoundException($"Execution run '{runId:D}' does not exist.");
     }
   }
+
+  private static void ValidateRunForPersistence(ExecutionRun run)
+  {
+    if (run.State == ExecutionState.Completed
+        && (run.Outcome is null || run.EndedAtUtc is null))
+    {
+      throw new ArgumentException(
+          "A completed execution run requires both an outcome and an end timestamp.",
+          nameof(run));
+    }
+
+    if (run.State != ExecutionState.Completed
+        && (run.Outcome is not null || run.EndedAtUtc is not null))
+    {
+      throw new ArgumentException(
+          "An incomplete execution run cannot have an outcome or end timestamp.",
+          nameof(run));
+    }
+  }
+
+  private static ExecutionRun SnapshotRestoredRun(ExecutionRun run) => run with
+  {
+    Graph = run.Graph is null ? null : SnapshotRestoredGraph(run.Graph),
+    Plan = run.Plan is null ? null : run.Plan with
+    {
+      Resources = run.Plan.Resources.Select(resource => resource with
+      {
+        Definition = SnapshotRestoredDefinition(resource.Definition)
+      }).ToArray()
+    }
+  };
+
+  private static ResourceGraph SnapshotRestoredGraph(ResourceGraph graph) => graph with
+  {
+    Nodes = graph.Nodes.ToFrozenDictionary(
+        pair => pair.Key,
+        pair => pair.Value with
+        {
+          Definition = SnapshotRestoredDefinition(pair.Value.Definition),
+          RequiredBy = pair.Value.RequiredBy.ToFrozenSet(StringComparer.OrdinalIgnoreCase)
+        },
+        StringComparer.OrdinalIgnoreCase)
+  };
+
+  private static ResourceDefinition SnapshotRestoredDefinition(ResourceDefinition definition) =>
+      definition with
+      {
+        Dependencies = Array.AsReadOnly(definition.Dependencies.ToArray()),
+        Parameters = definition.Parameters.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase)
+      };
 
   private ExecutionRun Redact(ExecutionRun run) => run with
   {
@@ -538,9 +791,16 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
     Dependencies = definition.Dependencies.Select(_redactor.Redact).ToArray(),
     Parameters = definition.Parameters.ToDictionary(
         pair => _redactor.Redact(pair.Key),
-        pair => pair.Value is null ? null : _redactor.Redact(pair.Value),
+        pair => _redactor.RedactNamedValue(pair.Key, pair.Value),
         StringComparer.OrdinalIgnoreCase)
   };
+
+  private readonly record struct LogIndexState(long Count, long LastSequence);
+
+  private readonly record struct LogIndexRecord(
+      long Sequence,
+      long StartOffset,
+      long EndOffset);
 
   private sealed class ReadOnlyStringSetJsonConverter : JsonConverter<IReadOnlySet<string>>
   {

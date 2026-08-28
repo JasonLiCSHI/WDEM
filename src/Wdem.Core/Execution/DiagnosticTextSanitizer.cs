@@ -5,11 +5,6 @@ namespace Wdem.Core.Execution;
 internal static partial class DiagnosticTextSanitizer
 {
   [GeneratedRegex(
-      """(?<prefix>^|[^a-z0-9_"'])(?:"|')?(?<key>(?:password|passwd|pwd|token|access[_-]?token|refresh[_-]?token|client[_-]?secret|api[_-]?key|secret|authorization|[a-z][a-z0-9_-]*[_-](?:token|password|secret)))(?:"|')?[ \t]*[:=][ \t]*(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s;,]+)""",
-      RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.NonBacktracking)]
-  private static partial Regex KeyValueSecretPattern();
-
-  [GeneratedRegex(
       @"\bbearer[ \t]+[^\s,;]+",
       RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.NonBacktracking)]
   private static partial Regex BearerTokenPattern();
@@ -42,7 +37,7 @@ internal static partial class DiagnosticTextSanitizer
         message,
         "Authorization=[REDACTED]");
     sanitized = BearerTokenPattern().Replace(sanitized, "Bearer [REDACTED]");
-    sanitized = KeyValueSecretPattern().Replace(sanitized, "${prefix}${key}=[REDACTED]");
+    sanitized = SensitiveTextRedactor.RedactAssignments(sanitized, "[REDACTED]");
     sanitized = LocalWindowsUserPathPattern().Replace(sanitized, "${prefix}[REDACTED]");
     sanitized = UncUserPathPattern().Replace(sanitized, "${prefix}[REDACTED]");
     return UnixUserPathPattern().Replace(sanitized, "${prefix}[REDACTED]");
