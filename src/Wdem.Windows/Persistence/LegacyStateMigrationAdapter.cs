@@ -488,7 +488,7 @@ public sealed class LegacyStateMigrationAdapter
         !string.Equals(StepNameRedactor.Redact(value), value, StringComparison.Ordinal) ||
         HasKnownCredentialPrefix(value) ||
         HasExplicitCompoundCredentialKey(value) ||
-        LooksLikeHighEntropyCredential(value))
+        LooksLikeUnclassifiedOpaqueToken(value))
     {
       return false;
     }
@@ -539,46 +539,50 @@ public sealed class LegacyStateMigrationAdapter
         normalized.Contains("privatekey", StringComparison.Ordinal);
   }
 
-  private static bool LooksLikeHighEntropyCredential(string value)
+  private static bool LooksLikeUnclassifiedOpaqueToken(string value)
   {
-    if (value.Length < 20 ||
-        !value.All(char.IsLetterOrDigit) ||
-        !value.Any(char.IsUpper) ||
-        !value.Any(char.IsLower) ||
-        !value.Any(char.IsDigit))
+    const int MinimumOpaqueTokenLength = 20;
+    const int MinimumOpaqueHexLength = 32;
+    if (value.Length < MinimumOpaqueTokenLength ||
+        !value.All(char.IsAsciiLetterOrDigit))
     {
       return false;
     }
 
-    var characterClassTransitions = 0;
-    var digitRuns = 0;
-    var previousClass = CharacterClass(value[0]);
-    if (previousClass == 2)
+    if (value.Length >= MinimumOpaqueHexLength && value.All(Uri.IsHexDigit))
     {
-      digitRuns++;
+      return true;
     }
 
-    for (var index = 1; index < value.Length; index++)
-    {
-      var currentClass = CharacterClass(value[index]);
-      if (currentClass != previousClass)
-      {
-        characterClassTransitions++;
-        if (currentClass == 2)
-        {
-          digitRuns++;
-        }
-      }
-
-      previousClass = currentClass;
-    }
-
-    return characterClassTransitions >= 8 && digitRuns >= 3;
+    return CountCamelCaseLexicalWords(value) < 2;
   }
 
-  private static int CharacterClass(char value) => char.IsUpper(value)
-      ? 0
-      : char.IsLower(value) ? 1 : 2;
+  private static int CountCamelCaseLexicalWords(string value)
+  {
+    var count = 0;
+    for (var index = 0; index < value.Length; index++)
+    {
+      if (!char.IsAsciiLetterUpper(value[index]))
+      {
+        continue;
+      }
+
+      var wordEnd = index + 1;
+      while (wordEnd < value.Length && char.IsAsciiLetterLower(value[wordEnd]))
+      {
+        wordEnd++;
+      }
+
+      if (wordEnd - index >= 3)
+      {
+        count++;
+      }
+
+      index = wordEnd - 1;
+    }
+
+    return count;
+  }
 
   private async Task WriteMarkerAtomicallyAsync(
       LegacyMigrationMarker marker,

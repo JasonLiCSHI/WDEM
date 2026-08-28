@@ -274,7 +274,9 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
       "github_pat_1234567890_abcdefghijklmnopqrstuvwxyz",
       "AKIAIOSFODNN7EXAMPLE",
       "myAccessToken",
-      "a8F3kP9zQ2mN7vR4xT6cL1wY"
+      "a8F3kP9zQ2mN7vR4xT6cL1wY",
+      "0123456789abcdef0123456789abcdef01234567",
+      "k7m2q9v4x8n3p6r1t5w0y2z7c4b9d6f3h8j1s5u0"
     }));
     WriteLegacy(".winhome-state.json", """
         {
@@ -295,7 +297,9 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     {
       "super-secret", "quoted-secret", "abc.def.ghi", "Jane", "server", "jane",
       "control", "nested", overlong, "ghp_", "github_pat_", "AKIA",
-      "myAccessToken", "a8F3kP9zQ2mN7vR4xT6cL1wY"
+      "myAccessToken", "a8F3kP9zQ2mN7vR4xT6cL1wY",
+      "0123456789abcdef0123456789abcdef01234567",
+      "k7m2q9v4x8n3p6r1t5w0y2z7c4b9d6f3h8j1s5u0"
     })
     {
       Assert.DoesNotContain(forbidden, marker, StringComparison.OrdinalIgnoreCase);
@@ -309,7 +313,8 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     {
       "1Password",
       "Microsoft.VisualStudio.2022.BuildTools",
-      "VisualStudioBuildTools2022"
+      "VisualStudioBuildTools2022",
+      "VisualStudio17BuildTools2022x64"
     };
     WriteLegacy("state.json", JsonSerializer.Serialize(legitimateLabels));
 
@@ -334,7 +339,8 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
           "importedStepNames": [
             "1Password",
             "Microsoft.VisualStudio.2022.BuildTools",
-            "VisualStudioBuildTools2022"
+            "VisualStudioBuildTools2022",
+            "VisualStudio17BuildTools2022x64"
           ]
         }
         """);
@@ -348,6 +354,9 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
         markerDirectory,
         "migration-v1.invalid-*.json"));
     Assert.Contains("1Password", await File.ReadAllTextAsync(markerPath));
+    Assert.Contains(
+        "VisualStudio17BuildTools2022x64",
+        await File.ReadAllTextAsync(markerPath));
   }
 
   private sealed class RecordingFinalPathResolver(string finalPath) :
