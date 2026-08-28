@@ -30,7 +30,7 @@ jobs:
       uses: oven-sh/setup-bun@v2
 
     - name: Restore solution
-      run: dotnet restore Wdem.sln
+      run: dotnet restore Wdem.sln -p:EnableWindowsTargeting=true
 
     - name: Check Python formatting
       run: |
@@ -41,7 +41,7 @@ jobs:
       run: bun x prettier --check plugins/
 
     - name: Build
-      run: dotnet build Wdem.sln --no-restore
+      run: dotnet build Wdem.sln --no-restore -p:EnableWindowsTargeting=true
 
   test:
     runs-on: windows-latest
@@ -54,7 +54,7 @@ jobs:
         dotnet-version: 10.0.x
 
     - name: Restore dependencies
-      run: dotnet restore Wdem.sln
+      run: dotnet restore Wdem.sln -p:EnableWindowsTargeting=true
 
     - name: Install uv and bun
       shell: pwsh
@@ -65,7 +65,7 @@ jobs:
         echo "$env:USERPROFILE\.bun\bin" >> $env:GITHUB_PATH
 
     - name: Run tests
-      run: dotnet test Wdem.sln --no-restore
+      run: dotnet test Wdem.sln --no-restore -p:EnableWindowsTargeting=true
 
     - name: Test plugin action downloads
       shell: bash

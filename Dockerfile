@@ -8,12 +8,12 @@ COPY src/Wdem.Core/Wdem.Core.csproj src/Wdem.Core/
 COPY src/Wdem.LegacySource/Wdem.LegacySource.csproj src/Wdem.LegacySource/
 COPY tests/Wdem.Core.Tests/Wdem.Core.Tests.csproj tests/Wdem.Core.Tests/
 COPY tests/Wdem.LegacySource.Tests/Wdem.LegacySource.Tests.csproj tests/Wdem.LegacySource.Tests/
-RUN dotnet restore Wdem.sln
+RUN dotnet restore Wdem.sln -p:EnableWindowsTargeting=true
 
 # Copy remaining source code and build the transition libraries
 COPY src/ src/
 COPY tests/ tests/
-RUN dotnet build Wdem.sln -c Release --no-restore
+RUN dotnet build Wdem.sln -c Release --no-restore -p:EnableWindowsTargeting=true
 
 # Stage 2: Artifact Export Layer
 # Product hosts are not present yet; this stage exports the validated build outputs.

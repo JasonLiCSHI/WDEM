@@ -48,7 +48,7 @@
             name = "wdem-build";
             text = ''
               export PATH="${dotnetSdk}/bin:$PATH"
-              exec dotnet build Wdem.sln "$@"
+              exec dotnet build Wdem.sln -p:EnableWindowsTargeting=true "$@"
             '';
           });
 
@@ -56,7 +56,7 @@
             name = "wdem-test";
             text = ''
               export PATH="${dotnetSdk}/bin:$PATH"
-              exec dotnet test Wdem.sln "$@"
+              exec dotnet test Wdem.sln -p:EnableWindowsTargeting=true "$@"
             '';
           });
 
@@ -79,7 +79,7 @@
           name = "wdem-build";
           text = ''
             export PATH="${dotnetSdk}/bin:$PATH"
-            exec dotnet build Wdem.sln "$@"
+            exec dotnet build Wdem.sln -p:EnableWindowsTargeting=true "$@"
           '';
         };
       }
