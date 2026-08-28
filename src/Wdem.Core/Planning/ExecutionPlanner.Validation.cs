@@ -236,17 +236,5 @@ public sealed partial class ExecutionPlanner
   }
 
   private static bool IsValidResourceId(string? value)
-  {
-    if (string.IsNullOrEmpty(value) || value.Length > MaxResourceIdLength ||
-        !IsAsciiLetterOrDigit(value[0]))
-    {
-      return false;
-    }
-
-    return value.All(character =>
-        IsAsciiLetterOrDigit(character) || character is '.' or '_' or '-');
-  }
-
-  private static bool IsAsciiLetterOrDigit(char character) =>
-      character is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9';
+    => !string.IsNullOrWhiteSpace(value);
 }

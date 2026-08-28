@@ -3,6 +3,7 @@ using Wdem.Core.Execution;
 using Wdem.Core.Graph;
 using Wdem.Core.Providers;
 using Wdem.Core.Resources;
+using Wdem.Core.Versions;
 
 namespace Wdem.Core.Planning;
 
@@ -26,8 +27,8 @@ public sealed partial class ExecutionPlanner
       return false;
     }
 
-    if (graph.Nodes.Count > MaxResourceCount ||
-        graph.TopologicalLayers.Count > MaxExternalCollectionCount)
+    if (graph.Nodes.Count is < 0 or > MaxResourceCount ||
+        graph.TopologicalLayers.Count is < 0 or > MaxExternalCollectionCount)
     {
       contractError = GraphBoundaryError(
           "The execution plan is too large.",
@@ -37,13 +38,22 @@ public sealed partial class ExecutionPlanner
     }
 
     var nodes = new Dictionary<string, ResolvedResource>(IdComparer);
+    var nodeCount = 0;
     foreach (var pair in graph.Nodes)
     {
+      if (ExceedsLimit(ref nodeCount, MaxResourceCount))
+      {
+        contractError = GraphBoundaryError(
+            "The execution plan is too large.",
+            $"The graph exceeds the limit of {MaxResourceCount} resources.");
+        return false;
+      }
+
       if (!IsValidResourceId(pair.Key) || pair.Value?.Definition is null)
       {
         contractError = GraphBoundaryError(
             "The resource graph contains a malformed node.",
-            "Graph keys must be restricted resource ids and definitions cannot be null.");
+            "Graph keys must be non-blank resource ids and definitions cannot be null.");
         return false;
       }
 
@@ -69,7 +79,7 @@ public sealed partial class ExecutionPlanner
         return false;
       }
 
-      if (pair.Value.RequiredBy.Count > MaxExternalCollectionCount)
+      if (pair.Value.RequiredBy.Count is < 0 or > MaxExternalCollectionCount)
       {
         contractError = ResourceBoundaryError(
             definition.Id,
@@ -79,16 +89,18 @@ public sealed partial class ExecutionPlanner
       }
 
       var requiredBy = new HashSet<string>(IdComparer);
+      var requiredByCount = 0;
       foreach (var requiredById in pair.Value.RequiredBy)
       {
-        if (!IsValidResourceId(requiredById) ||
+        if (ExceedsLimit(ref requiredByCount, MaxExternalCollectionCount) ||
+            !IsValidResourceId(requiredById) ||
             !TryAddExternalText(requiredById, ref totalTextBytes) ||
             !requiredBy.Add(requiredById))
         {
           contractError = ResourceBoundaryError(
               definition.Id,
               "The resource graph contains malformed reverse dependencies.",
-              "Reverse-dependency ids must be restricted, unique, and within planner limits.");
+              "Reverse-dependency ids must be non-blank, unique, and within planner limits.");
           return false;
         }
       }
@@ -106,10 +118,12 @@ public sealed partial class ExecutionPlanner
     }
 
     var layers = new List<ResourceGraphLayer>(graph.TopologicalLayers.Count);
+    var layerCount = 0;
     foreach (var layer in graph.TopologicalLayers)
     {
-      if (layer is null || layer.ResourceIds is null ||
-          layer.ResourceIds.Count > MaxExternalCollectionCount)
+      if (ExceedsLimit(ref layerCount, MaxExternalCollectionCount) ||
+          layer is null || layer.ResourceIds is null ||
+          layer.ResourceIds.Count is < 0 or > MaxExternalCollectionCount)
       {
         contractError = GraphBoundaryError(
             "The resource graph contains a malformed layer.",
@@ -118,14 +132,16 @@ public sealed partial class ExecutionPlanner
       }
 
       var resourceIds = new List<string>(layer.ResourceIds.Count);
+      var layerResourceCount = 0;
       foreach (var resourceId in layer.ResourceIds)
       {
-        if (!IsValidResourceId(resourceId) ||
+        if (ExceedsLimit(ref layerResourceCount, MaxExternalCollectionCount) ||
+            !IsValidResourceId(resourceId) ||
             !TryAddExternalText(resourceId, ref totalTextBytes))
         {
           contractError = GraphBoundaryError(
               "The resource graph contains a malformed layer identity.",
-              "Layer resource ids must be restricted and within planner limits.");
+              "Layer resource ids must be non-blank and within planner limits.");
           return false;
         }
 
@@ -156,7 +172,7 @@ public sealed partial class ExecutionPlanner
       contractError = ResourceBoundaryError(
           definition.Id,
           "The resource definition has an invalid identity.",
-          "Resource ids, types, and provider names must use the restricted identifier format.");
+          "Resource ids, types, and provider names must be non-blank and within planner limits.");
       return false;
     }
 
@@ -169,8 +185,8 @@ public sealed partial class ExecutionPlanner
       return false;
     }
 
-    if (definition.Dependencies.Count > MaxExternalCollectionCount ||
-        definition.Parameters.Count > MaxExternalCollectionCount)
+    if (definition.Dependencies.Count is < 0 or > MaxExternalCollectionCount ||
+        definition.Parameters.Count is < 0 or > MaxExternalCollectionCount)
     {
       contractError = ResourceBoundaryError(
           definition.Id,
@@ -200,26 +216,29 @@ public sealed partial class ExecutionPlanner
     }
 
     var dependencies = new HashSet<string>(IdComparer);
+    var dependencyCount = 0;
     foreach (var dependency in definition.Dependencies)
     {
-      if (!IsValidResourceId(dependency) ||
+      if (ExceedsLimit(ref dependencyCount, MaxExternalCollectionCount) ||
+          !IsValidResourceId(dependency) ||
           !TryAddExternalText(dependency, ref totalTextBytes) ||
           !dependencies.Add(dependency))
       {
         contractError = ResourceBoundaryError(
             definition.Id,
             "The resource definition contains malformed dependencies.",
-            "Dependency ids must be restricted, unique, and within planner limits.");
+            "Dependency ids must be non-blank, unique, and within planner limits.");
         return false;
       }
     }
 
     var parameters = new Dictionary<string, string?>(IdComparer);
+    var parameterCount = 0;
     foreach (var parameter in definition.Parameters)
     {
-      if (string.IsNullOrWhiteSpace(parameter.Key) ||
+      if (ExceedsLimit(ref parameterCount, MaxExternalCollectionCount) ||
+          string.IsNullOrWhiteSpace(parameter.Key) ||
           parameter.Key.Any(char.IsControl) ||
-          parameter.Value is null ||
           !TryAddExternalText(parameter.Key, ref totalTextBytes) ||
           !TryAddExternalText(parameter.Value, ref totalTextBytes) ||
           !parameters.TryAdd(parameter.Key, parameter.Value))
@@ -227,7 +246,7 @@ public sealed partial class ExecutionPlanner
         contractError = ResourceBoundaryError(
             definition.Id,
             "The resource definition contains malformed parameters.",
-            "Parameter keys must be unique case-insensitively and values cannot be null or exceed limits.");
+            "Parameter keys must be unique case-insensitively; keys and values must remain within planner limits.");
         return false;
       }
     }
@@ -251,7 +270,7 @@ public sealed partial class ExecutionPlanner
     var states = new Dictionary<string, DetectedState>(IdComparer);
     snapshot = FrozenDictionary<string, DetectedState>.Empty;
     contractError = null;
-    if (source.Count > MaxExternalCollectionCount)
+    if (source.Count is < 0 or > MaxExternalCollectionCount)
     {
       contractError = DetectionBoundaryError(
           "The detected-state collection is too large.",
@@ -259,14 +278,16 @@ public sealed partial class ExecutionPlanner
       return false;
     }
 
+    var stateCount = 0;
     foreach (var pair in source)
     {
-      if (!IsValidResourceId(pair.Key) || pair.Value is null ||
+      if (ExceedsLimit(ref stateCount, MaxExternalCollectionCount) ||
+          !IsValidResourceId(pair.Key) || pair.Value is null ||
           !IsValidResourceId(pair.Value.ResourceId))
       {
         contractError = DetectionBoundaryError(
             "The detected-state collection is malformed.",
-            "Detected-state keys and resource ids must use the restricted identifier format.");
+            "Detected-state keys and resource ids must be non-blank and within planner limits.");
         return false;
       }
 
@@ -280,8 +301,8 @@ public sealed partial class ExecutionPlanner
 
       var state = pair.Value;
       if (state.InstalledVersions is null || state.Evidence is null ||
-          state.InstalledVersions.Count > MaxExternalCollectionCount ||
-          state.Evidence.Count > MaxExternalCollectionCount)
+          state.InstalledVersions.Count is < 0 or > MaxExternalCollectionCount ||
+          state.Evidence.Count is < 0 or > MaxExternalCollectionCount)
       {
         contractError = DetectionBoundaryError(
             "A detected state contains a malformed collection.",
@@ -307,10 +328,27 @@ public sealed partial class ExecutionPlanner
         }
       }
 
+      var installedVersions = new List<SemanticVersion>(state.InstalledVersions.Count);
+      var installedVersionCount = 0;
+      foreach (var installedVersion in state.InstalledVersions)
+      {
+        if (ExceedsLimit(ref installedVersionCount, MaxExternalCollectionCount))
+        {
+          contractError = DetectionBoundaryError(
+              "A detected state contains too many installed versions.",
+              $"Detected-state collections cannot exceed {MaxExternalCollectionCount} entries.");
+          return false;
+        }
+
+        installedVersions.Add(installedVersion);
+      }
+
       var evidence = new Dictionary<string, string>(IdComparer);
+      var evidenceCount = 0;
       foreach (var item in state.Evidence)
       {
-        if (string.IsNullOrWhiteSpace(item.Key) || item.Key.Any(char.IsControl) ||
+        if (ExceedsLimit(ref evidenceCount, MaxExternalCollectionCount) ||
+            string.IsNullOrWhiteSpace(item.Key) || item.Key.Any(char.IsControl) ||
             item.Value is null ||
             !TryAddExternalText(item.Key, ref totalTextBytes) ||
             !TryAddExternalText(item.Value, ref totalTextBytes) ||
@@ -340,7 +378,7 @@ public sealed partial class ExecutionPlanner
 
       var stateSnapshot = state with
       {
-        InstalledVersions = ReadOnly(state.InstalledVersions),
+        InstalledVersions = ReadOnly(installedVersions),
         Evidence = evidence.ToFrozenDictionary(IdComparer),
         StructuredError = diagnostic
       };
@@ -414,6 +452,9 @@ public sealed partial class ExecutionPlanner
     totalTextBytes += bytes;
     return true;
   }
+
+  private static bool ExceedsLimit(ref int observedCount, int limit) =>
+      ++observedCount > limit;
 
   private static StructuredError GraphBoundaryError(string summary, string detail) => new(
       WdemErrorCode.DependencyError,

@@ -1309,12 +1309,8 @@ public sealed class ExecutionPlannerTests
           ["TOKEN"] = "second"
         }
       },
-      Resource("git") with
-      {
-        Parameters = new Dictionary<string, string?> { ["channel"] = null }
-      },
       Resource("git") with { Dependencies = new ThrowingReadOnlyList<string>() },
-      Resource("bad\u0001id")
+      Resource("   ")
     };
 
     foreach (var resource in malformed)
@@ -1338,6 +1334,88 @@ public sealed class ExecutionPlannerTests
           error.ResourceId is null || !error.ResourceId.Any(char.IsControl)));
       Assert.Equal(0, provider.PlanCalls);
     }
+  }
+
+  [Fact]
+  public async Task CreateAsync_NullParameterValue_IsSafelySnapshottedAndPassedToProvider()
+  {
+    string? providerValue = "not observed";
+    var resource = Resource("git") with
+    {
+      Parameters = new Dictionary<string, string?> { ["channel"] = null }
+    };
+    var provider = new StubProvider(plan: (definition, _) =>
+    {
+      providerValue = definition.Parameters["channel"];
+      return ValidPlan(definition, ComplianceStatus.Missing, Step("install"));
+    });
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(resource),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.True(plan.IsExecutable);
+    Assert.Null(providerValue);
+    Assert.Null(Assert.Single(plan.Resources).Definition.Parameters["channel"]);
+    Assert.Equal(1, provider.PlanCalls);
+  }
+
+  [Fact]
+  public async Task CreateAsync_UnderreportedParameterCount_IsStillBoundedDuringEnumeration()
+  {
+    var values = Enumerable.Range(0, ExecutionPlanner.MaxExternalCollectionCount + 1)
+        .Select(index => new KeyValuePair<string, string?>($"key-{index}", string.Empty));
+    var resource = Resource("git") with
+    {
+      Parameters = new MisreportedReadOnlyDictionary<string, string?>(values, reportedCount: 1)
+    };
+    var provider = new StubProvider();
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(resource),
+        States(State("git", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Empty(plan.Resources);
+    Assert.Contains(plan.Errors, error => error.Code == WdemErrorCode.ProfileError);
+    Assert.Equal(0, provider.PlanCalls);
+  }
+
+  [Fact]
+  public async Task CreateAsync_UnicodeAndPunctuationResourceIdentity_PreservesAcceptedProfileContract()
+  {
+    const string resourceId = "工具 /β:~1";
+    const string resourceType = "类型/工具 v1";
+    const string providerName = "提供者:β";
+    var resource = Resource(resourceId) with
+    {
+      Type = resourceType,
+      Provider = providerName
+    };
+    var provider = new StubProvider(
+        resourceType: resourceType,
+        providerName: providerName);
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(resource),
+        States(State(resourceId, false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    var planned = Assert.Single(plan.Resources);
+    Assert.True(plan.IsExecutable);
+    Assert.Equal(resourceId, planned.Definition.Id);
+    Assert.Equal(resourceType, planned.Definition.Type);
+    Assert.Equal(providerName, planned.Definition.Provider);
+    Assert.Equal(1, provider.ValidationCalls);
+    Assert.Equal(1, provider.PlanCalls);
   }
 
   [Fact]
@@ -1652,11 +1730,14 @@ public sealed class ExecutionPlannerTests
 
   private sealed class StubProvider(
       Func<ResourceDefinition, ProviderValidationResult>? validation = null,
-      Func<ResourceDefinition, DetectedState, ResourcePlan>? plan = null) : IResourceProvider
+      Func<ResourceDefinition, DetectedState, ResourcePlan>? plan = null,
+      string resourceType = "package",
+      string providerName = "test") : IResourceProvider
   {
-    public string ResourceType => "package";
-    public string ProviderName => "test";
+    public string ResourceType => resourceType;
+    public string ProviderName => providerName;
     public ProviderCapabilities Capabilities { get; } = new();
+    public int ValidationCalls { get; private set; }
     public int PlanCalls { get; private set; }
 
     public ValueTask<ProviderValidationResult> ValidateAsync(
@@ -1664,6 +1745,7 @@ public sealed class ExecutionPlannerTests
         CancellationToken cancellationToken)
     {
       cancellationToken.ThrowIfCancellationRequested();
+      ValidationCalls++;
       return ValueTask.FromResult(validation?.Invoke(resource) ?? ProviderValidationResult.Valid);
     }
 
@@ -1714,6 +1796,30 @@ public sealed class ExecutionPlannerTests
 
     public IEnumerator<T> GetEnumerator() =>
         throw new InvalidOperationException("snapshot failed");
+
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() =>
+        GetEnumerator();
+  }
+
+  private sealed class MisreportedReadOnlyDictionary<TKey, TValue>(
+      IEnumerable<KeyValuePair<TKey, TValue>> values,
+      int reportedCount) : IReadOnlyDictionary<TKey, TValue>
+      where TKey : notnull
+  {
+    private readonly Dictionary<TKey, TValue> _values = values.ToDictionary();
+
+    public int Count => reportedCount;
+    public IEnumerable<TKey> Keys => _values.Keys;
+    public IEnumerable<TValue> Values => _values.Values;
+    public TValue this[TKey key] => _values[key];
+
+    public bool ContainsKey(TKey key) => _values.ContainsKey(key);
+
+    public bool TryGetValue(TKey key, out TValue value) =>
+        _values.TryGetValue(key, out value!);
+
+    public IEnumerator<KeyValuePair<TKey, TValue>> GetEnumerator() =>
+        _values.GetEnumerator();
 
     System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() =>
         GetEnumerator();
