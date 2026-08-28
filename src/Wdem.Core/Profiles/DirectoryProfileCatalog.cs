@@ -49,7 +49,7 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
         return boundaryError;
       }
 
-      return await LoadFileAsync(path, cancellationToken).ConfigureAwait(false);
+      return await LoadFileCoreAsync(path, cancellationToken, _directory).ConfigureAwait(false);
     }
 
     cancellationToken.ThrowIfCancellationRequested();
@@ -66,7 +66,13 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
   /// </remarks>
   public async Task<ProfileLoadResult> LoadFileAsync(
       string path,
-      CancellationToken cancellationToken = default)
+      CancellationToken cancellationToken = default) =>
+      await LoadFileCoreAsync(path, cancellationToken, requiredRoot: null).ConfigureAwait(false);
+
+  private async Task<ProfileLoadResult> LoadFileCoreAsync(
+      string path,
+      CancellationToken cancellationToken,
+      string? requiredRoot)
   {
     cancellationToken.ThrowIfCancellationRequested();
     string sourcePath;
@@ -98,7 +104,8 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
 
     using var readResult = await ProfileDocumentReader.ReadAsync(
         sourcePath,
-        cancellationToken).ConfigureAwait(false);
+        cancellationToken,
+        requiredRoot).ConfigureAwait(false);
     cancellationToken.ThrowIfCancellationRequested();
     if (!readResult.IsValid)
     {
@@ -155,7 +162,7 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
       var boundaryError = ValidateDiscoveredPathBoundary(path);
       cancellationToken.ThrowIfCancellationRequested();
       results.Add(boundaryError ??
-          await LoadFileAsync(path, cancellationToken).ConfigureAwait(false));
+          await LoadFileCoreAsync(path, cancellationToken, _directory).ConfigureAwait(false));
     }
 
     cancellationToken.ThrowIfCancellationRequested();
@@ -246,10 +253,10 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
       string summary,
       string detail,
       string pointer = "") => new()
-  {
-    SourcePath = sourcePath,
-    Errors = [ProfileErrorFactory.Create(sourcePath, summary, detail, pointer)]
-  };
+      {
+        SourcePath = sourcePath,
+        Errors = [ProfileErrorFactory.Create(sourcePath, summary, detail, pointer)]
+      };
 
   private static ProfileLoadResult FailureFromException(
       string sourcePath,
@@ -257,13 +264,13 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
       string safeContext,
       string pointer,
       Exception exception) => new()
-  {
-    SourcePath = sourcePath,
-    Errors = [ProfileErrorFactory.FromException(
-        sourcePath,
-        summary,
-        safeContext,
-        pointer,
-        exception)]
-  };
+      {
+        SourcePath = sourcePath,
+        Errors = [ProfileErrorFactory.FromException(
+            sourcePath,
+            summary,
+            safeContext,
+            pointer,
+            exception)]
+      };
 }

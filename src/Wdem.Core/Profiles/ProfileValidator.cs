@@ -330,14 +330,21 @@ internal sealed class ProfileValidator(IResourceProviderRegistry providerRegistr
         continue;
       }
 
-      ProviderValidationResult validation;
+      string[] validationErrors;
       try
       {
-        validation = await provider.ValidateAsync(resource, cancellationToken).ConfigureAwait(false);
+        var validation = await provider.ValidateAsync(resource, cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
-        if (validation?.Errors is null || validation.Errors.Any(static error => error is null))
+        if (validation?.Errors is null)
         {
           throw new InvalidOperationException(
+              "Provider validation contract violation: the result, Errors collection, and its entries must not be null.");
+        }
+
+        validationErrors = new string[validation.Errors.Count];
+        for (var index = 0; index < validationErrors.Length; index++)
+        {
+          validationErrors[index] = validation.Errors[index] ?? throw new InvalidOperationException(
               "Provider validation contract violation: the result, Errors collection, and its entries must not be null.");
         }
       }
@@ -356,7 +363,7 @@ internal sealed class ProfileValidator(IResourceProviderRegistry providerRegistr
         continue;
       }
 
-      foreach (var validationError in validation.Errors)
+      foreach (var validationError in validationErrors)
       {
         cancellationToken.ThrowIfCancellationRequested();
         errors.Add(ProfileErrorFactory.Create(sourcePath, "The resource provider rejected the resource.",

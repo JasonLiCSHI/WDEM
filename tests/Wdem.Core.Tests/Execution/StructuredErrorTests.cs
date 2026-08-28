@@ -121,6 +121,21 @@ public sealed class StructuredErrorTests
   }
 
   [Theory]
+  [InlineData("{\"token\":\"super-secret\"}", "super-secret")]
+  [InlineData("{\"password\": \"hunter2\"}", "hunter2")]
+  [InlineData("{\"token\":\"prefix\\\"secret-suffix\"}", "secret-suffix")]
+  [InlineData("{'api_key':'private-key'}", "private-key")]
+  public void Constructor_RedactsQuotedObjectKeys(string diagnostic, string sensitiveValue)
+  {
+    var error = new StructuredError(
+        WdemErrorCode.ProviderError,
+        "Provider failed",
+        diagnostic);
+
+    Assert.DoesNotContain(sensitiveValue, error.Detail, StringComparison.Ordinal);
+  }
+
+  [Theory]
   [InlineData("OAuth failed: client_secret=hunter2", "hunter2")]
   [InlineData("Process inherited GITHUB_TOKEN=ghp_abcdef", "ghp_abcdef")]
   [InlineData("Database rejected DB_PASSWORD: p@ssw0rd", "p@ssw0rd")]

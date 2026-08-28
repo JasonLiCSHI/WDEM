@@ -453,6 +453,24 @@ public sealed class ProfileCatalogTests
   }
 
   [Fact]
+  public async Task LoadFileAsync_ReadsEachProviderValidationErrorOnce()
+  {
+    using var directory = new TemporaryDirectory();
+    var path = directory.Write("provider-single-read.json", ValidSingleResourceJson("provider-single-read"));
+    var errors = new SingleReadErrorList("first rejection", "second rejection");
+    var registry = new ResourceProviderRegistry([
+      new DelegateProvider((_, _) => ValueTask.FromResult(
+          new ProviderValidationResult { Errors = errors }))
+    ]);
+
+    var result = await new DirectoryProfileCatalog(directory.Path, registry).LoadFileAsync(path);
+
+    Assert.Equal(2, result.Errors.Count);
+    Assert.Contains(result.Errors, error => error.Detail.Contains("first rejection", StringComparison.Ordinal));
+    Assert.Contains(result.Errors, error => error.Detail.Contains("second rejection", StringComparison.Ordinal));
+  }
+
+  [Fact]
   public async Task LoadFileAsync_SpuriousProviderCancellationReturnsStructuredError()
   {
     using var directory = new TemporaryDirectory();
@@ -782,6 +800,33 @@ public sealed class ProfileCatalogTests
         throw new NotSupportedException();
     public ValueTask<VerificationResult> VerifyAsync(ResourceDefinition resource, CancellationToken cancellationToken) =>
         throw new NotSupportedException();
+  }
+
+  private sealed class SingleReadErrorList(params string[] errors) : IReadOnlyList<string>
+  {
+    private readonly bool[] _wasRead = new bool[errors.Length];
+
+    public int Count => errors.Length;
+
+    public string this[int index]
+    {
+      get
+      {
+        Assert.False(_wasRead[index], $"Provider error at index {index} was read more than once.");
+        _wasRead[index] = true;
+        return errors[index];
+      }
+    }
+
+    public IEnumerator<string> GetEnumerator()
+    {
+      for (var index = 0; index < Count; index++)
+      {
+        yield return this[index];
+      }
+    }
+
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
   }
 
   private sealed class TemporaryDirectory : IDisposable

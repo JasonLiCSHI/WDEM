@@ -16,28 +16,37 @@ internal static class ProfileDocumentReader
 
   public static async Task<ProfileDocumentReadResult> ReadAsync(
       string sourcePath,
-      CancellationToken cancellationToken)
+      CancellationToken cancellationToken,
+      string? requiredRoot = null)
   {
     cancellationToken.ThrowIfCancellationRequested();
-    try
-    {
-      if (new FileInfo(sourcePath).Length > MaxInputBytes)
-      {
-        cancellationToken.ThrowIfCancellationRequested();
-        return Failure(sourcePath, "The profile input size exceeds the limit.",
-            $"Profile inputs may not exceed {MaxInputBytes} bytes.");
-      }
-    }
-    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-    {
-      cancellationToken.ThrowIfCancellationRequested();
-      return FailureFromException(sourcePath, "The profile file could not be inspected.", exception);
-    }
-
     byte[] bytes;
     try
     {
-      bytes = await File.ReadAllBytesAsync(sourcePath, cancellationToken).ConfigureAwait(false);
+      var resolvedRoot = requiredRoot is null
+          ? null
+          : ProfilePathBoundary.ResolveRoot(requiredRoot);
+      await using var stream = new FileStream(sourcePath, new FileStreamOptions
+      {
+        Mode = FileMode.Open,
+        Access = FileAccess.Read,
+        Share = FileShare.Read,
+        Options = FileOptions.Asynchronous | FileOptions.SequentialScan
+      });
+      if (resolvedRoot is not null &&
+          !ProfilePathBoundary.IsOpenFileWithinResolvedRoot(
+              stream.SafeFileHandle,
+              sourcePath,
+              resolvedRoot))
+      {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Failure(
+            sourcePath,
+            "The discovered profile leaves the configured profile root.",
+            "Profile discovery does not read a file outside the configured profile root.");
+      }
+
+      bytes = await ReadBoundedAsync(stream, cancellationToken).ConfigureAwait(false);
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
@@ -126,6 +135,31 @@ internal static class ProfileDocumentReader
 
     cancellationToken.ThrowIfCancellationRequested();
     return new ProfileDocumentReadResult(document, Array.Empty<StructuredError>());
+  }
+
+  private static async Task<byte[]> ReadBoundedAsync(
+      Stream stream,
+      CancellationToken cancellationToken)
+  {
+    var capacity = stream.CanSeek
+        ? checked((int)Math.Min(stream.Length, MaxInputBytes + 1L))
+        : 0;
+    using var output = new MemoryStream(capacity);
+    var buffer = new byte[64 * 1024];
+    while (output.Length <= MaxInputBytes)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      var remaining = checked((int)Math.Min(buffer.Length, MaxInputBytes + 1L - output.Length));
+      var read = await stream.ReadAsync(buffer.AsMemory(0, remaining), cancellationToken).ConfigureAwait(false);
+      if (read == 0)
+      {
+        break;
+      }
+
+      output.Write(buffer, 0, read);
+    }
+
+    return output.ToArray();
   }
 
   private static JsonDocumentOptions JsonOptions => new()
