@@ -59,7 +59,7 @@ public sealed class ProfileCatalogTests
   }
 
   [Fact]
-  public async Task LoadFileAsync_ResolvesYamlAliasesWithoutLosingScalarTypes()
+  public async Task LoadFileAsync_PreservesYamlScalarTypes()
   {
     using var directory = new TemporaryDirectory();
     var path = directory.Write("aliases.yaml", """
@@ -75,10 +75,12 @@ public sealed class ProfileCatalogTests
             - id: tool
               defaultSelected: true
         resources:
-          git: &package
+          git:
             type: package
             provider: winget
-          tool: *package
+          tool:
+            type: package
+            provider: winget
         """);
 
     var result = await CreateCatalog(directory.Path).LoadFileAsync(path);
@@ -156,6 +158,131 @@ public sealed class ProfileCatalogTests
     Assert.Contains(result.Errors, error => error.Detail.Contains("/profile/id", StringComparison.Ordinal));
     Assert.Contains(result.Errors, error => error.Detail.Contains("/profile/optionalResources/0/id", StringComparison.Ordinal));
     Assert.Contains(result.Errors, error => error.Detail.Contains("/resources/   ", StringComparison.Ordinal));
+  }
+
+  [Fact]
+  public async Task LoadFileAsync_RejectsYamlAnchorsAndAliasesInBoundedTime()
+  {
+    using var directory = new TemporaryDirectory();
+    var bomb = """
+        a: &a ["lol","lol","lol","lol","lol","lol","lol","lol","lol"]
+        b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a]
+        c: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b]
+        d: [*c,*c,*c,*c,*c,*c,*c,*c,*c]
+        """.PadRight(216, ' ');
+    var task = CreateCatalog(directory.Path)
+        .LoadFileAsync(directory.Write("alias-bomb.yaml", bomb));
+
+    var completed = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(2)));
+
+    Assert.Same(task, completed);
+    var result = await task;
+    var error = Assert.Single(result.Errors);
+    Assert.Contains("alias-bomb.yaml", error.Detail, StringComparison.Ordinal);
+    Assert.True(
+        error.Detail.Contains("anchor", StringComparison.OrdinalIgnoreCase) ||
+        error.Detail.Contains("alias", StringComparison.OrdinalIgnoreCase));
+  }
+
+  [Fact]
+  public async Task LoadFileAsync_RejectsInputLargerThanOneMiB()
+  {
+    using var directory = new TemporaryDirectory();
+    var path = directory.Write("oversized.json", new string(' ', (1024 * 1024) + 1));
+
+    var result = await CreateCatalog(directory.Path).LoadFileAsync(path);
+
+    Assert.False(result.IsValid);
+    Assert.Contains("size", Assert.Single(result.Errors).Summary, StringComparison.OrdinalIgnoreCase);
+  }
+
+  [Fact]
+  public async Task LoadFileAsync_RejectsJsonAstAboveNodeQuota()
+  {
+    using var directory = new TemporaryDirectory();
+    var values = string.Join(',', Enumerable.Repeat("0", 100_001));
+
+    var result = await CreateCatalog(directory.Path)
+        .LoadFileAsync(directory.Write("too-many-nodes.json", $"[{values}]"));
+
+    Assert.False(result.IsValid);
+    Assert.Contains("complex", Assert.Single(result.Errors).Summary, StringComparison.OrdinalIgnoreCase);
+  }
+
+  [Fact]
+  public async Task LoadFileAsync_CancellationWinsOverInvalidSchemaEarlyReturn()
+  {
+    using var directory = new TemporaryDirectory();
+    using var cancellation = new CancellationTokenSource();
+    var padding = string.Join(',', Enumerable.Repeat("0", 80_000));
+    var path = directory.Write("cancel-schema.json", $$"""
+        {
+          "schemaVersion": "1.0",
+          "profile": { "id": "cancel", "version": "1.0.0", "displayName": "Cancel", "description": "Cancel" },
+          "resources": {},
+          "invalidPadding": [{{padding}}]
+        }
+        """);
+
+    cancellation.CancelAfter(TimeSpan.FromMilliseconds(1));
+
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+        CreateCatalog(directory.Path).LoadFileAsync(path, cancellation.Token));
+  }
+
+  [Theory]
+  [InlineData(
+      "duplicate-profile-id.json",
+      "{\"schemaVersion\":\"1.0\",\"profile\":{\"id\":\"first\",\"id\":\"second\",\"version\":\"1.0.0\",\"displayName\":\"P\",\"description\":\"D\"},\"resources\":{}}",
+      "/profile/id")]
+  [InlineData(
+      "duplicate-provider.json",
+      "{\"schemaVersion\":\"1.0\",\"profile\":{\"id\":\"p\",\"version\":\"1.0.0\",\"displayName\":\"P\",\"description\":\"D\",\"requiredResources\":[{\"id\":\"git\"}]},\"resources\":{\"git\":{\"type\":\"package\",\"provider\":\"winget\",\"provider\":\"winget\"}}}",
+      "/resources/git/provider")]
+  [InlineData(
+      "duplicate-parameter.json",
+      "{\"schemaVersion\":\"1.0\",\"profile\":{\"id\":\"p\",\"version\":\"1.0.0\",\"displayName\":\"P\",\"description\":\"D\",\"requiredResources\":[{\"id\":\"git\"}]},\"resources\":{\"git\":{\"type\":\"package\",\"provider\":\"winget\",\"parameters\":{\"path\":\"one\",\"path\":\"two\"}}}}",
+      "/resources/git/parameters/path")]
+  public async Task LoadFileAsync_RejectsExactJsonDuplicateProperties(
+      string fileName,
+      string contents,
+      string pointer)
+  {
+    using var directory = new TemporaryDirectory();
+
+    var result = await CreateCatalog(directory.Path)
+        .LoadFileAsync(directory.Write(fileName, contents));
+
+    var error = Assert.Single(result.Errors, item => item.Detail.Contains(pointer, StringComparison.Ordinal));
+    Assert.Contains("duplicate", error.Summary, StringComparison.OrdinalIgnoreCase);
+  }
+
+  [Fact]
+  public async Task LoadFileAsync_RejectsExactYamlDuplicatePropertiesWithPointer()
+  {
+    using var directory = new TemporaryDirectory();
+    var contents = """
+        schemaVersion: "1.0"
+        profile:
+          id: duplicate-yaml
+          version: "1.0.0"
+          displayName: Duplicate YAML
+          description: Duplicate YAML property
+          requiredResources:
+            - id: git
+        resources:
+          git:
+            type: package
+            provider: winget
+            provider: winget
+        """;
+
+    var result = await CreateCatalog(directory.Path)
+        .LoadFileAsync(directory.Write("duplicate.yaml", contents));
+
+    var error = Assert.Single(result.Errors, item =>
+        item.Detail.Contains("/resources/git/provider", StringComparison.Ordinal));
+    Assert.Contains("duplicate", error.Summary, StringComparison.OrdinalIgnoreCase);
   }
 
   [Fact]
@@ -266,6 +393,66 @@ public sealed class ProfileCatalogTests
   }
 
   [Fact]
+  public async Task LoadFileAsync_SanitizesProviderValidationDiagnostics()
+  {
+    using var directory = new TemporaryDirectory();
+    var path = directory.Write("provider-secret.json", ValidSingleResourceJson("provider-secret"));
+    var registry = new ResourceProviderRegistry([
+      new StubProvider(
+          "package",
+          "winget",
+          @"token=raw-secret Bearer bearer-secret C:\Users\Alice\profile.yaml")
+    ]);
+
+    var result = await new DirectoryProfileCatalog(directory.Path, registry).LoadFileAsync(path);
+
+    var error = Assert.Single(result.Errors);
+    Assert.DoesNotContain("raw-secret", error.Detail, StringComparison.Ordinal);
+    Assert.DoesNotContain("bearer-secret", error.Detail, StringComparison.Ordinal);
+    Assert.DoesNotContain("Alice", error.Detail, StringComparison.Ordinal);
+  }
+
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public async Task LoadFileAsync_ProviderContractViolationsReturnProfileError(bool nullResult)
+  {
+    using var directory = new TemporaryDirectory();
+    var path = directory.Write("provider-contract.json", ValidSingleResourceJson("provider-contract"));
+    var registry = new ResourceProviderRegistry([
+      new DelegateProvider((_, _) => ValueTask.FromResult(
+          nullResult
+              ? null!
+              : new ProviderValidationResult { Errors = null! }))
+    ]);
+
+    var result = await new DirectoryProfileCatalog(directory.Path, registry).LoadFileAsync(path);
+
+    var error = Assert.Single(result.Errors);
+    Assert.Equal(WdemErrorCode.ProfileError, error.Code);
+    Assert.Contains("contract", error.Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("/resources/git", error.Detail, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task LoadFileAsync_NullProviderValidationErrorReturnsProfileError()
+  {
+    using var directory = new TemporaryDirectory();
+    var path = directory.Write("provider-null-error.json", ValidSingleResourceJson("provider-null-error"));
+    var registry = new ResourceProviderRegistry([
+      new DelegateProvider((_, _) => ValueTask.FromResult(
+          new ProviderValidationResult { Errors = new string[] { null! } }))
+    ]);
+
+    var result = await new DirectoryProfileCatalog(directory.Path, registry).LoadFileAsync(path);
+
+    var error = Assert.Single(result.Errors);
+    Assert.Equal(WdemErrorCode.ProfileError, error.Code);
+    Assert.Contains("contract", error.Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("/resources/git", error.Detail, StringComparison.Ordinal);
+  }
+
+  [Fact]
   public async Task LoadFileAsync_SpuriousProviderCancellationReturnsStructuredError()
   {
     using var directory = new TemporaryDirectory();
@@ -362,6 +549,20 @@ public sealed class ProfileCatalogTests
     Assert.Contains("missing.yaml", result.Errors[0].Detail, StringComparison.Ordinal);
   }
 
+  [Fact]
+  public async Task LoadFileAsync_SanitizesIoExceptionDiagnostics()
+  {
+    using var directory = new TemporaryDirectory();
+    var path = Path.Combine(directory.Path, "token=raw-secret.yaml");
+
+    var result = await CreateCatalog(directory.Path).LoadFileAsync(path);
+
+    var error = Assert.Single(result.Errors);
+    Assert.DoesNotContain("raw-secret", error.Detail, StringComparison.Ordinal);
+    Assert.NotNull(error.UnderlyingException);
+    Assert.DoesNotContain("raw-secret", error.UnderlyingExceptionMessage, StringComparison.Ordinal);
+  }
+
   [Theory]
   [InlineData("../outside")]
   [InlineData("..\\outside")]
@@ -374,6 +575,51 @@ public sealed class ProfileCatalogTests
 
     Assert.False(result.IsValid);
     Assert.Equal(WdemErrorCode.ProfileError, Assert.Single(result.Errors).Code);
+  }
+
+  [Theory]
+  [InlineData("contains space")]
+  [InlineData("éclair")]
+  [InlineData(".hidden")]
+  [InlineData("name:stream")]
+  public async Task LoadAsync_RejectsIdsOutsideCrossPlatformAllowlist(string id)
+  {
+    using var directory = new TemporaryDirectory();
+
+    var result = await CreateCatalog(directory.Path).LoadAsync(id);
+
+    var error = Assert.Single(result.Errors);
+    Assert.Contains("not safe", error.Summary, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("/profile/id", error.Detail, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task LoadAsync_RejectsSymlinkThatEscapesProfileRootWhileLoadFileRemainsExplicit()
+  {
+    using var directory = new TemporaryDirectory();
+    using var outside = new TemporaryDirectory();
+    var target = outside.Write("outside.yaml", ValidSingleResourceYaml("outside"));
+    var link = Path.Combine(directory.Path, "linked.yaml");
+    try
+    {
+      File.CreateSymbolicLink(link, target);
+    }
+    catch (Exception exception) when (
+        exception is UnauthorizedAccessException or PlatformNotSupportedException or IOException)
+    {
+      return;
+    }
+
+    var catalog = CreateCatalog(directory.Path);
+    var discovered = await catalog.LoadAsync("linked");
+    var discoveredAll = Assert.Single(await catalog.LoadAllAsync());
+    var explicitLoad = await catalog.LoadFileAsync(target);
+
+    Assert.False(discovered.IsValid);
+    Assert.Contains("profile root", Assert.Single(discovered.Errors).Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.False(discoveredAll.IsValid);
+    Assert.Contains("profile root", Assert.Single(discoveredAll.Errors).Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.True(explicitLoad.IsValid, FormatErrors(explicitLoad.Errors));
   }
 
   [Fact]
@@ -442,6 +688,8 @@ public sealed class ProfileCatalogTests
     var schema = reader.ReadToEnd();
 
     Assert.Contains("\"additionalProperties\": false", schema, StringComparison.Ordinal);
+    Assert.Contains("JasonLiCSHI/WDEM", schema, StringComparison.Ordinal);
+    Assert.DoesNotContain("DotDev262/WinHome", schema, StringComparison.Ordinal);
   }
 
   private static string TestDataDirectory =>

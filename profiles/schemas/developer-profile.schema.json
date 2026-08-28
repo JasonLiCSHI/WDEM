@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/DotDev262/WinHome/profiles/schemas/developer-profile.schema.json",
+  "$id": "https://github.com/JasonLiCSHI/WDEM/profiles/schemas/developer-profile.schema.json",
   "title": "WDEM developer profile",
   "type": "object",
   "additionalProperties": false,

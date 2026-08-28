@@ -196,6 +196,25 @@ public sealed class StructuredErrorTests
         null!));
   }
 
+  [Fact]
+  public void ConstructorAndInit_SanitizePersistedSummaryAndDetail()
+  {
+    var error = new StructuredError(
+        WdemErrorCode.ProviderError,
+        "Provider failed with token=summary-secret",
+        @"Bearer detail-secret at C:\Users\Alice\profile.yaml") with
+    {
+      Detail = "Authorization: Basic replacement-secret"
+    };
+
+    var serialized = JsonSerializer.Serialize(error);
+
+    Assert.DoesNotContain("summary-secret", error.Summary, StringComparison.Ordinal);
+    Assert.DoesNotContain("replacement-secret", error.Detail, StringComparison.Ordinal);
+    Assert.DoesNotContain("Alice", serialized, StringComparison.Ordinal);
+    Assert.DoesNotContain("detail-secret", serialized, StringComparison.Ordinal);
+  }
+
   [Theory]
   [InlineData("{}")]
   [InlineData("{\"Code\":9,\"Summary\":null,\"Detail\":\"detail\"}")]

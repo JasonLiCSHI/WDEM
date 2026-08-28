@@ -80,6 +80,41 @@ public sealed class ProfileValueExpanderTests
     Assert.Equal(value, result.Profile!.Resources["tool"].Parameters["path"]);
   }
 
+  [Fact]
+  public void ExpandSelected_HandlesThousandsDeepDependencyCycleIteratively()
+  {
+    const int resourceCount = 8_000;
+    var resources = new Dictionary<string, ResourceDefinition>(StringComparer.OrdinalIgnoreCase);
+    for (var index = 0; index < resourceCount; index++)
+    {
+      var id = $"resource-{index}";
+      resources[id] = new ResourceDefinition
+      {
+        Id = id,
+        Type = "package",
+        Provider = "winget",
+        Dependencies = [$"resource-{(index + 1) % resourceCount}"],
+        Parameters = new Dictionary<string, string?> { ["value"] = "${WDEM_VALUE}" }
+      };
+    }
+
+    var profile = new DeveloperProfile
+    {
+      Id = "deep",
+      Version = "1.0.0",
+      DisplayName = "Deep",
+      Description = "Deep dependency cycle",
+      RequiredResources = [new ProfileResourceReference { Id = "resource-0" }],
+      Resources = resources
+    };
+
+    var result = ProfileValueExpander.ExpandSelected(profile, [], _ => "expanded");
+
+    Assert.True(result.IsValid);
+    Assert.All(result.Profile!.Resources.Values, resource =>
+        Assert.Equal("expanded", resource.Parameters["value"]));
+  }
+
   private static DeveloperProfile CreateProfile() => new()
   {
     Id = "developer",

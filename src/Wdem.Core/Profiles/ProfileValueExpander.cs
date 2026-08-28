@@ -72,22 +72,28 @@ public static partial class ProfileValueExpander
       HashSet<string> selected,
       List<StructuredError> errors)
   {
-    if (!selected.Add(id))
+    var pending = new Stack<string>();
+    pending.Push(id);
+    while (pending.Count > 0)
     {
-      return;
-    }
+      var currentId = pending.Pop();
+      if (!selected.Add(currentId))
+      {
+        continue;
+      }
 
-    if (!profile.Resources.TryGetValue(id, out var resource))
-    {
-      errors.Add(Error(
-          $"Selected resource '{id}' does not exist in the profile.",
-          $"/resources/{EscapePointer(id)}"));
-      return;
-    }
+      if (!profile.Resources.TryGetValue(currentId, out var resource))
+      {
+        errors.Add(Error(
+            $"Selected resource '{currentId}' does not exist in the profile.",
+            $"/resources/{EscapePointer(currentId)}"));
+        continue;
+      }
 
-    foreach (var dependency in resource.Dependencies)
-    {
-      AddClosure(dependency, profile, selected, errors);
+      for (var index = resource.Dependencies.Count - 1; index >= 0; index--)
+      {
+        pending.Push(resource.Dependencies[index]);
+      }
     }
   }
 
