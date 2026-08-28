@@ -6,7 +6,7 @@
 
 **Architecture:** `Wdem.Core` remains the UI-free domain/application layer for profiles, versions, graphs, providers, planning, scheduling, runs, and reports. Migrate reusable MIT-derived WinHome implementation into explicitly transitional `Wdem.LegacySource` code behind `Wdem.Windows`; product hosts are `Wdem.Cli`, `Wdem.Desktop`, and the narrowly scoped `Wdem.ElevatedHost`. WDEM is a standalone private repository (`JasonLiCSHI/WDEM`): WinHome remotes are fetch-only provenance, never merge or pull-request targets.
 
-**Tech Stack:** C# 14/.NET 10, WPF, BCL MVVM, xUnit 2.9.3, Microsoft.NET.Test.Sdk 18.8.1, System.CommandLine 2.0.10, YamlDotNet 18.1.0, JsonSchema.Net 9.4.0, and MIT-derived transition adapters.
+**Tech Stack:** C# 14/.NET 10, WinUI 3 with Microsoft.WindowsAppSDK 2.4.0, BCL MVVM, xUnit 2.9.3, Microsoft.NET.Test.Sdk 18.8.1, System.CommandLine 2.0.10, YamlDotNet 18.1.0, JsonSchema.Net 9.4.0, and MIT-derived transition adapters.
 
 ---
 
@@ -14,9 +14,9 @@
 
 - After Task 1, `Wdem.sln` has a UI-free `src\Wdem.Core` (`net10.0`) with `ResourceDefinition`, `IResourceProvider`, `ResourceProviderRegistry`, and a safe `LegacyPackageManagerProviderAdapter`.
 - Before Task 1, the imported source owns a CLI plus `DefaultProcessRunner`, `WindowsProcessJob`, `WingetService`, plugin host, and JSON state files. Task 1 turns its reusable code into a non-product `Wdem.LegacySource` library; preserve the atomic cancellable installer-job assignment while extracting it, but retire its CLI and executable.
-- No WPF, `System.Windows`, `Microsoft.Win32` UI API, page/view-model, or UI package may be referenced by `Wdem.Core`. The desktop host uses only WPF/BCL controls and self-written MVVM helpers; no third-party UI framework is added.
+- No WinUI, Windows App SDK, `Microsoft.UI.Xaml`, page/view-model, or UI package may be referenced by `Wdem.Core`. The desktop host uses WinUI 3 controls and self-written BCL MVVM helpers; no third-party UI framework is added.
 - Only the WDEM command grammar defined in Task 13 is supported. Existing command behavior may be mined or covered by transition regression tests while adapters are extracted, but no permanent WinHome CLI compatibility guarantee applies and `WinHome.exe` is never built for release.
-- The solution must build on the existing Ubuntu lint job, so every Windows-targeting project added to the solution sets `<EnableWindowsTargeting>true</EnableWindowsTargeting>`. WPF execution tests run only on Windows.
+- The solution must build on the existing Ubuntu lint job, so every Windows-targeting project added to the solution sets `<EnableWindowsTargeting>true</EnableWindowsTargeting>`. WinUI execution tests run only on Windows.
 - All product provider process invocation uses `ProcessStartInfo.ArgumentList`; profile values never become raw command strings. Persisted reports and displayed logs pass through one redactor before writing or rendering.
 
 ## Planned file structure
@@ -38,7 +38,7 @@
 | `src\Wdem.Windows\Security\*.cs` | Trusted-file verification and one-elevation named-pipe broker. |
 | `src\Wdem.ElevatedHost\Program.cs` | Narrow elevated worker that accepts only persisted WDEM resource plans by named pipe. |
 | `src\Wdem.Cli\Program.cs` | WDEM inspect/apply/retry/resume/runs CLI host. |
-| `src\Wdem.Desktop\App.xaml` and `MainWindow.xaml` | WPF composition root and navigation shell. |
+| `src\Wdem.Desktop\App.xaml` and `MainWindow.xaml` | WinUI 3 composition root and navigation shell. |
 | `src\Wdem.Desktop\ViewModels\*.cs` | BCL-only MVVM state and commands. |
 | `src\Wdem.Desktop\Views\*.xaml` | Profile, resource, plan, monitor, and completion pages. |
 | `profiles\csharp-developer.yaml` and `profiles\schemas\developer-profile.schema.json` | Shipped C# Developer profile and formal profile schema. |
@@ -51,7 +51,7 @@
 
 1. **M1 — P0 engine:** Tasks 1–13 deliver a buildable independent WDEM product core that can inspect/apply Git and .NET SDK with a complete run history, scheduler, recovery, CLI, and no GUI dependency.
 2. **M2 — P1 Windows tooling:** Tasks 14–18 add Visual Studio, workloads/components/`.vsconfig`, one-prompt UAC, VSIX, ReSharper, `.DotSettings`, and `.vssettings`.
-3. **M3 — Product experience:** Tasks 19–23 deliver the WPF workflow, live monitoring/export, documentation/CI/release assets, and clean-VM acceptance.
+3. **M3 — Product experience:** Tasks 19–23 deliver the WinUI 3 workflow, live monitoring/export, documentation/CI/release assets, and clean-VM acceptance.
 
 ### Task 1: Establish WDEM identity, provenance, solution, and transitional source boundary
 
@@ -300,8 +300,9 @@ Create `Wdem.Windows` as the one permitted transition-source consumer; it refere
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
-    <UseWPF>true</UseWPF>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <AssemblyName>Wdem.Desktop</AssemblyName>
     <RootNamespace>Wdem.Desktop</RootNamespace>
@@ -311,6 +312,7 @@ Create `Wdem.Windows` as the one permitted transition-source consumer; it refere
   <ItemGroup>
     <ProjectReference Include="..\Wdem.Core\Wdem.Core.csproj" />
     <ProjectReference Include="..\Wdem.Windows\Wdem.Windows.csproj" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
   </ItemGroup>
 </Project>
 ```
@@ -326,7 +328,7 @@ public sealed class WdemWindowsAssemblyMarker;
 return await Task.FromResult(0);
 ```
 
-Use standard WPF roots with a WDEM title:
+Use standard WinUI 3 roots with a WDEM title. `App` derives from `Microsoft.UI.Xaml.Application`; `MainWindow` derives from `Microsoft.UI.Xaml.Window`; `App.OnLaunched` creates and activates the main window:
 
 ```xml
 <!-- src\Wdem.Desktop\App.xaml -->
@@ -340,10 +342,10 @@ Use standard WPF roots with a WDEM title:
 <Window x:Class="Wdem.Desktop.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="WDEM" Width="960" Height="640" />
+        Title="WDEM" />
 ```
 
-Give `Wdem.Windows.Tests` direct project references to `Wdem.Core`, `Wdem.Windows`, and `Wdem.Cli`; give `Wdem.Desktop.Tests` direct references to `Wdem.Core`, `Wdem.Windows`, and `Wdem.Desktop`. Both test projects target `net10.0-windows`, set `EnableWindowsTargeting`, and use the existing exact package versions (`Microsoft.NET.Test.Sdk` 18.8.1, `xunit` 2.9.3, `xunit.runner.visualstudio` 3.1.5). Add every new project with `dotnet sln Wdem.sln add`.
+Give `Wdem.Windows.Tests` direct project references to `Wdem.Core`, `Wdem.Windows`, and `Wdem.Cli`; give `Wdem.Desktop.Tests` direct references to `Wdem.Core`, `Wdem.Windows`, and `Wdem.Desktop`. `Wdem.Desktop.Tests` targets `net10.0-windows10.0.19041.0`; the other Windows projects may remain `net10.0-windows`. Both test projects set `EnableWindowsTargeting` and use the existing exact package versions (`Microsoft.NET.Test.Sdk` 18.8.1, `xunit` 2.9.3, `xunit.runner.visualstudio` 3.1.5). Add every new project with `dotnet sln Wdem.sln add`.
 
 - [ ] **Step 5: Verify product projects compile and boundary tests pass**
 
@@ -1866,7 +1868,7 @@ git add src\Wdem.Windows\Configuration src\Wdem.Windows\Providers\ReSharperSetti
 git commit -m "feat(wdem): import developer tool settings"
 ```
 
-### Task 19: Build WPF profile and resource-selection pages with BCL MVVM
+### Task 19: Build WinUI 3 profile and resource-selection pages with BCL MVVM
 
 **Files:**
 - Create: `src\Wdem.Desktop\ViewModels\ObservableObject.cs`
@@ -1915,28 +1917,28 @@ Run: `dotnet test tests\Wdem.Desktop.Tests\Wdem.Desktop.Tests.csproj --filter Fu
 
 Expected: FAIL with missing MVVM/view-model types.
 
-- [ ] **Step 3: Implement WPF navigation and selection bindings without UI packages**
+- [ ] **Step 3: Implement WinUI 3 navigation and selection bindings without third-party UI packages**
 
 `ObservableObject` implements `INotifyPropertyChanged`; `AsyncRelayCommand` implements `ICommand`, exposes `Task ExecuteAsync(object? parameter)`, prevents reentrancy, reports exceptions to a supplied error callback, and raises `CanExecuteChanged`. `MainWindowViewModel` owns `object CurrentPage`, `ProfileSelectionViewModel`, `ResourceSelectionViewModel`, and navigation commands. It obtains profiles through the core catalog, but exposes only the shipped `C# Developer` profile as enabled; do not render future C++/Python/Web/Company profile choices as selectable MVP options.
 
 `ResourceSelectionItemViewModel` has `Id`, `DisplayName`, `Description`, `Origin`, `IsSelected`, and `CanChangeSelection`. Required rows always remain selected and disabled. Optional rows are selectable. Auto dependencies are selected, disabled, and labelled “Auto dependency”; recomputation calls the core `ResourceGraphBuilder`, not duplicate UI graph logic.
 
-Use stock WPF `ListBox`, `CheckBox`, `Button`, `TextBlock`, bindings, and data templates. `ProfileSelectionView.xaml` displays name/description/version. `ResourceSelectionView.xaml` separates Required, Optional, and Auto Dependency groups and offers exactly `[检查环境]` and `[开始配置]` actions; the actions navigate to the plan page introduced in Task 20. Set the `MainWindow.DataContext` in code-behind through a factory, leaving no service locator in XAML.
+Use stock WinUI 3 `NavigationView`, `ListView`, `CheckBox`, `Button`, `TextBlock`, bindings, and data templates. `ProfileSelectionView.xaml` displays name/description/version. `ResourceSelectionView.xaml` separates Required, Optional, and Auto Dependency groups and offers exactly `[检查环境]` and `[开始配置]` actions; the actions navigate to the plan page introduced in Task 20. Set the `MainWindow.DataContext` in code-behind through a factory, leaving no service locator in XAML.
 
-- [ ] **Step 4: Run desktop view-model tests and build the WPF app**
+- [ ] **Step 4: Run desktop view-model tests and build the WinUI 3 app**
 
 Run: `dotnet test tests\Wdem.Desktop.Tests\Wdem.Desktop.Tests.csproj --filter FullyQualifiedName~ResourceSelectionViewModelTests --no-restore && dotnet build src\Wdem.Desktop\Wdem.Desktop.csproj --no-restore`
 
 Expected: PASS and build succeeds. The test confirms required resources cannot be removed and optional changes are resolved by the core graph.
 
-- [ ] **Step 5: Commit WPF selection pages**
+- [ ] **Step 5: Commit WinUI 3 selection pages**
 
 ```powershell
 git add src\Wdem.Desktop\ViewModels src\Wdem.Desktop\Views src\Wdem.Desktop\App.xaml src\Wdem.Desktop\App.xaml.cs src\Wdem.Desktop\MainWindow.xaml src\Wdem.Desktop\MainWindow.xaml.cs tests\Wdem.Desktop.Tests\ViewModels
 git commit -m "feat(wdem): add profile and resource selection UI"
 ```
 
-### Task 20: Add WPF plan review and real-time execution monitoring
+### Task 20: Add WinUI 3 plan review and real-time execution monitoring
 
 **Files:**
 - Create: `src\Wdem.Desktop\ViewModels\PlanViewModel.cs`
@@ -1981,7 +1983,7 @@ Expected: FAIL because plan/monitor view models and run event subscription are a
 
 - [ ] **Step 3: Implement plan review, bounded live event stream, and controls**
 
-Make `IRunEventSink` expose a subscription API returning `IDisposable`; `RunEvent` contains run ID, monotonically increasing sequence, timestamp, kind, optional resource/step ID, progress, message, and optional structured error. `JsonExecutionRunStore` remains the source of truth; the event sink publishes after durable save. The desktop adapter subscribes and marshals events through `Dispatcher.BeginInvoke`.
+Make `IRunEventSink` expose a subscription API returning `IDisposable`; `RunEvent` contains run ID, monotonically increasing sequence, timestamp, kind, optional resource/step ID, progress, message, and optional structured error. `JsonExecutionRunStore` remains the source of truth; the event sink publishes after durable save. The desktop adapter subscribes and marshals events through `DispatcherQueue.TryEnqueue`.
 
 `PlanViewModel` invokes `InspectAsync` to render plan layers, resource action, provider, privilege, restart policy, dependencies, and non-executable errors before allowing Apply. `ExecutionMonitorViewModel` starts `ApplyAsync` in an awaited background task, exposes total progress, elapsed duration, current resource, resource/step state, cancel command, retry-failed command, error-detail selection, and restart requirement. Its log collection keeps the newest 5,000 redacted rows; bind the list with `VirtualizingStackPanel.IsVirtualizing="True"` and `ScrollViewer.CanContentScroll="True"`.
 
@@ -2038,7 +2040,7 @@ Expected: FAIL because report exporter and completion view model are absent.
 
 `IRunReportExporter` exports one `ExecutionRun` as redacted JSON and Markdown. The Markdown report contains profile/version/run ID/timestamps/machine facts, selected options, graph/plan summary, resource state/outcome/compliance, detected-before/after versions, step exit codes, structured error summaries/details/suggested actions, blocked/unexecuted IDs, and restart requirements. Use `LogRedactor` on all user-visible text. Write report files atomically.
 
-`CompletionViewModel` groups terminal resources into Satisfied (`NotRequired`), Succeeded, Failed, Blocked, Cancelled/Skipped, and Restart Required. Its heading is exactly `C# Developer Environment Ready` only when no selected resource failed/blocked/cancelled; otherwise use `Environment Partially Configured`. `CompletionView.xaml` provides standard `SaveFileDialog` commands for `.json` and `.md`, a link back to plan/profile selection, and no automatic restart. Add `[--report <file>]` to each completed WDEM CLI command and wire it through the same exporter.
+`CompletionViewModel` groups terminal resources into Satisfied (`NotRequired`), Succeeded, Failed, Blocked, Cancelled/Skipped, and Restart Required. Its heading is exactly `C# Developer Environment Ready` only when no selected resource failed/blocked/cancelled; otherwise use `Environment Partially Configured`. `CompletionView.xaml` uses the Windows App SDK file picker initialized with the current window handle for `.json` and `.md`, provides a link back to plan/profile selection, and never restarts automatically. Add `[--report <file>]` to each completed WDEM CLI command and wire it through the same exporter.
 
 - [ ] **Step 4: Run report and completion tests**
 
@@ -2096,8 +2098,11 @@ $release = Get-Content (Join-Path $root '.github\workflows\release.yaml') -Raw
 foreach ($executable in 'Wdem.Cli.exe', 'Wdem.Desktop.exe', 'Wdem.ElevatedHost.exe') {
     if ($release -notmatch [regex]::Escape($executable)) { throw "Release workflow does not publish $executable." }
 }
-foreach ($required in 'Wdem.sln', 'THIRD-PARTY-NOTICES.md') {
+foreach ($required in 'Wdem.sln', 'Wdem-win-x64.zip', 'SHA256SUMS.txt', 'THIRD-PARTY-NOTICES.md', 'WindowsAppSDKSelfContained') {
     if ($release -notmatch [regex]::Escape($required)) { throw "Release workflow does not contain $required." }
+}
+if ($release -match 'PublishSingleFile[^\r\n]*Wdem\.Desktop') {
+    throw 'The WinUI desktop host must not be published as a single-file executable.'
 }
 foreach ($forbidden in 'WinHome.exe', 'WinHome.sln', 'src\WinHome.csproj') {
     if ($release -match [regex]::Escape($forbidden)) { throw "Release workflow must not contain $forbidden." }
@@ -2118,7 +2123,7 @@ Expected: the profile test passes after Task 18; the identity script FAILS becau
 
 Write the WDEM docs with these non-negotiable product statements:
 
-- `getting-started.md` installs/runs `Wdem.Desktop.exe` or `Wdem.Cli.exe`, uses `%LOCALAPPDATA%\WDEM`, describes `WDEM_*` inputs only, and documents the one-time import of old `%LOCALAPPDATA%\WinHome` state as non-authoritative.
+- `getting-started.md` verifies and extracts `Wdem-win-x64.zip`, then runs `Desktop\Wdem.Desktop.exe` or `Cli\Wdem.Cli.exe`; it uses `%LOCALAPPDATA%\WDEM`, describes `WDEM_*` inputs only, explains that every file in the extracted archive must be retained, and documents the one-time import of old `%LOCALAPPDATA%\WinHome` state as non-authoritative.
 - `profile-authoring.md` gives the complete YAML/JSON schema, version syntax, required/optional/automatic dependency behavior, supported resource types, hashes/source requirements, VS instance selection, and the `WDEM_COMPANY_VSIX_PATH` / `WDEM_COMPANY_VSIX_SHA256` contract.
 - `recovery-and-security.md` describes the UAC broker, trust/hash/signature policy, redaction, cancellation, restart recovery, the mandatory new Detect/Plan cycle, the one-time state migration marker, and fetch-only WinHome provenance.
 - Replace every user-facing product name, repository link, executable, default state path, environment-variable prefix, solution/project identifier, issue template, and CI job label with WDEM. The only allowed WinHome references in Markdown/YAML are the attribution files listed in Step 1; those must state MIT provenance and must not present WinHome as a supported product.
@@ -2132,29 +2137,37 @@ dotnet build Wdem.sln --no-restore -p:EnableWindowsTargeting=true
 dotnet test Wdem.sln --no-restore --verbosity normal --collect "XPlat Code Coverage"
 ```
 
-Replace the release workflow with product-only publishing. It must not call `dotnet publish` for `Wdem.LegacySource`, and the asset list must contain exactly the three WDEM executables, their SHA-256 checksum file, and `THIRD-PARTY-NOTICES.md`:
+Replace the release workflow with product-only publishing. It must not call `dotnet publish` for `Wdem.LegacySource`. Publish an unpackaged, self-contained WinUI 3 distribution: do not request `PublishSingleFile` for `Wdem.Desktop`, because Windows App SDK framework/bootstrapper files must remain beside the executable. The release asset list contains the distribution ZIP, its SHA-256 checksum file, and `THIRD-PARTY-NOTICES.md`:
 
 ```powershell
-$products = @(
-    @{ Project = 'src\Wdem.Cli\Wdem.Cli.csproj'; Name = 'Wdem.Cli' },
-    @{ Project = 'src\Wdem.Desktop\Wdem.Desktop.csproj'; Name = 'Wdem.Desktop' },
-    @{ Project = 'src\Wdem.ElevatedHost\Wdem.ElevatedHost.csproj'; Name = 'Wdem.ElevatedHost' }
+$root = Join-Path $PWD 'staging\WDEM'
+$publish = Join-Path $PWD 'publish'
+New-Item -ItemType Directory -Force -Path $root, $publish | Out-Null
+
+dotnet publish src\Wdem.Cli\Wdem.Cli.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o (Join-Path $root 'Cli')
+if ($LASTEXITCODE -ne 0) { throw 'Publish failed: Wdem.Cli' }
+dotnet publish src\Wdem.Desktop\Wdem.Desktop.csproj -c Release -r win-x64 --self-contained true -p:WindowsPackageType=None -p:WindowsAppSDKSelfContained=true -o (Join-Path $root 'Desktop')
+if ($LASTEXITCODE -ne 0) { throw 'Publish failed: Wdem.Desktop' }
+dotnet publish src\Wdem.ElevatedHost\Wdem.ElevatedHost.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o (Join-Path $root 'ElevatedHost')
+if ($LASTEXITCODE -ne 0) { throw 'Publish failed: Wdem.ElevatedHost' }
+
+$expected = @(
+    (Join-Path $root 'Cli\Wdem.Cli.exe'),
+    (Join-Path $root 'Desktop\Wdem.Desktop.exe'),
+    (Join-Path $root 'ElevatedHost\Wdem.ElevatedHost.exe')
 )
-New-Item -ItemType Directory -Force -Path publish | Out-Null
-foreach ($product in $products) {
-    $output = Join-Path 'publish' $product.Name
-    dotnet publish $product.Project -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o $output
-    if ($LASTEXITCODE -ne 0) { throw "Publish failed: $($product.Name)" }
+foreach ($executable in $expected) {
+    if (-not (Test-Path $executable -PathType Leaf)) { throw "Missing product host: $executable" }
 }
-$executables = @(Get-ChildItem publish -Recurse -File -Filter '*.exe')
-$expected = @('Wdem.Cli.exe', 'Wdem.Desktop.exe', 'Wdem.ElevatedHost.exe')
-if (Compare-Object ($executables.Name | Sort-Object) ($expected | Sort-Object)) { throw 'Release must contain exactly the WDEM product executables.' }
-$executables | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $($_.Path)" } |
-    Set-Content publish\SHA256SUMS.txt -Encoding ascii
-Copy-Item THIRD-PARTY-NOTICES.md publish\THIRD-PARTY-NOTICES.md
+Copy-Item THIRD-PARTY-NOTICES.md (Join-Path $root 'THIRD-PARTY-NOTICES.md')
+$archive = Join-Path $publish 'Wdem-win-x64.zip'
+Compress-Archive -Path (Join-Path $root '*') -DestinationPath $archive -Force
+Get-FileHash $archive -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  Wdem-win-x64.zip" } |
+    Set-Content (Join-Path $publish 'SHA256SUMS.txt') -Encoding ascii
+Copy-Item THIRD-PARTY-NOTICES.md (Join-Path $publish 'THIRD-PARTY-NOTICES.md')
 ```
 
-Configure the release action to upload only `publish\Wdem.Cli\Wdem.Cli.exe`, `publish\Wdem.Desktop\Wdem.Desktop.exe`, `publish\Wdem.ElevatedHost\Wdem.ElevatedHost.exe`, `publish\SHA256SUMS.txt`, and `publish\THIRD-PARTY-NOTICES.md`. It must have no `WinHome.exe`, no `WinHome.sln`, and no link to a WinHome release.
+Configure the release action to upload only `publish\Wdem-win-x64.zip`, `publish\SHA256SUMS.txt`, and `publish\THIRD-PARTY-NOTICES.md`. It must have no loose executable assets, no `WinHome.exe`, no `WinHome.sln`, and no link to a WinHome release. The archive must retain the `Cli`, `Desktop`, and `ElevatedHost` directories exactly as published.
 
 - [ ] **Step 4: Run format, build, product-identity, and release-layout validation**
 
@@ -2167,7 +2180,7 @@ dotnet test Wdem.sln --no-restore --verbosity normal
 powershell -ExecutionPolicy Bypass -File testing\wdem\assert-product-identity.ps1
 ```
 
-Expected: all commands exit `0`; every solution/project/namespace and user-facing document is WDEM-branded except explicit MIT attribution; Windows and Ubuntu CI use `Wdem.sln`; and release configuration names only `Wdem.Cli.exe`, `Wdem.Desktop.exe`, and `Wdem.ElevatedHost.exe`.
+Expected: all commands exit `0`; every solution/project/namespace and user-facing document is WDEM-branded except explicit MIT attribution; Windows and Ubuntu CI use `Wdem.sln`; and release configuration produces only the self-contained `Wdem-win-x64.zip`, `SHA256SUMS.txt`, and `THIRD-PARTY-NOTICES.md` assets. The ZIP contains the three WDEM product hosts and no transition-source executable.
 
 - [ ] **Step 5: Commit documentation and product-only automation**
 
@@ -2300,7 +2313,7 @@ git commit -m "test(wdem): add product acceptance checks"
 | Provider SDK and temporary MIT-derived transition adapters | Tasks 6, 11 |
 | WinGet, Git, .NET SDK | Task 12 |
 | Visual Studio, VSIX, ReSharper, `.DotSettings`, `.vssettings`, hashes, and UAC | Tasks 14–18 |
-| WPF profile/resource/plan/monitor/completion workflow | Tasks 19–21 |
-| WDEM-only CLI, docs, CI, solution commands, and release artifacts (`Wdem.Cli.exe`, `Wdem.Desktop.exe`, `Wdem.ElevatedHost.exe`) | Tasks 13, 22–23 |
+| WinUI 3 profile/resource/plan/monitor/completion workflow | Tasks 19–21 |
+| WDEM-only CLI, docs, CI, solution commands, and self-contained WinUI release archive (`Wdem-win-x64.zip` with the three product hosts) | Tasks 13, 22–23 |
 
 Self-check completed: the plan contains 23 ordered checkbox tasks; product identity migration precedes all new hosts; WDEM is the sole release brand and command contract; every intentional WinHome mention is constrained to migration, provenance, or MIT attribution; no task treats upstream mergeability or legacy CLI compatibility as a hard boundary.
