@@ -41,23 +41,25 @@ public sealed class LegacyStateMigrationAdapter
 
   private static readonly LogRedactor StepNameRedactor = new();
 
-  private static readonly HashSet<string> KnownLegacyAppliedItemIdentifiers = new(
+  private static readonly HashSet<string> KnownAmbiguousLegacyPackageIdentifiers = new(
       StringComparer.OrdinalIgnoreCase)
   {
-    "1Password",
-    "Git.Git",
-    "winget:Git.Git",
-    "Microsoft.VisualStudio.2022.BuildTools",
-    "Microsoft.VisualStudio.BuildTools-2022",
     "com.microsoft.visualstudiobuildtools",
     "ai.openai.chatgptdesktop",
     "visual-studio-build-tools-2022",
     "visual-studio-build-tools-v2022",
     "visual-studio-build-tools-rc1",
     "visual-studio-build-tools-x64",
-    "visual-studio-build-tools-win11",
-    "VisualStudioBuildTools2022",
-    "VisualStudio17BuildTools2022x64"
+    "visual-studio-build-tools-win11"
+  };
+
+  private static readonly HashSet<string> KnownLegacyManagerNames = new(
+      StringComparer.OrdinalIgnoreCase)
+  {
+    "winget",
+    "choco",
+    "chocolatey",
+    "scoop"
   };
 
   private enum LegacyNameSource
@@ -512,9 +514,51 @@ public sealed class LegacyStateMigrationAdapter
 
   private static bool IsSafeMigratedName(string value, LegacyNameSource source)
   {
-    var isKnownAppliedItem =
+    if (value.Length is 0 or > MaximumStepNameLength)
+    {
+      return false;
+    }
+
+    var allowsManagedIdentifier = source is
+        LegacyNameSource.AppliedItem or
+        LegacyNameSource.StepHistoryKey or
+        LegacyNameSource.PersistedMarker;
+    if (allowsManagedIdentifier &&
+        TryGetKnownLegacyManagerSuffix(value, out var suffix))
+    {
+      return IsSafeUnqualifiedName(
+          suffix,
+          KnownAmbiguousLegacyPackageIdentifiers.Contains(suffix));
+    }
+
+    var allowsKnownAmbiguousPackage =
         source is LegacyNameSource.AppliedItem or LegacyNameSource.PersistedMarker &&
-        KnownLegacyAppliedItemIdentifiers.Contains(value);
+        KnownAmbiguousLegacyPackageIdentifiers.Contains(value);
+    return IsSafeUnqualifiedName(value, allowsKnownAmbiguousPackage);
+  }
+
+  private static bool TryGetKnownLegacyManagerSuffix(
+      string value,
+      out string suffix)
+  {
+    var separatorIndex = value.IndexOf(':');
+    if (separatorIndex <= 0 ||
+        separatorIndex != value.LastIndexOf(':') ||
+        !KnownLegacyManagerNames.Contains(value[..separatorIndex]))
+    {
+      suffix = string.Empty;
+      return false;
+    }
+
+    suffix = value[(separatorIndex + 1)..];
+    return suffix.Length > 0 &&
+        string.Equals(suffix, suffix.Trim(), StringComparison.Ordinal);
+  }
+
+  private static bool IsSafeUnqualifiedName(
+      string value,
+      bool allowsOpaqueValue)
+  {
     if (value.Length is 0 or > MaximumStepNameLength ||
         value.Any(character => char.IsControl(character)) ||
         value.Contains("..", StringComparison.Ordinal) ||
@@ -530,8 +574,7 @@ public sealed class LegacyStateMigrationAdapter
     if (value.Any(character =>
             !(char.IsLetterOrDigit(character) ||
               char.IsWhiteSpace(character) ||
-              character is '-' or '_' or '.' or '(' or ')' or '+' or '#' ||
-              character == ':' && isKnownAppliedItem)))
+              character is '-' or '_' or '.' or '(' or ')' or '+' or '#')))
     {
       return false;
     }
@@ -549,7 +592,7 @@ public sealed class LegacyStateMigrationAdapter
       return false;
     }
 
-    return !LooksLikeUnclassifiedOpaqueToken(value) || isKnownAppliedItem;
+    return !LooksLikeUnclassifiedOpaqueToken(value) || allowsOpaqueValue;
   }
 
   private static bool HasKnownCredentialPrefix(string value) =>

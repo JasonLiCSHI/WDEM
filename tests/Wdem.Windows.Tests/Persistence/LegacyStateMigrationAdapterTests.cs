@@ -361,6 +361,84 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
   }
 
   [Fact]
+  public async Task MigrateAsync_PreservesKnownManagerIdentifiersFromAppliedItems()
+  {
+    var managedIdentifiers = new[]
+    {
+      "winget:TestApp",
+      "winget:Microsoft.VisualStudioCode",
+      "choco:git",
+      "chocolatey:nodejs",
+      "scoop:neovim"
+    };
+    WriteLegacy(
+        "state.json",
+        JsonSerializer.Serialize(new { applied_items = managedIdentifiers }));
+
+    var result = await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.Equal(managedIdentifiers, result.ImportedStepNames);
+  }
+
+  [Fact]
+  public async Task MigrateAsync_PreservesKnownManagerIdentifiersFromStepHistoryKeys()
+  {
+    var managedIdentifiers = new[]
+    {
+      "winget:TestApp",
+      "winget:Microsoft.VisualStudioCode",
+      "choco:git",
+      "chocolatey:nodejs",
+      "scoop:neovim"
+    };
+    WriteLegacy(
+        "state.json",
+        JsonSerializer.Serialize(new
+        {
+          step_history = managedIdentifiers.ToDictionary(
+              identifier => identifier,
+              _ => new { status = "Succeeded" })
+        }));
+
+    var result = await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.Equal(managedIdentifiers, result.ImportedStepNames);
+  }
+
+  [Theory]
+  [InlineData("winget:banana-coconut-20240829")]
+  [InlineData("winget:k7m2q9v4x8n3p6r1t5w0y2z7c4b9d6f3h8j1s5u0")]
+  [InlineData("scoop:eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijklmnopqrstuvwxyz_01234")]
+  [InlineData("choco:ghp_1234567890abcdefghijklmnopqrstuvwxyz")]
+  [InlineData("chocolatey:Bearer abc.def.ghi")]
+  [InlineData("winget:password=super-secret")]
+  [InlineData("winget:550e8400-e29b-41d4-a716-446655440000")]
+  [InlineData("unknown:Microsoft.VisualStudioCode")]
+  public async Task MigrateAsync_RejectsUnsafeOrUnknownManagerIdentifiers(
+      string identifier)
+  {
+    WriteLegacy("state.json", JsonSerializer.Serialize(new
+    {
+      applied_items = new[] { identifier },
+      step_history = new Dictionary<string, object>
+      {
+        [identifier] = new { status = "Failed" }
+      }
+    }));
+
+    var result = await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.Empty(result.ImportedStepNames);
+    Assert.DoesNotContain(
+        identifier,
+        await File.ReadAllTextAsync(result.MarkerPath),
+        StringComparison.Ordinal);
+  }
+
+  [Fact]
   public async Task MigrateAsync_PreservesLegitimateProductAndPackageLabels()
   {
     var legitimateLabels = new[]
@@ -461,6 +539,11 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
   [Theory]
   [InlineData("banana-coconut-20240829")]
   [InlineData("zaneku-morapi-tuvexo-20240829")]
+  [InlineData("winget:banana-coconut-20240829")]
+  [InlineData("scoop:eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijklmnopqrstuvwxyz_01234")]
+  [InlineData("choco:ghp_1234567890abcdefghijklmnopqrstuvwxyz")]
+  [InlineData("chocolatey:Bearer abc.def.ghi")]
+  [InlineData("unknown:Microsoft.VisualStudioCode")]
   public async Task MigrateAsync_QuarantinesMarkerContainingOpaqueCredential(
       string credential)
   {
@@ -489,6 +572,45 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
         credential,
         await File.ReadAllTextAsync(markerPath),
         StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task MigrateAsync_ValidMarkerPreservesKnownManagerIdentifiers()
+  {
+    var managedIdentifiers = new[]
+    {
+      "winget:TestApp",
+      "winget:Microsoft.VisualStudioCode",
+      "choco:git",
+      "chocolatey:nodejs",
+      "scoop:neovim"
+    };
+    var markerDirectory = Path.Combine(_root, "WDEM");
+    Directory.CreateDirectory(markerDirectory);
+    var markerPath = Path.Combine(markerDirectory, "migration-v1.json");
+    await File.WriteAllTextAsync(markerPath, JsonSerializer.Serialize(new
+    {
+      schemaVersion = 1,
+      recordKind = "legacy-step-name-reference",
+      sourceProduct = "WinHome",
+      importedAtUtc = "2026-08-29T00:00:00Z",
+      importedStepNames = managedIdentifiers
+    }));
+    WriteLegacy("state.json", "[\"must-not-import\"]");
+
+    var result = await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.False(result.MigrationPerformed);
+    Assert.Empty(Directory.EnumerateFiles(
+        markerDirectory,
+        "migration-v1.invalid-*.json"));
+    Assert.Equal(
+        managedIdentifiers,
+        JsonDocument.Parse(await File.ReadAllTextAsync(markerPath))
+            .RootElement.GetProperty("importedStepNames")
+            .EnumerateArray()
+            .Select(item => item.GetString()));
   }
 
   private sealed class RecordingFinalPathResolver(string finalPath) :
