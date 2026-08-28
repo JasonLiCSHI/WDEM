@@ -580,6 +580,48 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     Assert.False(File.Exists(lockPath));
   }
 
+  [Fact]
+  public async Task SaveAsync_MissingRunDoesNotLeaveLockFile()
+  {
+    var run = SampleRun();
+
+    await Assert.ThrowsAsync<KeyNotFoundException>(() =>
+        _store.SaveAsync(run, CancellationToken.None));
+
+    var lockPath = Path.Combine(
+        new WdemDataPaths(_directory).RunsDirectory,
+        $"{run.RunId:D}.lock");
+    Assert.False(File.Exists(lockPath));
+  }
+
+  [Fact]
+  public async Task AppendLogAsync_MissingRunDoesNotLeaveLockFile()
+  {
+    var runId = Guid.NewGuid();
+
+    await Assert.ThrowsAsync<KeyNotFoundException>(() =>
+        _store.AppendLogAsync(runId, SampleLog(1), CancellationToken.None));
+
+    var lockPath = Path.Combine(
+        new WdemDataPaths(_directory).RunsDirectory,
+        $"{runId:D}.lock");
+    Assert.False(File.Exists(lockPath));
+  }
+
+  [Fact]
+  public async Task ReadLogPageAsync_MissingRunDoesNotLeaveLockFile()
+  {
+    var runId = Guid.NewGuid();
+
+    await Assert.ThrowsAsync<KeyNotFoundException>(() =>
+        _store.ReadLogPageAsync(runId, 0, 10, CancellationToken.None));
+
+    var lockPath = Path.Combine(
+        new WdemDataPaths(_directory).RunsDirectory,
+        $"{runId:D}.lock");
+    Assert.False(File.Exists(lockPath));
+  }
+
   [Theory]
   [InlineData(null, true)]
   [InlineData(ExecutionOutcome.Succeeded, false)]

@@ -78,12 +78,9 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
       return null;
     }
 
-    var snapshotPath = SnapshotPath(runId);
-    var removeUnusedLock = !File.Exists(snapshotPath);
-    await using var runLock = await AcquireRunLockAsync(
+    await using var runLock = await AcquireRunLockForExistingSnapshotAsync(
         runId,
-        cancellationToken,
-        deleteOnClose: removeUnusedLock)
+        cancellationToken)
         .ConfigureAwait(false);
     return await ReadSnapshotAsync(runId, cancellationToken).ConfigureAwait(false);
   }
@@ -123,7 +120,9 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
     ArgumentNullException.ThrowIfNull(run);
     ValidateRunForPersistence(run);
     cancellationToken.ThrowIfCancellationRequested();
-    await using var runLock = await AcquireRunLockAsync(run.RunId, cancellationToken)
+    await using var runLock = await AcquireRunLockForExistingSnapshotAsync(
+        run.RunId,
+        cancellationToken)
         .ConfigureAwait(false);
     var path = SnapshotPath(run.RunId);
     EnsureRunExists(run.RunId, path);
@@ -138,7 +137,9 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
     ArgumentNullException.ThrowIfNull(entry);
     ValidateLogEntryForPersistence(entry);
     cancellationToken.ThrowIfCancellationRequested();
-    await using var runLock = await AcquireRunLockAsync(runId, cancellationToken)
+    await using var runLock = await AcquireRunLockForExistingSnapshotAsync(
+        runId,
+        cancellationToken)
         .ConfigureAwait(false);
     EnsureRunExists(runId, SnapshotPath(runId));
     var logPath = LogPath(runId);
@@ -190,7 +191,9 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
     }
 
     cancellationToken.ThrowIfCancellationRequested();
-    await using var runLock = await AcquireRunLockAsync(runId, cancellationToken)
+    await using var runLock = await AcquireRunLockForExistingSnapshotAsync(
+        runId,
+        cancellationToken)
         .ConfigureAwait(false);
     EnsureRunExists(runId, SnapshotPath(runId));
     var logPath = LogPath(runId);
@@ -254,6 +257,14 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
       }
     }
   }
+
+  private Task<FileStream> AcquireRunLockForExistingSnapshotAsync(
+      Guid runId,
+      CancellationToken cancellationToken) =>
+      AcquireRunLockAsync(
+          runId,
+          cancellationToken,
+          deleteOnClose: !File.Exists(SnapshotPath(runId)));
 
   private async Task<ExecutionRun?> ReadSnapshotAsync(
       Guid runId,

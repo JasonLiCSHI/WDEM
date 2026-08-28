@@ -114,7 +114,7 @@ public sealed partial class LogRedactor
   private static partial Regex AuthorizationBearerPattern();
 
   [GeneratedRegex(
-      @"(?<prefix>\bbearer[ \t]+)(?<token>[a-z0-9._~+/=-]+)(?<continuation>[ \t]+[a-z]+)?",
+      @"(?<prefix>\bbearer[ \t]+)(?<token>[a-z0-9._~+/=-]+)(?<continuation>(?:[ \t]+[a-z0-9]+){0,3})",
       RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking)]
   private static partial Regex StandaloneBearerCandidatePattern();
 
@@ -122,9 +122,7 @@ public sealed partial class LogRedactor
   {
     var rawToken = match.Groups["token"].Value;
     var token = rawToken.TrimEnd('.');
-    if (!LooksLikeStandaloneBearerToken(
-        token,
-        match.Groups["continuation"].Success))
+    if (IsKnownBearerDiagnosticPhrase(match, token))
     {
       return match.Value;
     }
@@ -134,32 +132,15 @@ public sealed partial class LogRedactor
         + match.Groups["continuation"].Value;
   }
 
-  private static bool LooksLikeStandaloneBearerToken(
-      string token,
-      bool hasDiagnosticContinuation)
+  private static bool IsKnownBearerDiagnosticPhrase(Match match, string token)
   {
-    if (!hasDiagnosticContinuation)
-    {
-      return true;
-    }
-
-    // A plain-language noun followed by another word is diagnostic prose, not
-    // an opaque credential. Well-known numbered protocol families follow the
-    // same pattern; other mixed or punctuated candidates remain secret-first.
-    return !token.All(char.IsAsciiLetter)
-        && !LooksLikeAuthenticationProtocolIdentifier(token);
-  }
-
-  private static bool LooksLikeAuthenticationProtocolIdentifier(string token)
-  {
-    return HasNumericSuffix(token, "OAuth") || HasNumericSuffix(token, "RFC");
-  }
-
-  private static bool HasNumericSuffix(string value, string prefix)
-  {
-    return value.Length > prefix.Length
-        && value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-        && value[prefix.Length..].All(char.IsAsciiDigit);
+    var phrase = token + match.Groups["continuation"].Value;
+    return phrase.Equals("authentication failed", StringComparison.OrdinalIgnoreCase)
+        || phrase.Equals("token unavailable", StringComparison.OrdinalIgnoreCase)
+        || phrase.Equals("authorization required", StringComparison.OrdinalIgnoreCase)
+        || phrase.Equals("OAuth2 authentication enabled", StringComparison.OrdinalIgnoreCase)
+        || phrase.Equals("RFC6750 support enabled", StringComparison.OrdinalIgnoreCase)
+        || phrase.Equals("service ready", StringComparison.OrdinalIgnoreCase);
   }
 
   private static string RedactSecretBlocks(string value)

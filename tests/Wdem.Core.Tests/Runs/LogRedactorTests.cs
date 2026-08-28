@@ -72,6 +72,11 @@ public sealed class LogRedactorTests
   [InlineData("Bearer abc123 expired", "Bearer *** expired")]
   [InlineData("Bearer hunter2 rejected", "Bearer *** rejected")]
   [InlineData("Bearer abc-123 unavailable", "Bearer *** unavailable")]
+  [InlineData("Bearer secret expired", "Bearer *** expired")]
+  [InlineData("Bearer hunter rejected", "Bearer *** rejected")]
+  [InlineData(
+      "Bearer OAuth2 authentication enabled unexpectedly",
+      "Bearer *** authentication enabled unexpectedly")]
   [InlineData("Bearer abcdefghijklmnop", "Bearer ***")]
   [InlineData("Bearer abcdefghijklmnopqrstuvw", "Bearer ***")]
   public void Redact_RemovesStandaloneBearerTokensWithoutConsumingFollowingText(
@@ -93,6 +98,7 @@ public sealed class LogRedactorTests
   [InlineData("Bearer authentication failed")]
   [InlineData("Bearer token unavailable")]
   [InlineData("Bearer authorization required")]
+  [InlineData("bearer service ready")]
   public void Redact_PreservesBearerProtocolDiagnostics(string input)
   {
     Assert.Equal(input, _redactor.Redact(input));
