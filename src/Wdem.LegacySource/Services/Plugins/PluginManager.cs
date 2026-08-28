@@ -1,7 +1,9 @@
 using System.Diagnostics;
 using global::System.IO;
 using global::System.IO.Compression;
+using global::System.Net;
 using global::System.Net.Http;
+using global::System.Net.Http.Headers;
 using Wdem.LegacySource.Interfaces;
 using Wdem.LegacySource.Models.Plugins;
 using Wdem.LegacySource.Services.Bootstrappers;
@@ -10,6 +12,21 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace Wdem.LegacySource.Services.Plugins
 {
+  /// <summary>Describes a failure while retrieving the private WDEM plugin archive.</summary>
+  public sealed class PluginDownloadException : InvalidOperationException
+  {
+    public PluginDownloadException(string errorCode, HttpStatusCode? statusCode, string message, Exception? innerException = null)
+        : base(message, innerException)
+    {
+      ErrorCode = errorCode;
+      StatusCode = statusCode;
+    }
+
+    public string ErrorCode { get; }
+
+    public HttpStatusCode? StatusCode { get; }
+  }
+
   /// <summary>Discovers plugins from the plugins directory and ensures their runtimes are available.</summary>
   public class PluginManager : IPluginManager
   {
@@ -18,6 +35,7 @@ namespace Wdem.LegacySource.Services.Plugins
     private readonly ILogger _logger;
     private readonly string _pluginsDir;
     private readonly IRuntimeResolver? _runtimeResolver;
+    private readonly HttpClient _httpClient;
 
     /// <summary>Initializes a new instance of <see cref="PluginManager"/>.</summary>
     public PluginManager(
@@ -25,12 +43,14 @@ namespace Wdem.LegacySource.Services.Plugins
         BunBootstrapper bunBootstrapper,
         ILogger logger,
         string? pluginsDirectory = null,
-        IRuntimeResolver? runtimeResolver = null)
+        IRuntimeResolver? runtimeResolver = null,
+        HttpClient? httpClient = null)
     {
       _uvBootstrapper = uvBootstrapper;
       _bunBootstrapper = bunBootstrapper;
       _logger = logger;
       _runtimeResolver = runtimeResolver;
+      _httpClient = httpClient ?? new HttpClient();
 
       _pluginsDir = pluginsDirectory ?? Path.Combine(
           Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -152,24 +172,27 @@ namespace Wdem.LegacySource.Services.Plugins
 
       _logger.LogInfo($"[PluginManager] Missing local plugins: {string.Join(", ", missingPlugins)}. Downloading fresh plugin pack from GitHub...");
 
+      var tempZipPath = Path.Combine(Path.GetTempPath(), $"wdem-plugins-{Guid.NewGuid()}.zip");
+      var tempExtractPath = Path.Combine(Path.GetTempPath(), $"wdem-extract-{Guid.NewGuid()}");
       try
       {
-        using var client = new HttpClient();
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("Wdem.LegacySource-CLI");
+        var zipUrl = "https://codeload.github.com/JasonLiCSHI/WDEM/zip/refs/heads/main";
+        var token = GetGitHubToken();
 
-        var zipUrl = "https://github.com/JasonLiCSHI/WDEM/archive/refs/heads/main.zip";
-        var tempZipPath = Path.Combine(Path.GetTempPath(), $"wdem-plugins-{Guid.NewGuid()}.zip");
-
-        using (var response = await client.GetAsync(zipUrl))
+        using (var request = new HttpRequestMessage(HttpMethod.Get, zipUrl))
+        using (var response = await SendArchiveRequestAsync(request, token))
         {
-          response.EnsureSuccessStatusCode();
+          if (!response.IsSuccessStatusCode)
+          {
+            throw CreateDownloadException(response.StatusCode, token is not null);
+          }
+
           using (var fs = new FileStream(tempZipPath, FileMode.Create, FileAccess.Write, FileShare.None))
           {
             await response.Content.CopyToAsync(fs);
           }
         }
 
-        var tempExtractPath = Path.Combine(Path.GetTempPath(), $"wdem-extract-{Guid.NewGuid()}");
         ZipFile.ExtractToDirectory(tempZipPath, tempExtractPath);
 
         var extractedPluginsDir = Path.Combine(tempExtractPath, "WDEM-main", "plugins");
@@ -189,19 +212,76 @@ namespace Wdem.LegacySource.Services.Plugins
         }
         else
         {
-          _logger.LogError("[PluginManager] Failed to locate plugins folder in downloaded archive.");
+          throw new PluginDownloadException(
+              "github_plugin_archive_invalid",
+              null,
+              "The downloaded WDEM plugin archive does not contain a plugins directory.");
         }
-
-        try
-        {
-          File.Delete(tempZipPath);
-          Directory.Delete(tempExtractPath, true);
-        }
-        catch { /* ignored */ }
+      }
+      catch (PluginDownloadException)
+      {
+        throw;
       }
       catch (Exception ex)
       {
-        _logger.LogError($"[PluginManager] Failed to download plugin pack: {ex.Message}");
+        throw new PluginDownloadException(
+            "github_plugin_download_failed",
+            null,
+            "Failed to download the WDEM plugin archive.",
+            ex);
+      }
+      finally
+      {
+        TryDeleteTemporaryPluginFiles(tempZipPath, tempExtractPath);
+      }
+    }
+
+    private async Task<HttpResponseMessage> SendArchiveRequestAsync(HttpRequestMessage request, string? token)
+    {
+      request.Headers.UserAgent.Add(new ProductInfoHeaderValue("Wdem.LegacySource", "1.0"));
+      if (token is not null)
+      {
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+      }
+
+      return await _httpClient.SendAsync(request);
+    }
+
+    private static string? GetGitHubToken()
+    {
+      var wdemToken = Environment.GetEnvironmentVariable("WDEM_GITHUB_TOKEN");
+      if (!string.IsNullOrWhiteSpace(wdemToken)) return wdemToken;
+
+      var githubToken = Environment.GetEnvironmentVariable("GITHUB_TOKEN");
+      return string.IsNullOrWhiteSpace(githubToken) ? null : githubToken;
+    }
+
+    private static PluginDownloadException CreateDownloadException(HttpStatusCode statusCode, bool hasToken)
+    {
+      if (!hasToken && (statusCode == HttpStatusCode.Unauthorized || statusCode == HttpStatusCode.NotFound))
+      {
+        return new PluginDownloadException(
+            "github_authentication_required",
+            statusCode,
+            $"The private WDEM plugin archive returned {(int)statusCode}. Set WDEM_GITHUB_TOKEN or GITHUB_TOKEN with repository read access.");
+      }
+
+      return new PluginDownloadException(
+          "github_plugin_archive_request_failed",
+          statusCode,
+          $"The WDEM plugin archive request failed with HTTP {(int)statusCode}.");
+    }
+
+    private static void TryDeleteTemporaryPluginFiles(string zipPath, string extractPath)
+    {
+      try
+      {
+        if (File.Exists(zipPath)) File.Delete(zipPath);
+        if (Directory.Exists(extractPath)) Directory.Delete(extractPath, true);
+      }
+      catch (Exception)
+      {
+        // Temporary cleanup must not hide the retrieval error.
       }
     }
 

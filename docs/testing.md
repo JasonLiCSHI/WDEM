@@ -1,132 +1,33 @@
-> **Development status:** WDEM currently provides transition libraries and automated tests only. No public CLI or desktop host exists yet, so command and distribution examples on this page are design references rather than supported product instructions. Binary releases will be enabled only after `Wdem.Cli` and `Wdem.Desktop` exist. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
+> **Development status:** WDEM currently provides transition libraries and automated unit tests only. `Wdem.Cli` and `Wdem.Desktop` have not been implemented, so no supported product, sandbox, container, or release integration workflow exists. See [THIRD-PARTY-NOTICES](https://github.com/JasonLiCSHI/WDEM/blob/main/THIRD-PARTY-NOTICES.md) and [source provenance](https://github.com/JasonLiCSHI/WDEM/blob/main/docs/wdem/source-provenance.md).
+
 # Testing Guide
 
-This document outlines the testing strategy for WDEM. Because WDEM modifies system state
-(registry, packages, environment variables), testing requires strict isolation to prevent damaging
-the host machine and to ensure idempotency.
+## Available validation: .NET unit tests
 
-## Testing Tiers
-
-We employ a three-tier testing strategy:
-
-1.  **Unit Tests (Fast)**: Validate logic, parsers, and service abstractions in isolation.
-2.  **Container Integration (CI)**: Validates package manager interactions in a clean Windows Server
-    Core environment.
-3.  **Sandbox / VM (Full System)**: Validates deep OS integrations (Service Control Manager,
-    Registry Hives) that may differ or fail in containers.
-
----
-
-## Local Development Workflow
-
-### 1. Unit Tests
-
-Run standard .NET unit tests locally. These have no system side effects.
+Run the solution's automated unit tests from the repository root:
 
 ```powershell
 dotnet restore Wdem.sln -p:EnableWindowsTargeting=true
-dotnet build Wdem.sln --no-restore -p:EnableWindowsTargeting=true
-dotnet test Wdem.sln --no-build -p:EnableWindowsTargeting=true
+dotnet build Wdem.sln -c Release -p:EnableWindowsTargeting=true --no-restore
+dotnet test Wdem.sln -c Release -p:EnableWindowsTargeting=true --no-build
 ```
 
-### 2. Windows Sandbox ("Clean Room" Testing)
+These tests have no intended system side effects and are the only supported Task1 validation.
 
-For rapid integration testing, we use **Windows Sandbox**. This provides a temporary, disposable
-Windows desktop environment that starts in seconds.
+## Unavailable integration entry points
 
-**Prerequisites:**
+The historical scripts below intentionally report that integration testing is unavailable and exit non-zero. They must not be interpreted as passing integration checks:
 
-- Windows 10/11 Pro or Enterprise
-- "Windows Sandbox" feature enabled
+- `test-data/run-test.ps1`
+- `test-data/run-test-full.ps1`
+- `test-data/run-test-gha.ps1`
+- `test-data/run-test-container.ps1`
+- `testing/infrastructure/start-sandbox.ps1`
+- `testing/infrastructure/run-sandbox-test.ps1`
+- `testing/infrastructure/run-sandbox-plugins.ps1`
 
-**Full System Integration Test:**
+They will be replaced when `Wdem.Cli` can apply a configuration in an isolated environment and the resulting state can be verified. Until then, do not run the Pester files in `test-data/` against a development machine: they describe product integration behavior that Task1 cannot execute.
 
-1.  Execute the launcher script:
-    ```powershell
-    powershell -File testing/infrastructure/start-sandbox.ps1
-    ```
-2.  The sandbox will automatically build the project, setup plugins, install runtimes (`uv`, `bun`),
-    and run the full test configuration (`test-config.yaml`).
-3.  Verification results will be displayed in the terminal upon logon.
+## CI
 
-**Plugin-Only Integration Test:** For faster iteration when working on plugins:
-
-1.  Ensure the project is built (`dotnet publish`).
-2.  Launch the specialized sandbox script:
-    ```powershell
-    powershell -File testing/infrastructure/run-sandbox-plugins.ps1
-    ```
-
-**Why use this?**
-
-- **Safety**: Changes (installing apps, changing registry) are discarded when you close the window.
-- **Idempotency**: Every run starts from a pristine Windows state, ensuring your configuration works
-  on fresh systems.
-
----
-
-## Automated CI (Docker)
-
-Our GitHub Actions pipeline utilizes **Windows Server Core** containers to run integration tests.
-
-### Dockerfile Strategy
-
-- **Location**: `testing/infrastructure/Dockerfile`.
-- **Base Image**: `mcr.microsoft.com/windows/servercore:ltsc2022`.
-- **Optimizations**:
-  - Layer caching for `.csproj` restores.
-  - Pester module pre-installed.
-  - Full plugin source code and runtimes included.
-
-### Running Container Tests Locally
-
-If you have Docker Desktop for Windows configured for **Windows Containers**:
-
-```powershell
-# Build and Run from project root
-docker build -t wdem:test -f testing/infrastructure/Dockerfile .
-docker run wdem:test
-```
-
-This executes the `test-data/run-test-container.ps1` script, which:
-
-1.  Installs a test configuration.
-2.  Runs WDEM.
-3.  Executes the Pester verification suite.
-
----
-
-## Verification Framework (Pester)
-
-We use [Pester](https://pester.dev/) for structured integration assertions. The test suite is
-located at `test-data/verify.Tests.ps1`.
-
-### Key Scenarios Covered
-
-- **Package Managers**: Verifies installation of packages via Scoop, Chocolatey, and Winget.
-- **Environment**: Checks for correct environment variable persistence.
-- **System Settings**: Validates Registry keys and Windows Settings (e.g., showing file extensions).
-- **Dotfiles**: Ensures configuration files are correctly linked.
-
-To run these tests manually against your local machine (**Use with caution**):
-
-```powershell
-Invoke-Pester -Path test-data/verify.Tests.ps1 -Output Detailed
-```
-
----
-
-## Release Validation (Virtual Machines)
-
-For final release candidates, we recommend testing on a full Virtual Machine (Hyper-V / VMware) to
-validate behaviors that cannot be simulated in containers (e.g., reboots, specific driver
-interactions).
-
-**Recommended Workflow:**
-
-1.  **Snapshot**: Always take a snapshot of a clean VM state.
-2.  **Execute**: Run the release binary.
-3.  **Verify**: Check all system states.
-4.  **Revert**: Revert to the snapshot for the next test run.
-
-_Future Note: We aim to automate this tier using GitHub Actions Self-Hosted Runners._
+CI runs the solution's direct `dotnet restore`, `dotnet build`, and `dotnet test` commands. It does not invoke the unavailable integration entry points.

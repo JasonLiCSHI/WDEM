@@ -24,6 +24,11 @@ files/
 TestResults/
 config.yaml
 .wdem-state.json
+winhome.state.json
+.winhome-state.json
+*.migrated-*
+*.migration-backup.*
+*.backup.*
 *.snk
 *.trx
 *.cache

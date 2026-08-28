@@ -1,10 +1,3 @@
 $ErrorActionPreference = "Stop"
 
-Push-Location (Split-Path -Parent $PSScriptRoot)
-try {
-    dotnet build Wdem.sln -c Release --no-restore
-    dotnet test Wdem.sln -c Release --no-build
-}
-finally {
-    Pop-Location
-}
+throw "WDEM container integration tests are unavailable during Task1 because Wdem.Cli has not been implemented. Run the documented dotnet unit-test commands instead."

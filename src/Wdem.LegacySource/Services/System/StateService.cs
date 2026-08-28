@@ -42,11 +42,11 @@ namespace Wdem.LegacySource.Services.System
       // Migration fallbacks are read once and moved aside; WDEM never writes these paths.
       var legacyEnvStatePath = Environment.GetEnvironmentVariable("WINHOME_STATE_PATH");
 
-      bool oldStepExists = File.Exists(oldStepPath);
-      bool oldStateExists = File.Exists(oldStatePath);
-      bool oldCwdExists = File.Exists(cwdStatePath);
+      bool oldStepExists = File.Exists(oldStepPath) && !IsCurrentStatePath(oldStepPath);
+      bool oldStateExists = File.Exists(oldStatePath) && !IsCurrentStatePath(oldStatePath);
+      bool oldCwdExists = File.Exists(cwdStatePath) && !IsCurrentStatePath(cwdStatePath);
       bool legacyEnvExists = !string.IsNullOrWhiteSpace(legacyEnvStatePath)
-          && !string.Equals(legacyEnvStatePath, _stateFilePath, StringComparison.OrdinalIgnoreCase)
+          && !IsCurrentStatePath(legacyEnvStatePath)
           && File.Exists(legacyEnvStatePath);
 
       if (!oldStepExists && !oldStateExists && !oldCwdExists && !legacyEnvExists) return;
@@ -54,139 +54,126 @@ namespace Wdem.LegacySource.Services.System
       lock (_sync)
       {
         var merged = _inMemoryState;
-        bool changed = false;
+        var backups = new List<(string Path, string Description, string Suffix)>();
 
-        if (oldCwdExists)
+        AddLegacyState(cwdStatePath, oldCwdExists, "legacy state", "backup", merged, backups);
+        AddLegacyState(legacyEnvStatePath, legacyEnvExists, "migration fallback state", "migration-backup", merged, backups);
+        AddLegacyState(oldStatePath, oldStateExists, "migration fallback state", "migration-backup", merged, backups);
+        AddLegacySteps(oldStepPath, oldStepExists, merged, backups);
+
+        if (backups.Count == 0) return;
+
+        _inMemoryState = merged;
+        if (!TryFlushToDisk())
         {
-          try
-          {
-            var oldCwdJson = File.ReadAllText(cwdStatePath);
-            var oldState = JsonSerializer.Deserialize<StateData>(oldCwdJson);
-            if (oldState != null && oldState.AppliedItems.Any())
-            {
-              foreach (var item in oldState.AppliedItems)
-                merged.AppliedItems.Add(item);
-              foreach (var kv in oldState.SystemSettingOriginals)
-                merged.SystemSettingOriginals.TryAdd(kv.Key, kv.Value);
-              changed = true;
-            }
-          }
-          catch (Exception)
-          {
-            /* Silently skip malformed structural nodes */
-          }
-
-          try
-          {
-            var backupPath = cwdStatePath + $".backup.{Guid.NewGuid():N}";
-            File.Move(cwdStatePath, backupPath);
-            _logger.LogInfo($"[State] Read migration fallback state from {cwdStatePath}, backed up to {backupPath}");
-          }
-          catch (Exception ex)
-          {
-            _logger.LogWarning($"[State] Failed to back up legacy state: {ex.Message}");
-          }
+          _logger.LogWarning("[State] Legacy state was not backed up because the merged state could not be persisted.");
+          return;
         }
 
-        if (legacyEnvExists)
+        foreach (var backup in backups)
         {
-          try
-          {
-            var legacyEnvJson = File.ReadAllText(legacyEnvStatePath!);
-            var legacyState = JsonSerializer.Deserialize<StateData>(legacyEnvJson);
-            if (legacyState != null && legacyState.AppliedItems.Any())
-            {
-              foreach (var item in legacyState.AppliedItems)
-                merged.AppliedItems.Add(item);
-              foreach (var kv in legacyState.SystemSettingOriginals)
-                merged.SystemSettingOriginals.TryAdd(kv.Key, kv.Value);
-              changed = true;
-            }
-          }
-          catch (Exception)
-          {
-            /* Silently skip malformed migration fallback state. */
-          }
+          BackupMigratedFile(backup.Path, backup.Description, backup.Suffix);
+        }
+      }
+    }
 
-          try
-          {
-            var backupPath = legacyEnvStatePath + $".migration-backup.{Guid.NewGuid():N}";
-            File.Move(legacyEnvStatePath!, backupPath);
-            _logger.LogInfo($"[State] Read migration fallback state from {legacyEnvStatePath}, backed up to {backupPath}");
-          }
-          catch (Exception ex)
-          {
-            _logger.LogWarning($"[State] Failed to back up migration fallback state: {ex.Message}");
-          }
+    private void AddLegacyState(
+        string? path,
+        bool exists,
+        string description,
+        string backupSuffix,
+        StateData merged,
+        List<(string Path, string Description, string Suffix)> backups)
+    {
+      if (!exists || string.IsNullOrWhiteSpace(path)) return;
+
+      try
+      {
+        var legacyState = JsonSerializer.Deserialize<StateData>(File.ReadAllText(path));
+        if (legacyState == null) return;
+
+        MergeStateData(merged, legacyState);
+        backups.Add((path, description, backupSuffix));
+      }
+
+      catch (Exception)
+      {
+        // Malformed legacy files are left in place rather than risking a backup before migration succeeds.
+      }
+    }
+
+    private bool IsCurrentStatePath(string? candidatePath)
+    {
+      if (string.IsNullOrWhiteSpace(candidatePath)) return false;
+
+      try
+      {
+        return string.Equals(
+            Path.GetFullPath(candidatePath),
+            Path.GetFullPath(_stateFilePath),
+            StringComparison.OrdinalIgnoreCase);
+      }
+      catch (Exception)
+      {
+        return string.Equals(candidatePath, _stateFilePath, StringComparison.OrdinalIgnoreCase);
+      }
+    }
+
+    private void AddLegacySteps(
+        string path,
+        bool exists,
+        StateData merged,
+        List<(string Path, string Description, string Suffix)> backups)
+    {
+      if (!exists) return;
+
+      try
+      {
+        var legacySteps = JsonSerializer.Deserialize<Dictionary<string, StepResult>>(File.ReadAllText(path));
+        if (legacySteps == null) return;
+
+        foreach (var step in legacySteps)
+        {
+          merged.StepHistory.TryAdd(step.Key, step.Value);
         }
 
-        if (oldStateExists)
-        {
-          try
-          {
-            var oldStateJson = File.ReadAllText(oldStatePath);
-            var oldState = JsonSerializer.Deserialize<StateData>(oldStateJson);
-            if (oldState != null && oldState.AppliedItems.Any())
-            {
-              foreach (var item in oldState.AppliedItems)
-                merged.AppliedItems.Add(item);
-              foreach (var kv in oldState.SystemSettingOriginals)
-                merged.SystemSettingOriginals.TryAdd(kv.Key, kv.Value);
-              changed = true;
-            }
-          }
-          catch (Exception)
-          {
-            /* Silently skip malformed migration fallback state. */
-          }
+        backups.Add((path, "migration fallback step state", "backup"));
+      }
+      catch (Exception)
+      {
+        // Malformed legacy files are left in place rather than risking a backup before migration succeeds.
+      }
+    }
 
-          try
-          {
-            var backupPath = oldStatePath + $".migration-backup.{Guid.NewGuid():N}";
-            File.Move(oldStatePath, backupPath);
-            _logger.LogInfo($"[State] Read migration fallback state from {oldStatePath}, backed up to {backupPath}");
-          }
-          catch (Exception ex)
-          {
-            _logger.LogWarning($"[State] Failed to back up migration fallback state: {ex.Message}");
-          }
-        }
+    private static void MergeStateData(StateData destination, StateData source)
+    {
+      foreach (var item in source.AppliedItems)
+      {
+        destination.AppliedItems.Add(item);
+      }
 
-        if (oldStepExists)
-        {
-          try
-          {
-            var oldStepJson = File.ReadAllText(oldStepPath);
-            var oldSteps = JsonSerializer.Deserialize<Dictionary<string, StepResult>>(oldStepJson);
-            if (oldSteps != null)
-            {
-              foreach (var kv in oldSteps)
-                merged.StepHistory.TryAdd(kv.Key, kv.Value);
-              changed = true;
-            }
-          }
-          catch (Exception)
-          {
-            /* Silently skip malformed structural nodes */
-          }
+      foreach (var setting in source.SystemSettingOriginals)
+      {
+        destination.SystemSettingOriginals.TryAdd(setting.Key, setting.Value);
+      }
 
-          try
-          {
-            var backupPath = oldStepPath + $".backup.{Guid.NewGuid():N}";
-            File.Move(oldStepPath, backupPath);
-            _logger.LogInfo($"[State] Read migration fallback step state from {oldStepPath}, backed up to {backupPath}");
-          }
-          catch (Exception ex)
-          {
-            _logger.LogWarning($"[State] Failed to back up legacy step state: {ex.Message}");
-          }
-        }
+      foreach (var step in source.StepHistory)
+      {
+        destination.StepHistory.TryAdd(step.Key, step.Value);
+      }
+    }
 
-        if (changed)
-        {
-          _inMemoryState = merged;
-          FlushToDisk();
-        }
+    private void BackupMigratedFile(string path, string description, string suffix)
+    {
+      try
+      {
+        var backupPath = path + $".{suffix}.{Guid.NewGuid():N}";
+        File.Move(path, backupPath);
+        _logger.LogInfo($"[State] Read {description} from {path}, backed up to {backupPath}");
+      }
+      catch (Exception ex)
+      {
+        _logger.LogWarning($"[State] Failed to back up {description}: {ex.Message}");
       }
     }
 
@@ -348,6 +335,11 @@ namespace Wdem.LegacySource.Services.System
 
     private void FlushToDisk()
     {
+      TryFlushToDisk();
+    }
+
+    private bool TryFlushToDisk()
+    {
       try
       {
         string json = JsonSerializer.Serialize(_inMemoryState, new JsonSerializerOptions { WriteIndented = true });
@@ -360,10 +352,12 @@ namespace Wdem.LegacySource.Services.System
         }
 
         File.Move(tmpPath, _stateFilePath, overwrite: true);
+        return true;
       }
       catch (Exception ex)
       {
         _logger.LogWarning($"[State] Could not save state: {ex.Message}");
+        return false;
       }
     }
 

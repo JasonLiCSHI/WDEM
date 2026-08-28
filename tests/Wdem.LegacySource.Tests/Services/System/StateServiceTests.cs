@@ -108,6 +108,91 @@ namespace Wdem.LegacySource.Tests.Services.System
       }
     }
 
+    [Fact]
+    public void LegacyStateEnvironment_MigratesSystemSettingOriginalsWithoutAppliedItems()
+    {
+      var legacyStatePath = Path.Combine(_testDir, ".winhome-state.json");
+      var originalLegacyPath = Environment.GetEnvironmentVariable("WINHOME_STATE_PATH");
+      File.WriteAllText(legacyStatePath, JsonSerializer.Serialize(
+          new StateData
+          {
+            SystemSettingOriginals = new Dictionary<string, object> { ["HideFileExt"] = 1 }
+          }));
+
+      try
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", legacyStatePath);
+
+        var state = CreateService().LoadState();
+
+        Assert.Empty(state.AppliedItems);
+        Assert.Equal("1", state.SystemSettingOriginals["HideFileExt"].ToString());
+        Assert.True(File.Exists(_stateFilePath));
+        Assert.False(File.Exists(legacyStatePath));
+        Assert.Single(Directory.GetFiles(_testDir, ".winhome-state.json.migration-backup.*"));
+      }
+      finally
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", originalLegacyPath);
+      }
+    }
+
+    [Fact]
+    public void LegacyStateEnvironment_MigratesStepHistoryWithoutAppliedItems()
+    {
+      var legacyStatePath = Path.Combine(_testDir, ".winhome-state.json");
+      var originalLegacyPath = Environment.GetEnvironmentVariable("WINHOME_STATE_PATH");
+      File.WriteAllText(legacyStatePath, JsonSerializer.Serialize(
+          new StateData
+          {
+            StepHistory = new Dictionary<string, StepResult>
+            {
+              ["install-git"] = new() { StepId = "install-git", Status = StepStatus.Succeeded }
+            }
+          }));
+
+      try
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", legacyStatePath);
+
+        var state = CreateService().LoadState();
+
+        Assert.Empty(state.AppliedItems);
+        Assert.Equal(StepStatus.Succeeded, state.StepHistory["install-git"].Status);
+        Assert.True(File.Exists(_stateFilePath));
+        Assert.False(File.Exists(legacyStatePath));
+        Assert.Single(Directory.GetFiles(_testDir, ".winhome-state.json.migration-backup.*"));
+      }
+      finally
+      {
+        Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", originalLegacyPath);
+      }
+    }
+
+    [Fact]
+    public void ConfiguredStatePathMatchingLegacyName_IsNotMovedAsAMigrationBackup()
+    {
+      var originalDirectory = Directory.GetCurrentDirectory();
+      var configuredStatePath = Path.Combine(_testDir, "winhome.state.json");
+      File.WriteAllText(configuredStatePath, JsonSerializer.Serialize(
+          new StateData { AppliedItems = new HashSet<string> { "configured-package" } }));
+
+      try
+      {
+        Directory.SetCurrentDirectory(_testDir);
+        Environment.SetEnvironmentVariable("WDEM_STATE_PATH", configuredStatePath);
+
+        var state = new StateService(_mockLogger.Object).LoadState();
+
+        Assert.Contains("configured-package", state.AppliedItems);
+        Assert.True(File.Exists(configuredStatePath));
+      }
+      finally
+      {
+        Directory.SetCurrentDirectory(originalDirectory);
+      }
+    }
+
     // ── Corrupted JSON ─────────────────────────────────────────────────────────
 
     [Fact]

@@ -21,6 +21,19 @@ public sealed class RepositoryIdentityTests
     }
 
     [Fact]
+    public void ProvenanceDocumentsDefineTheStandaloneRepositoryBoundary()
+    {
+        var notices = NormalizeWhitespace(File.ReadAllText(Path.Combine(RepositoryRoot, "THIRD-PARTY-NOTICES.md")));
+        var provenance = NormalizeWhitespace(File.ReadAllText(Path.Combine(RepositoryRoot, "docs", "wdem", "source-provenance.md")));
+
+        Assert.Contains("not a branch, pull request, or merge target of either WinHome repository", notices);
+        Assert.Contains("fetch-only", provenance);
+    }
+
+    private static string NormalizeWhitespace(string value) =>
+        string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+    [Fact]
     public void ProjectIdentitiesDoNotUseWinHome()
     {
         foreach (var project in Directory.EnumerateFiles(RepositoryRoot, "*.csproj", SearchOption.AllDirectories))

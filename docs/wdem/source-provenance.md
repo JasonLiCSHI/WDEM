@@ -6,9 +6,10 @@ WDEM is an independent product repository. Its transitional
 Aryan Madhusudhanan, under the MIT License.
 
 The repository retains `LICENSE` and `THIRD-PARTY-NOTICES.md` for that source
-provenance. The `winhome-source` and `winhome-fork` Git remotes may be used to
-inspect provenance only: their push URLs are `DISABLED`. WDEM does not merge
-to an upstream WinHome repository.
+provenance. The `winhome-source` and `winhome-fork` Git remotes are fetch-only
+and may be used to inspect provenance only: their push URLs are `DISABLED`.
+WDEM is an independent private repository, not a branch, pull request, or
+merge target of either WinHome repository.
 
 `Wdem.Core` is the WDEM-owned core. `Wdem.LegacySource` is a transitional
 library boundary, not a WDEM command-line product or compatibility promise.

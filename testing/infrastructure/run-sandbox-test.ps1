@@ -1,3 +1,3 @@
 $ErrorActionPreference = "Stop"
 
-& (Join-Path $PSScriptRoot "start-sandbox.ps1")
+throw "WDEM sandbox integration tests are unavailable during Task1 because Wdem.Cli has not been implemented."

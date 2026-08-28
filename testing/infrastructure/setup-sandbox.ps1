@@ -1,4 +1,3 @@
 $ErrorActionPreference = "Stop"
 
-Write-Host "No sandbox product setup is available: WDEM has no CLI or desktop host yet."
-Write-Host "Use .\start-sandbox.ps1 to validate Wdem.sln instead."
+throw "WDEM sandbox setup is unavailable during Task1 because Wdem.Cli has not been implemented. Run the documented dotnet unit-test commands instead."

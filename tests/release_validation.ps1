@@ -1,12 +1,22 @@
 $ErrorActionPreference = "Stop"
 
-$repositoryRoot = Split-Path -Parent $PSScriptRoot
-Push-Location $repositoryRoot
+function Invoke-NativeCommand {
+    param(
+        [string]$Description,
+        [scriptblock]$Command
+    )
+
+    & $Command
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Description failed with exit code $LASTEXITCODE."
+    }
+}
+
+Push-Location (Split-Path -Parent $PSScriptRoot)
 try {
-    dotnet restore Wdem.sln -p:EnableWindowsTargeting=true
-    dotnet build Wdem.sln -c Release -p:EnableWindowsTargeting=true --no-restore
-    dotnet test Wdem.sln -c Release -p:EnableWindowsTargeting=true --no-build
-    Write-Host "Validated Wdem.sln. Product binary publication remains disabled until Wdem.Cli and Wdem.Desktop exist."
+    Invoke-NativeCommand "dotnet restore" { dotnet restore Wdem.sln -p:EnableWindowsTargeting=true }
+    Invoke-NativeCommand "dotnet build" { dotnet build Wdem.sln -c Release -p:EnableWindowsTargeting=true --no-restore }
+    Invoke-NativeCommand "dotnet test" { dotnet test Wdem.sln -c Release -p:EnableWindowsTargeting=true --no-build }
 }
 finally {
     Pop-Location

@@ -10,6 +10,7 @@ Copyright (c) 2025 Aryan Madhusudhanan
 The source-derived material is licensed under the MIT License. The full MIT
 license text is retained in this repository's [LICENSE](LICENSE).
 
-WDEM is an independent private product repository. It has no upstream merge
-relationship with DotDev262/WinHome; provenance remotes are read-only sources
-whose push URLs are deliberately disabled.
+WDEM is an independent private repository. It is not a branch, pull request,
+or merge target of either WinHome repository. The `DotDev262/WinHome` source
+and `JasonLiCSHI/WinHome` fork are provenance sources only; their remotes are
+fetch-only and their push URLs are deliberately disabled.
