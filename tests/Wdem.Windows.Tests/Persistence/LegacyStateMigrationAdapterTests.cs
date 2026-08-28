@@ -310,6 +310,10 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
   [InlineData("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0In0.abcdefghijklmnopqrstuvwxyz_01234")]
   [InlineData("k7m2q9v4x8n3p6r1t5w0-y2z7c4b9d6f3h8j1s5u0")]
   [InlineData("k7m2q9v4x8n3p6r1t5w0_y2z7c4b9d6f3h8j1s5u0")]
+  [InlineData("k7m2q9v4x8n3p6r1-t5w0y2z7c4b9d6f3-h8j1s5u0a2c7e4g9")]
+  [InlineData("k7m2q9v4x8n3p6r1.t5w0y2z7c4b9d6f3.h8j1s5u0a2c7e4g9")]
+  [InlineData("k7m2q9v4x8n3p6r1_t5w0y2z7c4b9d6f3_h8j1s5u0a2c7e4g9")]
+  [InlineData("550e8400-e29b-41d4-a716-446655440000")]
   public async Task MigrateAsync_RejectsDelimitedOpaqueCredentials(string credential)
   {
     WriteLegacy("state.json", JsonSerializer.Serialize(new[] { credential }));

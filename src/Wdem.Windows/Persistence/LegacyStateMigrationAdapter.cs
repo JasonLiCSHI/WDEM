@@ -542,10 +542,43 @@ public sealed class LegacyStateMigrationAdapter
 
   private static bool LooksLikeUnclassifiedOpaqueToken(string value)
   {
+    if (Guid.TryParse(value, out _))
+    {
+      return true;
+    }
+
     var segments = value.Split(
         ['.', '-', '_'],
         StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-    return segments.Any(LooksLikeOpaqueTokenSegment);
+    if (segments.Any(LooksLikeOpaqueTokenSegment))
+    {
+      return true;
+    }
+
+    var compactValue = string.Concat(segments);
+    return LooksLikeOpaqueTokenSegment(compactValue) &&
+        !HasReadablePackageStructure(value, segments);
+  }
+
+  private static bool HasReadablePackageStructure(
+      string value,
+      IReadOnlyList<string> segments) =>
+      value.Any(character => character is '.' or '-' or '_') &&
+      segments.Count >= 2 &&
+      segments.All(IsReadablePackageSegment);
+
+  private static bool IsReadablePackageSegment(string segment)
+  {
+    if (segment.All(char.IsAsciiLetter) || segment.All(char.IsAsciiDigit) ||
+        CountCamelCaseLexicalWords(segment) > 0)
+    {
+      return true;
+    }
+
+    var digitStart = segment.IndexOfAnyInRange('0', '9');
+    return digitStart > 0 &&
+        segment[..digitStart].All(char.IsAsciiLetter) &&
+        segment[digitStart..].All(char.IsAsciiDigit);
   }
 
   private static bool LooksLikeOpaqueTokenSegment(string value)
