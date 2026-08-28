@@ -106,11 +106,24 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         continue;
       }
 
+      var current = await _runStore.GetAsync(run.RunId, cancellationToken)
+          .ConfigureAwait(false);
+      if (current is null || !IsRecoverableState(current))
+      {
+        continue;
+      }
+
+      pending = PendingResourceIds(current);
+      if (pending.Count == 0)
+      {
+        continue;
+      }
+
       candidates.Add(new RecoveryCandidate
       {
-        RunId = run.RunId,
-        ProfileSourcePath = run.ProfileSourcePath,
-        StartedAtUtc = run.StartedAtUtc,
+        RunId = current.RunId,
+        ProfileSourcePath = current.ProfileSourcePath,
+        StartedAtUtc = current.StartedAtUtc,
         PendingResourceIds = pending
       });
     }

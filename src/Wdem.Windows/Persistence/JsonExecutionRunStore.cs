@@ -381,7 +381,7 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
         throw new JsonException("The execution run snapshot has no matching run identifier.");
       }
 
-      ValidateRunForPersistence(run);
+      ValidateRun(run);
       return SnapshotRestoredRun(run);
     }
     catch (Exception exception) when (
@@ -891,6 +891,22 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
 
   private void ValidateRunForPersistence(ExecutionRun run)
   {
+    ValidateRun(run);
+
+    if (run.RecoveryClaimedAtUtc is { } claimedAt)
+    {
+      var now = _timeProvider.GetUtcNow();
+      if (claimedAt > now && claimedAt - now > MaximumClaimClockSkew)
+      {
+        throw new ArgumentException(
+            "A recovery claim timestamp cannot be excessively far in the future.",
+            nameof(run));
+      }
+    }
+  }
+
+  private static void ValidateRun(ExecutionRun run)
+  {
     if (run.Revision < 0)
     {
       throw new ArgumentException(
@@ -903,17 +919,6 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
       throw new ArgumentException(
           "A recovery claim requires both an identifier and a claim timestamp.",
           nameof(run));
-    }
-
-    if (run.RecoveryClaimedAtUtc is { } claimedAt)
-    {
-      var now = _timeProvider.GetUtcNow();
-      if (claimedAt > now && claimedAt - now > MaximumClaimClockSkew)
-      {
-        throw new ArgumentException(
-            "A recovery claim timestamp cannot be excessively far in the future.",
-            nameof(run));
-      }
     }
 
     ValidateEnum(run.Mode, "run mode");

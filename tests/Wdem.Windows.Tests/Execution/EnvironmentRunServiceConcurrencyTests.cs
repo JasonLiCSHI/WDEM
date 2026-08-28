@@ -14,6 +14,18 @@ namespace Wdem.Windows.Tests.Execution;
 
 public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
 {
+  public static TheoryData<DateTimeOffset, DateTimeOffset> FutureClaimReadTimes => new()
+  {
+    {
+      new DateTimeOffset(2030, 1, 2, 3, 4, 5, TimeSpan.Zero),
+      new DateTimeOffset(2029, 12, 31, 23, 59, 59, TimeSpan.Zero)
+    },
+    {
+      DateTimeOffset.MaxValue,
+      new DateTimeOffset(2030, 1, 2, 3, 4, 5, TimeSpan.Zero)
+    }
+  };
+
   private readonly string _directory = Path.Combine(
       Path.GetTempPath(), $"wdem-recovery-concurrency-{Guid.NewGuid():N}");
 
@@ -163,6 +175,37 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     Assert.DoesNotContain(candidates, candidate => candidate.RunId == claimed.RunId);
   }
 
+  [Theory]
+  [InlineData(CompetingOperation.Recover)]
+  [InlineData(CompetingOperation.Abandon)]
+  public async Task FindRecoveryCandidatesAsync_RechecksAfterConcurrentCompletion(
+      CompetingOperation competingOperation)
+  {
+    var provider = new GatedProvider { WaitForRelease = false };
+    var backingStore = CreateStore();
+    var gatedStore = new GatedRecoveryOperationStore(CreateStore());
+    var finder = CreateService(provider, gatedStore);
+    var competitor = CreateService(provider, CreateStore());
+    var prior = InterruptedRun();
+    await backingStore.CreateAsync(prior, CancellationToken.None);
+    var finding = finder.FindRecoveryCandidatesAsync(CancellationToken.None);
+    await gatedStore.AcquireEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    if (competingOperation == CompetingOperation.Recover)
+    {
+      await competitor.RecoverAsync(prior.RunId, CancellationToken.None);
+    }
+    else
+    {
+      await competitor.AbandonAsync(prior.RunId, CancellationToken.None);
+    }
+
+    gatedStore.ReleaseAcquire.TrySetResult();
+    var candidates = await finding.WaitAsync(TimeSpan.FromSeconds(5));
+
+    Assert.DoesNotContain(candidates, candidate => candidate.RunId == prior.RunId);
+  }
+
   [Fact]
   public async Task RecoverAsync_ReclaimsOrphanedClaimAcrossJsonStores()
   {
@@ -189,31 +232,40 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     Assert.True(persisted.Revision > claimed.Revision);
   }
 
-  [Fact]
-  public async Task RecoverAsync_ReclaimsMaxValueTimestampClaimWithoutOverflow()
+  [Theory]
+  [MemberData(nameof(FutureClaimReadTimes))]
+  public async Task RecoverAsync_ReclaimsPersistedFutureClaimAfterClockRollback(
+      DateTimeOffset claimedAt,
+      DateTimeOffset readAt)
   {
-    var clock = new MutableTimeProvider(DateTimeOffset.MaxValue);
+    var writeClock = new MutableTimeProvider(claimedAt);
+    var readClock = new MutableTimeProvider(readAt);
     var provider = new GatedProvider { WaitForRelease = false };
-    var store = CreateStore(clock);
+    var store = CreateStore(writeClock);
     var claimed = InterruptedRun() with
     {
       Revision = 1,
       RecoveryClaimId = Guid.NewGuid(),
-      RecoveryClaimedAtUtc = DateTimeOffset.MaxValue
+      RecoveryClaimedAtUtc = claimedAt
     };
     await store.CreateAsync(claimed, CancellationToken.None);
-    var service = CreateService(provider, CreateStore(clock), clock);
+    var reader = CreateStore(readClock);
+    var service = CreateService(provider, reader, readClock);
 
     var candidates = await service.FindRecoveryCandidatesAsync(CancellationToken.None);
     var recovered = await service.RecoverAsync(claimed.RunId, CancellationToken.None);
 
-    var persisted = await CreateStore(clock).GetAsync(claimed.RunId, CancellationToken.None);
+    var persisted = await reader.GetAsync(claimed.RunId, CancellationToken.None);
     Assert.Contains(candidates, candidate => candidate.RunId == claimed.RunId);
     Assert.Equal(ExecutionOutcome.Succeeded, recovered.Outcome);
     Assert.Equal(1, provider.ApplyCalls);
     Assert.Equal(ExecutionState.Completed, persisted!.State);
     Assert.Null(persisted.RecoveryClaimId);
     Assert.Null(persisted.RecoveryClaimedAtUtc);
+    Assert.True(File.Exists(reader.SnapshotPath(claimed.RunId)));
+    Assert.Empty(Directory.GetFiles(
+        Path.GetDirectoryName(reader.SnapshotPath(claimed.RunId))!,
+        $"{claimed.RunId:D}.json.corrupted.*"));
   }
 
   [Fact]
@@ -492,6 +544,12 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     public override DateTimeOffset GetUtcNow() => _utcNow;
 
     public void Advance(TimeSpan duration) => _utcNow += duration;
+  }
+
+  public enum CompetingOperation
+  {
+    Recover,
+    Abandon
   }
 
   private sealed class GatedRecoveryOperationStore(IExecutionRunStore inner) :
