@@ -1,0 +1,357 @@
+using Wdem.Core.Execution;
+using Wdem.Core.Graph;
+using Wdem.Core.Planning;
+using Wdem.Core.Providers;
+using Wdem.Core.Resources;
+using Wdem.Core.Runs;
+using Xunit;
+
+namespace Wdem.Core.Tests.Execution;
+
+public sealed class ResourceSchedulerTests
+{
+  private readonly IResourceScheduler _scheduler = new ResourceScheduler();
+
+  [Theory]
+  [InlineData(0)]
+  [InlineData(33)]
+  public async Task ExecuteAsync_MaximumConcurrencyOutsideSupportedRange_Throws(int maximumConcurrency)
+  {
+    await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => _scheduler.ExecuteAsync(
+        IndependentPlan("a"),
+        (resource, _) => Task.FromResult(Result(resource.Definition.Id, ExecutionOutcome.Succeeded)),
+        _ => new ProviderCapabilities(),
+        maximumConcurrency,
+        CancellationToken.None));
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_EmptyPlan_ReturnsEmptyCaseInsensitiveResults()
+  {
+    var result = await _scheduler.ExecuteAsync(
+        Plan(Array.Empty<PlannedResource>()),
+        (_, _) => throw new InvalidOperationException("No resource should execute."),
+        _ => throw new InvalidOperationException("No capabilities should be requested."),
+        maximumConcurrency: 1,
+        CancellationToken.None);
+
+    Assert.Empty(result.Results);
+    Assert.False(result.Results.ContainsKey("missing"));
+  }
+
+  [Theory]
+  [InlineData(ExecutionOutcome.Succeeded)]
+  [InlineData(ExecutionOutcome.NotRequired)]
+  public async Task ExecuteAsync_SuccessfulDependency_AllowsDependentToRun(
+      ExecutionOutcome dependencyOutcome)
+  {
+    var executionOrder = new List<string>();
+    var result = await _scheduler.ExecuteAsync(
+        ChainPlan("a", "b"),
+        (resource, _) =>
+        {
+          executionOrder.Add(resource.Definition.Id);
+          var outcome = resource.Definition.Id == "a"
+              ? dependencyOutcome
+              : ExecutionOutcome.Succeeded;
+          return Task.FromResult(Result(resource.Definition.Id, outcome));
+        },
+        _ => new ProviderCapabilities(),
+        maximumConcurrency: 2,
+        CancellationToken.None);
+
+    Assert.Equal(["a", "b"], executionOrder);
+    Assert.Equal(ExecutionOutcome.Succeeded, result.Results["B"].Outcome);
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_FailedDependency_BlocksAllDownstreamResources()
+  {
+    var invoked = new List<string>();
+    var result = await _scheduler.ExecuteAsync(
+        DiamondPlan(),
+        (resource, _) =>
+        {
+          invoked.Add(resource.Definition.Id);
+          return Task.FromResult(Result("a", ExecutionOutcome.Failed));
+        },
+        _ => new ProviderCapabilities { MaxConcurrentOperations = 2 },
+        maximumConcurrency: 4,
+        CancellationToken.None);
+
+    Assert.Equal(["a"], invoked);
+    Assert.All(new[] { "b", "c", "d" }, id =>
+    {
+      var blocked = result.Results[id];
+      Assert.Equal(ExecutionState.Blocked, blocked.State);
+      Assert.Equal(ExecutionOutcome.Skipped, blocked.Outcome);
+      Assert.NotNull(blocked.Error);
+      Assert.Equal(WdemErrorCode.DependencyError, blocked.Error.Code);
+      Assert.False(blocked.Error.IsRetryable);
+      Assert.Contains("a", blocked.Error.Detail, StringComparison.OrdinalIgnoreCase);
+    });
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_RespectsGlobalConcurrency()
+  {
+    var release = NewGate();
+    var twoStarted = NewGate();
+    var observed = 0;
+    var peak = 0;
+    var started = 0;
+
+    var execution = _scheduler.ExecuteAsync(
+        IndependentPlan("a", "b", "c"),
+        async (resource, token) =>
+        {
+          var active = Interlocked.Increment(ref observed);
+          SetMaximum(ref peak, active);
+          if (Interlocked.Increment(ref started) == 2)
+          {
+            twoStarted.TrySetResult();
+          }
+
+          await release.Task.WaitAsync(token);
+          Interlocked.Decrement(ref observed);
+          return Result(resource.Definition.Id, ExecutionOutcome.Succeeded);
+        },
+        resource => new ProviderCapabilities
+        {
+          MaxConcurrentOperations = 3,
+          ConcurrencyGroup = resource.Definition.Id
+        },
+        maximumConcurrency: 2,
+        CancellationToken.None);
+
+    await twoStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    Assert.Equal(2, Volatile.Read(ref peak));
+    release.TrySetResult();
+    await execution;
+    Assert.Equal(2, peak);
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_RespectsSharedProviderConcurrencyGroup()
+  {
+    var release = NewGate();
+    var firstStarted = NewGate();
+    var observed = 0;
+    var peak = 0;
+
+    var execution = _scheduler.ExecuteAsync(
+        IndependentPlan("a", "b", "c"),
+        async (resource, token) =>
+        {
+          var active = Interlocked.Increment(ref observed);
+          SetMaximum(ref peak, active);
+          firstStarted.TrySetResult();
+          await release.Task.WaitAsync(token);
+          Interlocked.Decrement(ref observed);
+          return Result(resource.Definition.Id, ExecutionOutcome.Succeeded);
+        },
+        _ => new ProviderCapabilities
+        {
+          MaxConcurrentOperations = 1,
+          ConcurrencyGroup = "vs-installer"
+        },
+        maximumConcurrency: 3,
+        CancellationToken.None);
+
+    await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    release.TrySetResult();
+    await execution;
+
+    Assert.Equal(1, peak);
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_DifferentDefaultProviderGroups_RunConcurrently()
+  {
+    var bothStarted = NewGate();
+    var started = 0;
+    var plan = Plan(
+        Resource("a", provider: "one"),
+        Resource("b", provider: "two"));
+
+    var execution = _scheduler.ExecuteAsync(
+        plan,
+        async (resource, token) =>
+        {
+          if (Interlocked.Increment(ref started) == 2)
+          {
+            bothStarted.TrySetResult();
+          }
+
+          await bothStarted.Task.WaitAsync(token);
+          return Result(resource.Definition.Id, ExecutionOutcome.Succeeded);
+        },
+        _ => new ProviderCapabilities { MaxConcurrentOperations = 1 },
+        maximumConcurrency: 2,
+        CancellationToken.None);
+
+    await execution.WaitAsync(TimeSpan.FromSeconds(5));
+    Assert.Equal(2, started);
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_CancellationStopsNewDelegatesAndCompletesUnstartedResources()
+  {
+    using var cancellation = new CancellationTokenSource();
+    var firstStarted = NewGate();
+    var invoked = 0;
+
+    var execution = _scheduler.ExecuteAsync(
+        IndependentPlan("a", "b", "c"),
+        async (resource, token) =>
+        {
+          Interlocked.Increment(ref invoked);
+          firstStarted.TrySetResult();
+          await Task.Delay(Timeout.InfiniteTimeSpan, token);
+          return Result(resource.Definition.Id, ExecutionOutcome.Succeeded);
+        },
+        _ => new ProviderCapabilities { MaxConcurrentOperations = 3 },
+        maximumConcurrency: 1,
+        cancellation.Token);
+
+    await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await cancellation.CancelAsync();
+    var result = await execution.WaitAsync(TimeSpan.FromSeconds(5));
+
+    Assert.Equal(1, invoked);
+    Assert.All(result.Results.Values, resourceResult =>
+    {
+      Assert.Equal(ExecutionState.Completed, resourceResult.State);
+      Assert.Equal(ExecutionOutcome.Cancelled, resourceResult.Outcome);
+    });
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_DelegateExceptionFailsResourceAndBlocksDependent()
+  {
+    var result = await _scheduler.ExecuteAsync(
+        ChainPlan("a", "b"),
+        (resource, _) => resource.Definition.Id == "a"
+            ? Task.FromException<ResourceResult>(new InvalidOperationException("provider failed"))
+            : Task.FromResult(Result(resource.Definition.Id, ExecutionOutcome.Succeeded)),
+        _ => new ProviderCapabilities(),
+        maximumConcurrency: 1,
+        CancellationToken.None);
+
+    Assert.Equal(ExecutionState.Completed, result.Results["a"].State);
+    Assert.Equal(ExecutionOutcome.Failed, result.Results["a"].Outcome);
+    Assert.Equal(WdemErrorCode.ProviderError, result.Results["a"].Error?.Code);
+    Assert.Equal(ExecutionState.Blocked, result.Results["b"].State);
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_DelegateCancellationCancelsResourceAndBlocksDependent()
+  {
+    var result = await _scheduler.ExecuteAsync(
+        ChainPlan("a", "b"),
+        (resource, _) => resource.Definition.Id == "a"
+            ? Task.FromCanceled<ResourceResult>(new CancellationToken(canceled: true))
+            : Task.FromResult(Result(resource.Definition.Id, ExecutionOutcome.Succeeded)),
+        _ => new ProviderCapabilities(),
+        maximumConcurrency: 1,
+        CancellationToken.None);
+
+    Assert.Equal(ExecutionState.Completed, result.Results["a"].State);
+    Assert.Equal(ExecutionOutcome.Cancelled, result.Results["a"].Outcome);
+    Assert.Equal(WdemErrorCode.CancellationError, result.Results["a"].Error?.Code);
+    Assert.Equal(ExecutionState.Blocked, result.Results["b"].State);
+    Assert.Equal(ExecutionOutcome.Skipped, result.Results["b"].Outcome);
+  }
+
+  private static TaskCompletionSource NewGate() =>
+      new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+  private static void SetMaximum(ref int maximum, int candidate)
+  {
+    int observed;
+    do
+    {
+      observed = Volatile.Read(ref maximum);
+      if (candidate <= observed)
+      {
+        return;
+      }
+    }
+    while (Interlocked.CompareExchange(ref maximum, candidate, observed) != observed);
+  }
+
+  private static ExecutionPlan IndependentPlan(params string[] ids) =>
+      Plan(ids.Select(id => Resource(id)).ToArray());
+
+  private static ExecutionPlan ChainPlan(string first, string second) => Plan(
+      [Resource(first)],
+      [Resource(second, [first])]);
+
+  private static ExecutionPlan DiamondPlan() => Plan(
+      [Resource("a")],
+      [Resource("b", ["a"]), Resource("c", ["a"])],
+      [Resource("d", ["b", "c"])]);
+
+  private static ExecutionPlan Plan(params PlannedResource[] resources) =>
+      Plan([resources]);
+
+  private static ExecutionPlan Plan(params PlannedResource[][] layers)
+  {
+    var resources = layers.SelectMany(layer => layer).ToArray();
+    return new ExecutionPlan
+    {
+      PlanId = Guid.NewGuid(),
+      Fingerprint = "test-plan",
+      ProfileId = "test-profile",
+      ProfileVersion = "1.0.0",
+      Layers = layers.Select((layer, index) =>
+          new ResourceGraphLayer(index, layer.Select(resource => resource.Definition.Id).ToArray()))
+          .ToArray(),
+      Resources = resources,
+      IsExecutable = true
+    };
+  }
+
+  private static PlannedResource Resource(
+      string id,
+      IReadOnlyList<string>? dependencies = null,
+      string provider = "test")
+  {
+    var definition = new ResourceDefinition
+    {
+      Id = id,
+      Type = "package",
+      Provider = provider,
+      Dependencies = dependencies ?? []
+    };
+    return new PlannedResource
+    {
+      Definition = definition,
+      Origin = ResourceOrigin.Required,
+      Dependencies = dependencies ?? [],
+      ResourcePlan = new ResourcePlan
+      {
+        ResourceId = id,
+        ResourceType = definition.Type,
+        ProviderName = provider,
+        DesiredStateFingerprint = $"fingerprint-{id}",
+        Compliance = ComplianceStatus.Missing,
+        IsExecutable = true
+      },
+      Status = PlannedResourceStatus.Ready,
+      Risk = PlanRisk.Standard,
+      RequiresElevation = false,
+      IsDestructive = false,
+      RestartPolicy = RestartPolicy.NoRestart
+    };
+  }
+
+  private static ResourceResult Result(string id, ExecutionOutcome outcome) => new()
+  {
+    ResourceId = id,
+    State = ExecutionState.Completed,
+    Outcome = outcome,
+    Progress = outcome is ExecutionOutcome.Succeeded or ExecutionOutcome.NotRequired ? 1 : 0,
+    EndedAtUtc = DateTimeOffset.UtcNow
+  };
+}
