@@ -24,7 +24,17 @@ public enum PlanAction
   None,
   Install,
   Configure,
-  Repair
+  Repair,
+  Upgrade
+}
+
+public enum ProviderLogLevel
+{
+  Trace,
+  Debug,
+  Info,
+  Warning,
+  Error
 }
 
 public enum ApplyOutcome
@@ -40,6 +50,8 @@ public sealed record ProviderCapabilities
   public bool SupportsVersionConstraints { get; init; }
   public bool SupportsInstallerParameters { get; init; }
   public bool SupportsInProgressCancellation { get; init; }
+  public int MaxConcurrentOperations { get; init; } = 1;
+  public string? ConcurrencyGroup { get; init; }
 }
 
 public sealed record ProviderValidationResult
@@ -87,7 +99,23 @@ public sealed record ResourcePlan
   public bool RequiresApply => Steps.Count > 0;
 }
 
-public sealed record ProviderProgress(string Stage, double Percent, string Message);
+public sealed record ProviderProgress(string Stage, double Percent, string Message)
+{
+  public ProviderProgress(
+      string stage,
+      double percent,
+      string message,
+      string? stepId,
+      ProviderLogLevel logLevel = ProviderLogLevel.Info)
+      : this(stage, percent, message)
+  {
+    StepId = stepId;
+    LogLevel = logLevel;
+  }
+
+  public string? StepId { get; init; }
+  public ProviderLogLevel LogLevel { get; init; } = ProviderLogLevel.Info;
+}
 
 public sealed record ResourceApplyResult
 {
