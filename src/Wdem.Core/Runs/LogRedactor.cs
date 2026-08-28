@@ -114,7 +114,7 @@ public sealed partial class LogRedactor
   private static partial Regex AuthorizationBearerPattern();
 
   [GeneratedRegex(
-      @"(?<prefix>\bbearer[ \t]+)(?<token>[a-z0-9._~+/=-]+)",
+      @"(?<prefix>\bbearer[ \t]+)(?<token>[a-z0-9._~+/=-]+)(?<continuation>[ \t]+[a-z]+)?",
       RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking)]
   private static partial Regex StandaloneBearerCandidatePattern();
 
@@ -122,20 +122,44 @@ public sealed partial class LogRedactor
   {
     var rawToken = match.Groups["token"].Value;
     var token = rawToken.TrimEnd('.');
-    if (!LooksLikeStandaloneBearerToken(token))
+    if (!LooksLikeStandaloneBearerToken(
+        token,
+        match.Groups["continuation"].Success))
     {
       return match.Value;
     }
 
     var trailingPeriods = rawToken[token.Length..];
-    return $"{match.Groups["prefix"].Value}***{trailingPeriods}";
+    return $"{match.Groups["prefix"].Value}***{trailingPeriods}"
+        + match.Groups["continuation"].Value;
   }
 
-  private static bool LooksLikeStandaloneBearerToken(string token)
+  private static bool LooksLikeStandaloneBearerToken(
+      string token,
+      bool hasDiagnosticContinuation)
   {
-    return !token.Equals("OAuth2", StringComparison.OrdinalIgnoreCase)
-        && !token.Equals("RFC6750", StringComparison.OrdinalIgnoreCase)
-        && !token.Equals("service", StringComparison.OrdinalIgnoreCase);
+    if (!hasDiagnosticContinuation)
+    {
+      return true;
+    }
+
+    // A plain-language noun followed by another word is diagnostic prose, not
+    // an opaque credential. Well-known numbered protocol families follow the
+    // same pattern; other mixed or punctuated candidates remain secret-first.
+    return !token.All(char.IsAsciiLetter)
+        && !LooksLikeAuthenticationProtocolIdentifier(token);
+  }
+
+  private static bool LooksLikeAuthenticationProtocolIdentifier(string token)
+  {
+    return HasNumericSuffix(token, "OAuth") || HasNumericSuffix(token, "RFC");
+  }
+
+  private static bool HasNumericSuffix(string value, string prefix)
+  {
+    return value.Length > prefix.Length
+        && value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+        && value[prefix.Length..].All(char.IsAsciiDigit);
   }
 
   private static string RedactSecretBlocks(string value)
