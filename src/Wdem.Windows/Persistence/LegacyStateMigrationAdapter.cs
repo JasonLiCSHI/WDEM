@@ -190,58 +190,51 @@ public sealed class LegacyStateMigrationAdapter
     Directory.CreateDirectory(_markerDirectory);
     await using var migrationLock = await AcquireLockAsync(cancellationToken)
         .ConfigureAwait(false);
-    try
+    var markerState = _pathEntryProbe.Probe(_markerPath);
+    if (markerState == MigrationPathEntryState.Inaccessible)
     {
-      var markerState = _pathEntryProbe.Probe(_markerPath);
-      if (markerState == MigrationPathEntryState.Inaccessible)
+      throw CreateInaccessiblePathException(_markerPath);
+    }
+
+    var gateState = _pathEntryProbe.Probe(_gatePath);
+    if (gateState == MigrationPathEntryState.Inaccessible)
+    {
+      throw CreateInaccessiblePathException(_gatePath);
+    }
+
+    if (markerState == MigrationPathEntryState.Present)
+    {
+      if (gateState == MigrationPathEntryState.Absent)
       {
-        throw CreateInaccessiblePathException(_markerPath);
+        await CreatePersistentGateAsync(cancellationToken).ConfigureAwait(false);
       }
 
-      var gateState = _pathEntryProbe.Probe(_gatePath);
-      if (gateState == MigrationPathEntryState.Inaccessible)
-      {
-        throw CreateInaccessiblePathException(_gatePath);
-      }
-
-      if (markerState == MigrationPathEntryState.Present)
-      {
-        if (gateState == MigrationPathEntryState.Absent)
-        {
-          await CreatePersistentGateAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        return await ResolveExistingMarkerAsync(
-            includePersistedNames: false,
-            cancellationToken).ConfigureAwait(false);
-      }
-
-      if (gateState == MigrationPathEntryState.Present)
-      {
-        return await CommitSentinelFromGateAsync(cancellationToken)
-            .ConfigureAwait(false);
-      }
-
-      var gateCreated = await CreatePersistentGateAsync(cancellationToken)
-          .ConfigureAwait(false);
-      if (!gateCreated)
-      {
-        return await CommitSentinelFromGateAsync(cancellationToken)
-            .ConfigureAwait(false);
-      }
-
-      var importedStepNames = await DiscoverStepNamesAsync(cancellationToken)
-          .ConfigureAwait(false);
-      var marker = CreateMarker(importedStepNames);
-      return await CommitDiscoveredMarkerAsync(
-          marker,
-          importedStepNames,
+      return await ResolveExistingMarkerAsync(
+          includePersistedNames: false,
           cancellationToken).ConfigureAwait(false);
     }
-    finally
+
+    if (gateState == MigrationPathEntryState.Present)
     {
-      TryDeleteLockAfterRelease(migrationLock);
+      return await CommitSentinelFromGateAsync(cancellationToken)
+          .ConfigureAwait(false);
     }
+
+    var gateCreated = await CreatePersistentGateAsync(cancellationToken)
+        .ConfigureAwait(false);
+    if (!gateCreated)
+    {
+      return await CommitSentinelFromGateAsync(cancellationToken)
+          .ConfigureAwait(false);
+    }
+
+    var importedStepNames = await DiscoverStepNamesAsync(cancellationToken)
+        .ConfigureAwait(false);
+    var marker = CreateMarker(importedStepNames);
+    return await CommitDiscoveredMarkerAsync(
+        marker,
+        importedStepNames,
+        cancellationToken).ConfigureAwait(false);
   }
 
   private async Task<bool> CreatePersistentGateAsync(
@@ -368,21 +361,61 @@ public sealed class LegacyStateMigrationAdapter
       cancellationToken.ThrowIfCancellationRequested();
       try
       {
-        return new FileStream(
-            _lockPath,
-            FileMode.OpenOrCreate,
-            FileAccess.ReadWrite,
-            FileShare.None,
-            1,
-            FileOptions.Asynchronous | FileOptions.DeleteOnClose);
+        ThrowIfLockIsReparsePoint();
+        FileStream? stream = null;
+        try
+        {
+          stream = new FileStream(
+              _lockPath,
+              FileMode.OpenOrCreate,
+              FileAccess.ReadWrite,
+              FileShare.None,
+              1,
+              FileOptions.Asynchronous);
+          var finalPath = WindowsLegacyFileFinalPathResolver.Instance
+              .ResolveFinalPath(stream, _lockPath);
+          if (!IsSameFinalPath(_lockPath, finalPath))
+          {
+            throw new IOException("The migration lock path is unsafe.");
+          }
+
+          stream.SetLength(0);
+          return stream;
+        }
+        catch
+        {
+          stream?.Dispose();
+          throw;
+        }
       }
-      catch (IOException)
+      catch (IOException exception) when (IsLockContention(exception))
       {
         await Task.Delay(TimeSpan.FromMilliseconds(20), cancellationToken)
             .ConfigureAwait(false);
       }
     }
   }
+
+  private void ThrowIfLockIsReparsePoint()
+  {
+    try
+    {
+      if ((File.GetAttributes(_lockPath) & FileAttributes.ReparsePoint) != 0)
+      {
+        throw new IOException("The migration lock path is unsafe.");
+      }
+    }
+    catch (FileNotFoundException)
+    {
+    }
+    catch (DirectoryNotFoundException)
+    {
+    }
+  }
+
+  private static bool IsLockContention(IOException exception) =>
+      exception.HResult is unchecked((int)0x80070020) or
+          unchecked((int)0x80070021);
 
   private async Task<MarkerReadResult> ReadMarkerAsync(
       CancellationToken cancellationToken)
@@ -1238,21 +1271,6 @@ public sealed class LegacyStateMigrationAdapter
     catch (UnauthorizedAccessException)
     {
       return true;
-    }
-  }
-
-  private void TryDeleteLockAfterRelease(FileStream migrationLock)
-  {
-    try
-    {
-      migrationLock.Dispose();
-      File.Delete(_lockPath);
-    }
-    catch (IOException)
-    {
-    }
-    catch (UnauthorizedAccessException)
-    {
     }
   }
 

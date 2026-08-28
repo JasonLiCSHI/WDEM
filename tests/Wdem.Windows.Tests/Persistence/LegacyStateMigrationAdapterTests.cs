@@ -552,6 +552,90 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
   }
 
   [Fact]
+  public async Task MigrateAsync_LeavesReusableZeroByteLockFile()
+  {
+    WriteLegacy("state.json", "[\"one-step\"]");
+    var lockPath = Path.Combine(_root, "WDEM", ".migration-v1.lock");
+
+    var first = await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.True(first.MigrationPerformed);
+    Assert.True(File.Exists(lockPath));
+    Assert.Equal(0, new FileInfo(lockPath).Length);
+    Assert.Equal(
+        (FileAttributes)0,
+        File.GetAttributes(lockPath) & FileAttributes.ReparsePoint);
+
+    var second = await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+
+    Assert.False(second.MigrationPerformed);
+    Assert.True(File.Exists(lockPath));
+    Assert.Equal(0, new FileInfo(lockPath).Length);
+  }
+
+  [Fact]
+  public async Task MigrateAsync_RepeatedConcurrentInstancesNeverFailLockAcquisition()
+  {
+    WriteLegacy("state.json", "[\"one-step\"]");
+    var results = new List<LegacyStateMigrationResult>();
+
+    for (var round = 0; round < 10; round++)
+    {
+      results.AddRange(await Task.WhenAll(
+          Enumerable.Range(0, 12)
+              .Select(_ => new LegacyStateMigrationAdapter(_root)
+                  .MigrateAsync(CancellationToken.None))));
+    }
+
+    Assert.Single(results, result => result.MigrationPerformed);
+    Assert.True(File.Exists(Path.Combine(_root, "WDEM", ".migration-v1.lock")));
+  }
+
+  [Fact]
+  public async Task MigrateAsync_RejectsPreexistingLockSymlinkWithoutReadingLegacy()
+  {
+    var outside = Path.Combine(Path.GetTempPath(), $"wdem-lock-{Guid.NewGuid():N}");
+    var markerDirectory = Path.Combine(_root, "WDEM");
+    Directory.CreateDirectory(outside);
+    Directory.CreateDirectory(markerDirectory);
+    var outsideLock = Path.Combine(outside, "outside.lock");
+    var lockPath = Path.Combine(markerDirectory, ".migration-v1.lock");
+    await File.WriteAllBytesAsync(outsideLock, []);
+    try
+    {
+      try
+      {
+        File.CreateSymbolicLink(lockPath, outsideLock);
+      }
+      catch (Exception exception) when (
+          exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+      {
+        return;
+      }
+
+      WriteLegacy("state.json", "[\"must-not-import\"]");
+      var resolver = new RecordingFinalPathResolver(
+          Path.Combine(_root, "WinHome", "state.json"));
+
+      await Assert.ThrowsAsync<IOException>(() =>
+          new LegacyStateMigrationAdapter(_root, resolver)
+              .MigrateAsync(CancellationToken.None));
+
+      Assert.False(resolver.ObservedOpenReadableStream);
+      Assert.True(File.Exists(outsideLock));
+      Assert.Equal(0, new FileInfo(outsideLock).Length);
+      Assert.False(File.Exists(Path.Combine(markerDirectory, "migration-v1.json")));
+      Assert.False(File.Exists(Path.Combine(markerDirectory, ".migration-v1.gate")));
+    }
+    finally
+    {
+      Directory.Delete(outside, recursive: true);
+    }
+  }
+
+  [Fact]
   public async Task MigrateAsync_AtomicReplaceFailureLeavesNoValidMarker()
   {
     WriteLegacy("state.json", "[\"one-step\"]");
