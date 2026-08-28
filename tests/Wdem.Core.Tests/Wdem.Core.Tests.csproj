@@ -18,4 +18,8 @@
     <ProjectReference Include="..\..\src\Wdem.Core\Wdem.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="TestData\Profiles\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

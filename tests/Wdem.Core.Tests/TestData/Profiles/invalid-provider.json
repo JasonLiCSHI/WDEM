@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.0",
+  "profile": {
+    "id": "invalid-provider",
+    "version": "1.0.0",
+    "displayName": "Invalid provider",
+    "description": "References a provider that is not registered.",
+    "requiredResources": [{ "id": "git" }]
+  },
+  "resources": {
+    "git": { "type": "package", "provider": "not-registered" }
+  }
+}

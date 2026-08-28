@@ -8,4 +8,14 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
 
+  <ItemGroup>
+    <PackageReference Include="JsonSchema.Net" Version="9.4.0" />
+    <PackageReference Include="YamlDotNet" Version="18.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\profiles\schemas\developer-profile.schema.json"
+                      Link="Profiles\Schemas\developer-profile.schema.json" />
+  </ItemGroup>
+
 </Project>

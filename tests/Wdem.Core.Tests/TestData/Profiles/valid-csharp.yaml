@@ -1,0 +1,38 @@
+schemaVersion: "1.0"
+profile:
+  id: csharp-developer
+  version: "1.0.0"
+  displayName: C# Developer
+  description: A complete C# development environment.
+  requiredResources:
+    - id: git
+    - id: dotnet-sdk
+  optionalResources:
+    - id: resharper
+      defaultSelected: true
+    - id: company-vsix
+resources:
+  git:
+    type: package
+    provider: winget
+    preferredVersion: "2.45.1"
+    parameters:
+      packageId: Git.Git
+  dotnet-sdk:
+    type: package
+    provider: winget
+    versionConstraint: ">= 10.0.0"
+    dependsOn:
+      - git
+    parameters:
+      packageId: Microsoft.DotNet.SDK.10
+  resharper:
+    type: package
+    provider: winget
+    parameters:
+      packageId: JetBrains.ReSharper
+  company-vsix:
+    type: extension
+    provider: file
+    parameters:
+      path: "${WDEM_COMPANY_VSIX_PATH}"

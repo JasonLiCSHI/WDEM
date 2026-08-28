@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "1.0",
+  "profile": {
+    "id": "csharp-developer",
+    "version": "1.0.0",
+    "displayName": "C# Developer",
+    "description": "A complete C# development environment.",
+    "requiredResources": [{ "id": "git" }, { "id": "dotnet-sdk" }],
+    "optionalResources": [{ "id": "resharper", "defaultSelected": true }]
+  },
+  "resources": {
+    "git": { "type": "package", "provider": "winget", "parameters": { "packageId": "Git.Git" } },
+    "dotnet-sdk": { "type": "package", "provider": "winget", "dependsOn": ["git"], "parameters": { "packageId": "Microsoft.DotNet.SDK.10" } },
+    "resharper": { "type": "package", "provider": "winget", "parameters": { "packageId": "JetBrains.ReSharper" } }
+  }
+}
