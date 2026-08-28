@@ -145,7 +145,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
   [InlineData("{")]
   [InlineData("{ \"schemaVersion\": 2, \"recordKind\": \"legacy-step-name-reference\", \"sourceProduct\": \"WinHome\", \"importedAtUtc\": \"2026-08-29T00:00:00Z\", \"importedStepNames\": [] }")]
   [InlineData("{ \"schemaVersion\": 1, \"recordKind\": \"unrelated\", \"sourceProduct\": \"Other\", \"importedAtUtc\": \"2026-08-29T00:00:00Z\", \"importedStepNames\": [] }")]
-  public async Task MigrateAsync_InvalidMarkerIsQuarantinedWithoutRereadingLegacy(
+  public async Task MigrateAsync_InvalidMarkerRecordsOneDiagnosticWithoutRereadingLegacy(
       string invalidMarker)
   {
     var markerDirectory = Path.Combine(_root, "WDEM");
@@ -162,9 +162,11 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     Assert.False(result.MigrationPerformed);
     Assert.Empty(result.ImportedStepNames);
     Assert.False(firstResolver.ObservedOpenReadableStream);
-    Assert.Single(Directory.EnumerateFiles(
+    var firstDiagnostics = Directory.EnumerateFiles(
         markerDirectory,
-        "migration-v1.invalid-*.json"));
+        "migration-v1.invalid-*.json").Order().ToArray();
+    Assert.Single(firstDiagnostics);
+    var firstDiagnosticBytes = firstDiagnostics.Sum(path => new FileInfo(path).Length);
     Assert.Equal(invalidMarker, await File.ReadAllTextAsync(markerPath));
 
     var secondResolver = new RecordingFinalPathResolver(legacyPath);
@@ -175,11 +177,85 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     Assert.Empty(second.ImportedStepNames);
     Assert.False(secondResolver.ObservedOpenReadableStream);
     Assert.Equal(invalidMarker, await File.ReadAllTextAsync(markerPath));
+    var repeatedDiagnostics = Directory.EnumerateFiles(
+        markerDirectory,
+        "migration-v1.invalid-*.json").Order().ToArray();
+    Assert.Equal(firstDiagnostics, repeatedDiagnostics);
+    Assert.Equal(
+        firstDiagnosticBytes,
+        repeatedDiagnostics.Sum(path => new FileInfo(path).Length));
+  }
+
+  [Fact]
+  public async Task MigrateAsync_ExistingInvalidDiagnosticSkipsFurtherWrites()
+  {
+    const string invalidMarker = "{";
+    var markerDirectory = Path.Combine(_root, "WDEM");
+    Directory.CreateDirectory(markerDirectory);
+    var markerPath = Path.Combine(markerDirectory, "migration-v1.json");
+    await File.WriteAllTextAsync(markerPath, invalidMarker);
+    WriteLegacy("state.json", "[\"must-not-import\"]");
+
+    await new LegacyStateMigrationAdapter(_root)
+        .MigrateAsync(CancellationToken.None);
+    var operations = new ThrowingDiagnosticMigrationFileOperations();
+    var resolver = new RecordingFinalPathResolver(
+        Path.Combine(_root, "WinHome", "state.json"));
+
+    var repeatedAdapter = new LegacyStateMigrationAdapter(
+        _root,
+        resolver,
+        operations);
+
+    var repeated = await repeatedAdapter.MigrateAsync(CancellationToken.None);
+    var repeatedAgain = await repeatedAdapter.MigrateAsync(CancellationToken.None);
+
+    Assert.False(repeated.MigrationPerformed);
+    Assert.Empty(repeated.ImportedStepNames);
+    Assert.False(repeatedAgain.MigrationPerformed);
+    Assert.Empty(repeatedAgain.ImportedStepNames);
+    Assert.Equal(0, operations.DiagnosticCommitAttempts);
+    Assert.False(resolver.ObservedOpenReadableStream);
+    Assert.Equal(invalidMarker, await File.ReadAllTextAsync(markerPath));
+    Assert.Single(Directory.EnumerateFiles(
+        markerDirectory,
+        "migration-v1.invalid-*.json"));
+  }
+
+  [Fact]
+  public async Task MigrateAsync_PreexistingInvalidDiagnosticNeverAuthorizesLegacyRead()
+  {
+    const string invalidMarker = "{";
+    const string untrustedDiagnostic = "attacker-controlled";
+    var markerDirectory = Path.Combine(_root, "WDEM");
+    Directory.CreateDirectory(markerDirectory);
+    var markerPath = Path.Combine(markerDirectory, "migration-v1.json");
+    var diagnosticPath = Path.Combine(
+        markerDirectory,
+        "migration-v1.invalid-diagnostic.json");
+    await File.WriteAllTextAsync(markerPath, invalidMarker);
+    await File.WriteAllTextAsync(diagnosticPath, untrustedDiagnostic);
+    WriteLegacy("state.json", "[\"must-not-import\"]");
+    var operations = new ThrowingDiagnosticMigrationFileOperations();
+    var resolver = new RecordingFinalPathResolver(
+        Path.Combine(_root, "WinHome", "state.json"));
+
+    var result = await new LegacyStateMigrationAdapter(
+        _root,
+        resolver,
+        operations).MigrateAsync(CancellationToken.None);
+
+    Assert.False(result.MigrationPerformed);
+    Assert.Empty(result.ImportedStepNames);
+    Assert.Equal(0, operations.DiagnosticCommitAttempts);
+    Assert.False(resolver.ObservedOpenReadableStream);
+    Assert.Equal(invalidMarker, await File.ReadAllTextAsync(markerPath));
+    Assert.Equal(untrustedDiagnostic, await File.ReadAllTextAsync(diagnosticPath));
   }
 
   [Theory]
-  [InlineData(MigrationFailureStage.QuarantineCopy, false)]
-  [InlineData(MigrationFailureStage.QuarantineCopy, true)]
+  [InlineData(MigrationFailureStage.DiagnosticCommit, false)]
+  [InlineData(MigrationFailureStage.DiagnosticCommit, true)]
   public async Task MigrateAsync_InvalidMarkerFailureAlwaysLeavesPermanentGate(
       MigrationFailureStage failureStage,
       bool cancel)
@@ -210,7 +286,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
 
     Assert.Equal(invalidMarker, await File.ReadAllTextAsync(markerPath));
     Assert.False(firstResolver.ObservedOpenReadableStream);
-    if (failureStage == MigrationFailureStage.QuarantineCopy)
+    if (failureStage == MigrationFailureStage.DiagnosticCommit)
     {
       Assert.Empty(Directory.EnumerateFiles(
           markerDirectory,
@@ -346,14 +422,14 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
   }
 
   [Fact]
-  public async Task MigrateAsync_ValidWinnerDuringQuarantineIsNotOverwritten()
+  public async Task MigrateAsync_ValidWinnerDuringDiagnosticCommitIsNotOverwritten()
   {
     var markerDirectory = Path.Combine(_root, "WDEM");
     Directory.CreateDirectory(markerDirectory);
     var markerPath = Path.Combine(markerDirectory, "migration-v1.json");
     await File.WriteAllTextAsync(markerPath, "{");
     WriteLegacy("state.json", "[\"must-not-import\"]");
-    var operations = new WinnerDuringQuarantineMigrationFileOperations(
+    var operations = new WinnerDuringDiagnosticMigrationFileOperations(
         CreateMarkerJson(["winner-step-b"]));
 
     var result = await new LegacyStateMigrationAdapter(
@@ -369,7 +445,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
   }
 
   [Fact]
-  public async Task MigrateAsync_OversizedInvalidMarkerIsNotCopiedOrPartiallyQuarantined()
+  public async Task MigrateAsync_OversizedInvalidMarkerDoesNotCreateDiagnostic()
   {
     var markerDirectory = Path.Combine(_root, "WDEM");
     Directory.CreateDirectory(markerDirectory);
@@ -386,7 +462,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
 
     Assert.False(result.MigrationPerformed);
     Assert.Empty(result.ImportedStepNames);
-    Assert.Equal(0, operations.QuarantineCopyAttempts);
+    Assert.Equal(0, operations.DiagnosticCommitAttempts);
     Assert.Equal(oversizedMarker, await File.ReadAllTextAsync(markerPath));
     Assert.Empty(Directory.EnumerateFiles(
         markerDirectory,
@@ -958,7 +1034,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
   [InlineData("choco:ghp_1234567890abcdefghijklmnopqrstuvwxyz")]
   [InlineData("chocolatey:Bearer abc.def.ghi")]
   [InlineData("unknown:Microsoft.VisualStudioCode")]
-  public async Task MigrateAsync_QuarantinesMarkerContainingOpaqueCredential(
+  public async Task MigrateAsync_InvalidCredentialMarkerRecordsSafeDiagnostic(
       string credential)
   {
     var markerDirectory = Path.Combine(_root, "WDEM");
@@ -988,7 +1064,7 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
         "migration-v1.invalid-*.json"));
     Assert.Equal(invalidMarker, await File.ReadAllTextAsync(markerPath));
     Assert.Equal(
-        invalidMarker,
+        "{\"recordKind\":\"invalid-migration-marker\",\"legacyImportDisabled\":true}\n",
         await File.ReadAllTextAsync(Directory.EnumerateFiles(
             markerDirectory,
             "migration-v1.invalid-*.json").Single()));
@@ -1059,22 +1135,19 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
 
   public enum MigrationFailureStage
   {
-    QuarantineCopy
+    DiagnosticCommit
   }
 
   private sealed class FaultInjectingMigrationFileOperations(
       MigrationFailureStage failureStage,
       bool cancel) : ILegacyMigrationFileOperations
   {
-    public void CommitQuarantine(string temporaryPath, string quarantinePath)
+    public void CommitInvalidMarkerDiagnostic(
+        string temporaryPath,
+        string diagnosticPath)
     {
-      if (failureStage == MigrationFailureStage.QuarantineCopy)
-      {
-        File.WriteAllText(quarantinePath, "partial");
-      }
-
-      ThrowIfRequested(MigrationFailureStage.QuarantineCopy);
-      File.Move(temporaryPath, quarantinePath, overwrite: false);
+      ThrowIfRequested(MigrationFailureStage.DiagnosticCommit);
+      File.Move(temporaryPath, diagnosticPath, overwrite: false);
     }
 
     public void CommitNewMarker(string temporaryPath, string markerPath) =>
@@ -1096,11 +1169,30 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     }
   }
 
+  private sealed class ThrowingDiagnosticMigrationFileOperations :
+      ILegacyMigrationFileOperations
+  {
+    public int DiagnosticCommitAttempts { get; private set; }
+
+    public void CommitInvalidMarkerDiagnostic(
+        string temporaryPath,
+        string diagnosticPath)
+    {
+      DiagnosticCommitAttempts++;
+      throw new IOException("Injected read-only diagnostic directory.");
+    }
+
+    public void CommitNewMarker(string temporaryPath, string markerPath) =>
+        File.Move(temporaryPath, markerPath, overwrite: false);
+  }
+
   private sealed class CompetingMigrationFileOperations(string winnerMarker) :
       ILegacyMigrationFileOperations
   {
-    public void CommitQuarantine(string temporaryPath, string quarantinePath) =>
-        File.Move(temporaryPath, quarantinePath, overwrite: false);
+    public void CommitInvalidMarkerDiagnostic(
+        string temporaryPath,
+        string diagnosticPath) =>
+        File.Move(temporaryPath, diagnosticPath, overwrite: false);
 
     public void CommitNewMarker(string temporaryPath, string markerPath)
     {
@@ -1114,8 +1206,10 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
   {
     public int CommitAttempts { get; private set; }
 
-    public void CommitQuarantine(string temporaryPath, string quarantinePath) =>
-        File.Move(temporaryPath, quarantinePath, overwrite: false);
+    public void CommitInvalidMarkerDiagnostic(
+        string temporaryPath,
+        string diagnosticPath) =>
+        File.Move(temporaryPath, diagnosticPath, overwrite: false);
 
     public void CommitNewMarker(string temporaryPath, string markerPath)
     {
@@ -1131,14 +1225,16 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
     }
   }
 
-  private sealed class WinnerDuringQuarantineMigrationFileOperations(
+  private sealed class WinnerDuringDiagnosticMigrationFileOperations(
       string winnerMarker) : ILegacyMigrationFileOperations
   {
-    public void CommitQuarantine(string temporaryPath, string quarantinePath)
+    public void CommitInvalidMarkerDiagnostic(
+        string temporaryPath,
+        string diagnosticPath)
     {
-      File.Move(temporaryPath, quarantinePath, overwrite: false);
+      File.Move(temporaryPath, diagnosticPath, overwrite: false);
       File.WriteAllText(
-          Path.Combine(Path.GetDirectoryName(quarantinePath)!, "migration-v1.json"),
+          Path.Combine(Path.GetDirectoryName(diagnosticPath)!, "migration-v1.json"),
           winnerMarker);
     }
 
@@ -1148,12 +1244,14 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
 
   private sealed class TrackingMigrationFileOperations : ILegacyMigrationFileOperations
   {
-    public int QuarantineCopyAttempts { get; private set; }
+    public int DiagnosticCommitAttempts { get; private set; }
 
-    public void CommitQuarantine(string temporaryPath, string quarantinePath)
+    public void CommitInvalidMarkerDiagnostic(
+        string temporaryPath,
+        string diagnosticPath)
     {
-      QuarantineCopyAttempts++;
-      File.Move(temporaryPath, quarantinePath, overwrite: false);
+      DiagnosticCommitAttempts++;
+      File.Move(temporaryPath, diagnosticPath, overwrite: false);
     }
 
     public void CommitNewMarker(string temporaryPath, string markerPath) =>
@@ -1163,8 +1261,10 @@ public sealed class LegacyStateMigrationAdapterTests : IDisposable
   private sealed class AlwaysFailingMarkerCommitOperations :
       ILegacyMigrationFileOperations
   {
-    public void CommitQuarantine(string temporaryPath, string quarantinePath) =>
-        File.Move(temporaryPath, quarantinePath, overwrite: false);
+    public void CommitInvalidMarkerDiagnostic(
+        string temporaryPath,
+        string diagnosticPath) =>
+        File.Move(temporaryPath, diagnosticPath, overwrite: false);
 
     public void CommitNewMarker(string temporaryPath, string markerPath) =>
         throw new IOException("Injected persistent marker commit failure.");

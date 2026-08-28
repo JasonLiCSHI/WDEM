@@ -21,7 +21,7 @@ internal interface ILegacyFileFinalPathResolver
 
 internal interface ILegacyMigrationFileOperations
 {
-  void CommitQuarantine(string temporaryPath, string quarantinePath);
+  void CommitInvalidMarkerDiagnostic(string temporaryPath, string diagnosticPath);
   void CommitNewMarker(string temporaryPath, string markerPath);
 }
 
@@ -49,6 +49,12 @@ public sealed class LegacyStateMigrationAdapter
   private const int MaximumCandidateFiles = 3;
   private const int MaximumMarkerBytes = 128 * 1024;
   private const int MaximumStepNameLength = 128;
+  private const string InvalidMarkerDiagnosticFileName =
+      "migration-v1.invalid-diagnostic.json";
+
+  private static readonly byte[] InvalidMarkerDiagnosticBytes =
+      "{\"recordKind\":\"invalid-migration-marker\",\"legacyImportDisabled\":true}\n"u8
+          .ToArray();
 
   private static readonly string[] LegacyStateFileNames =
   [
@@ -458,7 +464,7 @@ public sealed class LegacyStateMigrationAdapter
           importedNames.ValueKind != JsonValueKind.Array ||
           importedNames.GetArrayLength() > MaximumImportedStepNames)
       {
-        return MarkerReadResult.Invalid(markerBytes);
+        return MarkerReadResult.Invalid;
       }
 
       var names = new List<string>(importedNames.GetArrayLength());
@@ -469,7 +475,7 @@ public sealed class LegacyStateMigrationAdapter
             !IsSafeMigratedName(name, LegacyNameSource.PersistedMarker) ||
             !string.Equals(name, name.Trim(), StringComparison.Ordinal))
         {
-          return MarkerReadResult.Invalid(markerBytes);
+          return MarkerReadResult.Invalid;
         }
 
         names.Add(name);
@@ -479,7 +485,7 @@ public sealed class LegacyStateMigrationAdapter
     }
     catch (JsonException)
     {
-      return MarkerReadResult.Invalid(markerBytes);
+      return MarkerReadResult.Invalid;
     }
   }
 
@@ -505,7 +511,7 @@ public sealed class LegacyStateMigrationAdapter
       return NotPerformed();
     }
 
-    await WriteQuarantineAtomicallyAsync(marker.RawBytes!, cancellationToken)
+    await WriteInvalidMarkerDiagnosticOnceAsync(cancellationToken)
         .ConfigureAwait(false);
     return NotPerformed();
   }
@@ -517,22 +523,24 @@ public sealed class LegacyStateMigrationAdapter
       value.ValueKind == JsonValueKind.String &&
       string.Equals(value.GetString(), expected, StringComparison.Ordinal);
 
-  private async Task WriteQuarantineAtomicallyAsync(
-      byte[] markerBytes,
+  private async Task WriteInvalidMarkerDiagnosticOnceAsync(
       CancellationToken cancellationToken)
   {
-    if (markerBytes.Length > MaximumMarkerBytes)
+    var diagnosticPath = Path.Combine(
+        _markerDirectory,
+        InvalidMarkerDiagnosticFileName);
+    switch (_pathEntryProbe.Probe(diagnosticPath))
     {
-      throw new InvalidDataException("The migration quarantine exceeded its safe limit.");
+      case MigrationPathEntryState.Present:
+        return;
+      case MigrationPathEntryState.Inaccessible:
+        throw CreateInaccessiblePathException(diagnosticPath);
     }
 
     var identifier = Guid.NewGuid().ToString("N");
-    var quarantinePath = Path.Combine(
-        _markerDirectory,
-        $"migration-v1.invalid-{identifier}.json");
     var temporaryPath = Path.Combine(
         _markerDirectory,
-        $".migration-v1.invalid-{identifier}.tmp");
+        $".migration-v1.invalid-diagnostic.{identifier}.tmp");
     try
     {
       await using (var stream = new FileStream(
@@ -543,19 +551,34 @@ public sealed class LegacyStateMigrationAdapter
           4096,
           FileOptions.Asynchronous | FileOptions.WriteThrough))
       {
-        await stream.WriteAsync(markerBytes, cancellationToken).ConfigureAwait(false);
+        await stream.WriteAsync(InvalidMarkerDiagnosticBytes, cancellationToken)
+            .ConfigureAwait(false);
         await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
         stream.Flush(flushToDisk: true);
       }
 
-      _fileOperations.CommitQuarantine(temporaryPath, quarantinePath);
+      try
+      {
+        _fileOperations.CommitInvalidMarkerDiagnostic(temporaryPath, diagnosticPath);
+      }
+      catch (Exception exception) when (
+          exception is IOException or UnauthorizedAccessException)
+      {
+        switch (_pathEntryProbe.Probe(diagnosticPath))
+        {
+          case MigrationPathEntryState.Present:
+            return;
+          case MigrationPathEntryState.Inaccessible:
+            throw CreateInaccessiblePathException(diagnosticPath, exception);
+          case MigrationPathEntryState.Absent:
+          default:
+            ExceptionDispatchInfo.Capture(exception).Throw();
+            throw;
+        }
+      }
+
       global::System.Diagnostics.Trace.WriteLine(
-          "[LegacyMigration] Invalid completion marker was copied to quarantine.");
-    }
-    catch
-    {
-      TryDeleteFile(quarantinePath);
-      throw;
+          "[LegacyMigration] Invalid completion marker diagnostic was recorded.");
     }
     finally
     {
@@ -1243,21 +1266,16 @@ public sealed class LegacyStateMigrationAdapter
 
   private sealed record MarkerReadResult(
       MarkerReadState State,
-      IReadOnlyList<string> ImportedStepNames,
-      byte[]? RawBytes = null)
+      IReadOnlyList<string> ImportedStepNames)
   {
     public static MarkerReadResult Missing { get; } = Empty(MarkerReadState.Missing);
+    public static MarkerReadResult Invalid { get; } = Empty(MarkerReadState.Invalid);
     public static MarkerReadResult Oversized { get; } = Empty(
         MarkerReadState.Oversized);
     public static MarkerReadResult UnsafePath { get; } = Empty(
         MarkerReadState.UnsafePath);
     public static MarkerReadResult Unreadable { get; } = Empty(
         MarkerReadState.Unreadable);
-
-    public static MarkerReadResult Invalid(byte[] bytes) => new(
-        MarkerReadState.Invalid,
-        Array.AsReadOnly(Array.Empty<string>()),
-        bytes);
 
     public static MarkerReadResult Valid(IReadOnlyList<string> names) => new(
         MarkerReadState.Valid,
@@ -1295,8 +1313,10 @@ internal sealed class SystemLegacyMigrationFileOperations :
 {
   public static readonly SystemLegacyMigrationFileOperations Instance = new();
 
-  public void CommitQuarantine(string temporaryPath, string quarantinePath) =>
-      File.Move(temporaryPath, quarantinePath, overwrite: false);
+  public void CommitInvalidMarkerDiagnostic(
+      string temporaryPath,
+      string diagnosticPath) =>
+      File.Move(temporaryPath, diagnosticPath, overwrite: false);
 
   public void CommitNewMarker(string temporaryPath, string markerPath) =>
       File.Move(temporaryPath, markerPath, overwrite: false);
