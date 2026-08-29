@@ -31,6 +31,44 @@ public sealed class ArtifactCleanupQueueTests
     Assert.Equal(4, fileSystem.DirectoryDeleteAttempts);
   }
 
+  [Fact]
+  public async Task StartupSweep_RetriesTransientlyLockedArtifactWithoutManualPump()
+  {
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-cleanup-sweep-{Guid.NewGuid():N}");
+    var path = Path.Combine(root, "stale-installer.exe");
+    Directory.CreateDirectory(root);
+    await File.WriteAllTextAsync(path, "stale");
+
+    try
+    {
+      using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+      {
+        _ = new ArtifactCleanupQueue(
+            maxAttempts: 1,
+            retryDelay: TimeSpan.FromMilliseconds(25),
+            maxDelayedRetryRounds: 3,
+            knownStagingRoots: [root]);
+      }
+
+      var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+      while (File.Exists(path) && DateTime.UtcNow < deadline)
+      {
+        await Task.Delay(25);
+      }
+
+      Assert.False(File.Exists(path));
+    }
+    finally
+    {
+      if (Directory.Exists(root))
+      {
+        Directory.Delete(root, recursive: true);
+      }
+    }
+  }
+
   private sealed class RecordingCleanupFileSystem : IArtifactCleanupFileSystem
   {
     public int FailuresRemaining { get; set; }

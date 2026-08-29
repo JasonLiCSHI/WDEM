@@ -385,8 +385,14 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
 
       if (staged.Artifact is null)
       {
-        throw new InvalidOperationException(
+        var error = staged.Error ?? new StructuredError(
+            WdemErrorCode.ConfigurationError,
+            "Secure artifact staging failed.",
             "The Visual Studio installer executable could not be staged as a verified artifact.");
+        return new VisualStudioInstallerResult(
+            new ProcessExecutionResult(false, null, [], [], error),
+            RestartPolicy.NoRestart,
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
       }
 
       stagedArtifact = staged.Artifact;

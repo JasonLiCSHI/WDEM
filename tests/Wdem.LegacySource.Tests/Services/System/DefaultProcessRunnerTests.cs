@@ -145,6 +145,25 @@ namespace Wdem.LegacySource.Tests.Services.System
       Assert.Equal("Process execution timed out.", result.FailureMessage);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task RunCommandDetailedAsync_InvalidTimeoutIsRejectedBeforeExecutableLaunch(
+        int timeoutMilliseconds)
+    {
+      var runner = new DefaultProcessRunner();
+      var missingExecutable = $"missing-{Guid.NewGuid():N}";
+
+      await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+          runner.RunCommandDetailedAsync(
+              missingExecutable,
+              [],
+              null,
+              TimeSpan.FromMilliseconds(timeoutMilliseconds),
+              null,
+              CancellationToken.None));
+    }
+
     [Fact]
     public async Task RunCommandDetailedAsync_DrainFailureRetainsExitCodeAndCollectedEvidence()
     {

@@ -223,6 +223,35 @@ public sealed class VisualStudioInstallerClientTests
   }
 
   [Fact]
+  public async Task AcquiredBootstrapper_StagingFailureReturnsStructuredErrorWithoutLaunch()
+  {
+    var bytes = "trusted bootstrapper"u8.ToArray();
+    var hash = Convert.ToHexString(SHA256.HashData(bytes));
+    var error = new StructuredError(
+        WdemErrorCode.ConfigurationError,
+        "Secure artifact staging failed.",
+        "The verified executable could not be copied into restricted storage.");
+    var process = new RecordingProcessExecutor();
+    var client = new VisualStudioInstallerClient(
+        process,
+        httpClient: new HttpClient(new ContentHandler(bytes)),
+        secureArtifactStager: new FailingArtifactStager(error));
+    var acquired = await client.AcquireBootstrapperAsync(
+        new Uri("https://example.test/vs.exe"), hash, CancellationToken.None);
+
+    var result = await client.InstallAsync(
+        acquired.VerifiedPath!,
+        "Microsoft.VisualStudio.Product.Community",
+        null,
+        @"C:\VS", [], [], null, CancellationToken.None);
+
+    Assert.Same(error, result.Process.Error);
+    Assert.False(result.Process.Started);
+    Assert.Empty(process.Requests);
+    Assert.False(File.Exists(acquired.VerifiedPath));
+  }
+
+  [Fact]
   public async Task AcquiredBootstrapper_SuccessDeletesSourceAndCannotBeReused()
   {
     var bytes = "trusted bootstrapper"u8.ToArray();
@@ -378,13 +407,16 @@ public sealed class VisualStudioInstallerClientTests
         new Uri("https://example.test/vs.exe"), hash, CancellationToken.None);
     await File.WriteAllTextAsync(verified.VerifiedPath!, "tampered");
 
-    await Assert.ThrowsAsync<InvalidOperationException>(() => client.InstallAsync(
+    var result = await client.InstallAsync(
         verified.VerifiedPath!,
         "Microsoft.VisualStudio.Product.Community",
         null,
-        @"C:\VS", [], [], null, CancellationToken.None));
+        @"C:\VS", [], [], null, CancellationToken.None);
 
+    Assert.Equal(WdemErrorCode.ConfigurationError, result.Process.Error!.Code);
+    Assert.False(result.Process.Started);
     Assert.Empty(process.Requests);
+    Assert.False(File.Exists(verified.VerifiedPath));
   }
 
   [Fact]
@@ -632,6 +664,16 @@ public sealed class VisualStudioInstallerClientTests
   private sealed class NativeFailureSecureDirectoryPolicy : ISecureArtifactDirectoryPolicy
   {
     public string CreateRestrictedStagingDirectory() => throw new Win32Exception(5);
+  }
+
+  private sealed class FailingArtifactStager(StructuredError error) : ISecureArtifactStager
+  {
+    public Task<SecureArtifactStageResult> StageVerifiedAsync(
+        string sourcePath,
+        string expectedSha256,
+        SecureArtifactKind kind,
+        CancellationToken cancellationToken) =>
+        Task.FromResult(new SecureArtifactStageResult(null, error));
   }
 
   private sealed class ThrowingHandler(string secret) : HttpMessageHandler

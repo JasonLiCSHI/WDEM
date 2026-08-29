@@ -202,13 +202,15 @@ public sealed class ResourceScheduler : IResourceScheduler
           {
             var execution = running[id];
             ObserveFault(execution);
-            var startedAtUtc = execution.IsCompletedSuccessfully
-                ? execution.Result.Result.StartedAtUtc
-                : null;
-            var cancelled = Cancelled(id) with { StartedAtUtc = startedAtUtc };
-            await NotifyTransitionAsync(transitionAsync, cancelled).ConfigureAwait(false);
-            results[id] = cancelled;
-            rootFailures[id] = id;
+            var result = execution.IsCompletedSuccessfully
+                ? execution.Result.Result
+                : Cancelled(id);
+            await NotifyTransitionAsync(transitionAsync, result).ConfigureAwait(false);
+            results[id] = result;
+            if (IsBlockingOutcome(result.Outcome))
+            {
+              rootFailures[id] = id;
+            }
           }
 
           running.Clear();

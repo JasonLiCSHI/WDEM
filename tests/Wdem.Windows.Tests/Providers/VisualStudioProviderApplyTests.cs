@@ -251,6 +251,41 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   }
 
   [Fact]
+  public async Task ApplyAsync_CancelledAfterUpdatePreservesRestartEvidenceWithoutModify()
+  {
+    using var cancellation = new CancellationTokenSource();
+    var old = Instance("17.0_a", version: "17.9.0");
+    var installer = new RecordingInstallerClient
+    {
+      Result = new VisualStudioInstallerResult(
+          new ProcessExecutionResult(true, 3010, [], []),
+          RestartPolicy.RestartRecommended,
+          new Dictionary<string, string>
+          {
+            ["installerOperation"] = "update",
+            ["restartRequirement"] = "RestartRecommended"
+          }),
+      AfterUpdate = cancellation.Cancel
+    };
+    var provider = Provider(new SequenceDiscovery([[old]]), installer);
+    var resource = Resource();
+    var plan = await provider.PlanAsync(resource, State(old), CancellationToken.None);
+
+    var result = await provider.ApplyAsync(resource, plan, null, cancellation.Token);
+
+    var step = Assert.Single(result.StepResults);
+    Assert.Equal(ApplyOutcome.Cancelled, result.Outcome);
+    Assert.Equal(WdemErrorCode.CancellationError, result.Error!.Code);
+    Assert.Equal(RestartPolicy.RestartRecommended, result.RestartRequirement);
+    Assert.Equal(3010, step.ProcessExitCode);
+    Assert.Contains(
+        "restartRequirement=RestartRecommended",
+        step.Message,
+        StringComparison.Ordinal);
+    Assert.Equal(["update"], installer.Operations);
+  }
+
+  [Fact]
   public async Task ApplyAsync_VersionAndConfigurationMismatchUpdatesThenModifiesVerifiedSnapshot()
   {
     Directory.CreateDirectory(_root);
@@ -642,6 +677,7 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
     public List<string> Operations { get; } = [];
     public string? LastVsConfigPath { get; private set; }
     public Action<string?>? BeforeModify { get; init; }
+    public Action? AfterUpdate { get; init; }
     public VisualStudioInstallerResult Result { get; init; } = Success(@"C:\setup.exe");
     public VisualStudioBootstrapperAcquisition? LastAcquisition { get; private set; }
     public string? LastOperation { get; private set; }
@@ -709,6 +745,7 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
       LastInstallPath = installPath;
       LastArguments = VisualStudioInstallerClient.CreateUpdateArguments(installPath);
       ArgumentHistory.Add(LastArguments);
+      AfterUpdate?.Invoke();
       return Task.FromResult(Result);
     }
 

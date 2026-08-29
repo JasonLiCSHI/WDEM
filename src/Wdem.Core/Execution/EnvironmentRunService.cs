@@ -624,8 +624,16 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         if (completion == cancellationSignal)
         {
           progressBuffer.StopAccepting();
-          ObserveFault(applyTask);
-          cancellationToken.ThrowIfCancellationRequested();
+          try
+          {
+            await applyTask.WaitAsync(_persistenceTimeout).ConfigureAwait(false);
+          }
+          catch (TimeoutException)
+          {
+            ObserveFault(applyTask);
+            cancellationToken.ThrowIfCancellationRequested();
+            throw;
+          }
         }
       }
 
@@ -676,6 +684,10 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       }
     }
 
+    using var evidencePersistence = cancellationToken.IsCancellationRequested
+        ? new CancellationTokenSource(_persistenceTimeout)
+        : null;
+    var evidenceToken = evidencePersistence?.Token ?? cancellationToken;
     foreach (var diagnostic in applied.Diagnostics)
     {
       await events.PublishLogAsync(
@@ -683,7 +695,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           diagnostic.StepId,
           diagnostic.Summary,
           diagnostic,
-          cancellationToken).ConfigureAwait(false);
+          evidenceToken).ConfigureAwait(false);
     }
 
     foreach (var step in applied.StepResults)
@@ -694,7 +706,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           step.Progress,
           step.Message ?? step.StepId,
           step.Error,
-          cancellationToken).ConfigureAwait(false);
+          evidenceToken).ConfigureAwait(false);
     }
 
     var stepResults = ToStepResults(planned, applied, startedAt);

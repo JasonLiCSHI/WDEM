@@ -59,6 +59,26 @@ public sealed class VisualStudioConfigurationResolverTests : IDisposable
         StringComparison.Ordinal);
   }
 
+  [Fact]
+  public async Task ResolveAsync_OversizedConfigurationReturnsSanitizedSizeError()
+  {
+    Directory.CreateDirectory(_root);
+    var path = Path.Combine(_root, "secret-oversized-profile.vsconfig");
+    await using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write))
+    {
+      stream.SetLength((1024 * 1024) + 1);
+    }
+
+    var result = await new VisualStudioConfigurationResolver().ResolveAsync(
+        Options(path),
+        new string('A', 64),
+        CancellationToken.None);
+
+    Assert.Equal(WdemErrorCode.ConfigurationError, result.Error!.Code);
+    Assert.Contains("size limit", result.Error.Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.DoesNotContain("secret-oversized", result.Error.Detail, StringComparison.Ordinal);
+  }
+
   public void Dispose()
   {
     if (Directory.Exists(_root))

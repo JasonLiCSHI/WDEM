@@ -7,6 +7,8 @@ namespace Wdem.Windows.VisualStudio;
 internal sealed class VisualStudioConfigurationResolver(
     Func<CancellationToken, Task>? afterSnapshot = null)
 {
+  private const int MaxConfigurationBytes = 1024 * 1024;
+
   public async Task<ResolvedVisualStudioOptions> ResolveAsync(
       VisualStudioResourceOptions options,
       string expectedSha256,
@@ -35,9 +37,18 @@ internal sealed class VisualStudioConfigurationResolver(
                        bufferSize: 81920,
                        FileOptions.Asynchronous | FileOptions.SequentialScan))
       {
-        using var memory = new MemoryStream();
-        await stream.CopyToAsync(memory, cancellationToken).ConfigureAwait(false);
-        snapshot = memory.ToArray();
+        if (stream.Length > MaxConfigurationBytes)
+        {
+          return Failure(options, "The .vsconfig file exceeds the configured size limit.");
+        }
+
+        snapshot = new byte[checked((int)stream.Length)];
+        await stream.ReadExactlyAsync(snapshot, cancellationToken).ConfigureAwait(false);
+        var growthProbe = new byte[1];
+        if (await stream.ReadAsync(growthProbe, cancellationToken).ConfigureAwait(false) != 0)
+        {
+          return Failure(options, "The .vsconfig file exceeds the configured size limit.");
+        }
       }
 
       var actualBytes = SHA256.HashData(snapshot);

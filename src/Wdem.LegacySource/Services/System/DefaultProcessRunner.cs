@@ -116,20 +116,21 @@ namespace Wdem.LegacySource.Services.System
       ArgumentNullException.ThrowIfNull(arguments);
       cancellationToken.ThrowIfCancellationRequested();
       var argumentSnapshot = arguments.ToArray();
+      var resolvedTimeout = ResolveTimeout(timeout);
 
       return OperatingSystem.IsWindows()
           ? await RunWindowsJobCommandDetailedAsync(
               fileName,
               argumentSnapshot,
               workingDirectory,
-              timeout,
+              resolvedTimeout,
               onOutput,
               cancellationToken).ConfigureAwait(false)
           : await RunPortableCommandDetailedAsync(
               fileName,
               argumentSnapshot,
               workingDirectory,
-              timeout,
+              resolvedTimeout,
               onOutput,
               cancellationToken).ConfigureAwait(false);
     }
@@ -138,7 +139,7 @@ namespace Wdem.LegacySource.Services.System
         string fileName,
         IReadOnlyList<string> arguments,
         string? workingDirectory,
-        TimeSpan? requestedTimeout,
+        TimeSpan processTimeout,
         Action<ProcessOutputLine>? onOutput,
         CancellationToken cancellationToken)
     {
@@ -179,7 +180,7 @@ namespace Wdem.LegacySource.Services.System
           standardError,
           outputGate,
           onOutput);
-      using var timeout = new CancellationTokenSource(ResolveTimeout(requestedTimeout));
+      using var timeout = new CancellationTokenSource(processTimeout);
       using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
           cancellationToken,
           timeout.Token);
@@ -239,7 +240,7 @@ namespace Wdem.LegacySource.Services.System
         string fileName,
         IReadOnlyList<string> arguments,
         string? workingDirectory,
-        TimeSpan? requestedTimeout,
+        TimeSpan processTimeout,
         Action<ProcessOutputLine>? onOutput,
         CancellationToken cancellationToken)
     {
@@ -285,7 +286,7 @@ namespace Wdem.LegacySource.Services.System
           standardError,
           outputGate,
           onOutput);
-      using var timeout = new CancellationTokenSource(ResolveTimeout(requestedTimeout));
+      using var timeout = new CancellationTokenSource(processTimeout);
       using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
           cancellationToken,
           timeout.Token);

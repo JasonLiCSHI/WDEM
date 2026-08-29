@@ -485,42 +485,51 @@ public sealed class VisualStudioProvider : IResourceProvider
             cancellationToken).ConfigureAwait(false);
         if (InstallerSucceeded(command))
         {
-          await using var configurationBootstrapper = options.BootstrapperUri is not null
-              ? await _installer.AcquireBootstrapperAsync(
-                  options.BootstrapperUri,
-                  options.BootstrapperSha256!,
-                  cancellationToken).ConfigureAwait(false)
-              : null;
-          var configurationSetupPath = setupPath;
-          if (configurationBootstrapper is not null)
+          try
           {
-            if (!configurationBootstrapper.IsTrusted)
+            cancellationToken.ThrowIfCancellationRequested();
+            await using var configurationBootstrapper = options.BootstrapperUri is not null
+                ? await _installer.AcquireBootstrapperAsync(
+                    options.BootstrapperUri,
+                    options.BootstrapperSha256!,
+                    cancellationToken).ConfigureAwait(false)
+                : null;
+            var configurationSetupPath = setupPath;
+            if (configurationBootstrapper is not null)
             {
-              return ApplyFailure(
-                  resource,
-                  step,
-                  configurationBootstrapper.Error! with
-                  {
-                    ResourceId = resource.Id,
-                    StepId = step.Id
-                  },
-                  command.Process.ExitCode,
-                  0.5,
-                  command.Evidence,
-                  command.RestartRequirement);
+              if (!configurationBootstrapper.IsTrusted)
+              {
+                return ApplyFailure(
+                    resource,
+                    step,
+                    configurationBootstrapper.Error! with
+                    {
+                      ResourceId = resource.Id,
+                      StepId = step.Id
+                    },
+                    command.Process.ExitCode,
+                    0.5,
+                    command.Evidence,
+                    command.RestartRequirement);
+              }
+
+              configurationSetupPath = configurationBootstrapper.VerifiedPath!;
             }
 
-            configurationSetupPath = configurationBootstrapper.VerifiedPath!;
+            cancellationToken.ThrowIfCancellationRequested();
+            var configurationCommand = await _installer.ModifyAsync(
+                configurationSetupPath,
+                instance.InstallationPath,
+                options.Workloads,
+                options.Components,
+                verifiedVsConfig,
+                cancellationToken).ConfigureAwait(false);
+            command = CombineInstallerResults(command, configurationCommand);
           }
-
-          var configurationCommand = await _installer.ModifyAsync(
-              configurationSetupPath,
-              instance.InstallationPath,
-              options.Workloads,
-              options.Components,
-              verifiedVsConfig,
-              cancellationToken).ConfigureAwait(false);
-          command = CombineInstallerResults(command, configurationCommand);
+          catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+          {
+            return ApplyCancellation(resource, step, command);
+          }
         }
       }
       else
@@ -864,6 +873,42 @@ public sealed class VisualStudioProvider : IResourceProvider
               }
             ]
       };
+
+  private static ResourceApplyResult ApplyCancellation(
+      ResourceDefinition resource,
+      PlanStep step,
+      VisualStudioInstallerResult completedCommand)
+  {
+    var error = new StructuredError(
+        WdemErrorCode.CancellationError,
+        "Visual Studio configuration was cancelled.",
+        "The Visual Studio update completed, but cancellation was requested before configuration could finish.")
+    {
+      ResourceId = resource.Id,
+      StepId = step.Id,
+      ProcessExitCode = completedCommand.Process.ExitCode
+    };
+    return new ResourceApplyResult
+    {
+      ResourceId = resource.Id,
+      Outcome = ApplyOutcome.Cancelled,
+      RestartRequirement = completedCommand.RestartRequirement,
+      Error = error,
+      Diagnostics = [error],
+      StepResults =
+      [
+        new ProviderStepResult
+        {
+          StepId = step.Id,
+          Action = step.Action,
+          Progress = 0.5,
+          ProcessExitCode = completedCommand.Process.ExitCode,
+          Message = FormatEvidence(completedCommand.Evidence),
+          Error = error
+        }
+      ]
+    };
+  }
 
   private async Task<VerificationResult> VerifyAppliedConfigurationAsync(
       ResourceDefinition resource,

@@ -667,6 +667,57 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task ApplyAsync_CancellationWaitsForProviderEvidenceAndPersistsIt()
+  {
+    using var cancellation = new CancellationTokenSource();
+    var applyCancelled = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var releaseApply = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyOperation = async _ =>
+      {
+        cancellation.Cancel();
+        applyCancelled.SetResult();
+        await releaseApply.Task;
+        return new ResourceApplyResult
+        {
+          ResourceId = "git",
+          Outcome = ApplyOutcome.Cancelled,
+          RestartRequirement = RestartPolicy.RestartRecommended,
+          StepResults =
+          [
+            new ProviderStepResult
+            {
+              StepId = "install",
+              Action = PlanAction.Install,
+              Progress = 0.5,
+              ProcessExitCode = 3010,
+              Message = "The update completed before cancellation."
+            }
+          ]
+        };
+      }
+    };
+    var (service, store) = CreateService(provider);
+
+    var apply = service.ApplyAsync(Request(), cancellation.Token);
+    await applyCancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    releaseApply.SetResult();
+    var run = await apply;
+    var persisted = await store.GetAsync(run.RunId, CancellationToken.None);
+
+    var resource = run.ResourceResults["git"];
+    var step = Assert.Single(resource.StepResults);
+    Assert.Equal(ExecutionOutcome.Cancelled, resource.Outcome);
+    Assert.Equal(RestartPolicy.RestartRecommended, resource.RestartRequirement);
+    Assert.Equal(3010, step.ProcessExitCode);
+    Assert.Equal(resource, persisted!.ResourceResults["git"]);
+    Assert.Contains(RestartPolicy.RestartRecommended, persisted.RestartRequirements);
+  }
+
+  [Fact]
   public async Task Recovery_RedetectsAndReplansFromAnIncompleteSnapshot()
   {
     var provider = new ScriptedProvider(Satisfied("git", "2.52.1"));
