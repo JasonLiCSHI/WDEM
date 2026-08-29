@@ -131,38 +131,48 @@ public sealed class VisualStudioProvider : IResourceProvider
             StringComparison.OrdinalIgnoreCase))
         .Where(instance => MatchesVersion(instance, resource.VersionConstraint))
         .ToArray();
-    if (options.InstanceId is not null)
-    {
-      candidates = candidates.Where(instance => string.Equals(
-          instance.InstanceId,
-          options.InstanceId,
-          StringComparison.OrdinalIgnoreCase)).ToArray();
-    }
-
     if (candidates.Length > 1)
     {
       var candidateIds = candidates
           .Select(instance => instance.InstanceId)
           .Order(StringComparer.OrdinalIgnoreCase)
           .ToArray();
-      var error = new StructuredError(
-          WdemErrorCode.DetectionError,
-          "Multiple Visual Studio instances match.",
-          $"Set parameter 'instanceId' to one of: {string.Join(", ", candidateIds)}.")
+      var selectedCandidates = options.InstanceId is null
+          ? []
+          : candidates.Where(instance => string.Equals(
+              instance.InstanceId,
+              options.InstanceId,
+              StringComparison.OrdinalIgnoreCase)).ToArray();
+      if (selectedCandidates.Length != 1)
       {
-        ResourceId = resource.Id
-      };
-      return new DetectedState
-      {
-        ResourceId = resource.Id,
-        Outcome = DetectionOutcome.Failed,
-        Error = error.Detail,
-        StructuredError = error,
-        Evidence = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        var error = new StructuredError(
+            WdemErrorCode.DetectionError,
+            "Multiple Visual Studio instances match.",
+            $"Set parameter 'instanceId' to one of: {string.Join(", ", candidateIds)}.")
         {
-          ["candidateInstanceIds"] = string.Join(';', candidateIds)
-        }
-      };
+          ResourceId = resource.Id
+        };
+        return new DetectedState
+        {
+          ResourceId = resource.Id,
+          Outcome = DetectionOutcome.Failed,
+          Error = error.Detail,
+          StructuredError = error,
+          Evidence = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+          {
+            ["candidateInstanceIds"] = string.Join(';', candidateIds)
+          }
+        };
+      }
+
+      candidates = selectedCandidates;
+    }
+    else if (options.InstanceId is not null)
+    {
+      candidates = candidates.Where(instance => string.Equals(
+          instance.InstanceId,
+          options.InstanceId,
+          StringComparison.OrdinalIgnoreCase)).ToArray();
     }
 
     if (candidates.Length == 0)

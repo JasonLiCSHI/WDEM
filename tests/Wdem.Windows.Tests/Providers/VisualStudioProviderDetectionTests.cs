@@ -196,6 +196,30 @@ public sealed class VisualStudioProviderDetectionTests
   }
 
   [Fact]
+  public async Task DetectAsync_InstanceIdOutsideMatchingCandidates_ReturnsConflict()
+  {
+    var discovery = new StubVisualStudioDiscovery
+    {
+      Instances =
+      [
+        Instance("a", "18.3.2", "Community", "VisualStudio.18.Release"),
+        Instance("b", "18.3.2", "Community", "VisualStudio.18.Release"),
+        Instance("c", "18.3.2", "Professional", "VisualStudio.18.Release")
+      ]
+    };
+    var provider = new VisualStudioProvider(discovery, new ComplianceEvaluator());
+
+    var state = await provider.DetectAsync(
+        VisualStudioResource(instanceId: "c"),
+        CancellationToken.None);
+
+    Assert.Equal(DetectionOutcome.Failed, state.Outcome);
+    Assert.Equal(WdemErrorCode.DetectionError, state.StructuredError!.Code);
+    Assert.Contains("instanceId", state.StructuredError.Detail, StringComparison.Ordinal);
+    Assert.Equal("a;b", state.Evidence["candidateInstanceIds"]);
+  }
+
+  [Fact]
   public async Task DetectAsync_DiscoveryFailure_ReturnsStructuredDetectionError()
   {
     var provider = new VisualStudioProvider(
@@ -223,21 +247,17 @@ public sealed class VisualStudioProviderDetectionTests
     {
       ["productId"] = "Microsoft.VisualStudio.Product.Community",
       ["edition"] = "Community",
-      ["channelId"] = "VisualStudio.18.Release"
+      ["channelId"] = "VisualStudio.18.Release",
+      ["workloads"] = string.Join(
+          ';',
+          workloads ?? ["Microsoft.VisualStudio.Workload.ManagedDesktop"]),
+      ["components"] = string.Join(
+          ';',
+          components ?? ["Microsoft.VisualStudio.Component.Git"])
     };
     if (instanceId is not null)
     {
       parameters["instanceId"] = instanceId;
-    }
-
-    if (workloads is not null)
-    {
-      parameters["workloads"] = string.Join(';', workloads);
-    }
-
-    if (components is not null)
-    {
-      parameters["components"] = string.Join(';', components);
     }
 
     return new ResourceDefinition

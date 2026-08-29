@@ -59,8 +59,8 @@ public sealed record VisualStudioResourceOptions
       parseErrors.Add("Parameter 'vsconfigPath' must be an absolute path.");
     }
 
-    var workloads = ParseList(resource, "workloads", parseErrors);
-    var components = ParseList(resource, "components", parseErrors);
+    var workloads = ParseList(resource, "workloads", parseErrors, required: true);
+    var components = ParseList(resource, "components", parseErrors, required: true);
     var bootstrapper = Get(resource, "bootstrapperUri");
     Uri? bootstrapperUri = null;
     if (resource.Parameters.ContainsKey("bootstrapperUri") && bootstrapper is null)
@@ -142,10 +142,16 @@ public sealed record VisualStudioResourceOptions
   private static IReadOnlyList<string> ParseList(
       ResourceDefinition resource,
       string parameter,
-      List<string> errors)
+      List<string> errors,
+      bool required = false)
   {
     if (!resource.Parameters.TryGetValue(parameter, out var value))
     {
+      if (required)
+      {
+        errors.Add($"Parameter '{parameter}' is required.");
+      }
+
       return [];
     }
 

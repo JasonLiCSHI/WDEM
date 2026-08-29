@@ -82,7 +82,9 @@ public sealed class VisualStudioResourceOptionsTests
     {
       ["productId"] = "Microsoft.VisualStudio.Product.Community",
       ["edition"] = "Community",
-      ["channelId"] = "VisualStudio.18.Release"
+      ["channelId"] = "VisualStudio.18.Release",
+      ["workloads"] = "Microsoft.VisualStudio.Workload.ManagedDesktop",
+      ["components"] = "Microsoft.VisualStudio.Component.Git"
     };
     parameters[parameter] = value;
     var resource = new ResourceDefinition
@@ -98,5 +100,53 @@ public sealed class VisualStudioResourceOptionsTests
     Assert.False(parsed);
     Assert.Null(options);
     Assert.Contains(errors, error => error.Contains(expectedError, StringComparison.Ordinal));
+  }
+
+  [Fact]
+  public void TryParse_MissingWorkloads_ReturnsRequiredParameterError()
+  {
+    var resource = new ResourceDefinition
+    {
+      Id = "visual-studio",
+      Type = "visual-studio",
+      Provider = "visual-studio",
+      Parameters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["productId"] = "Microsoft.VisualStudio.Product.Community",
+        ["edition"] = "Community",
+        ["channelId"] = "VisualStudio.18.Release",
+        ["components"] = "Microsoft.VisualStudio.Component.Git"
+      }
+    };
+
+    var parsed = VisualStudioResourceOptions.TryParse(resource, out var options, out var errors);
+
+    Assert.False(parsed);
+    Assert.Null(options);
+    Assert.Contains(errors, error => error.Contains("workloads", StringComparison.Ordinal));
+  }
+
+  [Fact]
+  public void TryParse_MissingComponents_ReturnsRequiredParameterError()
+  {
+    var resource = new ResourceDefinition
+    {
+      Id = "visual-studio",
+      Type = "visual-studio",
+      Provider = "visual-studio",
+      Parameters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["productId"] = "Microsoft.VisualStudio.Product.Community",
+        ["edition"] = "Community",
+        ["channelId"] = "VisualStudio.18.Release",
+        ["workloads"] = "Microsoft.VisualStudio.Workload.ManagedDesktop"
+      }
+    };
+
+    var parsed = VisualStudioResourceOptions.TryParse(resource, out var options, out var errors);
+
+    Assert.False(parsed);
+    Assert.Null(options);
+    Assert.Contains(errors, error => error.Contains("components", StringComparison.Ordinal));
   }
 }
