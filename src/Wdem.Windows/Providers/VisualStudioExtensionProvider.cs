@@ -666,7 +666,6 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
 
     await DiscardPreparedArtifactAsync(
         resource,
-        VsixPlanVisualStudioIdentity.FromInstance(instance.Instance),
         staged.StepEvidence,
         cancellationToken)
         .ConfigureAwait(false);
@@ -681,20 +680,13 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
 
   private async Task DiscardPreparedArtifactAsync(
       ResourceDefinition resource,
-      VsixPlanVisualStudioIdentity visualStudioIdentity,
       string stepEvidence,
       CancellationToken cancellationToken)
   {
-    var claim = await _planArtifactStore.ClaimAsync(
+    await _planArtifactStore.AbandonAsync(
         resource.Id,
         stepEvidence,
-        GetParameter(resource, ExpectedSha256Parameter)!,
-        visualStudioIdentity,
         cancellationToken).ConfigureAwait(false);
-    if (claim.Artifact is not null)
-    {
-      await claim.Artifact.DisposeAsync().ConfigureAwait(false);
-    }
   }
 
   private Wdem.Core.Compliance.ComplianceResult Evaluate(

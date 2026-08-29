@@ -363,6 +363,84 @@ public sealed class VisualStudioExtensionProviderTests
     }
   }
 
+  [WindowsFact]
+  public async Task PlanAsync_IncompatibleSourceDoesNotRequireRootFileCreationToDiscardArtifact()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-incompatible-{Guid.NewGuid():N}");
+    var sharedRoot = Path.Combine(basePath, "Wdem", "PlanArtifacts");
+    var source = TempFile("vsix");
+    Directory.CreateDirectory(sharedRoot);
+    using var identity = WindowsIdentity.GetCurrent();
+    var rootSecurity = new DirectorySecurity();
+    rootSecurity.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+    rootSecurity.SetOwner(identity.User!);
+    rootSecurity.AddAccessRule(new FileSystemAccessRule(
+        identity.User!,
+        FileSystemRights.FullControl,
+        AccessControlType.Allow));
+    rootSecurity.AddAccessRule(new FileSystemAccessRule(
+        identity.User!,
+        FileSystemRights.CreateFiles,
+        AccessControlType.Deny));
+    new DirectoryInfo(sharedRoot).SetAccessControl(rootSecurity);
+
+    var manifests = new FakeVsixManifestReader
+    {
+      SourceManifest = new VsixManifest(
+          "Contoso.DeveloperTools",
+          "3.2.0",
+          "source!/extension.vsixmanifest",
+          "17.0_a",
+          [new VsixInstallationTarget("Microsoft.VisualStudio.Enterprise", "[17.0,18.0)")])
+    };
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    var stager = new SecureArtifactStager(
+        new TestPlanArtifactDirectoryPolicy(sharedRoot),
+        verifier);
+    var store = new VsixPlanArtifactStore(
+        stager,
+        verifier,
+        manifests,
+        WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedDirectory,
+        WindowsPlanArtifactDirectoryPolicy.GetCurrentUserSid,
+        identityNeutralPlanArtifactRoot: sharedRoot,
+        protectTerminalState: true,
+        revocationStore: new TestPlanArtifactRevocationStore(
+            Path.Combine(basePath, "trusted-revocations")));
+
+    try
+    {
+      var resource = ExtensionResource(
+          "Contoso.DeveloperTools",
+          "3.2.x",
+          "17.0_a",
+          source);
+      var provider = Provider(
+          manifests,
+          new ThrowingProcessExecutor(),
+          stager,
+          verifier,
+          planArtifactStore: store);
+
+      var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+
+      Assert.False(plan.IsExecutable);
+      Assert.Empty(plan.Steps);
+      var error = Assert.Single(plan.StructuredErrors);
+      Assert.Equal(WdemErrorCode.ConfigurationError, error.Code);
+      Assert.Equal("VSIX source is incompatible.", error.Summary);
+      Assert.Empty(Directory.EnumerateDirectories(sharedRoot));
+    }
+    finally
+    {
+      File.Delete(source);
+      if (Directory.Exists(basePath))
+      {
+        Directory.Delete(basePath, recursive: true);
+      }
+    }
+  }
+
   [Fact]
   public async Task PlanAsync_ReplanningCleansSupersededStagedArtifact()
   {
@@ -1427,6 +1505,103 @@ public sealed class VisualStudioExtensionProviderTests
     }
   }
 
+  [Fact]
+  public async Task PlanArtifactStore_FreshStoreRejectsRevokedArtifactAfterCreatorRollsBackLeafMarker()
+  {
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new ScriptedStager();
+    var deleteBlockers = new List<FileStream>();
+    var revocationPath = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-test-revocations-{Guid.NewGuid():N}");
+    var cleanupQueue = new ArtifactCleanupQueue(
+        maxAttempts: 1,
+        retryDelay: TimeSpan.FromSeconds(30),
+        maxDelayedRetryRounds: 1,
+        knownStagingRoots: []);
+    var stagingStore = PlanArtifactStore(
+        stager,
+        verifier,
+        manifests,
+        revocationStore: new TestPlanArtifactRevocationStore(revocationPath));
+    var abandoningStore = PlanArtifactStore(
+        stager,
+        verifier,
+        manifests,
+        deleteDirectory: path =>
+        {
+          deleteBlockers.AddRange(Directory.EnumerateFiles(path).Select(file => new FileStream(
+              file,
+              FileMode.Open,
+              FileAccess.Read,
+              FileShare.ReadWrite)));
+          cleanupQueue.DeleteDirectory(path);
+        },
+        revocationStore: new TestPlanArtifactRevocationStore(revocationPath));
+    var replayStore = PlanArtifactStore(
+        stager,
+        verifier,
+        manifests,
+        revocationStore: new TestPlanArtifactRevocationStore(revocationPath));
+    var expectedHash = new string('A', 64);
+    var directory = Path.GetDirectoryName(stager.VerifiedVsixPath)!;
+    var terminalStatePath = Path.Combine(
+        Path.GetDirectoryName(directory)!,
+        $".{Path.GetFileName(directory)}.wdem-vsix-terminal");
+    ClaimedVsixPlanArtifact? replayedArtifact = null;
+    try
+    {
+      var staged = await stagingStore.StageAsync(
+          "extension",
+          stager.StagedPath,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None);
+      await abandoningStore.AbandonAsync(
+          "extension",
+          staged.StepEvidence!,
+          CancellationToken.None);
+      foreach (var deleteBlocker in deleteBlockers)
+      {
+        deleteBlocker.Dispose();
+      }
+
+      deleteBlockers.Clear();
+      var revokedMarker = await File.ReadAllTextAsync(
+          Path.Combine(directory, ".wdem-vsix-owner"));
+      Assert.Contains("\"revoked\":true", revokedMarker, StringComparison.Ordinal);
+      ReplaceMarkerEvidence(directory, "\"revoked\":true", "\"revoked\":false");
+
+      var replay = await replayStore.ClaimAsync(
+          "extension",
+          staged.StepEvidence!,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None);
+      replayedArtifact = replay.Artifact;
+
+      Assert.Null(replay.Artifact);
+      Assert.NotNull(replay.Error);
+    }
+    finally
+    {
+      if (replayedArtifact is not null)
+      {
+        await replayedArtifact.DisposeAsync();
+      }
+
+      foreach (var deleteBlocker in deleteBlockers)
+      {
+        deleteBlocker.Dispose();
+      }
+
+      cleanupQueue.RetryPending();
+      File.Delete(terminalStatePath);
+      File.Delete(revocationPath);
+    }
+  }
+
   [WindowsFact]
   public async Task PlanArtifactStore_FreshElevatedStoreResolvesIdentityNeutralRoot()
   {
@@ -1812,7 +1987,8 @@ public sealed class VisualStudioExtensionProviderTests
       Action<string, string>? validateRestrictedDirectory = null,
       TimeSpan? handoffLifetime = null,
       Func<DateTimeOffset>? getUtcNow = null,
-      Action<string>? deleteDirectory = null) => new(
+      Action<string>? deleteDirectory = null,
+      IVsixPlanArtifactRevocationStore? revocationStore = null) => new(
           stager,
           verifier,
           manifests,
@@ -1824,7 +2000,8 @@ public sealed class VisualStudioExtensionProviderTests
               "Wdem",
               "PlanArtifacts"),
           getUtcNow,
-          deleteDirectory: deleteDirectory);
+          deleteDirectory: deleteDirectory,
+          revocationStore: revocationStore);
 
   private static VisualStudioExtensionProvider RealReaderProvider(string localApplicationData)
   {
@@ -1993,6 +2170,18 @@ public sealed class VisualStudioExtensionProviderTests
               new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null)));
       return path;
     }
+  }
+
+  private sealed class TestPlanArtifactRevocationStore(string path)
+      : IVsixPlanArtifactRevocationStore
+  {
+    public void Revoke(string ownershipToken, string directoryName) =>
+        File.AppendAllLines(path, [$"{ownershipToken}:{directoryName}"]);
+
+    public bool IsRevoked(string ownershipToken, string directoryName) =>
+        File.Exists(path) && File.ReadLines(path).Contains(
+            $"{ownershipToken}:{directoryName}",
+            StringComparer.OrdinalIgnoreCase);
   }
 
   private sealed class ScriptedStager : ISecureArtifactStager, IAsyncDisposable

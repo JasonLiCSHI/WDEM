@@ -17,6 +17,29 @@ internal sealed record VsixPlanArtifactClaimResult(
     ClaimedVsixPlanArtifact? Artifact,
     StructuredError? Error);
 
+internal interface IVsixPlanArtifactRevocationStore
+{
+  void Revoke(string ownershipToken, string directoryName);
+
+  bool IsRevoked(string ownershipToken, string directoryName);
+}
+
+internal sealed class WindowsVsixPlanArtifactRevocationStore(string planArtifactRoot)
+    : IVsixPlanArtifactRevocationStore
+{
+  public void Revoke(string ownershipToken, string directoryName) =>
+      WindowsPlanArtifactDirectoryPolicy.AppendRevocation(
+          planArtifactRoot,
+          ownershipToken,
+          directoryName);
+
+  public bool IsRevoked(string ownershipToken, string directoryName) =>
+      WindowsPlanArtifactDirectoryPolicy.ContainsRevocation(
+          planArtifactRoot,
+          ownershipToken,
+          directoryName);
+}
+
 internal sealed record VsixPlanVisualStudioIdentity(
     string InstanceId,
     string ProductId,
@@ -108,6 +131,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
   private readonly Func<string, string, IDisposable> _openValidatedDirectory;
   private readonly Action<string> _deleteDirectory;
   private readonly bool _protectTerminalState;
+  private readonly IVsixPlanArtifactRevocationStore _revocationStore;
   private readonly Func<string> _getCurrentUserSid;
   private readonly Func<DateTimeOffset> _getUtcNow;
   private readonly TimeSpan _handoffLifetime;
@@ -148,7 +172,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       Func<DateTimeOffset>? getUtcNow = null,
       Func<string, string, IDisposable>? openValidatedDirectory = null,
       Action<string>? deleteDirectory = null,
-      bool protectTerminalState = false)
+      bool protectTerminalState = false,
+      IVsixPlanArtifactRevocationStore? revocationStore = null)
   {
     _stager = stager ?? throw new ArgumentNullException(nameof(stager));
     _verifier = verifier ?? throw new ArgumentNullException(nameof(verifier));
@@ -165,6 +190,9 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     _planArtifactRoot = GetPlanArtifactRoot(
         identityNeutralPlanArtifactRoot ??
             WindowsPlanArtifactDirectoryPolicy.GetIdentityNeutralPlanArtifactRoot());
+    _revocationStore = revocationStore ?? (protectTerminalState
+        ? new WindowsVsixPlanArtifactRevocationStore(_planArtifactRoot)
+        : NoopRevocationStore.Instance);
     if (_handoffLifetime <= TimeSpan.Zero)
     {
       throw new ArgumentOutOfRangeException(nameof(handoffLifetime));
@@ -598,6 +626,9 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
         throw new SecurityException("The approved VSIX registration changed during cleanup.");
       }
 
+      _revocationStore.Revoke(
+          sealedRegistration.OwnershipToken,
+          Path.GetFileName(sealedRegistration.OwnershipDirectory));
       _ = PersistRevokedEvidence(registration);
     }
     catch (Exception exception) when (exception is ArgumentException or IOException or
@@ -646,6 +677,9 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
 
     if (!sealedRegistration.Revoked)
     {
+      _revocationStore.Revoke(
+          sealedRegistration.OwnershipToken,
+          Path.GetFileName(sealedRegistration.OwnershipDirectory));
       _ = PersistRevokedEvidence(sealedRegistration);
     }
   }
@@ -764,7 +798,10 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
   private void EnsureNoTerminalState(VsixPlanArtifactEvidence evidence)
   {
     var path = GetTerminalStatePath(evidence);
-    if (File.Exists(path) || Directory.Exists(path))
+    if (File.Exists(path) || Directory.Exists(path) ||
+        _revocationStore.IsRevoked(
+            evidence.OwnershipToken,
+            Path.GetFileName(evidence.OwnershipDirectory)))
     {
       throw new SecurityException("The approved VSIX artifact has a terminal claim state.");
     }
@@ -1126,6 +1163,17 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     public void Dispose()
     {
     }
+  }
+
+  private sealed class NoopRevocationStore : IVsixPlanArtifactRevocationStore
+  {
+    public static NoopRevocationStore Instance { get; } = new();
+
+    public void Revoke(string ownershipToken, string directoryName)
+    {
+    }
+
+    public bool IsRevoked(string ownershipToken, string directoryName) => false;
   }
 
   private sealed class OwnershipMarkerSizeException(int actualBytes, int maximumBytes)

@@ -1,6 +1,9 @@
+using Microsoft.Win32.SafeHandles;
+using System.Runtime.InteropServices;
 using System.Security;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Text;
 using Wdem.Windows.Security;
 using Xunit;
 
@@ -76,6 +79,221 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
     Assert.False(usersRule.FileSystemRights.HasFlag(FileSystemRights.Delete));
     Assert.False(usersRule.FileSystemRights.HasFlag(FileSystemRights.ChangePermissions));
     Assert.False(usersRule.FileSystemRights.HasFlag(FileSystemRights.TakeOwnership));
+  }
+
+  [WindowsFact]
+  public void ValidateRevocationLedgerSecurity_AllowsUsersOnlyMonotonicAppendRights()
+  {
+    var security = WindowsPlanArtifactDirectoryPolicy.CreateRevocationLedgerSecurity();
+
+    WindowsPlanArtifactDirectoryPolicy.ValidateRevocationLedgerSecurity(security);
+
+    var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+    var usersRule = Assert.Single(security.GetAccessRules(
+            includeExplicit: true,
+            includeInherited: false,
+            typeof(SecurityIdentifier))
+        .Cast<FileSystemAccessRule>(), rule => users.Equals(rule.IdentityReference));
+    Assert.Equal(
+        FileSystemRights.AppendData |
+            FileSystemRights.ReadPermissions |
+            FileSystemRights.Synchronize,
+        usersRule.FileSystemRights);
+    Assert.False(usersRule.FileSystemRights.HasFlag(FileSystemRights.WriteData));
+    Assert.False(usersRule.FileSystemRights.HasFlag(FileSystemRights.Delete));
+    Assert.False(usersRule.FileSystemRights.HasFlag(FileSystemRights.ChangePermissions));
+    Assert.False(usersRule.FileSystemRights.HasFlag(FileSystemRights.TakeOwnership));
+  }
+
+  [WindowsFact]
+  public void ValidateRevocationLedgerSecurity_RejectsUsersRewriteAccess()
+  {
+    var security = WindowsPlanArtifactDirectoryPolicy.CreateRevocationLedgerSecurity();
+    security.AddAccessRule(new FileSystemAccessRule(
+        new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+        FileSystemRights.WriteData,
+        AccessControlType.Allow));
+
+    Assert.Throws<SecurityException>(() =>
+        WindowsPlanArtifactDirectoryPolicy.ValidateRevocationLedgerSecurity(security));
+  }
+
+  [WindowsFact]
+  public void ValidateRevocationLedgerSecurity_RejectsUntrustedOwner()
+  {
+    var security = WindowsPlanArtifactDirectoryPolicy.CreateRevocationLedgerSecurity();
+    security.SetOwner(TestSid(1001));
+
+    Assert.Throws<SecurityException>(() =>
+        WindowsPlanArtifactDirectoryPolicy.ValidateRevocationLedgerSecurity(security));
+  }
+
+  [WindowsFact]
+  public void ValidateRevocationLedgerSecurity_RejectsUnprotectedDacl()
+  {
+    var security = WindowsPlanArtifactDirectoryPolicy.CreateRevocationLedgerSecurity();
+    security.SetAccessRuleProtection(isProtected: false, preserveInheritance: false);
+
+    Assert.Throws<SecurityException>(() =>
+        WindowsPlanArtifactDirectoryPolicy.ValidateRevocationLedgerSecurity(security));
+  }
+
+  [WindowsFact]
+  public void ValidateRevocationLedgerSecurity_RejectsInheritedRule()
+  {
+    var security = AddInheritedFileRule(
+        WindowsPlanArtifactDirectoryPolicy.CreateRevocationLedgerSecurity(),
+        new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+        FileSystemRights.Read,
+        AccessControlType.Allow);
+
+    Assert.Throws<SecurityException>(() =>
+        WindowsPlanArtifactDirectoryPolicy.ValidateRevocationLedgerSecurity(security));
+  }
+
+  [WindowsFact]
+  public void ValidateRevocationLedgerSecurity_RejectsDenyRule()
+  {
+    var security = WindowsPlanArtifactDirectoryPolicy.CreateRevocationLedgerSecurity();
+    security.AddAccessRule(new FileSystemAccessRule(
+        new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+        FileSystemRights.Read,
+        AccessControlType.Deny));
+
+    Assert.Throws<SecurityException>(() =>
+        WindowsPlanArtifactDirectoryPolicy.ValidateRevocationLedgerSecurity(security));
+  }
+
+  [WindowsFact]
+  public void RevocationLedger_CorruptAndTruncatedRecordsDoNotHideLaterValidRecord()
+  {
+    const string ownershipToken = "00112233445566778899AABBCCDDEEFF";
+    const string directoryName = "00112233445566778899aabbccddeeff";
+    var contents = Encoding.ASCII.GetBytes(
+        "garbage\n" +
+        "wdem-vsix-revoked-v1:00112233445566778899AABBCCDDEEFF:truncated\n" +
+        "wdem-vsix-revoked-v1:00112233445566778899AABBCCDDEEFF:" +
+        "00112233445566778899aabbccddeeff\n");
+
+    Assert.True(WindowsPlanArtifactDirectoryPolicy.ContainsRevocationRecord(
+        contents,
+        ownershipToken,
+        directoryName));
+  }
+
+  [WindowsFact]
+  public void RevocationLedger_TruncatedOrEmbeddedTargetRecordIsNotRevoked()
+  {
+    const string ownershipToken = "00112233445566778899AABBCCDDEEFF";
+    const string directoryName = "00112233445566778899aabbccddeeff";
+    const string record = "wdem-vsix-revoked-v1:00112233445566778899AABBCCDDEEFF:" +
+        "00112233445566778899aabbccddeeff\n";
+
+    Assert.False(WindowsPlanArtifactDirectoryPolicy.ContainsRevocationRecord(
+        Encoding.ASCII.GetBytes(record[..^1]),
+        ownershipToken,
+        directoryName));
+    Assert.False(WindowsPlanArtifactDirectoryPolicy.ContainsRevocationRecord(
+        Encoding.ASCII.GetBytes("garbage" + record),
+        ownershipToken,
+        directoryName));
+  }
+
+  [WindowsFact]
+  public void RevocationLedger_ConcurrentAppendsProduceCompleteDiscoverableRecords()
+  {
+    const int recordCount = 128;
+    var path = Path.Combine(Path.GetTempPath(), $"wdem-revocations-{Guid.NewGuid():N}");
+    File.WriteAllBytes(path, []);
+    var records = Enumerable.Range(0, recordCount)
+        .Select(index => (
+            Token: index.ToString("X32"),
+            Directory: Guid.NewGuid().ToString("N")))
+        .ToArray();
+
+    try
+    {
+      Parallel.ForEach(records, record =>
+      {
+        using var handle = OpenAppendOnly(path);
+        WindowsPlanArtifactDirectoryPolicy.WriteRevocationRecord(
+            handle,
+            record.Token,
+            record.Directory);
+      });
+
+      var contents = File.ReadAllBytes(path);
+      Assert.Equal(recordCount, contents.Count(value => value == (byte)'\n'));
+      foreach (var record in records)
+      {
+        Assert.True(WindowsPlanArtifactDirectoryPolicy.ContainsRevocationRecord(
+            contents,
+            record.Token,
+            record.Directory));
+      }
+    }
+    finally
+    {
+      File.Delete(path);
+    }
+  }
+
+  [WindowsFact]
+  public void RevocationLedger_MissingRootFailsClosed()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-missing-ledger-root-{Guid.NewGuid():N}");
+    var root = Path.Combine(basePath, "Wdem", "PlanArtifacts");
+    var ownershipToken = Convert.ToHexString(Guid.NewGuid().ToByteArray());
+    var directoryName = Guid.NewGuid().ToString("N");
+
+    Assert.Throws<SecurityException>(() =>
+        WindowsPlanArtifactDirectoryPolicy.AppendRevocation(
+            root,
+            ownershipToken,
+            directoryName));
+    Assert.Throws<SecurityException>(() =>
+        WindowsPlanArtifactDirectoryPolicy.ContainsRevocation(
+            root,
+            ownershipToken,
+            directoryName));
+    Assert.False(Directory.Exists(basePath));
+  }
+
+  [WindowsAdministratorFact]
+  public void RevocationLedger_MissingLedgerFailsClosed()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-missing-ledger-{Guid.NewGuid():N}");
+    var root = Path.Combine(basePath, "Wdem", "PlanArtifacts");
+    var ownershipToken = Convert.ToHexString(Guid.NewGuid().ToByteArray());
+    var directoryName = Guid.NewGuid().ToString("N");
+
+    try
+    {
+      WindowsPlanArtifactDirectoryPolicy.ProvisionIdentityNeutralRoot(root);
+      File.Delete(Path.Combine(
+          root,
+          WindowsPlanArtifactDirectoryPolicy.RevocationLedgerFileName));
+
+      Assert.Throws<SecurityException>(() =>
+          new WindowsPlanArtifactDirectoryPolicy(root).CreateRestrictedStagingDirectory());
+      Assert.Throws<SecurityException>(() =>
+          WindowsPlanArtifactDirectoryPolicy.AppendRevocation(
+              root,
+              ownershipToken,
+              directoryName));
+      Assert.Throws<SecurityException>(() =>
+          WindowsPlanArtifactDirectoryPolicy.ContainsRevocation(
+              root,
+              ownershipToken,
+              directoryName));
+    }
+    finally
+    {
+      if (Directory.Exists(basePath))
+      {
+        Directory.Delete(basePath, recursive: true);
+      }
+    }
   }
 
   [WindowsFact]
@@ -204,9 +422,22 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
 
       var leaf = new WindowsPlanArtifactDirectoryPolicy(root)
           .CreateRestrictedStagingDirectory();
+      var ownershipToken = Convert.ToHexString(Guid.NewGuid().ToByteArray());
+      var directoryName = Path.GetFileName(leaf);
+      WindowsPlanArtifactDirectoryPolicy.AppendRevocation(
+          root,
+          ownershipToken,
+          directoryName);
 
       Assert.StartsWith(root, leaf, StringComparison.OrdinalIgnoreCase);
       WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedDirectory(leaf);
+      Assert.True(File.Exists(Path.Combine(
+          root,
+          WindowsPlanArtifactDirectoryPolicy.RevocationLedgerFileName)));
+      Assert.True(WindowsPlanArtifactDirectoryPolicy.ContainsRevocation(
+          root,
+          ownershipToken,
+          directoryName));
     }
     finally
     {
@@ -512,6 +743,47 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
     return result;
   }
 
+  private static FileSecurity AddInheritedFileRule(
+      FileSecurity security,
+      SecurityIdentifier identity,
+      FileSystemRights rights,
+      AccessControlType accessControlType)
+  {
+    var descriptor = new RawSecurityDescriptor(
+        security.GetSecurityDescriptorBinaryForm(),
+        offset: 0);
+    descriptor.DiscretionaryAcl!.InsertAce(
+        descriptor.DiscretionaryAcl.Count,
+        new CommonAce(
+            AceFlags.Inherited,
+            accessControlType == AccessControlType.Allow
+                ? AceQualifier.AccessAllowed
+                : AceQualifier.AccessDenied,
+            (int)rights,
+            identity,
+            isCallback: false,
+            opaque: null));
+    var bytes = new byte[descriptor.BinaryLength];
+    descriptor.GetBinaryForm(bytes, offset: 0);
+    var result = new FileSecurity();
+    result.SetSecurityDescriptorBinaryForm(bytes);
+    return result;
+  }
+
+  private static SafeFileHandle OpenAppendOnly(string path)
+  {
+    var handle = NativeMethods.CreateFile(
+        path,
+        desiredAccess: 0x00000004,
+        FileShare.ReadWrite,
+        IntPtr.Zero,
+        creationDisposition: 3,
+        flagsAndAttributes: 0x00000080 | 0x80000000,
+        IntPtr.Zero);
+    Assert.False(handle.IsInvalid);
+    return handle;
+  }
+
   private static SecurityIdentifier Administrators { get; } = new(
       WellKnownSidType.BuiltinAdministratorsSid,
       null);
@@ -522,6 +794,20 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
 
   private static SecurityIdentifier TestSid(int relativeId) => new(
       $"S-1-5-21-111111111-222222222-333333333-{relativeId}");
+
+  private static class NativeMethods
+  {
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode,
+        SetLastError = true)]
+    public static extern SafeFileHandle CreateFile(
+        string fileName,
+        uint desiredAccess,
+        FileShare shareMode,
+        IntPtr securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        IntPtr templateFile);
+  }
 }
 
 internal sealed class WindowsFactAttribute : FactAttribute

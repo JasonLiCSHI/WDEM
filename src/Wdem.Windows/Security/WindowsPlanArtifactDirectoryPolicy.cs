@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Security;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Text;
 
 namespace Wdem.Windows.Security;
 
@@ -12,13 +13,18 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
   private const int ErrorAlreadyExists = 183;
   private const uint ErrorSuccess = 0;
   private const uint ReadControl = 0x00020000;
+  private const uint FileAppendData = 0x00000004;
+  private const uint GenericRead = 0x80000000;
   private const uint GenericWrite = 0x40000000;
+  private const uint Synchronize = 0x00100000;
   private const uint CreateNew = 1;
   private const uint OpenExisting = 3;
   private const uint FileAttributeNormal = 0x00000080;
   private const uint FileFlagWriteThrough = 0x80000000;
   private const uint FileFlagBackupSemantics = 0x02000000;
   private const uint FileFlagOpenReparsePoint = 0x00200000;
+  internal const string RevocationLedgerFileName = ".wdem-vsix-revocations";
+  private const int MaximumRevocationLedgerBytes = 64 * 1024 * 1024;
   private readonly string _rootPath;
 
   public WindowsPlanArtifactDirectoryPolicy()
@@ -57,6 +63,9 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
         throw new SecurityException("The shared plan-artifact product root is invalid.");
     using var productHandle = OpenValidatedProductRoot(productPath);
     using var rootHandle = OpenValidatedIdentityNeutralRoot(_rootPath);
+    using var revocationHandle = OpenValidatedRevocationLedger(
+        _rootPath,
+        FileAppendData | ReadControl | Synchronize);
     var stagingPath = Path.Combine(_rootPath, Guid.NewGuid().ToString("N"));
     CreateRestrictedDirectory(
         stagingPath,
@@ -118,6 +127,118 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
         CreateIdentityNeutralRootSecurity(administrators),
         allowExisting: true);
     using var rootHandle = OpenValidatedIdentityNeutralRoot(fullRootPath);
+    ProvisionRevocationLedger(fullRootPath);
+  }
+
+  internal static void AppendRevocation(
+      string rootPath,
+      string ownershipToken,
+      string directoryName)
+  {
+    var record = CreateRevocationRecord(ownershipToken, directoryName);
+    var fullRootPath = ValidateRevocationRootPath(rootPath);
+    var productPath = Path.GetDirectoryName(fullRootPath)!;
+    using var productHandle = OpenValidatedProductRoot(productPath);
+    using var rootHandle = OpenValidatedIdentityNeutralRoot(fullRootPath);
+    using var ledgerHandle = OpenValidatedRevocationLedger(
+        fullRootPath,
+        FileAppendData | ReadControl | Synchronize);
+    WriteRevocationRecord(ledgerHandle, record);
+  }
+
+  internal static bool ContainsRevocation(
+      string rootPath,
+      string ownershipToken,
+      string directoryName)
+  {
+    var record = CreateRevocationRecord(ownershipToken, directoryName);
+    var fullRootPath = ValidateRevocationRootPath(rootPath);
+    var productPath = Path.GetDirectoryName(fullRootPath)!;
+    using var productHandle = OpenValidatedProductRoot(productPath);
+    using var rootHandle = OpenValidatedIdentityNeutralRoot(fullRootPath);
+    using var ledgerHandle = OpenValidatedRevocationLedger(
+        fullRootPath,
+        GenericRead | ReadControl);
+    using var stream = new FileStream(ledgerHandle, FileAccess.Read, bufferSize: 4096, isAsync: false);
+    if (stream.Length > MaximumRevocationLedgerBytes)
+    {
+      throw new SecurityException("The VSIX revocation ledger exceeds its safe size limit.");
+    }
+
+    var contents = new byte[(int)stream.Length];
+    stream.ReadExactly(contents);
+    return ContainsRevocationRecord(contents, record);
+  }
+
+  internal static void WriteRevocationRecord(
+      SafeFileHandle ledgerHandle,
+      string ownershipToken,
+      string directoryName) =>
+      WriteRevocationRecord(
+          ledgerHandle,
+          CreateRevocationRecord(ownershipToken, directoryName));
+
+  internal static bool ContainsRevocationRecord(
+      ReadOnlySpan<byte> contents,
+      string ownershipToken,
+      string directoryName) =>
+      ContainsRevocationRecord(
+          contents,
+          CreateRevocationRecord(ownershipToken, directoryName));
+
+  private static void WriteRevocationRecord(
+      SafeFileHandle ledgerHandle,
+      byte[] record)
+  {
+    ArgumentNullException.ThrowIfNull(ledgerHandle);
+    if (ledgerHandle.IsInvalid || ledgerHandle.IsClosed)
+    {
+      throw new ArgumentException("The VSIX revocation ledger handle is invalid.", nameof(ledgerHandle));
+    }
+
+    if (!NativeMethods.WriteFile(
+            ledgerHandle,
+            record,
+            record.Length,
+            out var bytesWritten,
+            IntPtr.Zero) ||
+        bytesWritten != record.Length)
+    {
+      throw new IOException(
+          "The VSIX revocation record could not be appended atomically.",
+          new Win32Exception(Marshal.GetLastWin32Error()));
+    }
+
+    if (!NativeMethods.FlushFileBuffers(ledgerHandle))
+    {
+      throw new IOException(
+          "The VSIX revocation record could not be committed to durable storage.",
+          new Win32Exception(Marshal.GetLastWin32Error()));
+    }
+  }
+
+  private static bool ContainsRevocationRecord(
+      ReadOnlySpan<byte> contents,
+      ReadOnlySpan<byte> record)
+  {
+    while (!contents.IsEmpty)
+    {
+      var terminator = contents.IndexOf((byte)'\n');
+      if (terminator < 0)
+      {
+        return false;
+      }
+
+      var lineLength = terminator + 1;
+      if (contents[..lineLength].SequenceEqual(record))
+      {
+        return true;
+      }
+
+      contents = contents[lineLength..];
+    }
+
+    return false;
   }
 
   private static SafeFileHandle OpenValidatedIdentityNeutralRoot(string rootPath)
@@ -375,6 +496,33 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
       handle?.Dispose();
       descriptorHandle.Free();
     }
+  }
+
+  internal static FileSecurity CreateRevocationLedgerSecurity()
+  {
+    var administrators = new SecurityIdentifier(
+        WellKnownSidType.BuiltinAdministratorsSid,
+        null);
+    var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+    var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+    var security = new FileSecurity();
+    security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+    security.SetOwner(administrators);
+    foreach (var identity in new[] { administrators, system })
+    {
+      security.AddAccessRule(new FileSystemAccessRule(
+          identity,
+          FileSystemRights.FullControl,
+          AccessControlType.Allow));
+    }
+
+    security.AddAccessRule(new FileSystemAccessRule(
+        users,
+        FileSystemRights.AppendData |
+            FileSystemRights.ReadPermissions |
+            FileSystemRights.Synchronize,
+        AccessControlType.Allow));
+    return security;
   }
 
   internal static DirectorySecurity CreateSecurity(
@@ -651,6 +799,152 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
     }
   }
 
+  internal static void ValidateRevocationLedgerSecurity(FileSystemSecurity security)
+  {
+    var administrators = new SecurityIdentifier(
+        WellKnownSidType.BuiltinAdministratorsSid,
+        null);
+    var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+    var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+    var rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier))
+        .Cast<FileSystemAccessRule>()
+        .ToArray();
+    var usersRights = FileSystemRights.AppendData |
+        FileSystemRights.ReadPermissions |
+        FileSystemRights.Synchronize;
+    if (!administrators.Equals(security.GetOwner(typeof(SecurityIdentifier))) ||
+        !security.AreAccessRulesProtected ||
+        rules.Length != 3 ||
+        !HasAdministratorOnlyFileRule(rules, administrators) ||
+        !HasAdministratorOnlyFileRule(rules, system) ||
+        !rules.Any(rule =>
+            users.Equals(rule.IdentityReference) &&
+            rule.AccessControlType == AccessControlType.Allow &&
+            rule.FileSystemRights == usersRights &&
+            rule.InheritanceFlags == InheritanceFlags.None &&
+            rule.PropagationFlags == PropagationFlags.None))
+    {
+      throw new SecurityException("The VSIX revocation ledger grants unexpected access.");
+    }
+  }
+
+  private static void ProvisionRevocationLedger(string rootPath)
+  {
+    var path = Path.Combine(rootPath, RevocationLedgerFileName);
+    var security = CreateRevocationLedgerSecurity();
+    var descriptor = security.GetSecurityDescriptorBinaryForm();
+    var descriptorHandle = GCHandle.Alloc(descriptor, GCHandleType.Pinned);
+    SafeFileHandle? handle = null;
+    try
+    {
+      var attributes = new SecurityAttributes
+      {
+        Length = Marshal.SizeOf<SecurityAttributes>(),
+        SecurityDescriptor = descriptorHandle.AddrOfPinnedObject()
+      };
+      handle = NativeMethods.CreateFileWithSecurity(
+          path,
+          GenericWrite | ReadControl,
+          FileShare.Read | FileShare.Write,
+          ref attributes,
+          CreateNew,
+          FileAttributeNormal | FileFlagWriteThrough,
+          IntPtr.Zero);
+      if (handle.IsInvalid)
+      {
+        var error = Marshal.GetLastWin32Error();
+        handle.Dispose();
+        handle = null;
+        if (error != ErrorAlreadyExists)
+        {
+          throw new Win32Exception(error, "The VSIX revocation ledger could not be provisioned.");
+        }
+
+        using var existing = OpenValidatedRevocationLedger(
+            rootPath,
+            GenericRead | ReadControl);
+        return;
+      }
+
+      ValidateRevocationLedgerSecurity(ReadSecurity(handle));
+    }
+    finally
+    {
+      handle?.Dispose();
+      descriptorHandle.Free();
+    }
+  }
+
+  private static SafeFileHandle OpenValidatedRevocationLedger(
+      string rootPath,
+      uint desiredAccess)
+  {
+    var path = Path.Combine(rootPath, RevocationLedgerFileName);
+    var handle = NativeMethods.CreateFile(
+        path,
+        desiredAccess,
+        FileShare.Read | FileShare.Write,
+        IntPtr.Zero,
+        OpenExisting,
+        FileAttributeNormal | FileFlagOpenReparsePoint,
+        IntPtr.Zero);
+    if (handle.IsInvalid)
+    {
+      var error = Marshal.GetLastWin32Error();
+      handle.Dispose();
+      throw new SecurityException(
+          "The VSIX revocation ledger is missing or inaccessible; run elevated provisioning.",
+          new Win32Exception(error));
+    }
+
+    try
+    {
+      var attributes = File.GetAttributes(handle);
+      if (attributes.HasFlag(FileAttributes.Directory) ||
+          attributes.HasFlag(FileAttributes.ReparsePoint))
+      {
+        throw new SecurityException("The VSIX revocation ledger is redirected.");
+      }
+
+      ValidateRevocationLedgerSecurity(ReadSecurity(handle));
+      return handle;
+    }
+    catch
+    {
+      handle.Dispose();
+      throw;
+    }
+  }
+
+  private static string ValidateRevocationRootPath(string rootPath)
+  {
+    ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);
+    var fullRootPath = Path.GetFullPath(rootPath);
+    if (!string.Equals(fullRootPath, rootPath, StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(Path.GetFileName(fullRootPath), "PlanArtifacts", StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(
+            Path.GetFileName(Path.GetDirectoryName(fullRootPath)),
+            "Wdem",
+            StringComparison.OrdinalIgnoreCase))
+    {
+      throw new SecurityException("The VSIX revocation ledger root is invalid.");
+    }
+
+    return fullRootPath;
+  }
+
+  private static byte[] CreateRevocationRecord(string ownershipToken, string directoryName)
+  {
+    if (ownershipToken.Length != 32 || !ownershipToken.All(Uri.IsHexDigit) ||
+        !Guid.TryParseExact(directoryName, "N", out _))
+    {
+      throw new SecurityException("The VSIX revocation identity is invalid.");
+    }
+
+    return Encoding.ASCII.GetBytes(
+        $"wdem-vsix-revoked-v1:{ownershipToken.ToUpperInvariant()}:{directoryName.ToLowerInvariant()}\n");
+  }
+
   private static bool HasAdministratorOnlyFileRule(
       IReadOnlyList<FileSystemAccessRule> rules,
       SecurityIdentifier identity) => rules.Any(rule =>
@@ -741,6 +1035,19 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
         FileInfoByHandleClass fileInformationClass,
         out FileAttributeTagInfo fileInformation,
         uint bufferSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool WriteFile(
+        SafeFileHandle file,
+        byte[] buffer,
+        int numberOfBytesToWrite,
+        out int numberOfBytesWritten,
+        IntPtr overlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool FlushFileBuffers(SafeFileHandle file);
 
     [DllImport("advapi32.dll")]
     public static extern uint GetSecurityInfo(
