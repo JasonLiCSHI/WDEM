@@ -13,6 +13,7 @@ using Wdem.LegacySource.Services.System;
 using Wdem.Windows.Execution;
 using Wdem.Windows.Persistence;
 using Wdem.Windows.Security;
+using Wdem.Windows.VisualStudio;
 
 namespace Wdem.Windows.Composition;
 
@@ -59,7 +60,21 @@ public static class WdemWindowsFactory
     var runtimeResolver = providerComposition.RuntimeResolver;
     var winget = providerComposition.Winget;
     var complianceEvaluator = providerComposition.ComplianceEvaluator;
-    var providerRegistry = providerComposition.Providers;
+    var trustedFileVerifier = new TrustedFileVerifier();
+    var providerRegistry = new ResourceProviderRegistry(
+        providerComposition.Providers.Providers
+            .Where(provider => !string.Equals(
+                provider.ResourceType,
+                "visual-studio",
+                StringComparison.OrdinalIgnoreCase) || !string.Equals(
+                provider.ProviderName,
+                "visual-studio",
+                StringComparison.OrdinalIgnoreCase))
+            .Append<IResourceProvider>(new Providers.VisualStudioProvider(
+                new VsWhereVisualStudioDiscovery(processExecutor),
+                new VisualStudioInstallerClient(processExecutor, trustedFileVerifier),
+                trustedFileVerifier,
+                complianceEvaluator)));
 
     var pluginManager = new PluginManager(
         new UvBootstrapper(processRunner),

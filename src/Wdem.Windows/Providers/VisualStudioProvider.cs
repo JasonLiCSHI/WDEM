@@ -3,6 +3,7 @@ using Wdem.Core.Execution;
 using Wdem.Core.Providers;
 using Wdem.Core.Resources;
 using Wdem.Core.Versions;
+using Wdem.Windows.Security;
 using Wdem.Windows.VisualStudio;
 
 namespace Wdem.Windows.Providers;
@@ -10,6 +11,8 @@ namespace Wdem.Windows.Providers;
 public sealed class VisualStudioProvider : IResourceProvider
 {
   private readonly IVisualStudioDiscovery _discovery;
+  private readonly IVisualStudioInstallerClient? _installer;
+  private readonly ITrustedFileVerifier _trustedFileVerifier;
   private readonly IComplianceEvaluator _complianceEvaluator;
 
   public VisualStudioProvider(
@@ -17,6 +20,21 @@ public sealed class VisualStudioProvider : IResourceProvider
       IComplianceEvaluator complianceEvaluator)
   {
     _discovery = discovery ?? throw new ArgumentNullException(nameof(discovery));
+    _trustedFileVerifier = new TrustedFileVerifier();
+    _complianceEvaluator = complianceEvaluator ??
+        throw new ArgumentNullException(nameof(complianceEvaluator));
+  }
+
+  public VisualStudioProvider(
+      IVisualStudioDiscovery discovery,
+      IVisualStudioInstallerClient installer,
+      ITrustedFileVerifier trustedFileVerifier,
+      IComplianceEvaluator complianceEvaluator)
+  {
+    _discovery = discovery ?? throw new ArgumentNullException(nameof(discovery));
+    _installer = installer ?? throw new ArgumentNullException(nameof(installer));
+    _trustedFileVerifier = trustedFileVerifier ??
+        throw new ArgumentNullException(nameof(trustedFileVerifier));
     _complianceEvaluator = complianceEvaluator ??
         throw new ArgumentNullException(nameof(complianceEvaluator));
   }
@@ -46,9 +64,25 @@ public sealed class VisualStudioProvider : IResourceProvider
       errors.Add("Resource provider must be 'visual-studio'.");
     }
 
-    if (!VisualStudioResourceOptions.TryParse(resource, out _, out var optionErrors))
+    if (!TryParseOptions(resource, out var options, out var optionErrors))
     {
       errors.AddRange(optionErrors);
+    }
+
+    if (options?.VsConfigPath is not null && GetExpectedSha256(resource) is null)
+    {
+      errors.Add("Parameter 'expectedSha256' is required when 'vsconfigPath' is specified.");
+    }
+
+    if (GetExpectedSha256(resource) is { } expectedHash &&
+        (expectedHash.Length != 64 || !expectedHash.All(Uri.IsHexDigit)))
+    {
+      errors.Add("Parameter 'expectedSha256' must contain exactly 64 hexadecimal characters.");
+    }
+
+    if ((options?.BootstrapperUri is null) != (options?.BootstrapperSha256 is null))
+    {
+      errors.Add("Parameters 'bootstrapperUri' and 'bootstrapperSha256' must be specified together.");
     }
 
     if (!string.IsNullOrWhiteSpace(resource.VersionConstraint))
@@ -85,7 +119,7 @@ public sealed class VisualStudioProvider : IResourceProvider
     ArgumentNullException.ThrowIfNull(resource);
     var validation = await ValidateAsync(resource, cancellationToken).ConfigureAwait(false);
     if (!validation.IsValid ||
-        !VisualStudioResourceOptions.TryParse(resource, out var options, out _))
+        !TryParseOptions(resource, out var options, out _))
     {
       var error = validation.StructuredErrors.First();
       return Failure(resource, error);
@@ -193,6 +227,39 @@ public sealed class VisualStudioProvider : IResourceProvider
         : SemanticVersion.TryParse(selected.InstallationVersion, out var installationVersion)
             ? [installationVersion]
             : [];
+    var evidence = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+      ["instanceId"] = selected.InstanceId,
+      ["installationPath"] = selected.InstallationPath,
+      ["productId"] = selected.ProductId,
+      ["productPath"] = selected.ProductPath,
+      ["productDisplayVersion"] = selected.ProductDisplayVersion,
+      ["installationVersion"] = selected.InstallationVersion,
+      ["edition"] = selected.Edition,
+      ["channel"] = selected.ChannelId,
+      ["isComplete"] = selected.IsComplete.ToString().ToLowerInvariant(),
+      ["isLaunchable"] = selected.IsLaunchable.ToString().ToLowerInvariant(),
+      ["workloads"] = JoinIds(selected.Workloads),
+      ["components"] = JoinIds(selected.Components)
+    };
+    string? configurationHash = null;
+    if (options.VsConfigPath is not null && GetExpectedSha256(resource) is { } expectedSha256)
+    {
+      var verification = await _trustedFileVerifier.VerifySha256Async(
+          options.VsConfigPath,
+          expectedSha256,
+          cancellationToken).ConfigureAwait(false);
+      if (!verification.IsTrusted)
+      {
+        return Failure(resource, verification.Error!);
+      }
+
+      configurationHash = verification.Sha256;
+      evidence["vsconfigPath"] = verification.VerifiedPath!;
+      evidence["vsconfigSource"] = verification.VerifiedPath!;
+      evidence["vsconfigSha256"] = verification.Sha256!;
+    }
+
     return new DetectedState
     {
       ResourceId = resource.Id,
@@ -200,21 +267,8 @@ public sealed class VisualStudioProvider : IResourceProvider
       Exists = true,
       Version = selected.ProductDisplayVersion,
       InstalledVersions = installedVersions,
-      Evidence = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-      {
-        ["instanceId"] = selected.InstanceId,
-        ["installationPath"] = selected.InstallationPath,
-        ["productId"] = selected.ProductId,
-        ["productPath"] = selected.ProductPath,
-        ["productDisplayVersion"] = selected.ProductDisplayVersion,
-        ["installationVersion"] = selected.InstallationVersion,
-        ["edition"] = selected.Edition,
-        ["channel"] = selected.ChannelId,
-        ["isComplete"] = selected.IsComplete.ToString().ToLowerInvariant(),
-        ["isLaunchable"] = selected.IsLaunchable.ToString().ToLowerInvariant(),
-        ["workloads"] = JoinIds(selected.Workloads),
-        ["components"] = JoinIds(selected.Components)
-      }
+      ConfigurationHash = configurationHash,
+      Evidence = evidence
     };
   }
 
@@ -236,7 +290,25 @@ public sealed class VisualStudioProvider : IResourceProvider
       };
     }
 
-    var compliance = _complianceEvaluator.Evaluate(resource, currentState);
+    _ = TryParseOptions(resource, out var options, out _);
+    if (options!.VsConfigPath is not null)
+    {
+      var verification = await _trustedFileVerifier.VerifySha256Async(
+          options.VsConfigPath,
+          GetExpectedSha256(resource)!,
+          cancellationToken).ConfigureAwait(false);
+      if (!verification.IsTrusted)
+      {
+        var error = verification.Error! with { ResourceId = resource.Id };
+        return BasePlan(resource, ComplianceStatus.ConfigurationMismatch, isExecutable: false) with
+        {
+          Error = error.Detail,
+          StructuredErrors = [error]
+        };
+      }
+    }
+
+    var compliance = Evaluate(resource, currentState, options);
     if (compliance.Status is ComplianceStatus.DetectionFailed or ComplianceStatus.Unsupported)
     {
       return BasePlan(resource, compliance.Status, isExecutable: false) with
@@ -252,29 +324,28 @@ public sealed class VisualStudioProvider : IResourceProvider
       return plan;
     }
 
-    var action = compliance.Status switch
-    {
-      ComplianceStatus.Missing => PlanAction.Install,
-      ComplianceStatus.VersionMismatch => PlanAction.Upgrade,
-      _ => PlanAction.Configure
-    };
+    var action = compliance.Status == ComplianceStatus.Missing
+        ? PlanAction.Install
+        : PlanAction.Configure;
     return plan with
     {
       Steps =
       [
         new PlanStep
         {
-          Id = $"{resource.Id}:{action.ToString().ToLowerInvariant()}",
-          Description = $"{action} Visual Studio.",
+          Id = $"{resource.Id}:{(action == PlanAction.Install ? "install" : "modify")}",
+          Description = action == PlanAction.Install
+              ? "Install Visual Studio."
+              : "Modify Visual Studio workloads and components.",
           Action = action,
-          PrivilegeRequirement = resource.PrivilegeRequirement,
-          RestartPolicy = resource.RestartPolicy
+          PrivilegeRequirement = PrivilegeRequirement.Administrator,
+          RestartPolicy = RestartPolicy.NoRestart
         }
       ]
     };
   }
 
-  public ValueTask<ResourceApplyResult> ApplyAsync(
+  public async ValueTask<ResourceApplyResult> ApplyAsync(
       ResourceDefinition resource,
       ResourcePlan plan,
       IProgress<ProviderProgress>? progress,
@@ -283,18 +354,181 @@ public sealed class VisualStudioProvider : IResourceProvider
     cancellationToken.ThrowIfCancellationRequested();
     ArgumentNullException.ThrowIfNull(resource);
     ArgumentNullException.ThrowIfNull(plan);
-    return ValueTask.FromResult(new ResourceApplyResult
+    var validation = await ValidateAsync(resource, cancellationToken).ConfigureAwait(false);
+    if (!validation.IsValid)
     {
-      ResourceId = resource.Id,
-      Outcome = ApplyOutcome.Failed,
-      Error = new StructuredError(
+      return ProviderLifecycleSupport.RejectInvalidResource(resource, validation)!;
+    }
+
+    if (!IsApplicablePlan(resource, plan, out var planError))
+    {
+      return ApplyFailure(resource, null, planError!, null, 0);
+    }
+
+    if (!plan.RequiresApply)
+    {
+      return new ResourceApplyResult
+      {
+        ResourceId = resource.Id,
+        Outcome = ApplyOutcome.NotRequired
+      };
+    }
+
+    if (_installer is null)
+    {
+      var error = new StructuredError(
           WdemErrorCode.ProviderError,
           "Visual Studio changes are not available.",
-          "Visual Studio installation and modification are not implemented by this provider.")
+          "Visual Studio installation is not implemented by this provider instance because its installer client is not configured.")
       {
         ResourceId = resource.Id
+      };
+      return ApplyFailure(resource, plan.Steps[0], error, null, 0);
+    }
+
+    _ = TryParseOptions(resource, out var options, out _);
+    var step = plan.Steps[0];
+    progress?.Report(new ProviderProgress(
+        "BootstrapperVerification", 0.1, "Verifying Visual Studio installer inputs.", step.Id));
+    string? verifiedVsConfig = null;
+    if (options!.VsConfigPath is not null)
+    {
+      var verification = await _trustedFileVerifier.VerifySha256Async(
+          options.VsConfigPath,
+          GetExpectedSha256(resource)!,
+          cancellationToken).ConfigureAwait(false);
+      if (!verification.IsTrusted)
+      {
+        return ApplyFailure(
+            resource,
+            step,
+            verification.Error! with { ResourceId = resource.Id, StepId = step.Id },
+            null,
+            0.1);
       }
-    });
+
+      verifiedVsConfig = verification.VerifiedPath;
+    }
+
+    var setupPath = DefaultSetupPath();
+    if (options.BootstrapperUri is not null)
+    {
+      var bootstrapper = await _installer.AcquireBootstrapperAsync(
+          options.BootstrapperUri,
+          options.BootstrapperSha256!,
+          cancellationToken).ConfigureAwait(false);
+      if (!bootstrapper.IsTrusted)
+      {
+        return ApplyFailure(
+            resource,
+            step,
+            bootstrapper.Error! with { ResourceId = resource.Id, StepId = step.Id },
+            null,
+            0.1);
+      }
+
+      setupPath = bootstrapper.VerifiedPath!;
+    }
+
+    VisualStudioInstallerResult command;
+    if (step.Action == PlanAction.Install)
+    {
+      progress?.Report(new ProviderProgress("Install", 0.35, "Installing Visual Studio.", step.Id));
+      command = await _installer.InstallAsync(
+          setupPath,
+          options.ProductId,
+          null,
+          options.InstallPath ?? DefaultInstallPath(options),
+          options.Workloads,
+          options.Components,
+          verifiedVsConfig,
+          cancellationToken).ConfigureAwait(false);
+    }
+    else
+    {
+      progress?.Report(new ProviderProgress("Modify", 0.35, "Modifying Visual Studio.", step.Id));
+      var instances = await _discovery.DiscoverAsync(
+          options.Workloads,
+          options.Components,
+          cancellationToken).ConfigureAwait(false);
+      var instance = SelectInstance(instances, options);
+      if (instance is null)
+      {
+        var error = new StructuredError(
+            WdemErrorCode.VerificationError,
+            "Visual Studio instance could not be selected.",
+            "The planned Visual Studio instance was not found before modification.")
+        {
+          ResourceId = resource.Id,
+          StepId = step.Id
+        };
+        return ApplyFailure(resource, step, error, null, 0.35);
+      }
+
+      command = await _installer.ModifyAsync(
+          setupPath,
+          instance.InstallationPath,
+          options.Workloads,
+          options.Components,
+          verifiedVsConfig,
+          cancellationToken).ConfigureAwait(false);
+    }
+
+    if (command.Process.Error is not null ||
+        !command.Process.Started ||
+        command.Process.ExitCode is not (0 or 1641 or 3010))
+    {
+      var error = command.Process.Error ?? new StructuredError(
+          WdemErrorCode.InstallationError,
+          "Visual Studio installer failed.",
+          "The Visual Studio installer did not complete successfully.")
+      {
+        ResourceId = resource.Id,
+        StepId = step.Id,
+        ProcessExitCode = command.Process.ExitCode
+      };
+      return ApplyFailure(resource, step, error, command.Process.ExitCode, 0.5);
+    }
+
+    progress?.Report(new ProviderProgress(
+        "Configuration", 0.65, "Applying Visual Studio workloads and components.", step.Id));
+    progress?.Report(new ProviderProgress(
+        "Verification", 0.85, "Verifying Visual Studio configuration.", step.Id));
+    var finalVerification = await VerifyAsync(resource, cancellationToken).ConfigureAwait(false);
+    if (finalVerification.Compliance != ComplianceStatus.Satisfied)
+    {
+      var compliance = Evaluate(resource, finalVerification.DetectedState, options);
+      var error = compliance.Error ?? new StructuredError(
+          WdemErrorCode.VerificationError,
+          "Visual Studio verification failed.",
+          finalVerification.Message ?? "Visual Studio did not reach the requested state.")
+      {
+        ResourceId = resource.Id,
+        StepId = step.Id,
+        ProcessExitCode = command.Process.ExitCode
+      };
+      return ApplyFailure(resource, step, error, command.Process.ExitCode, 0.85);
+    }
+
+    var evidence = string.Join(
+        "; ",
+        command.Evidence.OrderBy(pair => pair.Key).Select(pair => $"{pair.Key}={pair.Value}"));
+    return new ResourceApplyResult
+    {
+      ResourceId = resource.Id,
+      Outcome = ApplyOutcome.Succeeded,
+      StepResults =
+      [
+        new ProviderStepResult
+        {
+          StepId = step.Id,
+          Action = step.Action,
+          Progress = 1,
+          ProcessExitCode = command.Process.ExitCode,
+          Message = evidence
+        }
+      ]
+    };
   }
 
   public async ValueTask<VerificationResult> VerifyAsync(
@@ -302,7 +536,8 @@ public sealed class VisualStudioProvider : IResourceProvider
       CancellationToken cancellationToken)
   {
     var detected = await DetectAsync(resource, cancellationToken).ConfigureAwait(false);
-    var compliance = _complianceEvaluator.Evaluate(resource, detected);
+    _ = TryParseOptions(resource, out var options, out _);
+    var compliance = Evaluate(resource, detected, options);
     return new VerificationResult
     {
       ResourceId = resource.Id,
@@ -331,6 +566,242 @@ public sealed class VisualStudioProvider : IResourceProvider
   private static string JoinIds(IEnumerable<string> ids) => string.Join(
       ';',
       ids.Order(StringComparer.OrdinalIgnoreCase));
+
+  private ComplianceResult Evaluate(
+      ResourceDefinition resource,
+      DetectedState state,
+      VisualStudioResourceOptions? options)
+  {
+    var baseCompliance = _complianceEvaluator.Evaluate(resource, state);
+    if (baseCompliance.Status != ComplianceStatus.Satisfied || options is null)
+    {
+      return baseCompliance;
+    }
+
+    if (!EvidenceEquals(state, "edition", options.Edition) ||
+        !EvidenceEquals(state, "channel", options.ChannelId))
+    {
+      return ConfigurationMismatch(resource, "The installed edition or channel does not match.");
+    }
+
+    if (!ContainsEvery(state, "workloads", options.Workloads))
+    {
+      return ConfigurationMismatch(resource, "One or more requested workloads are missing.");
+    }
+
+    if (!ContainsEvery(state, "components", options.Components))
+    {
+      return ConfigurationMismatch(resource, "One or more requested components are missing.");
+    }
+
+    if (options.VsConfigPath is not null)
+    {
+      var expectedHash = GetExpectedSha256(resource);
+      if (!EvidenceEquals(state, "vsconfigPath", Path.GetFullPath(options.VsConfigPath)) ||
+          !EvidenceEquals(state, "vsconfigSource", Path.GetFullPath(options.VsConfigPath)) ||
+          !EvidenceEquals(state, "vsconfigSha256", expectedHash))
+      {
+        return ConfigurationMismatch(resource, "The .vsconfig source or hash was not verified.");
+      }
+    }
+
+    return baseCompliance;
+  }
+
+  private static ComplianceResult ConfigurationMismatch(
+      ResourceDefinition resource,
+      string detail) => new(
+          ComplianceStatus.ConfigurationMismatch,
+          $"Resource '{resource.Id}' has a different Visual Studio configuration.",
+          new StructuredError(
+              WdemErrorCode.ConfigurationError,
+              "Visual Studio configuration does not match.",
+              detail)
+          {
+            ResourceId = resource.Id
+          });
+
+  private static bool EvidenceEquals(
+      DetectedState state,
+      string key,
+      string? expected) => expected is not null &&
+      state.Evidence.TryGetValue(key, out var actual) &&
+      string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase);
+
+  private static bool ContainsEvery(
+      DetectedState state,
+      string key,
+      IReadOnlyList<string> expected)
+  {
+    if (!state.Evidence.TryGetValue(key, out var joined))
+    {
+      return expected.Count == 0;
+    }
+
+    var actual = joined.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    return expected.All(actual.Contains);
+  }
+
+  private static bool TryParseOptions(
+      ResourceDefinition resource,
+      out VisualStudioResourceOptions? options,
+      out IReadOnlyList<string> errors)
+  {
+    if (!resource.Parameters.ContainsKey("expectedSha256"))
+    {
+      return VisualStudioResourceOptions.TryParse(resource, out options, out errors);
+    }
+
+    var parameters = resource.Parameters
+        .Where(pair => !string.Equals(
+            pair.Key,
+            "expectedSha256",
+            StringComparison.OrdinalIgnoreCase))
+        .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+    return VisualStudioResourceOptions.TryParse(
+        resource with { Parameters = parameters },
+        out options,
+        out errors);
+  }
+
+  private static string? GetExpectedSha256(ResourceDefinition resource) =>
+      resource.Parameters.TryGetValue("expectedSha256", out var value) &&
+      !string.IsNullOrWhiteSpace(value)
+          ? value.Trim()
+          : null;
+
+  private static VisualStudioInstance? SelectInstance(
+      IReadOnlyList<VisualStudioInstance> instances,
+      VisualStudioResourceOptions options)
+  {
+    var candidates = instances
+        .Where(instance => string.Equals(
+            instance.ProductId,
+            options.ProductId,
+            StringComparison.OrdinalIgnoreCase))
+        .Where(instance => string.Equals(
+            instance.Edition,
+            options.Edition,
+            StringComparison.OrdinalIgnoreCase))
+        .Where(instance => string.Equals(
+            instance.ChannelId,
+            options.ChannelId,
+            StringComparison.OrdinalIgnoreCase));
+    if (options.InstanceId is not null)
+    {
+      candidates = candidates.Where(instance => string.Equals(
+          instance.InstanceId,
+          options.InstanceId,
+          StringComparison.OrdinalIgnoreCase));
+    }
+
+    var selected = candidates.Take(2).ToArray();
+    return selected.Length == 1 ? selected[0] : null;
+  }
+
+  private static bool IsApplicablePlan(
+      ResourceDefinition resource,
+      ResourcePlan plan,
+      out StructuredError? error)
+  {
+    var validIdentity = plan.IsExecutable &&
+        string.Equals(plan.ResourceId, resource.Id, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(plan.ResourceType, "visual-studio", StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(plan.ProviderName, "visual-studio", StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(
+            plan.DesiredStateFingerprint,
+            ResourceDefinitionFingerprint.Create(resource),
+            StringComparison.Ordinal);
+    var validNoOp = !plan.RequiresApply &&
+        plan.Compliance == ComplianceStatus.Satisfied &&
+        plan.Steps.Count == 0;
+    var validStep = plan.Steps.Count == 1 &&
+        plan.Steps[0].Action is PlanAction.Install or PlanAction.Configure &&
+        ((plan.Compliance == ComplianceStatus.Missing &&
+          plan.Steps[0].Action == PlanAction.Install) ||
+         (plan.Compliance is ComplianceStatus.VersionMismatch or
+              ComplianceStatus.ConfigurationMismatch &&
+          plan.Steps[0].Action == PlanAction.Configure)) &&
+        string.Equals(
+            plan.Steps[0].Id,
+            $"{resource.Id}:{(plan.Steps[0].Action == PlanAction.Install ? "install" : "modify")}",
+            StringComparison.Ordinal) &&
+        plan.Steps[0].PrivilegeRequirement == PrivilegeRequirement.Administrator &&
+        plan.Steps[0].RestartPolicy == RestartPolicy.NoRestart &&
+        !plan.Steps[0].IsDestructive;
+    if (validIdentity && (validNoOp || validStep))
+    {
+      error = null;
+      return true;
+    }
+
+    error = new StructuredError(
+        WdemErrorCode.ProviderError,
+        "Resource plan cannot be applied.",
+        "The Visual Studio plan is stale or does not match the requested operation.")
+    {
+      ResourceId = resource.Id
+    };
+    return false;
+  }
+
+  private static ResourceApplyResult ApplyFailure(
+      ResourceDefinition resource,
+      PlanStep? step,
+      StructuredError error,
+      int? exitCode,
+      double progress) => new()
+      {
+        ResourceId = resource.Id,
+        Outcome = ApplyOutcome.Failed,
+        Error = error,
+        Diagnostics = [error],
+        StepResults = step is null
+            ? []
+            :
+            [
+              new ProviderStepResult
+              {
+                StepId = step.Id,
+                Action = step.Action,
+                Progress = progress,
+                ProcessExitCode = exitCode,
+                Error = error
+              }
+            ]
+      };
+
+  private static string DefaultSetupPath()
+  {
+    var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+    if (string.IsNullOrWhiteSpace(programFiles))
+    {
+      programFiles = Environment.GetEnvironmentVariable("ProgramFiles(x86)") ?? @"C:\Program Files (x86)";
+    }
+
+    return Path.Combine(
+        programFiles,
+        "Microsoft Visual Studio",
+        "Installer",
+        "setup.exe");
+  }
+
+  private static string DefaultInstallPath(VisualStudioResourceOptions options)
+  {
+    var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+    if (string.IsNullOrWhiteSpace(programFiles))
+    {
+      programFiles = Environment.GetEnvironmentVariable("ProgramFiles") ?? @"C:\Program Files";
+    }
+
+    var channelVersion = options.ChannelId.Split('.').ElementAtOrDefault(1) ?? "Current";
+    return Path.Combine(
+        programFiles,
+        "Microsoft Visual Studio",
+        channelVersion,
+        options.Edition);
+  }
 
   private static ResourcePlan BasePlan(
       ResourceDefinition resource,
