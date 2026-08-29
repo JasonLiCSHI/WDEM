@@ -222,7 +222,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
   private readonly string _planArtifactRoot;
   private readonly ConcurrentDictionary<string, HandoffRegistration> _handoffs =
       new(StringComparer.OrdinalIgnoreCase);
-  private readonly ConcurrentDictionary<string, byte> _begunClaims =
+  private readonly ConcurrentDictionary<string, string> _begunClaims =
       new(StringComparer.Ordinal);
   private static readonly JsonSerializerOptions JsonOptions = new()
   {
@@ -492,7 +492,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
 
     var claimWasBegun = _begunClaims.TryRemove(
         CreateClaimContinuationKey(resourceId, stepId),
-        out _);
+        out var claimNonce);
 
     VsixPlanArtifactEvidence? evidence = null;
     FileStream? readLock = null;
@@ -539,9 +539,10 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       directoryValidated = true;
       if (!claimWasBegun)
       {
-        EstablishDurableClaim(locator, evidence);
+        claimNonce = EstablishDurableClaim(locator, evidence);
       }
 
+      ValidateDurableClaim(locator, evidence, claimNonce!);
       EnsureNoTerminalState(evidence, locator);
       PersistConsumedTerminalState(evidence);
       protectedTerminal = true;
@@ -728,8 +729,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     _validateRestrictedDirectory(evidence.OwnershipDirectory, evidence.CreatorSid);
     using var lease = _acquireClaimLease(evidence.OwnershipDirectory);
     ValidateOwnershipMarker(evidence, locator);
-    EstablishDurableClaim(locator, evidence);
-    if (!_begunClaims.TryAdd(CreateClaimContinuationKey(resourceId, stepId), 0))
+    var claimNonce = EstablishDurableClaim(locator, evidence);
+    if (!_begunClaims.TryAdd(CreateClaimContinuationKey(resourceId, stepId), claimNonce))
     {
       throw new SecurityException("The approved VSIX claim has already been started.");
     }
@@ -976,7 +977,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     return true;
   }
 
-  private void EstablishDurableClaim(
+  private string EstablishDurableClaim(
       VsixPlanArtifactLocator locator,
       VsixPlanArtifactEvidence evidence)
   {
@@ -1008,8 +1009,21 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       throw;
     }
 
-    var claimedState = _revocationStore.GetState(evidence.OwnershipToken, directoryName);
+    ValidateDurableClaim(locator, evidence, claimNonce);
+    return claimNonce;
+  }
+
+  private void ValidateDurableClaim(
+      VsixPlanArtifactLocator locator,
+      VsixPlanArtifactEvidence evidence,
+      string claimNonce)
+  {
+    var claimedState = _revocationStore.GetState(
+        evidence.OwnershipToken,
+        Path.GetFileName(evidence.OwnershipDirectory));
     if (claimedState.Status != VsixPlanArtifactLedgerStatus.ClaimStarted ||
+        !HasAuthorizedActivationCommitment(claimedState, locator) ||
+        IsExpired(claimedState) ||
         claimedState.ClaimNonce is null ||
         !CryptographicOperations.FixedTimeEquals(
             Convert.FromHexString(claimNonce),
@@ -1631,11 +1645,14 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       VsixPlanArtifactLedgerState state,
       VsixPlanArtifactLocator locator)
   {
-    if (state.Status != VsixPlanArtifactLedgerStatus.Active)
-    {
-      return false;
-    }
+    return state.Status == VsixPlanArtifactLedgerStatus.Active &&
+        HasAuthorizedActivationCommitment(state, locator);
+  }
 
+  private static bool HasAuthorizedActivationCommitment(
+      VsixPlanArtifactLedgerState state,
+      VsixPlanArtifactLocator locator)
+  {
     var expected = Convert.FromHexString(state.ActivationCommitment);
     var actual = SHA256.HashData(DecodeActivationProof(locator.ActivationProof));
     return CryptographicOperations.FixedTimeEquals(expected, actual);

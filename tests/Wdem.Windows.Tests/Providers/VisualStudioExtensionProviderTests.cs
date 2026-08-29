@@ -3030,6 +3030,103 @@ public sealed class VisualStudioExtensionProviderTests
   }
 
   [Fact]
+  public async Task ApplyAsync_LosingClaimAbandonRevokesWinningContinuationAcrossStores()
+  {
+    const string winningNonce =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+    const string losingNonce =
+        "2222222222222222222222222222222222222222222222222222222222222222";
+    var source = TempFile("vsix");
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new RotatingStager();
+    var revocationPath = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-test-revocations-{Guid.NewGuid():N}");
+    var revocationStore = new TestPlanArtifactRevocationStore(revocationPath);
+    ClaimedVsixPlanArtifact? claimedArtifact = null;
+    string? terminalStatePath = null;
+    try
+    {
+      var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
+      var stagingProvider = Provider(
+          manifests,
+          new ThrowingProcessExecutor(),
+          stager,
+          verifier,
+          planArtifactStore: PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              deleteDirectory: static _ => { },
+              revocationStore: revocationStore));
+      var plan = await stagingProvider.PlanAsync(
+          resource,
+          Missing(resource),
+          CancellationToken.None);
+      var step = Assert.Single(plan.Steps);
+      var directory = Assert.Single(stager.Directories);
+      terminalStatePath = TerminalStatePath(directory, step.Id);
+      Directory.CreateDirectory(terminalStatePath);
+      var winningStore = PlanArtifactStore(
+          stager,
+          verifier,
+          manifests,
+          deleteDirectory: static _ => { },
+          revocationStore: revocationStore,
+          createClaimNonce: static () => winningNonce);
+      var losingStore = PlanArtifactStore(
+          stager,
+          verifier,
+          manifests,
+          deleteDirectory: static _ => { },
+          revocationStore: revocationStore,
+          createClaimNonce: static () => losingNonce);
+
+      await winningStore.BeginClaimAsync(
+          resource.Id,
+          step.Id,
+          CancellationToken.None);
+      var losingResult = await Provider(
+              manifests,
+              new ThrowingProcessExecutor(),
+              stager,
+              verifier,
+              planArtifactStore: losingStore)
+          .ApplyAsync(resource, plan, null, CancellationToken.None);
+      Directory.Delete(terminalStatePath);
+      terminalStatePath = null;
+      ReplaceMarkerEvidence(directory, "\"revoked\":true", "\"revoked\":false");
+
+      var winningClaim = await winningStore.ClaimAsync(
+          resource.Id,
+          step.Id,
+          resource.Parameters["expectedSha256"]!,
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
+          CancellationToken.None);
+      claimedArtifact = winningClaim.Artifact;
+
+      Assert.Equal(ApplyOutcome.Failed, losingResult.Outcome);
+      Assert.True(revocationStore.IsRevoked(
+          step.Id.Split(':')[1],
+          Path.GetFileName(directory)));
+      Assert.Null(winningClaim.Artifact);
+      Assert.NotNull(winningClaim.Error);
+    }
+    finally
+    {
+      if (claimedArtifact is not null)
+      {
+        await claimedArtifact.DisposeAsync();
+      }
+
+      DeleteTerminalState(terminalStatePath);
+      File.Delete(revocationPath);
+      File.Delete(source);
+    }
+  }
+
+  [Fact]
   public async Task PlanArtifactStore_LedgerPoisoningCannotHideRevocationFromFreshStore()
   {
     var manifests = SourceManifestReader();
