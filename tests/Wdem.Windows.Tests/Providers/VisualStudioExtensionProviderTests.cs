@@ -3279,6 +3279,64 @@ public sealed class VisualStudioExtensionProviderTests
     }
   }
 
+  [Fact]
+  public async Task NoopRevocationStore_ConsumePausePastExpiryFailsClosed()
+  {
+    using var consumeReadyToCommit = new ManualResetEventSlim();
+    using var releaseConsume = new ManualResetEventSlim();
+    var store = new VsixPlanArtifactStore.NoopRevocationStore
+    {
+      ConsumeTransitionBarrier = () =>
+      {
+        consumeReadyToCommit.Set();
+        Assert.True(releaseConsume.Wait(TimeSpan.FromSeconds(5)));
+      }
+    };
+    var issuedAtUtc = new DateTimeOffset(2026, 8, 30, 0, 0, 0, TimeSpan.Zero);
+    var utcNow = issuedAtUtc;
+    var bootIdentifier = Guid.Parse("00112233-4455-6677-8899-AABBCCDDEEFF");
+    var uptimeMilliseconds = 10_000L;
+    var ownershipToken = Guid.NewGuid().ToString("N");
+    var directoryName = Guid.NewGuid().ToString("N");
+    var activationCommitment = new string('A', 64);
+    var claimNonce = new string('B', 64);
+    store.RecordIssued(
+        ownershipToken,
+        directoryName,
+        issuedAtUtc.AddMinutes(1),
+        activationCommitment,
+        bootIdentifier,
+        uptimeMilliseconds + 60_000);
+    store.Activate(ownershipToken, directoryName);
+    store.ClaimStarted(ownershipToken, directoryName, claimNonce);
+
+    try
+    {
+      var consumeTask = Task.Run(() => Record.Exception(() => store.Consume(
+          ownershipToken,
+          directoryName,
+          claimNonce,
+          activationCommitment,
+          () => utcNow,
+          () => bootIdentifier,
+          () => uptimeMilliseconds)));
+      Assert.True(consumeReadyToCommit.Wait(TimeSpan.FromSeconds(5)));
+      utcNow = issuedAtUtc.AddMinutes(2);
+      uptimeMilliseconds += 120_000;
+      releaseConsume.Set();
+      var exception = await consumeTask;
+
+      Assert.IsType<System.Security.SecurityException>(exception);
+      Assert.Equal(
+          VsixPlanArtifactLedgerStatus.ClaimStarted,
+          store.GetState(ownershipToken, directoryName).Status);
+    }
+    finally
+    {
+      releaseConsume.Set();
+    }
+  }
+
   [Theory]
   [InlineData("consumed")]
   [InlineData("claimNonce")]

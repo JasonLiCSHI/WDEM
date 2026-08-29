@@ -1901,11 +1901,13 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     }
   }
 
-  private sealed class NoopRevocationStore : IVsixPlanArtifactRevocationStore
+  internal sealed class NoopRevocationStore : IVsixPlanArtifactRevocationStore
   {
     public static NoopRevocationStore Instance { get; } = new();
-    private readonly ConcurrentDictionary<(string Token, string Directory), VsixPlanArtifactLedgerState>
-        _issuances = new();
+    private readonly object _transitionSync = new();
+    private readonly Dictionary<(string Token, string Directory), VsixPlanArtifactLedgerState>
+        _issuances = [];
+    internal Action? ConsumeTransitionBarrier { get; init; }
 
     public void RecordIssued(
       string ownershipToken,
@@ -1913,7 +1915,10 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       DateTimeOffset expiresAtUtc,
       string activationCommitment,
       Guid bootIdentifier,
-      long expiresAtUptimeMilliseconds) =>
+      long expiresAtUptimeMilliseconds)
+    {
+      lock (_transitionSync)
+      {
         _issuances.TryAdd(
             (ownershipToken, directoryName),
             new VsixPlanArtifactLedgerState(
@@ -1922,21 +1927,28 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
                 bootIdentifier,
                 expiresAtUptimeMilliseconds,
                 VsixPlanArtifactLedgerStatus.Pending));
+      }
+    }
 
     public void Activate(string ownershipToken, string directoryName) =>
         SetStatus(ownershipToken, directoryName, VsixPlanArtifactLedgerStatus.Active);
 
-    public void ClaimStarted(string ownershipToken, string directoryName, string claimNonce) =>
-        _issuances.AddOrUpdate(
-            (ownershipToken, directoryName),
-            static _ => throw new SecurityException("The VSIX issuance record is missing."),
-            (_, existing) => existing.Status >= VsixPlanArtifactLedgerStatus.ClaimStarted
-                ? existing
-                : existing with
-                {
-                  Status = VsixPlanArtifactLedgerStatus.ClaimStarted,
-                  ClaimNonce = claimNonce
-                });
+    public void ClaimStarted(string ownershipToken, string directoryName, string claimNonce)
+    {
+      lock (_transitionSync)
+      {
+        var key = (ownershipToken, directoryName);
+        var existing = GetStateCore(key);
+        if (existing.Status < VsixPlanArtifactLedgerStatus.ClaimStarted)
+        {
+          _issuances[key] = existing with
+          {
+            Status = VsixPlanArtifactLedgerStatus.ClaimStarted,
+            ClaimNonce = claimNonce
+          };
+        }
+      }
+    }
 
     public void Consume(
         string ownershipToken,
@@ -1945,55 +1957,87 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
         string activationCommitment,
         Func<DateTimeOffset> getUtcNow,
         Func<Guid> getBootIdentifier,
-        Func<long> getUptimeMilliseconds) =>
-        _issuances.AddOrUpdate(
-            (ownershipToken, directoryName),
-            static _ => throw new SecurityException("The VSIX issuance record is missing."),
-            (_, existing) => VsixPlanArtifactLedger.IsAuthorizedClaimForConsumption(
+        Func<long> getUptimeMilliseconds)
+    {
+      lock (_transitionSync)
+      {
+        ConsumeTransitionBarrier?.Invoke();
+        var key = (ownershipToken, directoryName);
+        var existing = GetStateCore(key);
+        if (!VsixPlanArtifactLedger.IsAuthorizedClaimForConsumption(
                 existing,
                 claimNonce,
                 activationCommitment,
                 getUtcNow(),
                 getBootIdentifier(),
-                getUptimeMilliseconds())
-                    ? existing with { Status = VsixPlanArtifactLedgerStatus.Consumed }
-                    : throw new SecurityException(
-                        "The durable VSIX claim is no longer authorized for consumption."));
+                getUptimeMilliseconds()))
+        {
+          throw new SecurityException(
+              "The durable VSIX claim is no longer authorized for consumption.");
+        }
 
-    public VsixPlanArtifactLedgerState GetState(string ownershipToken, string directoryName) =>
-        _issuances.TryGetValue((ownershipToken, directoryName), out var state)
-            ? state
-            : throw new SecurityException("The VSIX issuance record is missing.");
+        _issuances[key] = existing with { Status = VsixPlanArtifactLedgerStatus.Consumed };
+      }
+    }
+
+    public VsixPlanArtifactLedgerState GetState(string ownershipToken, string directoryName)
+    {
+      lock (_transitionSync)
+      {
+        return GetStateCore((ownershipToken, directoryName));
+      }
+    }
 
     public DateTimeOffset GetIssuedExpiry(string ownershipToken, string directoryName) =>
         GetState(ownershipToken, directoryName).ExpiresAtUtc;
 
-    public void Revoke(string ownershipToken, string directoryName) =>
-        _issuances.AddOrUpdate(
-            (ownershipToken, directoryName),
-            static _ => new VsixPlanArtifactLedgerState(
-                DateTimeOffset.MaxValue,
-                new string('0', 64),
-                Guid.Empty,
-                long.MaxValue,
-                VsixPlanArtifactLedgerStatus.Revoked),
-            static (_, existing) => existing.Status == VsixPlanArtifactLedgerStatus.Consumed
-                ? existing
-                : existing with { Status = VsixPlanArtifactLedgerStatus.Revoked });
+    public void Revoke(string ownershipToken, string directoryName)
+    {
+      lock (_transitionSync)
+      {
+        var key = (ownershipToken, directoryName);
+        if (!_issuances.TryGetValue(key, out var existing))
+        {
+          _issuances.Add(
+              key,
+              new VsixPlanArtifactLedgerState(
+                  DateTimeOffset.MaxValue,
+                  new string('0', 64),
+                  Guid.Empty,
+                  long.MaxValue,
+                  VsixPlanArtifactLedgerStatus.Revoked));
+        }
+        else if (existing.Status < VsixPlanArtifactLedgerStatus.Consumed)
+        {
+          _issuances[key] = existing with { Status = VsixPlanArtifactLedgerStatus.Revoked };
+        }
+      }
+    }
 
     public bool IsRevoked(string ownershipToken, string directoryName) =>
         GetState(ownershipToken, directoryName).Status == VsixPlanArtifactLedgerStatus.Revoked;
 
+    private VsixPlanArtifactLedgerState GetStateCore(
+        (string Token, string Directory) key) =>
+        _issuances.TryGetValue(key, out var state)
+            ? state
+            : throw new SecurityException("The VSIX issuance record is missing.");
+
     private void SetStatus(
         string ownershipToken,
         string directoryName,
-        VsixPlanArtifactLedgerStatus status) =>
-        _issuances.AddOrUpdate(
-            (ownershipToken, directoryName),
-            static _ => throw new SecurityException("The VSIX issuance record is missing."),
-            (_, existing) => existing.Status >= status
-                ? existing
-                : existing with { Status = status });
+        VsixPlanArtifactLedgerStatus status)
+    {
+      lock (_transitionSync)
+      {
+        var key = (ownershipToken, directoryName);
+        var existing = GetStateCore(key);
+        if (existing.Status < status)
+        {
+          _issuances[key] = existing with { Status = status };
+        }
+      }
+    }
   }
 
   private sealed class OwnershipMarkerSizeException(int actualBytes, int maximumBytes)
