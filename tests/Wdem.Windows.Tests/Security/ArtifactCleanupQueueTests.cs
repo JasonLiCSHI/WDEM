@@ -265,6 +265,59 @@ public sealed class ArtifactCleanupQueueTests
   }
 
   [Fact]
+  public void StartupSweep_OversizedMarkerIsIgnoredWithoutUnboundedAllocationAndContinues()
+  {
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-cleanup-oversized-marker-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    var oversized = Path.Combine(root, Guid.NewGuid().ToString("N"));
+    var safeCandidate = Path.Combine(root, Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(oversized);
+    Directory.CreateDirectory(safeCandidate);
+    var markerPath = Path.Combine(oversized, ".wdem-artifact");
+    using (var marker = new FileStream(
+               markerPath,
+               FileMode.CreateNew,
+               FileAccess.Write,
+               FileShare.None))
+    {
+      marker.Write("wdem-artifact-v1\n"u8);
+      marker.SetLength(16L * 1024 * 1024);
+    }
+
+    var stale = DateTime.UtcNow - TimeSpan.FromHours(2);
+    File.SetLastWriteTimeUtc(markerPath, stale);
+    Directory.SetLastWriteTimeUtc(oversized, stale);
+    Directory.SetLastWriteTimeUtc(safeCandidate, stale);
+
+    try
+    {
+      var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+
+      _ = new ArtifactCleanupQueue(
+          maxAttempts: 1,
+          retryDelay: TimeSpan.FromSeconds(30),
+          maxDelayedRetryRounds: 1,
+          knownStagingRoots: [root]);
+
+      var allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+      Assert.True(
+          allocated < 4L * 1024 * 1024,
+          $"Startup sweep allocated {allocated} bytes for an oversized marker.");
+      Assert.True(Directory.Exists(oversized));
+      Assert.False(Directory.Exists(safeCandidate));
+    }
+    finally
+    {
+      if (Directory.Exists(root))
+      {
+        Directory.Delete(root, recursive: true);
+      }
+    }
+  }
+
+  [Fact]
   public async Task DelayedRetry_ReschedulesCleanupEnqueuedDuringScheduledReset()
   {
     var fileSystem = new RecordingCleanupFileSystem

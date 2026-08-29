@@ -289,8 +289,8 @@ internal sealed class ArtifactLease : IDisposable
 {
   internal const string OwnershipMarkerFileName = ".wdem-artifact";
   internal const string LeaseFileName = ".wdem-lease";
-  internal const string OwnershipMarkerContent = "wdem-artifact-v1\n";
   private FileStream? _lease;
+  private static ReadOnlySpan<byte> OwnershipMarkerContent => "wdem-artifact-v1\n"u8;
 
   private ArtifactLease(FileStream lease)
   {
@@ -307,7 +307,7 @@ internal sealed class ArtifactLease : IDisposable
                    FileAccess.Write,
                    FileShare.None))
     {
-      marker.Write("wdem-artifact-v1\n"u8);
+      marker.Write(OwnershipMarkerContent);
       marker.Flush(flushToDisk: true);
     }
 
@@ -342,13 +342,8 @@ internal sealed class ArtifactLease : IDisposable
     try
     {
       if (!File.Exists(markerPath) || !File.Exists(leasePath) ||
-          File.GetAttributes(markerPath).HasFlag(FileAttributes.ReparsePoint) ||
           File.GetAttributes(leasePath).HasFlag(FileAttributes.ReparsePoint) ||
-          File.GetLastWriteTimeUtc(markerPath) >= staleBeforeUtc ||
-          !string.Equals(
-              File.ReadAllText(markerPath),
-              OwnershipMarkerContent,
-              StringComparison.Ordinal))
+          !HasValidOwnershipMarker(markerPath, staleBeforeUtc))
       {
         return false;
       }
@@ -396,21 +391,51 @@ internal sealed class ArtifactLease : IDisposable
       }
 
       var markerPath = Path.Combine(directoryPath, OwnershipMarkerFileName);
-      var markerAttributes = File.GetAttributes(markerPath);
       return entries.Length == 1 &&
           string.Equals(entries[0], markerPath, StringComparison.OrdinalIgnoreCase) &&
-          !markerAttributes.HasFlag(FileAttributes.Directory) &&
-          !markerAttributes.HasFlag(FileAttributes.ReparsePoint) &&
-          File.GetLastWriteTimeUtc(markerPath) < staleBeforeUtc &&
-          string.Equals(
-              File.ReadAllText(markerPath),
-              OwnershipMarkerContent,
-              StringComparison.Ordinal);
+          HasValidOwnershipMarker(markerPath, staleBeforeUtc);
     }
     catch (Exception exception) when (exception is IOException or
         UnauthorizedAccessException or System.Security.SecurityException)
     {
       return false;
     }
+  }
+
+  private static bool HasValidOwnershipMarker(
+      string markerPath,
+      DateTime staleBeforeUtc)
+  {
+    var pathAttributes = File.GetAttributes(markerPath);
+    if (pathAttributes.HasFlag(FileAttributes.Directory) ||
+        pathAttributes.HasFlag(FileAttributes.ReparsePoint))
+    {
+      return false;
+    }
+
+    using var marker = new FileStream(
+        markerPath,
+        FileMode.Open,
+        FileAccess.Read,
+        FileShare.Read,
+        bufferSize: 1,
+        FileOptions.SequentialScan);
+    var attributes = File.GetAttributes(marker.SafeFileHandle);
+    if (attributes.HasFlag(FileAttributes.Directory) ||
+        attributes.HasFlag(FileAttributes.ReparsePoint) ||
+        File.GetLastWriteTimeUtc(marker.SafeFileHandle) >= staleBeforeUtc)
+    {
+      return false;
+    }
+
+    var expected = OwnershipMarkerContent;
+    if (marker.Length != expected.Length)
+    {
+      return false;
+    }
+
+    Span<byte> actual = stackalloc byte[expected.Length];
+    marker.ReadExactly(actual);
+    return actual.SequenceEqual(expected);
   }
 }
