@@ -4,7 +4,6 @@ using System.Runtime.InteropServices;
 using System.Security;
 using System.Security.AccessControl;
 using System.Security.Principal;
-using System.Text;
 
 namespace Wdem.Windows.Security;
 
@@ -24,7 +23,6 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
   private const uint FileFlagBackupSemantics = 0x02000000;
   private const uint FileFlagOpenReparsePoint = 0x00200000;
   internal const string RevocationLedgerFileName = ".wdem-vsix-revocations";
-  private const int MaximumRevocationLedgerBytes = 64 * 1024 * 1024;
   private readonly string _rootPath;
 
   public WindowsPlanArtifactDirectoryPolicy()
@@ -135,7 +133,27 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
       string ownershipToken,
       string directoryName)
   {
-    var record = CreateRevocationRecord(ownershipToken, directoryName);
+    var record = VsixPlanArtifactLedger.CreateRevokedRecord(ownershipToken, directoryName);
+    var fullRootPath = ValidateRevocationRootPath(rootPath);
+    var productPath = Path.GetDirectoryName(fullRootPath)!;
+    using var productHandle = OpenValidatedProductRoot(productPath);
+    using var rootHandle = OpenValidatedIdentityNeutralRoot(fullRootPath);
+    using var ledgerHandle = OpenValidatedRevocationLedger(
+        fullRootPath,
+        FileAppendData | ReadControl | Synchronize);
+    WriteRevocationRecord(ledgerHandle, record);
+  }
+
+  internal static void AppendIssuance(
+      string rootPath,
+      string ownershipToken,
+      string directoryName,
+      DateTimeOffset expiresAtUtc)
+  {
+    var record = VsixPlanArtifactLedger.CreateIssuedRecord(
+        ownershipToken,
+        directoryName,
+        expiresAtUtc);
     var fullRootPath = ValidateRevocationRootPath(rootPath);
     var productPath = Path.GetDirectoryName(fullRootPath)!;
     using var productHandle = OpenValidatedProductRoot(productPath);
@@ -151,7 +169,6 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
       string ownershipToken,
       string directoryName)
   {
-    var record = CreateRevocationRecord(ownershipToken, directoryName);
     var fullRootPath = ValidateRevocationRootPath(rootPath);
     var productPath = Path.GetDirectoryName(fullRootPath)!;
     using var productHandle = OpenValidatedProductRoot(productPath);
@@ -160,14 +177,26 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
         fullRootPath,
         GenericRead | ReadControl);
     using var stream = new FileStream(ledgerHandle, FileAccess.Read, bufferSize: 4096, isAsync: false);
-    if (stream.Length > MaximumRevocationLedgerBytes)
-    {
-      throw new SecurityException("The VSIX revocation ledger exceeds its safe size limit.");
-    }
+    return VsixPlanArtifactLedger.ContainsRevokedRecord(
+        stream,
+        ownershipToken,
+        directoryName);
+  }
 
-    var contents = new byte[(int)stream.Length];
-    stream.ReadExactly(contents);
-    return ContainsRevocationRecord(contents, record);
+  internal static DateTimeOffset GetIssuedExpiry(
+      string rootPath,
+      string ownershipToken,
+      string directoryName)
+  {
+    var fullRootPath = ValidateRevocationRootPath(rootPath);
+    var productPath = Path.GetDirectoryName(fullRootPath)!;
+    using var productHandle = OpenValidatedProductRoot(productPath);
+    using var rootHandle = OpenValidatedIdentityNeutralRoot(fullRootPath);
+    using var ledgerHandle = OpenValidatedRevocationLedger(
+        fullRootPath,
+        GenericRead | ReadControl);
+    using var stream = new FileStream(ledgerHandle, FileAccess.Read, bufferSize: 4096, isAsync: false);
+    return VsixPlanArtifactLedger.GetIssuedExpiry(stream, ownershipToken, directoryName);
   }
 
   internal static void WriteRevocationRecord(
@@ -176,15 +205,28 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
       string directoryName) =>
       WriteRevocationRecord(
           ledgerHandle,
-          CreateRevocationRecord(ownershipToken, directoryName));
+          VsixPlanArtifactLedger.CreateRevokedRecord(ownershipToken, directoryName));
+
+  internal static void WriteIssuanceRecord(
+      SafeFileHandle ledgerHandle,
+      string ownershipToken,
+      string directoryName,
+      DateTimeOffset expiresAtUtc) =>
+      WriteRevocationRecord(
+          ledgerHandle,
+          VsixPlanArtifactLedger.CreateIssuedRecord(
+              ownershipToken,
+              directoryName,
+              expiresAtUtc));
 
   internal static bool ContainsRevocationRecord(
       ReadOnlySpan<byte> contents,
       string ownershipToken,
       string directoryName) =>
-      ContainsRevocationRecord(
+      VsixPlanArtifactLedger.ContainsRevokedRecord(
           contents,
-          CreateRevocationRecord(ownershipToken, directoryName));
+          ownershipToken,
+          directoryName);
 
   private static void WriteRevocationRecord(
       SafeFileHandle ledgerHandle,
@@ -215,30 +257,6 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
           "The VSIX revocation record could not be committed to durable storage.",
           new Win32Exception(Marshal.GetLastWin32Error()));
     }
-  }
-
-  private static bool ContainsRevocationRecord(
-      ReadOnlySpan<byte> contents,
-      ReadOnlySpan<byte> record)
-  {
-    while (!contents.IsEmpty)
-    {
-      var terminator = contents.IndexOf((byte)'\n');
-      if (terminator < 0)
-      {
-        return false;
-      }
-
-      var lineLength = terminator + 1;
-      if (contents[..lineLength].SequenceEqual(record))
-      {
-        return true;
-      }
-
-      contents = contents[lineLength..];
-    }
-
-    return false;
   }
 
   private static SafeFileHandle OpenValidatedIdentityNeutralRoot(string rootPath)
@@ -931,18 +949,6 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
     }
 
     return fullRootPath;
-  }
-
-  private static byte[] CreateRevocationRecord(string ownershipToken, string directoryName)
-  {
-    if (ownershipToken.Length != 32 || !ownershipToken.All(Uri.IsHexDigit) ||
-        !Guid.TryParseExact(directoryName, "N", out _))
-    {
-      throw new SecurityException("The VSIX revocation identity is invalid.");
-    }
-
-    return Encoding.ASCII.GetBytes(
-        $"wdem-vsix-revoked-v1:{ownershipToken.ToUpperInvariant()}:{directoryName.ToLowerInvariant()}\n");
   }
 
   private static bool HasAdministratorOnlyFileRule(

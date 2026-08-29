@@ -3,6 +3,7 @@ using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text.Json;
 using Wdem.Windows.Security;
+using Wdem.Windows.VisualStudio;
 using Xunit;
 
 namespace Wdem.Windows.Tests.Security;
@@ -120,7 +121,7 @@ public sealed class ArtifactCleanupQueueTests
   }
 
   [WindowsFact]
-  public void StartupSweep_PlanArtifactsUsesSealedExpiryInsteadOfGenericFileAge()
+  public void StartupSweep_PlanArtifactsUsesDurableIssuedExpiryInsteadOfGenericFileAge()
   {
     var basePath = Path.Combine(Path.GetTempPath(), $"wdem-plan-sweep-{Guid.NewGuid():N}");
     var root = Path.Combine(basePath, "Wdem", "PlanArtifacts");
@@ -128,8 +129,13 @@ public sealed class ArtifactCleanupQueueTests
     var future = CreateVsixPlanArtifact(root, DateTimeOffset.UtcNow.AddHours(12));
     var expired = CreateVsixPlanArtifact(root, DateTimeOffset.UtcNow.AddHours(-1));
     var invalid = CreateVsixPlanArtifact(root, DateTimeOffset.UtcNow.AddHours(-1));
+    var missingIssuance = CreateVsixPlanArtifact(root, DateTimeOffset.UtcNow.AddHours(-1));
+    var revocations = new TestPlanArtifactRevocationStore();
+    RecordIssuance(revocations, future);
+    RecordIssuance(revocations, expired);
+    RecordIssuance(revocations, invalid);
     File.WriteAllText(Path.Combine(invalid, ".wdem-vsix-owner"), "{\"schemaVersion\":1}");
-    foreach (var directory in new[] { future, expired, invalid })
+    foreach (var directory in new[] { future, expired, invalid, missingIssuance })
     {
       File.SetLastWriteTimeUtc(
           Path.Combine(directory, ".wdem-artifact"),
@@ -142,11 +148,91 @@ public sealed class ArtifactCleanupQueueTests
           maxAttempts: 1,
           retryDelay: TimeSpan.FromSeconds(30),
           maxDelayedRetryRounds: 1,
-          knownStagingRoots: [root]);
+          knownStagingRoots: [root],
+          planArtifactRevocationStoreFactory: _ => revocations);
 
       Assert.True(Directory.Exists(future));
       Assert.False(Directory.Exists(expired));
       Assert.True(Directory.Exists(invalid));
+      Assert.True(Directory.Exists(missingIssuance));
+    }
+    finally
+    {
+      if (Directory.Exists(basePath))
+      {
+        Directory.Delete(basePath, recursive: true);
+      }
+    }
+  }
+
+  [WindowsFact]
+  public void StartupSweep_RevokesIssuedExpiryAfterCreatorExtendsMarker()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-plan-issued-{Guid.NewGuid():N}");
+    var root = Path.Combine(basePath, "Wdem", "PlanArtifacts");
+    Directory.CreateDirectory(root);
+    var issuedExpiry = DateTimeOffset.UtcNow.AddHours(-1);
+    var directory = CreateVsixPlanArtifact(root, issuedExpiry);
+    using var marker = JsonDocument.Parse(File.ReadAllBytes(
+        Path.Combine(directory, ".wdem-vsix-owner")));
+    var ownershipToken = marker.RootElement.GetProperty("ownershipToken").GetString()!;
+    var directoryName = Path.GetFileName(directory);
+    var revocations = new TestPlanArtifactRevocationStore();
+    revocations.RecordIssued(ownershipToken, directoryName, issuedExpiry);
+    var extended = File.ReadAllText(Path.Combine(directory, ".wdem-vsix-owner"))
+        .Replace(
+            $"\"expiresAtUtc\":\"{issuedExpiry:O}\"",
+            $"\"expiresAtUtc\":\"{DateTimeOffset.UtcNow.AddHours(12):O}\"",
+            StringComparison.Ordinal);
+    File.WriteAllText(Path.Combine(directory, ".wdem-vsix-owner"), extended);
+
+    try
+    {
+      _ = new ArtifactCleanupQueue(
+          maxAttempts: 1,
+          retryDelay: TimeSpan.FromSeconds(30),
+          maxDelayedRetryRounds: 1,
+          knownStagingRoots: [root],
+          planArtifactRevocationStoreFactory: _ => revocations);
+
+      Assert.True(revocations.IsRevoked(ownershipToken, directoryName));
+      Assert.False(Directory.Exists(directory));
+    }
+    finally
+    {
+      if (Directory.Exists(basePath))
+      {
+        Directory.Delete(basePath, recursive: true);
+      }
+    }
+  }
+
+  [WindowsFact]
+  public void StartupSweep_RetainsExpiredArtifactWhenDurableRevocationFails()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-plan-revoke-fail-{Guid.NewGuid():N}");
+    var root = Path.Combine(basePath, "Wdem", "PlanArtifacts");
+    Directory.CreateDirectory(root);
+    var issuedExpiry = DateTimeOffset.UtcNow.AddHours(-1);
+    var directory = CreateVsixPlanArtifact(root, issuedExpiry);
+    using var marker = JsonDocument.Parse(File.ReadAllBytes(
+        Path.Combine(directory, ".wdem-vsix-owner")));
+    var ownershipToken = marker.RootElement.GetProperty("ownershipToken").GetString()!;
+    var directoryName = Path.GetFileName(directory);
+    var revocations = new TestPlanArtifactRevocationStore { RevokeFailure = new IOException() };
+    revocations.RecordIssued(ownershipToken, directoryName, issuedExpiry);
+
+    try
+    {
+      _ = new ArtifactCleanupQueue(
+          maxAttempts: 1,
+          retryDelay: TimeSpan.FromSeconds(30),
+          maxDelayedRetryRounds: 1,
+          knownStagingRoots: [root],
+          planArtifactRevocationStoreFactory: _ => revocations);
+
+      Assert.False(revocations.IsRevoked(ownershipToken, directoryName));
+      Assert.True(Directory.Exists(directory));
     }
     finally
     {
@@ -594,6 +680,18 @@ public sealed class ArtifactCleanupQueueTests
     return directory;
   }
 
+  private static void RecordIssuance(
+      TestPlanArtifactRevocationStore revocations,
+      string directory)
+  {
+    using var marker = JsonDocument.Parse(File.ReadAllBytes(
+        Path.Combine(directory, ".wdem-vsix-owner")));
+    revocations.RecordIssued(
+        marker.RootElement.GetProperty("ownershipToken").GetString()!,
+        Path.GetFileName(directory),
+        marker.RootElement.GetProperty("expiresAtUtc").GetDateTimeOffset());
+  }
+
   private static void CreateJunction(string path, string target)
   {
     var startInfo = new ProcessStartInfo("cmd.exe")
@@ -640,5 +738,37 @@ public sealed class ArtifactCleanupQueueTests
         throw new IOException("secret-token cleanup failure");
       }
     }
+  }
+
+  private sealed class TestPlanArtifactRevocationStore : IVsixPlanArtifactRevocationStore
+  {
+    private readonly Dictionary<(string Token, string Directory), DateTimeOffset> _issuances = [];
+    private readonly HashSet<(string Token, string Directory)> _revocations = [];
+
+    public Exception? RevokeFailure { get; init; }
+
+    public void RecordIssued(
+        string ownershipToken,
+        string directoryName,
+        DateTimeOffset expiresAtUtc) =>
+        _issuances.Add((ownershipToken, directoryName), expiresAtUtc);
+
+    public DateTimeOffset GetIssuedExpiry(string ownershipToken, string directoryName) =>
+        _issuances.TryGetValue((ownershipToken, directoryName), out var expiry)
+            ? expiry
+            : throw new System.Security.SecurityException("The issuance record is missing.");
+
+    public void Revoke(string ownershipToken, string directoryName)
+    {
+      if (RevokeFailure is not null)
+      {
+        throw RevokeFailure;
+      }
+
+      _revocations.Add((ownershipToken, directoryName));
+    }
+
+    public bool IsRevoked(string ownershipToken, string directoryName) =>
+        _revocations.Contains((ownershipToken, directoryName));
   }
 }

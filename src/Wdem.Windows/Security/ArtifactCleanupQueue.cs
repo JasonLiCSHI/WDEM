@@ -24,6 +24,8 @@ internal sealed class ArtifactCleanupQueue
   private readonly IReadOnlyList<string> _knownStagingRoots;
   private readonly TimeSpan _minimumSweepAge;
   private readonly Action? _beforeRetryScheduledReset;
+  private readonly Func<string, IVsixPlanArtifactRevocationStore>
+      _planArtifactRevocationStoreFactory;
   private readonly List<PendingCleanup> _pending = [];
   private bool _retryScheduled;
   private long _enqueueVersion;
@@ -35,7 +37,9 @@ internal sealed class ArtifactCleanupQueue
       int maxDelayedRetryRounds = 4,
       IReadOnlyList<string>? knownStagingRoots = null,
       TimeSpan? minimumSweepAge = null,
-      Action? beforeRetryScheduledReset = null)
+      Action? beforeRetryScheduledReset = null,
+      Func<string, IVsixPlanArtifactRevocationStore>?
+          planArtifactRevocationStoreFactory = null)
   {
     if (maxAttempts <= 0)
     {
@@ -65,6 +69,8 @@ internal sealed class ArtifactCleanupQueue
         (fileSystem is null ? GetKnownStagingRoots() : []);
     _minimumSweepAge = minimumSweepAge ?? DefaultMinimumSweepAge;
     _beforeRetryScheduledReset = beforeRetryScheduledReset;
+    _planArtifactRevocationStoreFactory = planArtifactRevocationStoreFactory ??
+        (static root => new WindowsVsixPlanArtifactRevocationStore(root));
     SweepKnownStagingArtifacts();
   }
 
@@ -249,10 +255,10 @@ internal sealed class ArtifactCleanupQueue
           if (IsPlanArtifactRoot(root))
           {
             var planStaleBeforeUtc = DateTime.UtcNow - _minimumSweepAge;
-            var canReclaimExpired = VsixPlanArtifactStore.CanReclaimExpiredDirectory(
+            var canReclaimExpired = VsixPlanArtifactStore.TryRevokeExpiredDirectory(
                     fullPath,
-                    DateTimeOffset.UtcNow) &&
-                ArtifactLease.CanAcquireForCleanup(fullPath, DateTime.MaxValue);
+                    DateTimeOffset.UtcNow,
+                    _planArtifactRevocationStoreFactory(root));
             if (!canReclaimExpired &&
                 !ArtifactLease.CanReclaimUninitializedPlanArtifact(
                     fullPath,

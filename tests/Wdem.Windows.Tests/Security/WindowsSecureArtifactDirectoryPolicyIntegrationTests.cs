@@ -182,7 +182,7 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
   }
 
   [WindowsFact]
-  public void RevocationLedger_TruncatedOrEmbeddedTargetRecordIsNotRevoked()
+  public void RevocationLedger_TruncatedTargetIsIgnoredAndGarbagePrefixCannotHideRecord()
   {
     const string ownershipToken = "00112233445566778899AABBCCDDEEFF";
     const string directoryName = "00112233445566778899aabbccddeeff";
@@ -193,10 +193,31 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
         Encoding.ASCII.GetBytes(record[..^1]),
         ownershipToken,
         directoryName));
-    Assert.False(WindowsPlanArtifactDirectoryPolicy.ContainsRevocationRecord(
+    Assert.True(WindowsPlanArtifactDirectoryPolicy.ContainsRevocationRecord(
         Encoding.ASCII.GetBytes("garbage" + record),
         ownershipToken,
         directoryName));
+  }
+
+  [Fact]
+  public void RevocationLedger_MalformedIssuanceCannotHideLaterValidRecord()
+  {
+    const string ownershipToken = "00112233445566778899AABBCCDDEEFF";
+    const string directoryName = "00112233445566778899aabbccddeeff";
+    var contents = Encoding.ASCII.GetBytes(
+        "attacker-controlled-garbage" +
+        "wdem-vsix-issued-v1:00112233445566778899AABBCCDDEEFF:" +
+        "00112233445566778899aabbccddeeff:9999999999999999999\n" +
+        "wdem-vsix-issued-v1:00112233445566778899AABBCCDDEEFF:" +
+        "00112233445566778899aabbccddeeff:0638712864000000000\n");
+    using var ledger = new MemoryStream(contents, writable: false);
+
+    var expiry = VsixPlanArtifactLedger.GetIssuedExpiry(
+        ledger,
+        ownershipToken,
+        directoryName);
+
+    Assert.Equal(new DateTimeOffset(2025, 1, 1, 0, 0, 0, TimeSpan.Zero), expiry);
   }
 
   [WindowsFact]
@@ -231,6 +252,39 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
             record.Token,
             record.Directory));
       }
+    }
+    finally
+    {
+      File.Delete(path);
+    }
+  }
+
+  [WindowsFact]
+  public void RevocationLedger_RecordBeyondFormerSizeLimitRemainsDiscoverable()
+  {
+    const string ownershipToken = "00112233445566778899AABBCCDDEEFF";
+    const string directoryName = "00112233445566778899aabbccddeeff";
+    var path = Path.Combine(Path.GetTempPath(), $"wdem-large-revocations-{Guid.NewGuid():N}");
+    try
+    {
+      using (var padding = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+      {
+        padding.SetLength((64L * 1024 * 1024) + 1);
+      }
+
+      using (var handle = OpenAppendOnly(path))
+      {
+        WindowsPlanArtifactDirectoryPolicy.WriteRevocationRecord(
+            handle,
+            ownershipToken,
+            directoryName);
+      }
+
+      using var ledger = File.OpenRead(path);
+      Assert.True(VsixPlanArtifactLedger.ContainsRevokedRecord(
+          ledger,
+          ownershipToken,
+          directoryName));
     }
     finally
     {
