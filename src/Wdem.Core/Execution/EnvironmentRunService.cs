@@ -503,6 +503,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
 
     var transitions = new RunTransitions(_runStore, events, run, _persistenceTimeout);
     await transitions.SetRunningAsync(cancellationToken).ConfigureAwait(false);
+    var progressPumps = new RunProgressPumpCoordinator(_persistenceTimeout);
     var scheduled = await _scheduler.ExecuteAsync(
         plan,
         (planned, token) => ExecuteResourceAsync(
@@ -511,6 +512,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
             detected[planned.Definition.Id],
             compliance[planned.Definition.Id],
             events,
+            progressPumps,
             token),
         planned => _providers.GetRequired(
             planned.Definition.Type,
@@ -518,6 +520,10 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         request.MaximumConcurrency,
         cancellationToken,
         transitions.PersistSchedulerTransitionAsync).ConfigureAwait(false);
+    if (cancellationToken.IsCancellationRequested)
+    {
+      await progressPumps.SealAsync().ConfigureAwait(false);
+    }
 
     var completedRun = transitions.Current with
     {
@@ -545,6 +551,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       DetectedState detectedBefore,
       ComplianceResult complianceBefore,
       RunEventPublisher events,
+      RunProgressPumpCoordinator progressPumps,
       CancellationToken cancellationToken)
   {
     var id = definition.Id;
@@ -565,6 +572,10 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         events,
         id,
         progressPersistence.Token);
+    using var progressRegistration = progressPumps.Register(
+        progressBuffer,
+        progressPersistence,
+        progressPump);
     try
     {
       cancellationToken.ThrowIfCancellationRequested();
@@ -1432,6 +1443,112 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         var progress = _coalesced.Values.ToArray();
         _coalesced.Clear();
         return progress;
+      }
+    }
+  }
+
+  private sealed class RunProgressPumpCoordinator(TimeSpan persistenceTimeout)
+  {
+    private readonly object _gate = new();
+    private readonly HashSet<ProgressPumpSession> _sessions = [];
+
+    public IDisposable Register(
+        ProviderProgressBuffer buffer,
+        CancellationTokenSource persistence,
+        Task pump)
+    {
+      var session = new ProgressPumpSession(buffer, persistence, pump);
+      lock (_gate)
+      {
+        _sessions.Add(session);
+      }
+
+      return new ProgressPumpRegistration(this, session);
+    }
+
+    public async Task SealAsync()
+    {
+      ProgressPumpSession[] sessions;
+      lock (_gate)
+      {
+        sessions = [.. _sessions];
+      }
+
+      await Task.WhenAll(sessions.Select(session =>
+          session.SealAsync(persistenceTimeout))).ConfigureAwait(false);
+    }
+
+    private void Unregister(ProgressPumpSession session)
+    {
+      lock (_gate)
+      {
+        _sessions.Remove(session);
+      }
+    }
+
+    private sealed class ProgressPumpRegistration(
+        RunProgressPumpCoordinator owner,
+        ProgressPumpSession session) : IDisposable
+    {
+      private RunProgressPumpCoordinator? _owner = owner;
+
+      public void Dispose()
+      {
+        var currentOwner = Interlocked.Exchange(ref _owner, null);
+        if (currentOwner is null)
+        {
+          return;
+        }
+
+        session.Deactivate();
+        currentOwner.Unregister(session);
+      }
+    }
+
+    private sealed class ProgressPumpSession(
+        ProviderProgressBuffer buffer,
+        CancellationTokenSource persistence,
+        Task pump)
+    {
+      private readonly object _gate = new();
+      private bool _active = true;
+
+      public async Task SealAsync(TimeSpan timeout)
+      {
+        lock (_gate)
+        {
+          if (!_active)
+          {
+            return;
+          }
+
+          buffer.StopAccepting();
+          persistence.Cancel();
+        }
+
+        try
+        {
+          await pump.WaitAsync(timeout).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+          // Sealing cancels in-flight persistence after the scheduler's drain window.
+        }
+        catch (TimeoutException exception)
+        {
+          ObserveFault(pump);
+          throw new TimeoutException(
+              "Timed out while sealing provider progress.",
+              exception);
+        }
+      }
+
+      public void Deactivate()
+      {
+        lock (_gate)
+        {
+          _active = false;
+        }
       }
     }
   }
