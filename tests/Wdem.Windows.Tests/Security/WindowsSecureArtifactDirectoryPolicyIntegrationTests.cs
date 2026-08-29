@@ -103,6 +103,40 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
         WindowsPlanArtifactDirectoryPolicy.ValidateIdentityNeutralRootSecurity(security));
   }
 
+  [Theory]
+  [InlineData(FileSystemRights.FullControl)]
+  [InlineData(FileSystemRights.Delete)]
+  [InlineData(FileSystemRights.CreateFiles)]
+  [InlineData(FileSystemRights.ChangePermissions)]
+  [InlineData(FileSystemRights.TakeOwnership)]
+  public void ValidateIdentityNeutralRootSecurity_RejectsInheritedDangerousUsersRights(
+      FileSystemRights rights)
+  {
+    var security = AddInheritedRule(
+        WindowsPlanArtifactDirectoryPolicy.CreateIdentityNeutralRootSecurity(Administrators),
+        new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+        rights,
+        AccessControlType.Allow);
+
+    Assert.True(security.AreAccessRulesProtected);
+    Assert.Throws<SecurityException>(() =>
+        WindowsPlanArtifactDirectoryPolicy.ValidateIdentityNeutralRootSecurity(security));
+  }
+
+  [Fact]
+  public void ValidateIdentityNeutralRootSecurity_RejectsInheritedDenyRule()
+  {
+    var security = AddInheritedRule(
+        WindowsPlanArtifactDirectoryPolicy.CreateIdentityNeutralRootSecurity(Administrators),
+        new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+        FileSystemRights.Delete,
+        AccessControlType.Deny);
+
+    Assert.True(security.AreAccessRulesProtected);
+    Assert.Throws<SecurityException>(() =>
+        WindowsPlanArtifactDirectoryPolicy.ValidateIdentityNeutralRootSecurity(security));
+  }
+
   [WindowsFact]
   public void ValidateProductRootSecurity_DoesNotAllowUsersToReplacePlanArtifactRoot()
   {
@@ -121,6 +155,40 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
         usersRule.FileSystemRights);
     Assert.False(usersRule.FileSystemRights.HasFlag(FileSystemRights.CreateDirectories));
     Assert.False(usersRule.FileSystemRights.HasFlag(FileSystemRights.DeleteSubdirectoriesAndFiles));
+  }
+
+  [Theory]
+  [InlineData(FileSystemRights.FullControl)]
+  [InlineData(FileSystemRights.Delete)]
+  [InlineData(FileSystemRights.CreateFiles)]
+  [InlineData(FileSystemRights.ChangePermissions)]
+  [InlineData(FileSystemRights.TakeOwnership)]
+  public void ValidateProductRootSecurity_RejectsInheritedDangerousUsersRights(
+      FileSystemRights rights)
+  {
+    var security = AddInheritedRule(
+        WindowsPlanArtifactDirectoryPolicy.CreateProductRootSecurity(Administrators),
+        new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+        rights,
+        AccessControlType.Allow);
+
+    Assert.True(security.AreAccessRulesProtected);
+    Assert.Throws<SecurityException>(() =>
+        WindowsPlanArtifactDirectoryPolicy.ValidateProductRootSecurity(security));
+  }
+
+  [Fact]
+  public void ValidateProductRootSecurity_RejectsInheritedUnknownPrincipalRule()
+  {
+    var security = AddInheritedRule(
+        WindowsPlanArtifactDirectoryPolicy.CreateProductRootSecurity(Administrators),
+        TestSid(1001),
+        FileSystemRights.Read,
+        AccessControlType.Allow);
+
+    Assert.True(security.AreAccessRulesProtected);
+    Assert.Throws<SecurityException>(() =>
+        WindowsPlanArtifactDirectoryPolicy.ValidateProductRootSecurity(security));
   }
 
   [WindowsAdministratorFact]
@@ -319,6 +387,33 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
       rule.InheritanceFlags ==
           (InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit) &&
       rule.PropagationFlags == PropagationFlags.None;
+
+  private static DirectorySecurity AddInheritedRule(
+      DirectorySecurity security,
+      SecurityIdentifier identity,
+      FileSystemRights rights,
+      AccessControlType accessControlType)
+  {
+    var descriptor = new RawSecurityDescriptor(
+        security.GetSecurityDescriptorBinaryForm(),
+        offset: 0);
+    descriptor.DiscretionaryAcl!.InsertAce(
+        descriptor.DiscretionaryAcl.Count,
+        new CommonAce(
+            AceFlags.Inherited,
+            accessControlType == AccessControlType.Allow
+                ? AceQualifier.AccessAllowed
+                : AceQualifier.AccessDenied,
+            (int)rights,
+            identity,
+            isCallback: false,
+            opaque: null));
+    var bytes = new byte[descriptor.BinaryLength];
+    descriptor.GetBinaryForm(bytes, offset: 0);
+    var result = new DirectorySecurity();
+    result.SetSecurityDescriptorBinaryForm(bytes);
+    return result;
+  }
 
   private static SecurityIdentifier Administrators { get; } = new(
       WellKnownSidType.BuiltinAdministratorsSid,

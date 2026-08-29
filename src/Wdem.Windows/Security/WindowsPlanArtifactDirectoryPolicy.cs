@@ -340,7 +340,7 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
       throw new SecurityException("The shared plan-artifact root has untrusted ownership.");
     }
 
-    var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier))
+    var rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier))
         .Cast<FileSystemAccessRule>()
         .ToArray();
     var usersRights = FileSystemRights.ReadAndExecute |
@@ -372,7 +372,7 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
     var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
     var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier ??
         throw new SecurityException("The shared plan-artifact product root owner is unavailable.");
-    var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier))
+    var rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier))
         .Cast<FileSystemAccessRule>()
         .ToArray();
     if ((!owner.Equals(administrators) &&
