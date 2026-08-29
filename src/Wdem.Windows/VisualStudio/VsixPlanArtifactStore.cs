@@ -75,6 +75,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
 {
   private const string EvidencePrefix = "vsix-v1:";
   private const string OwnerFileName = ".wdem-vsix-owner";
+  private const int MaxOwnershipMarkerBytes = 16 * 1024;
+  private static readonly UTF8Encoding StrictUtf8 = new(false, true);
   private readonly ISecureArtifactStager _stager;
   private readonly ITrustedFileVerifier _verifier;
   private readonly IVsixManifestReader _manifestReader;
@@ -174,7 +176,15 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       }
 
       var ownerToken = Convert.ToHexString(Guid.NewGuid().ToByteArray());
-      WriteOwnershipMarker(directory, creatorSid, ownerToken);
+      var expiresAtUtc = DateTimeOffset.UtcNow.Add(_handoffLifetime);
+      WriteOwnershipMarker(new VsixPlanArtifactRegistration(
+          1,
+          resourceId,
+          creatorSid,
+          ownerToken,
+          directory,
+          artifactPath,
+          expiresAtUtc));
       var evidence = new VsixPlanArtifactEvidence(
           1,
           resourceId,
@@ -187,7 +197,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
           manifestResult.Manifest.Targets.ToArray(),
           creatorSid,
           directory,
-          ownerToken);
+          ownerToken,
+          expiresAtUtc);
       var encoded = EncodeEvidence(evidence);
       staged.ReleaseForHandoff();
       handedOff = true;
@@ -246,10 +257,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
 
       _validateRestrictedDirectory(evidence!.OwnershipDirectory, evidence.CreatorSid);
       lease = ArtifactLease.Acquire(evidence.OwnershipDirectory);
-      ValidateOwnershipMarker(
-          evidence.OwnershipDirectory,
-          evidence.CreatorSid,
-          evidence.OwnershipToken);
+      ValidateOwnershipMarker(evidence);
       directoryValidated = true;
       readLock = new FileStream(
           evidence.ArtifactPath,
@@ -301,7 +309,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       throw;
     }
     catch (Exception exception) when (exception is ArgumentException or IOException or
-        UnauthorizedAccessException or InvalidDataException or SecurityException)
+        UnauthorizedAccessException or InvalidDataException or JsonException or SecurityException)
     {
       return ClaimFailure(null, "The approved VSIX artifact could not be securely claimed.", exception);
     }
@@ -323,7 +331,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       CancellationToken cancellationToken)
   {
     cancellationToken.ThrowIfCancellationRequested();
-    if (TryAbandonRegistered(resourceId, stepId))
+    if (TryAbandonRegistered(resourceId, stepId) ||
+        TryAbandonDurable(resourceId, stepId))
     {
       return Task.CompletedTask;
     }
@@ -338,10 +347,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     {
       _validateRestrictedDirectory(evidence!.OwnershipDirectory, evidence.CreatorSid);
       lease = ArtifactLease.Acquire(evidence.OwnershipDirectory);
-      ValidateOwnershipMarker(
-          evidence.OwnershipDirectory,
-          evidence.CreatorSid,
-          evidence.OwnershipToken);
+      ValidateOwnershipMarker(evidence);
       RemoveHandoff(resourceId, evidence.OwnershipDirectory);
     }
     catch (Exception exception) when (exception is ArgumentException or IOException or
@@ -363,7 +369,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       TryDecodeEvidence(resourceId, stepId, out _);
 
   internal static bool IsPlanArtifactStep(string resourceId, string stepId) =>
-      TryGetRegistrationToken(resourceId, stepId, out _);
+      TryGetRegistrationLocator(resourceId, stepId, out _);
 
   private void RegisterHandoff(string resourceId, string registrationToken, string directory)
   {
@@ -383,12 +389,13 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
 
   private bool TryAbandonRegistered(string resourceId, string stepId)
   {
-    if (!TryGetRegistrationToken(resourceId, stepId, out var registrationToken) ||
+    if (!TryGetRegistrationLocator(resourceId, stepId, out var locator) ||
         !_handoffs.TryGetValue(resourceId, out var registration) ||
         !string.Equals(
-            registrationToken,
+            locator.RegistrationToken,
             registration.RegistrationToken,
             StringComparison.Ordinal) ||
+        !string.Equals(locator.Directory, registration.Directory, StringComparison.OrdinalIgnoreCase) ||
         !_handoffs.TryRemove(
             new KeyValuePair<string, HandoffRegistration>(resourceId, registration)))
     {
@@ -397,6 +404,42 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
 
     registration.Cancellation.Cancel();
     ArtifactCleanupQueue.Shared.DeleteDirectory(registration.Directory);
+    return true;
+  }
+
+  private bool TryAbandonDurable(string resourceId, string stepId)
+  {
+    if (!TryGetRegistrationLocator(resourceId, stepId, out var locator))
+    {
+      return false;
+    }
+
+    ArtifactLease? lease = null;
+    try
+    {
+      var registration = ReadOwnershipMarker(locator.Directory);
+      ValidateRegistration(registration, resourceId, locator);
+      _validateRestrictedDirectory(locator.Directory, registration.CreatorSid);
+      lease = ArtifactLease.Acquire(locator.Directory);
+      _validateRestrictedDirectory(locator.Directory, registration.CreatorSid);
+      var sealedRegistration = ReadOwnershipMarker(locator.Directory);
+      if (sealedRegistration != registration)
+      {
+        throw new SecurityException("The approved VSIX registration changed during cleanup.");
+      }
+    }
+    catch (Exception exception) when (exception is ArgumentException or IOException or
+        UnauthorizedAccessException or InvalidDataException or InvalidOperationException or
+        JsonException or NotSupportedException or SecurityException)
+    {
+      return false;
+    }
+    finally
+    {
+      lease?.Dispose();
+    }
+
+    ArtifactCleanupQueue.Shared.DeleteDirectory(locator.Directory);
     return true;
   }
 
@@ -432,11 +475,11 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     }
   }
 
-  private static void WriteOwnershipMarker(string directory, string creatorSid, string token)
+  private static void WriteOwnershipMarker(VsixPlanArtifactRegistration registration)
   {
-    var bytes = Encoding.UTF8.GetBytes(creatorSid + "\n" + token + "\n");
+    var bytes = JsonSerializer.SerializeToUtf8Bytes(registration, JsonOptions);
     using var stream = new FileStream(
-        Path.Combine(directory, OwnerFileName),
+        Path.Combine(registration.Directory, OwnerFileName),
         FileMode.CreateNew,
         FileAccess.Write,
         FileShare.None,
@@ -446,10 +489,24 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     stream.Flush(flushToDisk: true);
   }
 
-  private static void ValidateOwnershipMarker(
-      string directory,
-      string expectedCreatorSid,
-      string expectedToken)
+  private static void ValidateOwnershipMarker(VsixPlanArtifactEvidence evidence)
+  {
+    var locator = new VsixPlanArtifactLocator(
+        evidence.OwnershipToken,
+        evidence.OwnershipDirectory,
+        EncodedEvidenceIndex: 0);
+    var registration = ReadOwnershipMarker(evidence.OwnershipDirectory);
+    ValidateRegistration(registration, evidence.ResourceId, locator);
+    if (!string.Equals(registration.CreatorSid, evidence.CreatorSid, StringComparison.Ordinal) ||
+        !string.Equals(registration.ArtifactPath, evidence.ArtifactPath, StringComparison.OrdinalIgnoreCase) ||
+        registration.ExpiresAtUtc != evidence.ExpiresAtUtc ||
+        registration.ExpiresAtUtc <= DateTimeOffset.UtcNow)
+    {
+      throw new SecurityException("The approved VSIX ownership registration is invalid or expired.");
+    }
+  }
+
+  private static VsixPlanArtifactRegistration ReadOwnershipMarker(string directory)
   {
     var path = Path.Combine(directory, OwnerFileName);
     using var stream = new FileStream(
@@ -459,18 +516,35 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
         FileShare.Read,
         bufferSize: 1,
         FileOptions.SequentialScan);
-    var expected = Encoding.UTF8.GetBytes(expectedCreatorSid + "\n" + expectedToken + "\n");
     if (File.GetAttributes(stream.SafeFileHandle).HasFlag(FileAttributes.ReparsePoint) ||
-        stream.Length != expected.Length)
+        stream.Length <= 0 || stream.Length > MaxOwnershipMarkerBytes)
     {
-      throw new SecurityException("The approved VSIX ownership token is invalid.");
+      throw new SecurityException("The approved VSIX ownership registration is invalid.");
     }
 
-    var actual = new byte[expected.Length];
-    stream.ReadExactly(actual);
-    if (!actual.AsSpan().SequenceEqual(expected))
+    return JsonSerializer.Deserialize<VsixPlanArtifactRegistration>(stream, JsonOptions) ??
+        throw new InvalidDataException("The approved VSIX ownership registration is empty.");
+  }
+
+  private static void ValidateRegistration(
+      VsixPlanArtifactRegistration registration,
+      string expectedResourceId,
+      VsixPlanArtifactLocator locator)
+  {
+    var artifactPath = Path.Combine(locator.Directory, "extension.vsix");
+    if (registration.SchemaVersion != 1 ||
+        !string.Equals(registration.ResourceId, expectedResourceId, StringComparison.Ordinal) ||
+        string.IsNullOrWhiteSpace(registration.CreatorSid) ||
+        registration.CreatorSid.Any(char.IsControl) ||
+        !string.Equals(
+            registration.RegistrationToken,
+            locator.RegistrationToken,
+            StringComparison.Ordinal) ||
+        !string.Equals(registration.Directory, locator.Directory, StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(registration.ArtifactPath, artifactPath, StringComparison.OrdinalIgnoreCase) ||
+        registration.ExpiresAtUtc == default)
     {
-      throw new SecurityException("The approved VSIX ownership token is invalid.");
+      throw new SecurityException("The approved VSIX ownership registration does not match the plan.");
     }
   }
 
@@ -493,6 +567,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
         string.IsNullOrWhiteSpace(evidence.OwnershipDirectory) ||
         string.IsNullOrWhiteSpace(evidence.OwnershipToken) ||
         evidence.OwnershipToken.Length != 32 || !evidence.OwnershipToken.All(Uri.IsHexDigit) ||
+        evidence.ExpiresAtUtc == default ||
         !Path.IsPathFullyQualified(evidence.ArtifactPath) ||
         !Path.IsPathFullyQualified(evidence.OwnershipDirectory))
     {
@@ -501,6 +576,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
 
     var directory = Path.GetFullPath(evidence.OwnershipDirectory);
     var path = Path.GetFullPath(evidence.ArtifactPath);
+    ValidateOwnershipDirectoryPath(directory);
     if (!string.Equals(directory, evidence.OwnershipDirectory, StringComparison.OrdinalIgnoreCase) ||
         !string.Equals(path, evidence.ArtifactPath, StringComparison.OrdinalIgnoreCase) ||
         !string.Equals(path, Path.Combine(directory, "extension.vsix"), StringComparison.OrdinalIgnoreCase))
@@ -524,32 +600,51 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
   private static string EncodeEvidence(VsixPlanArtifactEvidence evidence)
   {
     var bytes = JsonSerializer.SerializeToUtf8Bytes(evidence, JsonOptions);
-    return EvidencePrefix + evidence.OwnershipToken + ":" + Convert.ToBase64String(bytes)
+    return EvidencePrefix + evidence.OwnershipToken + ":" + EncodePath(evidence.OwnershipDirectory) +
+        ":" + Convert.ToBase64String(bytes)
         .TrimEnd('=')
         .Replace('+', '-')
         .Replace('/', '_');
   }
 
-  private static bool TryGetRegistrationToken(
+  private static bool TryGetRegistrationLocator(
       string resourceId,
       string stepId,
-      out string registrationToken)
+      out VsixPlanArtifactLocator locator)
   {
-    registrationToken = string.Empty;
+    locator = null!;
     var prefix = $"{resourceId}:install:{EvidencePrefix}";
     if (!stepId.StartsWith(prefix, StringComparison.Ordinal))
     {
       return false;
     }
 
-    var separator = stepId.IndexOf(':', prefix.Length);
-    if (separator != prefix.Length + 32 || separator == stepId.Length - 1)
+    var tokenSeparator = stepId.IndexOf(':', prefix.Length);
+    if (tokenSeparator != prefix.Length + 32 || tokenSeparator == stepId.Length - 1)
     {
       return false;
     }
 
-    registrationToken = stepId[prefix.Length..separator];
-    return registrationToken.All(Uri.IsHexDigit);
+    var registrationToken = stepId[prefix.Length..tokenSeparator];
+    var pathSeparator = stepId.IndexOf(':', tokenSeparator + 1);
+    if (!registrationToken.All(Uri.IsHexDigit) ||
+        pathSeparator <= tokenSeparator + 1 || pathSeparator == stepId.Length - 1)
+    {
+      return false;
+    }
+
+    try
+    {
+      var directory = DecodePath(stepId[(tokenSeparator + 1)..pathSeparator]);
+      ValidateOwnershipDirectoryPath(directory);
+      locator = new VsixPlanArtifactLocator(registrationToken, directory, pathSeparator + 1);
+      return true;
+    }
+    catch (Exception exception) when (exception is ArgumentException or FormatException or
+        InvalidDataException or PathTooLongException or NotSupportedException)
+    {
+      return false;
+    }
   }
 
   private static bool TryDecodeEvidence(
@@ -559,14 +654,14 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
   {
     evidence = null;
     var prefix = $"{resourceId}:install:{EvidencePrefix}";
-    if (!TryGetRegistrationToken(resourceId, stepId, out _))
+    if (!TryGetRegistrationLocator(resourceId, stepId, out var locator))
     {
       return false;
     }
 
     try
     {
-      var encoded = stepId[(stepId.IndexOf(':', prefix.Length) + 1)..];
+      var encoded = stepId[locator.EncodedEvidenceIndex..];
       if (encoded.Length == 0 || encoded.Any(character =>
               !char.IsAsciiLetterOrDigit(character) && character is not '-' and not '_'))
       {
@@ -584,7 +679,15 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       }
 
       ValidateEvidencePaths(evidence);
-      if (!string.Equals(evidence.ResourceId, resourceId, StringComparison.Ordinal))
+      if (!string.Equals(evidence.ResourceId, resourceId, StringComparison.Ordinal) ||
+          !string.Equals(
+              evidence.OwnershipToken,
+              locator.RegistrationToken,
+              StringComparison.Ordinal) ||
+          !string.Equals(
+              evidence.OwnershipDirectory,
+              locator.Directory,
+              StringComparison.OrdinalIgnoreCase))
       {
         return false;
       }
@@ -597,6 +700,48 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     {
       evidence = null;
       return false;
+    }
+  }
+
+  private static string EncodePath(string path) => Convert.ToBase64String(StrictUtf8.GetBytes(path))
+      .TrimEnd('=')
+      .Replace('+', '-')
+      .Replace('/', '_');
+
+  private static string DecodePath(string encoded)
+  {
+    if (encoded.Length > 8192 || encoded.Any(character =>
+            !char.IsAsciiLetterOrDigit(character) && character is not '-' and not '_'))
+    {
+      throw new InvalidDataException("The approved VSIX directory hint is invalid.");
+    }
+
+    var padded = encoded.Replace('-', '+').Replace('_', '/');
+    padded += new string('=', (4 - padded.Length % 4) % 4);
+    return StrictUtf8.GetString(Convert.FromBase64String(padded));
+  }
+
+  private static void ValidateOwnershipDirectoryPath(string path)
+  {
+    if (string.IsNullOrWhiteSpace(path) ||
+        path.Any(char.IsControl) ||
+        !Path.IsPathFullyQualified(path))
+    {
+      throw new InvalidDataException("The approved VSIX ownership directory is invalid.");
+    }
+
+    var fullPath = Path.GetFullPath(path);
+    var leaf = Path.GetFileName(fullPath);
+    var root = Path.GetDirectoryName(fullPath);
+    if (!string.Equals(fullPath, path, StringComparison.OrdinalIgnoreCase) ||
+        !Guid.TryParseExact(leaf, "N", out _) ||
+        !string.Equals(Path.GetFileName(root), "PlanArtifacts", StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(
+            Path.GetFileName(Path.GetDirectoryName(root)),
+            "Wdem",
+            StringComparison.OrdinalIgnoreCase))
+    {
+      throw new InvalidDataException("The approved VSIX ownership directory is outside the bounded root.");
     }
   }
 
@@ -643,7 +788,22 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       IReadOnlyList<VsixInstallationTarget> InstallationTargets,
       string CreatorSid,
       string OwnershipDirectory,
-      string OwnershipToken);
+      string OwnershipToken,
+      DateTimeOffset ExpiresAtUtc);
+
+  private sealed record VsixPlanArtifactRegistration(
+      int SchemaVersion,
+      string ResourceId,
+      string CreatorSid,
+      string RegistrationToken,
+      string Directory,
+      string ArtifactPath,
+      DateTimeOffset ExpiresAtUtc);
+
+  private sealed record VsixPlanArtifactLocator(
+      string RegistrationToken,
+      string Directory,
+      int EncodedEvidenceIndex);
 
   private sealed record HandoffRegistration(
       string RegistrationToken,

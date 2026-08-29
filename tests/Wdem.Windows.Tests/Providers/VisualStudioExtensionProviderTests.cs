@@ -807,8 +807,22 @@ public sealed class VisualStudioExtensionProviderTests
     {
       var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
       var otherResource = resource with { Id = "other-extension" };
-      var provider = Provider(manifests, new ThrowingProcessExecutor(), stager);
-      var plan = await provider.PlanAsync(
+      var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+      var stagingStore = PlanArtifactStore(stager, verifier, manifests);
+      var applyingStore = PlanArtifactStore(stager, verifier, manifests);
+      var stagingProvider = Provider(
+          manifests,
+          new ThrowingProcessExecutor(),
+          stager,
+          verifier,
+          planArtifactStore: stagingStore);
+      var applyingProvider = Provider(
+          manifests,
+          new ThrowingProcessExecutor(),
+          stager,
+          verifier,
+          planArtifactStore: applyingStore);
+      var plan = await stagingProvider.PlanAsync(
           otherResource,
           Missing(otherResource),
           CancellationToken.None);
@@ -820,7 +834,7 @@ public sealed class VisualStudioExtensionProviderTests
         Steps = [step with { Id = step.Id[..^1] + replacement }]
       };
 
-      var result = await provider.ApplyAsync(
+      var result = await applyingProvider.ApplyAsync(
           resource,
           tampered,
           null,
@@ -828,6 +842,121 @@ public sealed class VisualStudioExtensionProviderTests
 
       Assert.Equal(ApplyOutcome.Failed, result.Outcome);
       Assert.True(Directory.Exists(directory));
+    }
+    finally
+    {
+      File.Delete(source);
+    }
+  }
+
+  [Fact]
+  public async Task ApplyAsync_FreshStoreCleansMalformedCreatorSidEvidence()
+  {
+    var source = TempFile("vsix");
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new RotatingStager();
+    try
+    {
+      var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
+      var stagingStore = PlanArtifactStore(stager, verifier, manifests);
+      var applyingStore = PlanArtifactStore(
+          stager,
+          verifier,
+          manifests,
+          (path, creatorSid) =>
+          {
+            _ = path;
+            _ = new System.Security.Principal.SecurityIdentifier(creatorSid);
+          });
+      var stagingProvider = Provider(
+          manifests,
+          new ThrowingProcessExecutor(),
+          stager,
+          verifier,
+          planArtifactStore: stagingStore);
+      var applyingProvider = Provider(
+          manifests,
+          new ThrowingProcessExecutor(),
+          stager,
+          verifier,
+          planArtifactStore: applyingStore);
+      var plan = await stagingProvider.PlanAsync(
+          resource,
+          Missing(resource),
+          CancellationToken.None);
+      var directory = Assert.Single(stager.Directories);
+      var step = Assert.Single(plan.Steps);
+      var malformedStepId = ReplaceEncodedEvidence(
+          step.Id,
+          "\"creatorSid\":\"S-1-0-0\"",
+          "\"creatorSid\":\"not-a-sid\"");
+
+      var result = await applyingProvider.ApplyAsync(
+          resource,
+          plan with { Steps = [step with { Id = malformedStepId }] },
+          null,
+          CancellationToken.None);
+
+      Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+      Assert.Equal(WdemErrorCode.ConfigurationError, result.Error?.Code);
+      Assert.IsType<ArgumentException>(result.Error?.UnderlyingException);
+      Assert.False(Directory.Exists(directory));
+    }
+    finally
+    {
+      File.Delete(source);
+    }
+  }
+
+  [Fact]
+  public async Task ApplyAsync_FreshStoreStalePlanDoesNotDeleteSupersedingArtifact()
+  {
+    var source = TempFile("vsix");
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new RotatingStager();
+    try
+    {
+      var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
+      var stagingStore = PlanArtifactStore(stager, verifier, manifests);
+      var applyingStore = PlanArtifactStore(stager, verifier, manifests);
+      var stagingProvider = Provider(
+          manifests,
+          new ThrowingProcessExecutor(),
+          stager,
+          verifier,
+          planArtifactStore: stagingStore);
+      var applyingProvider = Provider(
+          manifests,
+          new ThrowingProcessExecutor(),
+          stager,
+          verifier,
+          planArtifactStore: applyingStore);
+      var stalePlan = await stagingProvider.PlanAsync(
+          resource,
+          Missing(resource),
+          CancellationToken.None);
+      var currentPlan = await stagingProvider.PlanAsync(
+          resource,
+          Missing(resource),
+          CancellationToken.None);
+      var currentDirectory = stager.Directories[1];
+      var staleStep = Assert.Single(stalePlan.Steps);
+      var replacement = staleStep.Id[^1] == 'A' ? 'B' : 'A';
+
+      var result = await applyingProvider.ApplyAsync(
+          resource,
+          stalePlan with
+          {
+            Steps = [staleStep with { Id = staleStep.Id[..^1] + replacement }]
+          },
+          null,
+          CancellationToken.None);
+
+      Assert.True(currentPlan.IsExecutable);
+      Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+      Assert.True(Directory.Exists(currentDirectory));
     }
     finally
     {
@@ -934,7 +1063,8 @@ public sealed class VisualStudioExtensionProviderTests
         CancellationToken.None);
 
     await using var artifact = Assert.IsType<ClaimedVsixPlanArtifact>(claimed.Artifact);
-    Assert.StartsWith(creatorSid + "\n", marker, StringComparison.Ordinal);
+    Assert.Contains($"\"creatorSid\":\"{creatorSid}\"", marker, StringComparison.Ordinal);
+    Assert.Contains("\"resourceId\":\"extension\"", marker, StringComparison.Ordinal);
     Assert.Equal([creatorSid, creatorSid], validatedCreators);
   }
 
@@ -1084,17 +1214,17 @@ public sealed class VisualStudioExtensionProviderTests
       ITrustedFileVerifier? trustedFileVerifier = null,
       HttpClient? httpClient = null,
       TimeSpan? handoffLifetime = null,
-      Action<string, string>? validateRestrictedDirectory = null)
+      Action<string, string>? validateRestrictedDirectory = null,
+      IVsixPlanArtifactStore? planArtifactStore = null)
   {
     var verifier = trustedFileVerifier ?? new FakeTrustedFileVerifier(isTrusted: true);
     var artifactStager = stager ?? new SecureArtifactStager(verifier: verifier);
-    var artifactStore = new VsixPlanArtifactStore(
+    var artifactStore = planArtifactStore ?? PlanArtifactStore(
         artifactStager,
         verifier,
         manifests,
-        validateRestrictedDirectory: validateRestrictedDirectory ?? ((_, _) => { }),
-        getCurrentUserSid: static () => "S-1-0-0",
-        handoffLifetime: handoffLifetime);
+        validateRestrictedDirectory,
+        handoffLifetime);
     return new VisualStudioExtensionProvider(
         new FakeVisualStudioDiscovery(Instance("17.0_a"), Instance("17.0_b")),
         manifests,
@@ -1105,6 +1235,19 @@ public sealed class VisualStudioExtensionProviderTests
         verifier,
         artifactStore);
   }
+
+  private static VsixPlanArtifactStore PlanArtifactStore(
+      ISecureArtifactStager stager,
+      ITrustedFileVerifier verifier,
+      IVsixManifestReader manifests,
+      Action<string, string>? validateRestrictedDirectory = null,
+      TimeSpan? handoffLifetime = null) => new(
+          stager,
+          verifier,
+          manifests,
+          validateRestrictedDirectory ?? ((_, _) => { }),
+          static () => "S-1-0-0",
+          handoffLifetime);
 
   private static VisualStudioExtensionProvider RealReaderProvider(string localApplicationData)
   {
@@ -1137,7 +1280,8 @@ public sealed class VisualStudioExtensionProviderTests
     const string evidencePrefix = "vsix-v1:";
     var evidenceIndex = stepId.IndexOf(evidencePrefix, StringComparison.Ordinal);
     Assert.True(evidenceIndex >= 0);
-    var encodedIndex = stepId.IndexOf(':', evidenceIndex + evidencePrefix.Length) + 1;
+    var tokenSeparator = stepId.IndexOf(':', evidenceIndex + evidencePrefix.Length);
+    var encodedIndex = stepId.IndexOf(':', tokenSeparator + 1) + 1;
     Assert.True(encodedIndex > evidenceIndex + evidencePrefix.Length);
     var encoded = stepId[encodedIndex..].Replace('-', '+').Replace('_', '/');
     encoded += new string('=', (4 - encoded.Length % 4) % 4);
@@ -1283,7 +1427,11 @@ public sealed class VisualStudioExtensionProviderTests
 
     public ScriptedStager()
     {
-      _directory = Path.Combine(Path.GetTempPath(), $"wdem-staged-vsix-{Guid.NewGuid():N}");
+      _directory = Path.Combine(
+          Path.GetTempPath(),
+          "Wdem",
+          "PlanArtifacts",
+          Guid.NewGuid().ToString("N"));
       Directory.CreateDirectory(_directory);
       StagedPath = Path.Combine(_directory, "installer.exe");
       File.WriteAllText(StagedPath, "staged");
@@ -1338,7 +1486,11 @@ public sealed class VisualStudioExtensionProviderTests
         SecureArtifactKind kind,
         CancellationToken cancellationToken)
     {
-      var directory = Path.Combine(Path.GetTempPath(), $"wdem-rotating-{Guid.NewGuid():N}");
+      var directory = Path.Combine(
+          Path.GetTempPath(),
+          "Wdem",
+          "PlanArtifacts",
+          Guid.NewGuid().ToString("N"));
       Directory.CreateDirectory(directory);
       var path = Path.Combine(directory, "staged.vsix");
       File.WriteAllText(path, "staged");
