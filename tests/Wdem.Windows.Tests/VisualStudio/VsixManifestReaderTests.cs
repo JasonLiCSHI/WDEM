@@ -82,6 +82,30 @@ public sealed class VsixManifestReaderTests
   }
 
   [Fact]
+  public void InstallationTargetCompatibility_RejectsEmptyUnboundedRange()
+  {
+    var instance = new VisualStudioInstance
+    {
+      InstanceId = "17.0_a",
+      InstallationPath = @"C:\VS",
+      ProductId = "Microsoft.VisualStudio.Product.Community",
+      ProductPath = @"C:\VS\Common7\IDE\devenv.exe",
+      ProductDisplayVersion = "17.0",
+      InstallationVersion = "17.0.0",
+      ChannelId = "VisualStudio.17.Release",
+      Edition = "Community",
+      IsComplete = true,
+      IsLaunchable = true
+    };
+
+    var compatible = VsixInstallationTargetCompatibility.IsCompatible(
+        [new VsixInstallationTarget("Microsoft.VisualStudio.Community", "[,]")],
+        instance);
+
+    Assert.False(compatible);
+  }
+
+  [Fact]
   public async Task ReadInstalledWithDiagnosticsAsync_PreservesAllAmbiguousClaimedIds()
   {
     var root = Path.Combine(Path.GetTempPath(), $"wdem-vsix-ambiguous-{Guid.NewGuid():N}");

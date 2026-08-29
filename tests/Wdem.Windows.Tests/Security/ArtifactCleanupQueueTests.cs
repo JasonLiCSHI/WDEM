@@ -1,4 +1,7 @@
 using System.Diagnostics;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Text.Json;
 using Wdem.Windows.Security;
 using Xunit;
 
@@ -6,6 +9,49 @@ namespace Wdem.Windows.Tests.Security;
 
 public sealed class ArtifactCleanupQueueTests
 {
+  [WindowsFact]
+  public void ArtifactLease_AcquireRejectsLeaseReplacedBySymlinkBeforeOpen()
+  {
+    var root = Path.Combine(Path.GetTempPath(), $"wdem-lease-race-{Guid.NewGuid():N}");
+    var directory = Path.Combine(root, "artifact");
+    var outsidePath = Path.Combine(root, "outside.txt");
+    Directory.CreateDirectory(directory);
+    File.WriteAllText(outsidePath, "outside");
+    using (ArtifactLease.Create(directory))
+    {
+    }
+
+    var leasePath = Path.Combine(directory, ArtifactLease.LeaseFileName);
+    try
+    {
+      Assert.ThrowsAny<IOException>(() => ArtifactLease.Acquire(
+          directory,
+          () =>
+          {
+            File.Delete(leasePath);
+            File.CreateSymbolicLink(leasePath, outsidePath);
+          }));
+      Assert.Equal("outside", File.ReadAllText(outsidePath));
+      using var outside = new FileStream(
+          outsidePath,
+          FileMode.Open,
+          FileAccess.ReadWrite,
+          FileShare.None);
+    }
+    finally
+    {
+      if (File.Exists(leasePath))
+      {
+        File.Delete(leasePath);
+      }
+
+      if (Directory.Exists(root))
+      {
+        Directory.Delete(root, recursive: true);
+      }
+    }
+  }
+
   [Fact]
   public void DeleteFile_BoundsAttemptsAndDefersWithoutThrowing()
   {
@@ -69,6 +115,44 @@ public sealed class ArtifactCleanupQueueTests
       if (Directory.Exists(root))
       {
         Directory.Delete(root, recursive: true);
+      }
+    }
+  }
+
+  [WindowsFact]
+  public void StartupSweep_PlanArtifactsUsesSealedExpiryInsteadOfGenericFileAge()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-plan-sweep-{Guid.NewGuid():N}");
+    var root = Path.Combine(basePath, "Wdem", "PlanArtifacts");
+    Directory.CreateDirectory(root);
+    var future = CreateVsixPlanArtifact(root, DateTimeOffset.UtcNow.AddHours(12));
+    var expired = CreateVsixPlanArtifact(root, DateTimeOffset.UtcNow.AddHours(-1));
+    var invalid = CreateVsixPlanArtifact(root, DateTimeOffset.UtcNow.AddHours(-1));
+    File.WriteAllText(Path.Combine(invalid, ".wdem-vsix-owner"), "{\"schemaVersion\":1}");
+    foreach (var directory in new[] { future, expired, invalid })
+    {
+      File.SetLastWriteTimeUtc(
+          Path.Combine(directory, ".wdem-artifact"),
+          DateTime.UtcNow - TimeSpan.FromHours(2));
+    }
+
+    try
+    {
+      _ = new ArtifactCleanupQueue(
+          maxAttempts: 1,
+          retryDelay: TimeSpan.FromSeconds(30),
+          maxDelayedRetryRounds: 1,
+          knownStagingRoots: [root]);
+
+      Assert.True(Directory.Exists(future));
+      Assert.False(Directory.Exists(expired));
+      Assert.True(Directory.Exists(invalid));
+    }
+    finally
+    {
+      if (Directory.Exists(basePath))
+      {
+        Directory.Delete(basePath, recursive: true);
       }
     }
   }
@@ -402,6 +486,46 @@ public sealed class ArtifactCleanupQueueTests
     Directory.CreateDirectory(directory);
     File.WriteAllText(Path.Combine(directory, ".wdem-artifact"), "wdem-artifact-v1\n");
     File.WriteAllText(Path.Combine(directory, ".wdem-lease"), string.Empty);
+    return directory;
+  }
+
+  private static string CreateVsixPlanArtifact(string root, DateTimeOffset expiresAtUtc)
+  {
+    using var identity = WindowsIdentity.GetCurrent();
+    var creator = identity.User!;
+    var directory = Path.Combine(root, Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(directory);
+    new DirectoryInfo(directory).SetAccessControl(
+        WindowsPlanArtifactDirectoryPolicy.CreateSecurity(
+            creator,
+            new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null)));
+    using (ArtifactLease.Create(directory))
+    {
+    }
+
+    var artifactPath = Path.Combine(directory, "extension.vsix");
+    File.WriteAllText(artifactPath, "staged");
+    var marker = new
+    {
+      schemaVersion = 1,
+      resourceId = "extension",
+      artifactPath,
+      sha256 = new string('A', 64),
+      manifestId = "Contoso.Extension",
+      manifestVersion = "1.0.0",
+      manifestPath = "source!/extension.vsixmanifest",
+      visualStudioInstanceId = "17.0_a",
+      installationTargets = Array.Empty<object>(),
+      creatorSid = creator.Value,
+      ownershipDirectory = directory,
+      ownershipToken = Convert.ToHexString(Guid.NewGuid().ToByteArray()),
+      expiresAtUtc,
+      consumed = false
+    };
+    File.WriteAllBytes(
+        Path.Combine(directory, ".wdem-vsix-owner"),
+        JsonSerializer.SerializeToUtf8Bytes(marker));
     return directory;
   }
 

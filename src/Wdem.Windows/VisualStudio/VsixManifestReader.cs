@@ -413,50 +413,7 @@ public sealed class VsixManifestReader : IVsixManifestReader
   }
 
   private static bool IsValidVersionRange(string? expression)
-  {
-    if (expression is null)
-    {
-      return true;
-    }
-
-    var range = expression.Trim();
-    if (Version.TryParse(range, out _))
-    {
-      return true;
-    }
-
-    if (range.Length < 3 || range[0] is not ('[' or '(') || range[^1] is not (']' or ')'))
-    {
-      return false;
-    }
-
-    var bounds = range[1..^1].Split(',', StringSplitOptions.TrimEntries);
-    if (bounds.Length == 1)
-    {
-      return range[0] == '[' && range[^1] == ']' && Version.TryParse(bounds[0], out _);
-    }
-
-    if (bounds.Length != 2 || (bounds[0].Length == 0 && bounds[1].Length == 0))
-    {
-      return false;
-    }
-
-    Version? minimum = null;
-    Version? maximum = null;
-    if (bounds[0].Length > 0 && !Version.TryParse(bounds[0], out minimum) ||
-        bounds[1].Length > 0 && !Version.TryParse(bounds[1], out maximum))
-    {
-      return false;
-    }
-
-    if (minimum is null || maximum is null)
-    {
-      return true;
-    }
-
-    var comparison = minimum.CompareTo(maximum);
-    return comparison < 0 || comparison == 0 && range[0] == '[' && range[^1] == ']';
-  }
+    => VsixVersionRange.TryParse(expression, out _);
 
   private IReadOnlyList<string> GetInstalledExtensionRoots(VisualStudioInstance instance)
   {

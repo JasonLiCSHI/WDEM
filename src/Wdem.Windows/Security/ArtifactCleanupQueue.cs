@@ -1,4 +1,8 @@
+using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+using Wdem.Windows.VisualStudio;
 
 namespace Wdem.Windows.Security;
 
@@ -242,6 +246,20 @@ internal sealed class ArtifactCleanupQueue
             continue;
           }
 
+          if (IsPlanArtifactRoot(root))
+          {
+            if (!VsixPlanArtifactStore.CanReclaimExpiredDirectory(
+                    fullPath,
+                    DateTimeOffset.UtcNow) ||
+                !ArtifactLease.CanAcquireForCleanup(fullPath, DateTime.MaxValue))
+            {
+              continue;
+            }
+
+            TryExecute(new PendingCleanup(fullPath, true));
+            continue;
+          }
+
           var staleBeforeUtc = DateTime.UtcNow - _minimumSweepAge;
           if (!ArtifactLease.CanAcquireForCleanup(fullPath, staleBeforeUtc) &&
               !ArtifactLease.CanReclaimUninitialized(fullPath, staleBeforeUtc))
@@ -260,6 +278,13 @@ internal sealed class ArtifactCleanupQueue
       }
     }
   }
+
+  private static bool IsPlanArtifactRoot(string root) =>
+      string.Equals(Path.GetFileName(root), "PlanArtifacts", StringComparison.OrdinalIgnoreCase) &&
+      string.Equals(
+          Path.GetFileName(Path.GetDirectoryName(root)),
+          "Wdem",
+          StringComparison.OrdinalIgnoreCase);
 
   private static IReadOnlyList<string> GetKnownStagingRoots()
   {
@@ -336,6 +361,11 @@ internal sealed class ArtifactLease : IDisposable
 
   public static ArtifactLease Acquire(string directoryPath)
   {
+    return Acquire(directoryPath, beforeOpen: null);
+  }
+
+  internal static ArtifactLease Acquire(string directoryPath, Action? beforeOpen)
+  {
     var markerPath = Path.Combine(directoryPath, OwnershipMarkerFileName);
     var leasePath = Path.Combine(directoryPath, LeaseFileName);
     if (!File.Exists(markerPath) || !File.Exists(leasePath) ||
@@ -345,13 +375,29 @@ internal sealed class ArtifactLease : IDisposable
       throw new InvalidDataException("The staged artifact ownership marker is invalid.");
     }
 
-    return new ArtifactLease(new FileStream(
+    beforeOpen?.Invoke();
+    using var marker = OpenExistingWithoutFollowingLinks(
+        markerPath,
+        FileAccess.Read,
+        FileShare.Read,
+        FileOptions.SequentialScan);
+    if (!HasValidOwnershipMarker(marker, DateTime.MaxValue))
+    {
+      throw new InvalidDataException("The staged artifact ownership marker is invalid.");
+    }
+
+    var lease = OpenExistingWithoutFollowingLinks(
         leasePath,
-        FileMode.Open,
         FileAccess.ReadWrite,
         FileShare.None,
-        bufferSize: 1,
-        FileOptions.WriteThrough));
+        FileOptions.WriteThrough);
+    if (File.GetAttributes(lease.SafeFileHandle).HasFlag(FileAttributes.ReparsePoint))
+    {
+      lease.Dispose();
+      throw new InvalidDataException("The staged artifact lease is invalid.");
+    }
+
+    return new ArtifactLease(lease);
   }
 
   public void Dispose()
@@ -374,14 +420,22 @@ internal sealed class ArtifactLease : IDisposable
         return false;
       }
 
-      using var lease = new FileStream(
+      using var marker = OpenExistingWithoutFollowingLinks(
+          markerPath,
+          FileAccess.Read,
+          FileShare.Read,
+          FileOptions.SequentialScan);
+      if (!HasValidOwnershipMarker(marker, staleBeforeUtc))
+      {
+        return false;
+      }
+
+      using var lease = OpenExistingWithoutFollowingLinks(
           leasePath,
-          FileMode.Open,
           FileAccess.ReadWrite,
           FileShare.None,
-          bufferSize: 1,
           FileOptions.None);
-      return true;
+      return !File.GetAttributes(lease.SafeFileHandle).HasFlag(FileAttributes.ReparsePoint);
     }
     catch (Exception exception) when (exception is IOException or
         UnauthorizedAccessException or System.Security.SecurityException)
@@ -439,13 +493,18 @@ internal sealed class ArtifactLease : IDisposable
       return false;
     }
 
-    using var marker = new FileStream(
+    using var marker = OpenExistingWithoutFollowingLinks(
         markerPath,
-        FileMode.Open,
         FileAccess.Read,
         FileShare.Read,
-        bufferSize: 1,
         FileOptions.SequentialScan);
+    return HasValidOwnershipMarker(marker, staleBeforeUtc);
+  }
+
+  private static bool HasValidOwnershipMarker(
+      FileStream marker,
+      DateTime staleBeforeUtc)
+  {
     var attributes = File.GetAttributes(marker.SafeFileHandle);
     if (attributes.HasFlag(FileAttributes.Directory) ||
         attributes.HasFlag(FileAttributes.ReparsePoint) ||
@@ -463,5 +522,55 @@ internal sealed class ArtifactLease : IDisposable
     Span<byte> actual = stackalloc byte[expected.Length];
     marker.ReadExactly(actual);
     return actual.SequenceEqual(expected);
+  }
+
+  private static FileStream OpenExistingWithoutFollowingLinks(
+      string path,
+      FileAccess access,
+      FileShare share,
+      FileOptions options)
+  {
+    const uint GenericRead = 0x80000000;
+    const uint GenericWrite = 0x40000000;
+    const uint OpenExisting = 3;
+    const uint FileFlagOpenReparsePoint = 0x00200000;
+    var desiredAccess = access switch
+    {
+      FileAccess.Read => GenericRead,
+      FileAccess.Write => GenericWrite,
+      _ => GenericRead | GenericWrite
+    };
+    var handle = NativeMethods.CreateFile(
+        path,
+        desiredAccess,
+        share,
+        IntPtr.Zero,
+        OpenExisting,
+        (uint)options | FileFlagOpenReparsePoint,
+        IntPtr.Zero);
+    if (handle.IsInvalid)
+    {
+      var error = Marshal.GetLastWin32Error();
+      handle.Dispose();
+      throw new IOException(
+          $"Could not open the staged artifact metadata '{path}'.",
+          new Win32Exception(error));
+    }
+
+    return new FileStream(handle, access, bufferSize: 1, isAsync: false);
+  }
+
+  private static class NativeMethods
+  {
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode,
+        SetLastError = true)]
+    public static extern SafeFileHandle CreateFile(
+        string fileName,
+        uint desiredAccess,
+        FileShare shareMode,
+        IntPtr securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        IntPtr templateFile);
   }
 }

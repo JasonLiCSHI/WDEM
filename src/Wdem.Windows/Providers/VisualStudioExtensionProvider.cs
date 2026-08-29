@@ -308,7 +308,7 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
       [
         new PlanStep
         {
-          Id = $"{resource.Id}:install:{prepared.StepEvidence}",
+          Id = prepared.StepEvidence,
           Description = $"Install {resource.DisplayName ?? resource.Id} with VSIXInstaller.",
           Action = compliance.Status == ComplianceStatus.Missing
               ? PlanAction.Install
@@ -543,33 +543,44 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
     }
   }
 
-  private async Task<AcquiredSource> AcquireSourceAsync(
-      string source,
+  private async Task<VsixPlanArtifactStageResult> StagePlanSourceAsync(
+      ResourceDefinition resource,
+      string visualStudioInstanceId,
       CancellationToken cancellationToken)
   {
+    var source = GetParameter(resource, SourcePathParameter)!;
+    var expectedSha256 = GetParameter(resource, ExpectedSha256Parameter)!;
     if (!Uri.TryCreate(source, UriKind.Absolute, out var uri) || uri.IsFile)
     {
       try
       {
         var localPath = Path.GetFullPath(source);
-        return File.Exists(localPath)
-            ? new AcquiredSource(localPath, false, null)
-            : new AcquiredSource(null, false, new StructuredError(
+        if (!File.Exists(localPath))
+        {
+          return new VsixPlanArtifactStageResult(null, null, new StructuredError(
                 WdemErrorCode.DownloadError,
                 "VSIX source is unavailable.",
                 "The configured local VSIX source does not exist."));
+        }
+
+        return await _planArtifactStore.StageAsync(
+            resource.Id,
+            localPath,
+            expectedSha256,
+            visualStudioInstanceId,
+            cancellationToken).ConfigureAwait(false);
       }
       catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
       {
-        return new AcquiredSource(null, false, ConfigurationError(null, "The VSIX source path is invalid.", exception));
+        return new VsixPlanArtifactStageResult(
+            null,
+            null,
+            ConfigurationError(resource, "The VSIX source path is invalid.", exception));
       }
     }
 
-    var directory = Path.Combine(Path.GetTempPath(), "wdem", "vsix", Guid.NewGuid().ToString("N"));
-    var path = Path.Combine(directory, "extension.vsix");
     try
     {
-      Directory.CreateDirectory(directory);
       using var response = await _httpClient.GetAsync(
           uri,
           HttpCompletionOption.ResponseHeadersRead,
@@ -589,46 +600,21 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
 
       await using var sourceStream = await response.Content.ReadAsStreamAsync(cancellationToken)
           .ConfigureAwait(false);
-      await using var destination = new FileStream(
-          path,
-          FileMode.CreateNew,
-          FileAccess.Write,
-          FileShare.None,
-          81920,
-          FileOptions.Asynchronous | FileOptions.SequentialScan);
-      var buffer = new byte[81920];
-      long copied = 0;
-      while (true)
-      {
-        var count = await sourceStream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
-        if (count == 0)
-        {
-          break;
-        }
-
-        copied = checked(copied + count);
-        if (copied > MaxVsixBytes)
-        {
-          throw new InvalidDataException("The VSIX artifact is too large.");
-        }
-
-        await destination.WriteAsync(buffer.AsMemory(0, count), cancellationToken)
-            .ConfigureAwait(false);
-      }
-
-      await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
-      return new AcquiredSource(path, true, null);
+      return await _planArtifactStore.StageAsync(
+          resource.Id,
+          sourceStream,
+          expectedSha256,
+          visualStudioInstanceId,
+          cancellationToken).ConfigureAwait(false);
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
-      TryDeleteDownloaded(path);
       throw;
     }
     catch (Exception exception) when (exception is HttpRequestException or IOException or
         UnauthorizedAccessException or OverflowException)
     {
-      TryDeleteDownloaded(path);
-      return new AcquiredSource(null, false, new StructuredError(
+      return new VsixPlanArtifactStageResult(null, null, new StructuredError(
           WdemErrorCode.DownloadError,
           "VSIX download failed.",
           "The VSIX artifact could not be safely downloaded.")
@@ -659,62 +645,38 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
       });
     }
 
-    string? downloadedPath = null;
-    try
+    var staged = await StagePlanSourceAsync(
+        resource,
+        instance.Instance.InstanceId,
+        cancellationToken).ConfigureAwait(false);
+    if (staged.Error is not null || staged.Manifest is null || staged.StepEvidence is null)
     {
-      var acquired = await AcquireSourceAsync(
-          GetParameter(resource, SourcePathParameter)!,
-          cancellationToken).ConfigureAwait(false);
-      if (acquired.Error is not null)
-      {
-        return new PreparedPlanArtifact(
-            null,
-            acquired.Error with { ResourceId = resource.Id });
-      }
-
-      downloadedPath = acquired.Temporary ? acquired.Path : null;
-      var staged = await _planArtifactStore.StageAsync(
-          resource.Id,
-          acquired.Path!,
-          GetParameter(resource, ExpectedSha256Parameter)!,
-          instance.Instance.InstanceId,
-          cancellationToken).ConfigureAwait(false);
-      if (staged.Error is not null || staged.Manifest is null || staged.StepEvidence is null)
-      {
-        return new PreparedPlanArtifact(
-            null,
-            (staged.Error ?? ConfigurationError(resource, "The VSIX source could not be staged.")) with
-            {
-              ResourceId = resource.Id
-            });
-      }
-
-      if (SourceManifestMatches(resource, staged.Manifest, instance.Instance))
-      {
-        return new PreparedPlanArtifact(staged.StepEvidence, null);
-      }
-
-      await DiscardPreparedArtifactAsync(
-          resource,
-          instance.Instance.InstanceId,
-          staged.StepEvidence,
-          cancellationToken)
-          .ConfigureAwait(false);
-      return new PreparedPlanArtifact(null, new StructuredError(
-              WdemErrorCode.ConfigurationError,
-              "VSIX source is incompatible.",
-              "The verified VSIX identity, version, or Visual Studio installation target does not match the resource.")
-      {
-        ResourceId = resource.Id
-      });
+      return new PreparedPlanArtifact(
+          null,
+          (staged.Error ?? ConfigurationError(resource, "The VSIX source could not be staged.")) with
+          {
+            ResourceId = resource.Id
+          });
     }
-    finally
+
+    if (SourceManifestMatches(resource, staged.Manifest, instance.Instance))
     {
-      if (downloadedPath is not null)
-      {
-        TryDeleteDownloaded(downloadedPath);
-      }
+      return new PreparedPlanArtifact(staged.StepEvidence, null);
     }
+
+    await DiscardPreparedArtifactAsync(
+        resource,
+        instance.Instance.InstanceId,
+        staged.StepEvidence,
+        cancellationToken)
+        .ConfigureAwait(false);
+    return new PreparedPlanArtifact(null, new StructuredError(
+            WdemErrorCode.ConfigurationError,
+            "VSIX source is incompatible.",
+            "The verified VSIX identity, version, or Visual Studio installation target does not match the resource.")
+    {
+      ResourceId = resource.Id
+    });
   }
 
   private async Task DiscardPreparedArtifactAsync(
@@ -725,7 +687,7 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
   {
     var claim = await _planArtifactStore.ClaimAsync(
         resource.Id,
-        $"{resource.Id}:install:{stepEvidence}",
+        stepEvidence,
         GetParameter(resource, ExpectedSha256Parameter)!,
         instanceId,
         cancellationToken).ConfigureAwait(false);
@@ -957,29 +919,7 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
     };
   }
 
-  private static void TryDeleteDownloaded(string path)
-  {
-    try
-    {
-      var directory = Path.GetDirectoryName(path);
-      if (File.Exists(path))
-      {
-        File.Delete(path);
-      }
-
-      if (directory is not null && Directory.Exists(directory))
-      {
-        Directory.Delete(directory, recursive: true);
-      }
-    }
-    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-    {
-      // Cleanup is best effort; the artifact has already been closed.
-    }
-  }
-
   private sealed record InstanceSelection(VisualStudioInstance? Instance, StructuredError? Error);
-  private sealed record AcquiredSource(string? Path, bool Temporary, StructuredError? Error);
   private sealed record PreparedPlanArtifact(string? StepEvidence, StructuredError? Error);
   private sealed record PlanArtifactReference(string ResourceId, string StepId);
 }

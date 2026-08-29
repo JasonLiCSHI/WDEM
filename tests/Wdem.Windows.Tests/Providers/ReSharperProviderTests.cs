@@ -27,6 +27,45 @@ public sealed class ReSharperProviderTests
   }
 
   [Fact]
+  public async Task PlanAsync_MissingSelectedVisualStudioDoesNotQueryWinGet()
+  {
+    var discovery = new MutableVisualStudioDiscovery();
+    var process = new CountingSuccessProcessExecutor();
+    var provider = Provider(new FakeManifestReader(), process, discovery);
+    var resource = ReSharperResource(["visual-studio"]);
+
+    var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Contains(plan.StructuredErrors, error => error.Code == WdemErrorCode.DependencyError);
+    Assert.Empty(process.Requests);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_ReplacedSelectedVisualStudioDoesNotInvokeWinGet()
+  {
+    var original = Instance("17.0_a");
+    var discovery = new MutableVisualStudioDiscovery(original);
+    var process = new CountingSuccessProcessExecutor();
+    var provider = Provider(new FakeManifestReader(), process, discovery);
+    var resource = ReSharperResource(["visual-studio"]);
+    var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+    discovery.Instances =
+    [
+      original with
+      {
+        ProductId = "Microsoft.VisualStudio.Product.Enterprise",
+        InstallationVersion = "17.1.0"
+      }
+    ];
+
+    var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Single(process.Requests);
+  }
+
+  [Fact]
   public async Task DetectAsync_RequiresManifestInSelectedVisualStudioInstance()
   {
     var manifests = new FakeManifestReader();
@@ -157,8 +196,9 @@ public sealed class ReSharperProviderTests
 
   private static ReSharperProvider Provider(
       FakeManifestReader manifests,
-      IProcessExecutor process) => new(
-          new FakeVisualStudioDiscovery(Instance("17.0_a"), Instance("17.0_b")),
+      IProcessExecutor process,
+      IVisualStudioDiscovery? discovery = null) => new(
+          discovery ?? new FakeVisualStudioDiscovery(Instance("17.0_a"), Instance("17.0_b")),
           manifests,
           new WinGetCommandClient(process),
           new ComplianceEvaluator());
@@ -205,6 +245,17 @@ public sealed class ReSharperProviderTests
         IReadOnlyList<string> requestedComponents,
         CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<VisualStudioInstance>>(
             instances);
+  }
+
+  private sealed class MutableVisualStudioDiscovery(params VisualStudioInstance[] instances)
+      : IVisualStudioDiscovery
+  {
+    public IReadOnlyList<VisualStudioInstance> Instances { get; set; } = instances;
+
+    public Task<IReadOnlyList<VisualStudioInstance>> DiscoverAsync(
+        IReadOnlyList<string> requestedWorkloads,
+        IReadOnlyList<string> requestedComponents,
+        CancellationToken cancellationToken) => Task.FromResult(Instances);
   }
 
   private sealed class FakeManifestReader : IVsixManifestReader
@@ -275,5 +326,19 @@ public sealed class ReSharperProviderTests
         ProcessExecutionRequest request,
         IProgress<string>? output,
         CancellationToken cancellationToken) => throw new InvalidOperationException();
+  }
+
+  private sealed class CountingSuccessProcessExecutor : IProcessExecutor
+  {
+    public List<ProcessExecutionRequest> Requests { get; } = [];
+
+    public Task<ProcessExecutionResult> ExecuteAsync(
+        ProcessExecutionRequest request,
+        IProgress<string>? output,
+        CancellationToken cancellationToken)
+    {
+      Requests.Add(request);
+      return Task.FromResult(new ProcessExecutionResult(true, 0, ["available"], []));
+    }
   }
 }

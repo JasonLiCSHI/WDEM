@@ -33,37 +33,7 @@ internal static class VsixInstallationTargetCompatibility
       return true;
     }
 
-    if (!Version.TryParse(versionText, out var version))
-    {
-      return false;
-    }
-
-    var range = expression.Trim();
-    if (range.Length < 3 || range[0] is not ('[' or '(') ||
-        range[^1] is not (']' or ')'))
-    {
-      return Version.TryParse(range, out var exact) && version == exact;
-    }
-
-    var bounds = range[1..^1].Split(',', StringSplitOptions.TrimEntries);
-    if (bounds.Length == 1)
-    {
-      return range[0] == '[' && range[^1] == ']' &&
-          Version.TryParse(bounds[0], out var exact) && version == exact;
-    }
-
-    if (bounds.Length != 2)
-    {
-      return false;
-    }
-
-    var minimumMatches = string.IsNullOrEmpty(bounds[0]) ||
-        (Version.TryParse(bounds[0], out var minimum) &&
-         (version > minimum || (range[0] == '[' && version == minimum)));
-    var maximumMatches = string.IsNullOrEmpty(bounds[1]) ||
-        (Version.TryParse(bounds[1], out var maximum) &&
-         (version < maximum || (range[^1] == ']' && version == maximum)));
-    return minimumMatches && maximumMatches;
+    return VsixVersionRange.TryParse(expression, out var range) && range.Contains(versionText);
   }
 
   private static bool Matches(string? left, string? right) =>

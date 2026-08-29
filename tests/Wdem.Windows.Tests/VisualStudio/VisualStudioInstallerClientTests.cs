@@ -567,6 +567,27 @@ public sealed class VisualStudioInstallerClientTests
   }
 
   [Fact]
+  public async Task SecureArtifactStager_StreamCancellationRemovesRestrictedStaging()
+  {
+    var policy = new RecordingSecureDirectoryPolicy();
+    using var cancellation = new CancellationTokenSource();
+    await using var source = new MemoryStream("downloaded"u8.ToArray());
+    var stager = new SecureArtifactStager(policy)
+    {
+      AfterSourceLengthChecked = cancellation.Cancel
+    };
+
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stager.StageVerifiedAsync(
+        source,
+        new string('A', 64),
+        SecureArtifactKind.VisualStudioExtension,
+        cancellation.Token));
+
+    var stagingDirectory = Assert.Single(policy.SecuredDirectories);
+    Assert.False(Directory.Exists(stagingDirectory));
+  }
+
+  [Fact]
   public async Task VsconfigParser_ValidFileReturnsWorkloadsAndComponents()
   {
     var path = Path.GetTempFileName();
@@ -747,6 +768,13 @@ public sealed class VisualStudioInstallerClientTests
   {
     public Task<SecureArtifactStageResult> StageVerifiedAsync(
         string sourcePath,
+        string expectedSha256,
+        SecureArtifactKind kind,
+        CancellationToken cancellationToken) =>
+        Task.FromResult(new SecureArtifactStageResult(null, error));
+
+    public Task<SecureArtifactStageResult> StageVerifiedAsync(
+        Stream source,
         string expectedSha256,
         SecureArtifactKind kind,
         CancellationToken cancellationToken) =>

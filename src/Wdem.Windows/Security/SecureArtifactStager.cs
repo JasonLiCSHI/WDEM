@@ -26,6 +26,12 @@ public interface ISecureArtifactStager
       string expectedSha256,
       SecureArtifactKind kind,
       CancellationToken cancellationToken);
+
+  Task<SecureArtifactStageResult> StageVerifiedAsync(
+      Stream source,
+      string expectedSha256,
+      SecureArtifactKind kind,
+      CancellationToken cancellationToken);
 }
 
 public sealed record SecureArtifactStageResult(
@@ -115,6 +121,55 @@ public sealed class SecureArtifactStager : ISecureArtifactStager
       return Failure("The source path or expected SHA-256 is invalid.");
     }
 
+    try
+    {
+      await using var source = new FileStream(
+          Path.GetFullPath(sourcePath),
+          FileMode.Open,
+          FileAccess.Read,
+          FileShare.ReadWrite | FileShare.Delete,
+          bufferSize: 81920,
+          FileOptions.Asynchronous | FileOptions.SequentialScan);
+      return await StageVerifiedStreamAsync(
+          source,
+          expectedSha256,
+          kind,
+          cancellationToken).ConfigureAwait(false);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      throw;
+    }
+    catch (Exception exception) when (exception is IOException or
+        UnauthorizedAccessException or SecurityException)
+    {
+      return Failure("The artifact could not be copied into restricted staging.");
+    }
+  }
+
+  public Task<SecureArtifactStageResult> StageVerifiedAsync(
+      Stream source,
+      string expectedSha256,
+      SecureArtifactKind kind,
+      CancellationToken cancellationToken)
+  {
+    ArgumentNullException.ThrowIfNull(source);
+    cancellationToken.ThrowIfCancellationRequested();
+    if (!source.CanRead || expectedSha256.Length != 64 ||
+        !expectedSha256.All(Uri.IsHexDigit))
+    {
+      return Task.FromResult(Failure("The source stream or expected SHA-256 is invalid."));
+    }
+
+    return StageVerifiedStreamAsync(source, expectedSha256, kind, cancellationToken);
+  }
+
+  private async Task<SecureArtifactStageResult> StageVerifiedStreamAsync(
+      Stream source,
+      string expectedSha256,
+      SecureArtifactKind kind,
+      CancellationToken cancellationToken)
+  {
     string? directoryPath = null;
     string? partialPath = null;
     string? finalPath = null;
@@ -142,13 +197,13 @@ public sealed class SecureArtifactStager : ISecureArtifactStager
 
       artifactLease = ArtifactLease.Create(directoryPath);
 
-      await using (var source = new FileStream(
-                       Path.GetFullPath(sourcePath),
-                       FileMode.Open,
-                       FileAccess.Read,
-                       FileShare.ReadWrite | FileShare.Delete,
-                       bufferSize: 81920,
-                       FileOptions.Asynchronous | FileOptions.SequentialScan))
+      var maxBytes = GetMaxBytes(kind);
+      if (source.CanSeek && source.Length - source.Position > maxBytes)
+      {
+        throw new ArtifactTooLargeException(maxBytes);
+      }
+
+      AfterSourceLengthChecked?.Invoke();
       await using (var destination = new FileStream(
                        partialPath,
                        FileMode.CreateNew,
@@ -157,18 +212,6 @@ public sealed class SecureArtifactStager : ISecureArtifactStager
                        bufferSize: 81920,
                        FileOptions.Asynchronous | FileOptions.SequentialScan))
       {
-        var maxBytes = kind switch
-        {
-          SecureArtifactKind.Executable => MaxExecutableBytes,
-          SecureArtifactKind.VisualStudioExtension => MaxVisualStudioExtensionBytes,
-          _ => MaxVisualStudioConfigurationBytes
-        };
-        if (source.Length > maxBytes)
-        {
-          throw new ArtifactTooLargeException(maxBytes);
-        }
-
-        AfterSourceLengthChecked?.Invoke();
         await CopyWithinLimitAsync(
             source,
             destination,
@@ -246,6 +289,13 @@ public sealed class SecureArtifactStager : ISecureArtifactStager
       return Failure("The artifact could not be copied into restricted staging.");
     }
   }
+
+  private static long GetMaxBytes(SecureArtifactKind kind) => kind switch
+  {
+    SecureArtifactKind.Executable => MaxExecutableBytes,
+    SecureArtifactKind.VisualStudioExtension => MaxVisualStudioExtensionBytes,
+    _ => MaxVisualStudioConfigurationBytes
+  };
 
   private static async Task CopyWithinLimitAsync(
       Stream source,

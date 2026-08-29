@@ -3,6 +3,8 @@ using System.Security.Cryptography;
 using System.Text;
 using Wdem.Core.Compliance;
 using Wdem.Core.Execution;
+using Wdem.Core.Graph;
+using Wdem.Core.Planning;
 using Wdem.Core.Processes;
 using Wdem.Core.Providers;
 using Wdem.Core.Resources;
@@ -18,6 +20,69 @@ namespace Wdem.Windows.Tests.Providers;
 
 public sealed class VisualStudioExtensionProviderTests
 {
+  [Fact]
+  public async Task ExecutionPlanner_AcceptsOpaqueVsixPlanLocator()
+  {
+    var source = TempFile("vsix");
+    var manifests = SourceManifestReader();
+    await using var stager = new RotatingStager();
+    try
+    {
+      var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
+      var provider = Provider(manifests, new ThrowingProcessExecutor(), stager);
+      var dependency = resource with
+      {
+        Id = "visual-studio",
+        Type = "planner-dependency",
+        Provider = "planner-dependency",
+        VersionConstraint = null,
+        PreferredVersion = null,
+        Dependencies = [],
+        Parameters = new Dictionary<string, string?>()
+      };
+      var graph = new ResourceGraph(
+          new Dictionary<string, ResolvedResource>(StringComparer.OrdinalIgnoreCase)
+          {
+            [dependency.Id] = new(
+                dependency,
+                ResourceOrigin.AutoDependency,
+                new HashSet<string>([resource.Id], StringComparer.OrdinalIgnoreCase)),
+            [resource.Id] = new(resource, ResourceOrigin.Required, new HashSet<string>())
+          },
+          [new ResourceGraphLayer(0, [dependency.Id]), new ResourceGraphLayer(1, [resource.Id])]);
+      var planner = new ExecutionPlanner(
+          new ResourceProviderRegistry([new SatisfiedDependencyProvider(), provider]),
+          new ComplianceEvaluator());
+
+      var plan = await planner.CreateAsync(
+          graph,
+          new Dictionary<string, DetectedState>(StringComparer.OrdinalIgnoreCase)
+          {
+            [dependency.Id] = new DetectedState
+            {
+              ResourceId = dependency.Id,
+              Outcome = DetectionOutcome.Succeeded,
+              Exists = true
+            },
+            [resource.Id] = Missing(resource)
+          },
+          "developer",
+          "1.0.0",
+          CancellationToken.None);
+
+      Assert.True(
+          plan.IsExecutable,
+          string.Join(Environment.NewLine, plan.Errors.Select(error => error.Detail)));
+      var plannedResource = Assert.Single(plan.Resources, item => item.Definition.Id == resource.Id);
+      var step = Assert.Single(plannedResource.ResourcePlan.Steps);
+      Assert.True(step.Id.Length <= 128);
+    }
+    finally
+    {
+      File.Delete(source);
+    }
+  }
+
   [Fact]
   public async Task DetectAsync_UsesManifestIdentityAndTargetVisualStudioInstance()
   {
@@ -635,6 +700,30 @@ public sealed class VisualStudioExtensionProviderTests
     Assert.Equal(1, handler.RequestCount);
   }
 
+  [Fact]
+  public async Task PlanAsync_HttpsSourceStreamsDirectlyIntoRestrictedStaging()
+  {
+    var manifests = SourceManifestReader();
+    await using var stager = new ScriptedStager();
+    using var httpClient = new HttpClient(new CountingHttpHandler());
+    var resource = ExtensionResource(
+        "Contoso.DeveloperTools",
+        "3.2.x",
+        "17.0_a",
+        "https://artifacts.example.test/contoso.vsix");
+    var provider = Provider(
+        manifests,
+        new ThrowingProcessExecutor(),
+        stager,
+        httpClient: httpClient);
+
+    var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+
+    Assert.True(plan.IsExecutable);
+    Assert.Equal(1, stager.StreamStageCalls);
+    Assert.Equal(0, stager.PathStageCalls);
+  }
+
   [WindowsFact]
   public async Task PlanAndApply_DefaultStoreHandsOffFromCurrentUserToApprovedApply()
   {
@@ -789,7 +878,7 @@ public sealed class VisualStudioExtensionProviderTests
 
       Assert.Equal(ApplyOutcome.Failed, result.Outcome);
       Assert.Empty(process.Requests);
-      Assert.False(Directory.Exists(directory));
+      Assert.True(Directory.Exists(directory));
     }
     finally
     {
@@ -850,7 +939,7 @@ public sealed class VisualStudioExtensionProviderTests
   }
 
   [Fact]
-  public async Task ApplyAsync_FreshStoreCleansMalformedCreatorSidEvidence()
+  public async Task ApplyAsync_FreshStoreRejectsMalformedCreatorSidMarkerWithoutDeletingIt()
   {
     var source = TempFile("vsix");
     var manifests = SourceManifestReader();
@@ -887,21 +976,21 @@ public sealed class VisualStudioExtensionProviderTests
           CancellationToken.None);
       var directory = Assert.Single(stager.Directories);
       var step = Assert.Single(plan.Steps);
-      var malformedStepId = ReplaceEncodedEvidence(
-          step.Id,
+      ReplaceMarkerEvidence(
+          directory,
           "\"creatorSid\":\"S-1-0-0\"",
           "\"creatorSid\":\"not-a-sid\"");
 
       var result = await applyingProvider.ApplyAsync(
           resource,
-          plan with { Steps = [step with { Id = malformedStepId }] },
+          plan,
           null,
           CancellationToken.None);
 
       Assert.Equal(ApplyOutcome.Failed, result.Outcome);
       Assert.Equal(WdemErrorCode.ConfigurationError, result.Error?.Code);
       Assert.IsType<ArgumentException>(result.Error?.UnderlyingException);
-      Assert.False(Directory.Exists(directory));
+      Assert.True(Directory.Exists(directory));
     }
     finally
     {
@@ -965,7 +1054,7 @@ public sealed class VisualStudioExtensionProviderTests
   }
 
   [Fact]
-  public async Task ApplyAsync_MalformedCreatorSidReturnsStructuredFailureAndCleansRegisteredArtifact()
+  public async Task ApplyAsync_MalformedCreatorSidMarkerReturnsFailureWithoutDeletingIt()
   {
     var source = TempFile("vsix");
     var manifests = SourceManifestReader();
@@ -985,21 +1074,21 @@ public sealed class VisualStudioExtensionProviderTests
       var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
       var directory = Assert.Single(stager.Directories);
       var step = Assert.Single(plan.Steps);
-      var malformedStepId = ReplaceEncodedEvidence(
-          step.Id,
+      ReplaceMarkerEvidence(
+          directory,
           "\"creatorSid\":\"S-1-0-0\"",
           "\"creatorSid\":\"not-a-sid\"");
 
       var result = await provider.ApplyAsync(
           resource,
-          plan with { Steps = [step with { Id = malformedStepId }] },
+          plan,
           null,
           CancellationToken.None);
 
       Assert.Equal(ApplyOutcome.Failed, result.Outcome);
       Assert.Equal(WdemErrorCode.ConfigurationError, result.Error?.Code);
       Assert.IsType<ArgumentException>(result.Error?.UnderlyingException);
-      Assert.False(Directory.Exists(directory));
+      Assert.True(Directory.Exists(directory));
     }
     finally
     {
@@ -1008,18 +1097,14 @@ public sealed class VisualStudioExtensionProviderTests
   }
 
   [Theory]
-  [InlineData("null")]
-  [InlineData("{}")]
-  public void HasValidStepEvidence_MalformedJsonReturnsFalse(string json)
+  [InlineData("vsix-v2:")]
+  [InlineData("vsix-v2:00000000000000000000000000000000:not-a-guid")]
+  [InlineData("extension:install:vsix-v2:00000000000000000000000000000000:00000000000000000000000000000000")]
+  public void HasValidStepEvidence_MalformedLocatorReturnsFalse(string locator)
   {
-    var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(json))
-        .TrimEnd('=')
-        .Replace('+', '-')
-        .Replace('/', '_');
-
     var valid = VsixPlanArtifactStore.HasValidStepEvidence(
         "extension",
-        $"extension:install:vsix-v1:{encoded}");
+        locator);
 
     Assert.False(valid);
   }
@@ -1057,7 +1142,7 @@ public sealed class VisualStudioExtensionProviderTests
         ".wdem-vsix-owner"));
     var claimed = await claimingStore.ClaimAsync(
         "extension",
-        $"extension:install:{staged.StepEvidence}",
+        staged.StepEvidence!,
         expectedHash,
         "17.0_a",
         CancellationToken.None);
@@ -1066,6 +1151,75 @@ public sealed class VisualStudioExtensionProviderTests
     Assert.Contains($"\"creatorSid\":\"{creatorSid}\"", marker, StringComparison.Ordinal);
     Assert.Contains("\"resourceId\":\"extension\"", marker, StringComparison.Ordinal);
     Assert.Equal([creatorSid, creatorSid], validatedCreators);
+  }
+
+  [Fact]
+  public async Task PlanArtifactStore_FreshStoreRejectsReplayAfterConsumedArtifactCleanupFails()
+  {
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new ScriptedStager();
+    var stagingStore = PlanArtifactStore(stager, verifier, manifests);
+    var claimingStore = PlanArtifactStore(stager, verifier, manifests);
+    var replayStore = PlanArtifactStore(stager, verifier, manifests);
+    var expectedHash = new string('A', 64);
+    var directory = Path.GetDirectoryName(stager.VerifiedVsixPath)!;
+    ClaimedVsixPlanArtifact? firstArtifact = null;
+    ClaimedVsixPlanArtifact? replayedArtifact = null;
+    FileStream? blocker = null;
+    try
+    {
+      var staged = await stagingStore.StageAsync(
+          "extension",
+          stager.StagedPath,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None);
+      var firstClaim = await claimingStore.ClaimAsync(
+          "extension",
+          staged.StepEvidence!,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None);
+      firstArtifact = Assert.IsType<ClaimedVsixPlanArtifact>(firstClaim.Artifact);
+      var consumedMarker = await File.ReadAllTextAsync(
+          Path.Combine(directory, ".wdem-vsix-owner"));
+      Assert.Contains("\"consumed\":true", consumedMarker, StringComparison.Ordinal);
+      blocker = new FileStream(
+          Path.Combine(directory, "cleanup-blocker"),
+          FileMode.CreateNew,
+          FileAccess.ReadWrite,
+          FileShare.None);
+
+      await firstArtifact.DisposeAsync();
+      firstArtifact = null;
+      Assert.True(Directory.Exists(directory));
+      var replay = await replayStore.ClaimAsync(
+          "extension",
+          staged.StepEvidence!,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None);
+      replayedArtifact = replay.Artifact;
+
+      Assert.Null(replay.Artifact);
+      Assert.NotNull(replay.Error);
+    }
+    finally
+    {
+      if (firstArtifact is not null)
+      {
+        await firstArtifact.DisposeAsync();
+      }
+
+      if (replayedArtifact is not null)
+      {
+        await replayedArtifact.DisposeAsync();
+      }
+
+      blocker?.Dispose();
+      ArtifactCleanupQueue.Shared.RetryPending();
+    }
   }
 
   [Fact]
@@ -1272,27 +1426,16 @@ public sealed class VisualStudioExtensionProviderTests
           directory,
           fileName);
 
-  private static string ReplaceEncodedEvidence(
-      string stepId,
+  private static void ReplaceMarkerEvidence(
+      string directory,
       string expected,
       string replacement)
   {
-    const string evidencePrefix = "vsix-v1:";
-    var evidenceIndex = stepId.IndexOf(evidencePrefix, StringComparison.Ordinal);
-    Assert.True(evidenceIndex >= 0);
-    var tokenSeparator = stepId.IndexOf(':', evidenceIndex + evidencePrefix.Length);
-    var encodedIndex = stepId.IndexOf(':', tokenSeparator + 1) + 1;
-    Assert.True(encodedIndex > evidenceIndex + evidencePrefix.Length);
-    var encoded = stepId[encodedIndex..].Replace('-', '+').Replace('_', '/');
-    encoded += new string('=', (4 - encoded.Length % 4) % 4);
-    var json = Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
+    var markerPath = Path.Combine(directory, ".wdem-vsix-owner");
+    var json = File.ReadAllText(markerPath);
     Assert.Contains(expected, json, StringComparison.Ordinal);
     json = json.Replace(expected, replacement, StringComparison.Ordinal);
-    var tampered = Convert.ToBase64String(Encoding.UTF8.GetBytes(json))
-        .TrimEnd('=')
-        .Replace('+', '-')
-        .Replace('/', '_');
-    return stepId[..encodedIndex] + tampered;
+    File.WriteAllText(markerPath, json);
   }
 
   private static string InstalledManifest(string version) =>
@@ -1439,12 +1582,30 @@ public sealed class VisualStudioExtensionProviderTests
 
     public string StagedPath { get; }
     public string VerifiedVsixPath => Path.Combine(_directory, "extension.vsix");
+    public int PathStageCalls { get; private set; }
+    public int StreamStageCalls { get; private set; }
 
     public Task<SecureArtifactStageResult> StageVerifiedAsync(
         string sourcePath,
         string expectedSha256,
         SecureArtifactKind kind,
         CancellationToken cancellationToken)
+    {
+      PathStageCalls++;
+      return StageCore(expectedSha256);
+    }
+
+    public Task<SecureArtifactStageResult> StageVerifiedAsync(
+        Stream source,
+        string expectedSha256,
+        SecureArtifactKind kind,
+        CancellationToken cancellationToken)
+    {
+      StreamStageCalls++;
+      return StageCore(expectedSha256);
+    }
+
+    private Task<SecureArtifactStageResult> StageCore(string expectedSha256)
     {
       if (_result is not null)
       {
@@ -1484,7 +1645,15 @@ public sealed class VisualStudioExtensionProviderTests
         string sourcePath,
         string expectedSha256,
         SecureArtifactKind kind,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) => StageCore(expectedSha256);
+
+    public Task<SecureArtifactStageResult> StageVerifiedAsync(
+        Stream source,
+        string expectedSha256,
+        SecureArtifactKind kind,
+        CancellationToken cancellationToken) => StageCore(expectedSha256);
+
+    private Task<SecureArtifactStageResult> StageCore(string expectedSha256)
     {
       var directory = Path.Combine(
           Path.GetTempPath(),
@@ -1563,6 +1732,49 @@ public sealed class VisualStudioExtensionProviderTests
         ProcessExecutionRequest request,
         IProgress<string>? output,
         CancellationToken cancellationToken) => throw new InvalidOperationException();
+  }
+
+  private sealed class SatisfiedDependencyProvider : IResourceProvider
+  {
+    public string ResourceType => "planner-dependency";
+    public string ProviderName => "planner-dependency";
+    public ProviderCapabilities Capabilities { get; } = new();
+
+    public ValueTask<ProviderValidationResult> ValidateAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) => ValueTask.FromResult(ProviderValidationResult.Valid);
+
+    public ValueTask<DetectedState> DetectAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) => ValueTask.FromResult(new DetectedState
+        {
+          ResourceId = resource.Id,
+          Outcome = DetectionOutcome.Succeeded,
+          Exists = true
+        });
+
+    public ValueTask<ResourcePlan> PlanAsync(
+        ResourceDefinition resource,
+        DetectedState currentState,
+        CancellationToken cancellationToken) => ValueTask.FromResult(new ResourcePlan
+        {
+          ResourceId = resource.Id,
+          ResourceType = resource.Type,
+          ProviderName = resource.Provider,
+          DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(resource),
+          Compliance = ComplianceStatus.Satisfied,
+          IsExecutable = true
+        });
+
+    public ValueTask<ResourceApplyResult> ApplyAsync(
+        ResourceDefinition resource,
+        ResourcePlan plan,
+        IProgress<ProviderProgress>? progress,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+
+    public ValueTask<VerificationResult> VerifyAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
   }
 
   private sealed class CountingHttpHandler : HttpMessageHandler

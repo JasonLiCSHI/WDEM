@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text.Json;
 using Wdem.Core.Compliance;
 using Wdem.Core.Execution;
 using Wdem.Core.Providers;
@@ -292,6 +294,21 @@ public sealed class ReSharperProvider : IResourceProvider
       };
     }
 
+    var instance = await SelectInstanceAsync(resource, cancellationToken).ConfigureAwait(false);
+    if (instance.Instance is null)
+    {
+      var error = instance.Error ?? Error(
+          resource,
+          WdemErrorCode.DependencyError,
+          "Visual Studio instance is unavailable.",
+          "The selected Visual Studio instance was not found.");
+      return CreatePlan(resource, compliance.Status, false) with
+      {
+        Error = error.Detail,
+        StructuredErrors = [error]
+      };
+    }
+
     var source = await _winGet.QueryAvailabilityAsync(
         resource.Id,
         PackageId,
@@ -313,7 +330,7 @@ public sealed class ReSharperProvider : IResourceProvider
       [
         new PlanStep
         {
-          Id = $"{resource.Id}:install",
+          Id = CreateStepId(instance.Instance),
           Description = "Install JetBrains ReSharper with WinGet.",
           Action = compliance.Status == ComplianceStatus.Missing
               ? PlanAction.Install
@@ -345,7 +362,8 @@ public sealed class ReSharperProvider : IResourceProvider
         resource,
         plan,
         ResourceType,
-        ProviderName);
+        ProviderName,
+        static (_, step) => HasValidStepId(step.Id));
     if (invalidPlan is not null)
     {
       return invalidPlan;
@@ -357,6 +375,22 @@ public sealed class ReSharperProvider : IResourceProvider
     }
 
     var step = plan.Steps[0];
+    var instance = await SelectInstanceAsync(resource, cancellationToken).ConfigureAwait(false);
+    if (instance.Instance is null ||
+        !string.Equals(step.Id, CreateStepId(instance.Instance), StringComparison.Ordinal))
+    {
+      return ProviderLifecycleSupport.Failure(
+          resource,
+          step,
+          instance.Error ?? Error(
+              resource,
+              WdemErrorCode.DependencyError,
+              "Visual Studio instance changed after planning.",
+              "The selected Visual Studio instance is missing or no longer matches the approved plan."),
+          null,
+          0);
+    }
+
     progress?.Report(new ProviderProgress("Plan", 0.25, "Confirming the ReSharper package source.", step.Id));
     var source = await _winGet.QueryAvailabilityAsync(
         resource.Id,
@@ -440,6 +474,61 @@ public sealed class ReSharperProvider : IResourceProvider
         IsExecutable = executable
       };
 
+  private async Task<InstanceSelection> SelectInstanceAsync(
+      ResourceDefinition resource,
+      CancellationToken cancellationToken)
+  {
+    try
+    {
+      var requestedId = GetInstanceId(resource)!;
+      var instances = await _discovery.DiscoverAsync([], [], cancellationToken).ConfigureAwait(false);
+      var matches = instances.Where(candidate =>
+          candidate.IsComplete && Matches(candidate.InstanceId, requestedId)).ToArray();
+      if (matches.Length == 1)
+      {
+        return new InstanceSelection(matches[0], null);
+      }
+
+      return matches.Length == 0
+          ? new InstanceSelection(null, null)
+          : new InstanceSelection(null, Error(
+              resource,
+              WdemErrorCode.DetectionError,
+              "Visual Studio instance selection is ambiguous.",
+              "More than one Visual Studio instance has the selected instance ID."));
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      throw;
+    }
+    catch (Exception exception)
+    {
+      return new InstanceSelection(null, Error(
+          resource,
+          WdemErrorCode.DetectionError,
+          "Visual Studio discovery failed.",
+          "The target Visual Studio instance could not be discovered.",
+          exception));
+    }
+  }
+
+  private static string CreateStepId(VisualStudioInstance instance)
+  {
+    var evidence = JsonSerializer.SerializeToUtf8Bytes(new InstanceEvidence(
+        instance.InstanceId,
+        instance.ProductId,
+        instance.InstallationVersion));
+    return "resharper:install:" + Convert.ToHexString(SHA256.HashData(evidence));
+  }
+
+  private static bool HasValidStepId(string stepId)
+  {
+    const string prefix = "resharper:install:";
+    return stepId.Length == prefix.Length + 64 &&
+        stepId.StartsWith(prefix, StringComparison.Ordinal) &&
+        stepId[prefix.Length..].All(Uri.IsHexDigit);
+  }
+
   private static DetectedState CreateMissingState(
       ResourceDefinition resource,
       string? instanceId = null) => new()
@@ -483,4 +572,13 @@ public sealed class ReSharperProvider : IResourceProvider
 
   private static bool Matches(string? left, string? right) =>
       string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+
+  private sealed record InstanceEvidence(
+      string InstanceId,
+      string ProductId,
+      string InstallationVersion);
+
+  private sealed record InstanceSelection(
+      VisualStudioInstance? Instance,
+      StructuredError? Error);
 }

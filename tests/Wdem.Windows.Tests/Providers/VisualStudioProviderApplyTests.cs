@@ -1005,6 +1005,13 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
         SecureArtifactKind kind,
         CancellationToken cancellationToken) =>
         Task.FromResult(new SecureArtifactStageResult(null, error));
+
+    public Task<SecureArtifactStageResult> StageVerifiedAsync(
+        Stream source,
+        string expectedSha256,
+        SecureArtifactKind kind,
+        CancellationToken cancellationToken) =>
+        Task.FromResult(new SecureArtifactStageResult(null, error));
   }
 
   private sealed class RecordingRealProcessExecutor : IProcessExecutor
