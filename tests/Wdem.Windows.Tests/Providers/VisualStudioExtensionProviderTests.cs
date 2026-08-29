@@ -530,6 +530,88 @@ public sealed class VisualStudioExtensionProviderTests
   }
 
   [Fact]
+  public async Task PlanAsync_DeniedSupersessionRetainsPriorPlanAndDoesNotPublishNewLocator()
+  {
+    var source = TempFile("vsix");
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new RotatingStager();
+    var revocationPath = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-test-revocations-{Guid.NewGuid():N}");
+    var revocationStore = new TestPlanArtifactRevocationStore(revocationPath);
+    ClaimedVsixPlanArtifact? priorArtifact = null;
+    try
+    {
+      var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
+      var store = PlanArtifactStore(
+          stager,
+          verifier,
+          manifests,
+          deleteDirectory: static _ => { },
+          revocationStore: revocationStore);
+      var provider = Provider(
+          manifests,
+          new ThrowingProcessExecutor(),
+          stager,
+          verifier,
+          planArtifactStore: store);
+      var priorPlan = await provider.PlanAsync(
+          resource,
+          Missing(resource),
+          CancellationToken.None);
+      var priorStep = Assert.Single(priorPlan.Steps);
+      var priorDirectory = Assert.Single(stager.Directories);
+      revocationStore.RevokeFailure = new UnauthorizedAccessException("append denied");
+
+      var replacementPlan = await provider.PlanAsync(
+          resource,
+          Missing(resource),
+          CancellationToken.None);
+
+      Assert.False(replacementPlan.IsExecutable);
+      Assert.Empty(replacementPlan.Steps);
+      var error = Assert.Single(replacementPlan.StructuredErrors);
+      Assert.Equal(WdemErrorCode.ConfigurationError, error.Code);
+      Assert.Contains("prior plan remains valid", error.Detail, StringComparison.OrdinalIgnoreCase);
+      Assert.True(Directory.Exists(priorDirectory));
+      Assert.DoesNotContain(
+          "\"revoked\":true",
+          await File.ReadAllTextAsync(Path.Combine(priorDirectory, ".wdem-vsix-owner")),
+          StringComparison.Ordinal);
+
+      revocationStore.RevokeFailure = null;
+      var priorClaim = await PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              deleteDirectory: static _ => { },
+              revocationStore: revocationStore)
+          .ClaimAsync(
+              resource.Id,
+              priorStep.Id,
+              resource.Parameters["expectedSha256"]!,
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
+              CancellationToken.None);
+      priorArtifact = priorClaim.Artifact;
+      Assert.True(
+          priorArtifact is not null,
+          $"{priorClaim.Error?.Detail} {priorClaim.Error?.UnderlyingException}");
+      Assert.Null(priorClaim.Error);
+    }
+    finally
+    {
+      if (priorArtifact is not null)
+      {
+        await priorArtifact.DisposeAsync();
+      }
+
+      File.Delete(revocationPath);
+      File.Delete(source);
+    }
+  }
+
+  [Fact]
   public async Task PlanAsync_ReplanningRevokesSupersededArtifactWhenCreatorPreloadsRevokedMarker()
   {
     var source = TempFile("vsix");
@@ -2849,6 +2931,105 @@ public sealed class VisualStudioExtensionProviderTests
   }
 
   [Fact]
+  public async Task PlanArtifactStore_InterleavedClaimNoncesPermitOnlyLedgerWinner()
+  {
+    const string winningNonce =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+    const string losingNonce =
+        "2222222222222222222222222222222222222222222222222222222222222222";
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new ScriptedStager();
+    var revocationStore = new InterleavingClaimRevocationStore(winningNonce, losingNonce);
+    var expectedHash = new string('A', 64);
+    ClaimedVsixPlanArtifact? claimedArtifact = null;
+    try
+    {
+      var staged = await PlanArtifactStore(stager, verifier, manifests)
+          .StageAsync(
+              "extension",
+              stager.StagedPath,
+              expectedHash,
+              "17.0_a",
+              CancellationToken.None);
+      var winningStore = PlanArtifactStore(
+          stager,
+          verifier,
+          manifests,
+          deleteDirectory: static _ => { },
+          revocationStore: revocationStore,
+          createClaimNonce: static () => winningNonce,
+          acquireClaimLease: static _ => NoopDisposable.Instance);
+      var losingStore = PlanArtifactStore(
+          stager,
+          verifier,
+          manifests,
+          deleteDirectory: static _ => { },
+          revocationStore: revocationStore,
+          createClaimNonce: static () => losingNonce,
+          acquireClaimLease: static _ => NoopDisposable.Instance);
+
+      var losingBegin = Task.Run(() => CaptureExceptionAsync(() =>
+          losingStore.BeginClaimAsync(
+              "extension",
+              staged.StepEvidence!,
+              CancellationToken.None)));
+      revocationStore.WaitUntilLosingClaimIsBlocked();
+      var winningBegin = Task.Run(() => CaptureExceptionAsync(() =>
+          winningStore.BeginClaimAsync(
+              "extension",
+              staged.StepEvidence!,
+              CancellationToken.None)));
+      var beginResults = await Task.WhenAll(winningBegin, losingBegin);
+
+      Assert.Null(beginResults[0]);
+      Assert.IsType<System.Security.SecurityException>(beginResults[1]);
+      Assert.Equal(winningNonce, revocationStore.GetState(
+          staged.StepEvidence!.Split(':')[1],
+          Path.GetFileName(Path.GetDirectoryName(stager.VerifiedVsixPath)!)).ClaimNonce);
+
+      var winningClaim = await winningStore.ClaimAsync(
+          "extension",
+          staged.StepEvidence!,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None);
+      claimedArtifact = winningClaim.Artifact;
+      var losingClaim = await losingStore.ClaimAsync(
+          "extension",
+          staged.StepEvidence!,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None);
+
+      Assert.NotNull(claimedArtifact);
+      Assert.Null(winningClaim.Error);
+      Assert.Null(losingClaim.Artifact);
+      Assert.NotNull(losingClaim.Error);
+    }
+    finally
+    {
+      if (claimedArtifact is not null)
+      {
+        await claimedArtifact.DisposeAsync();
+      }
+    }
+
+    static async Task<Exception?> CaptureExceptionAsync(Func<Task> action)
+    {
+      try
+      {
+        await action();
+        return null;
+      }
+      catch (Exception exception)
+      {
+        return exception;
+      }
+    }
+  }
+
+  [Fact]
   public async Task PlanArtifactStore_LedgerPoisoningCannotHideRevocationFromFreshStore()
   {
     var manifests = SourceManifestReader();
@@ -3334,7 +3515,9 @@ public sealed class VisualStudioExtensionProviderTests
       IVsixPlanArtifactRevocationStore? revocationStore = null,
       Func<Guid>? getBootIdentifier = null,
       Func<long>? getUptimeMilliseconds = null,
-      Func<TimeSpan, CancellationToken, Task>? delay = null) => new(
+      Func<TimeSpan, CancellationToken, Task>? delay = null,
+      Func<string>? createClaimNonce = null,
+      Func<string, IDisposable>? acquireClaimLease = null) => new(
           stager,
           verifier,
           manifests,
@@ -3350,7 +3533,9 @@ public sealed class VisualStudioExtensionProviderTests
           revocationStore: revocationStore,
           getBootIdentifier: getBootIdentifier,
           getUptimeMilliseconds: getUptimeMilliseconds,
-          delay: delay);
+          delay: delay,
+          createClaimNonce: createClaimNonce,
+          acquireClaimLease: acquireClaimLease);
 
   private static VisualStudioExtensionProvider RealReaderProvider(string localApplicationData)
   {
@@ -3584,7 +3769,7 @@ public sealed class VisualStudioExtensionProviderTests
             ownershipToken,
             directoryName));
 
-    public void ClaimStarted(string ownershipToken, string directoryName)
+    public void ClaimStarted(string ownershipToken, string directoryName, string claimNonce)
     {
       if (ClaimStartedFailure is not null)
       {
@@ -3594,7 +3779,8 @@ public sealed class VisualStudioExtensionProviderTests
       Append(handle => WindowsPlanArtifactDirectoryPolicy.WriteClaimStartedRecord(
           handle,
           ownershipToken,
-          directoryName));
+          directoryName,
+          claimNonce));
     }
 
     public void Consume(string ownershipToken, string directoryName) =>
@@ -3653,6 +3839,118 @@ public sealed class VisualStudioExtensionProviderTests
     }
   }
 
+  private sealed class InterleavingClaimRevocationStore(
+      string winningNonce,
+      string losingNonce) : IVsixPlanArtifactRevocationStore
+  {
+    private readonly object _sync = new();
+    private readonly ManualResetEventSlim _loserBlocked = new();
+    private readonly ManualResetEventSlim _winnerWritten = new();
+    private readonly Barrier _claimsWritten = new(2);
+    private VsixPlanArtifactLedgerState? _state;
+
+    public void RecordIssued(
+        string ownershipToken,
+        string directoryName,
+        DateTimeOffset expiresAtUtc,
+        string activationCommitment,
+        Guid bootIdentifier,
+        long expiresAtUptimeMilliseconds)
+    {
+      lock (_sync)
+      {
+        _state ??= new VsixPlanArtifactLedgerState(
+            expiresAtUtc,
+            activationCommitment,
+            bootIdentifier,
+            expiresAtUptimeMilliseconds,
+            VsixPlanArtifactLedgerStatus.Pending);
+      }
+    }
+
+    public DateTimeOffset GetIssuedExpiry(string ownershipToken, string directoryName) =>
+        GetState(ownershipToken, directoryName).ExpiresAtUtc;
+
+    public void Activate(string ownershipToken, string directoryName)
+    {
+      lock (_sync)
+      {
+        if (_state is { Status: VsixPlanArtifactLedgerStatus.Pending } state)
+        {
+          _state = state with { Status = VsixPlanArtifactLedgerStatus.Active };
+        }
+      }
+    }
+
+    public void ClaimStarted(string ownershipToken, string directoryName, string claimNonce)
+    {
+      if (string.Equals(claimNonce, losingNonce, StringComparison.Ordinal))
+      {
+        _loserBlocked.Set();
+        Assert.True(_winnerWritten.Wait(TimeSpan.FromSeconds(5)));
+      }
+
+      lock (_sync)
+      {
+        if (_state is { Status: VsixPlanArtifactLedgerStatus.Active } state)
+        {
+          _state = state with
+          {
+            Status = VsixPlanArtifactLedgerStatus.ClaimStarted,
+            ClaimNonce = claimNonce
+          };
+        }
+      }
+
+      if (string.Equals(claimNonce, winningNonce, StringComparison.Ordinal))
+      {
+        _winnerWritten.Set();
+      }
+
+      Assert.True(_claimsWritten.SignalAndWait(TimeSpan.FromSeconds(5)));
+    }
+
+    public void Consume(string ownershipToken, string directoryName)
+    {
+      lock (_sync)
+      {
+        _state = _state!.Value with { Status = VsixPlanArtifactLedgerStatus.Consumed };
+      }
+    }
+
+    public VsixPlanArtifactLedgerState GetState(string ownershipToken, string directoryName)
+    {
+      lock (_sync)
+      {
+        return _state ?? throw new System.Security.SecurityException(
+            "The VSIX issuance record is missing.");
+      }
+    }
+
+    public void Revoke(string ownershipToken, string directoryName)
+    {
+      lock (_sync)
+      {
+        _state = _state!.Value with { Status = VsixPlanArtifactLedgerStatus.Revoked };
+      }
+    }
+
+    public bool IsRevoked(string ownershipToken, string directoryName) =>
+        GetState(ownershipToken, directoryName).Status == VsixPlanArtifactLedgerStatus.Revoked;
+
+    public void WaitUntilLosingClaimIsBlocked() =>
+        Assert.True(_loserBlocked.Wait(TimeSpan.FromSeconds(5)));
+  }
+
+  private sealed class NoopDisposable : IDisposable
+  {
+    public static NoopDisposable Instance { get; } = new();
+
+    public void Dispose()
+    {
+    }
+  }
+
   private sealed class ThrowingIssuanceRevocationStore : IVsixPlanArtifactRevocationStore
   {
     private bool _revoked;
@@ -3672,7 +3970,7 @@ public sealed class VisualStudioExtensionProviderTests
     {
     }
 
-    public void ClaimStarted(string ownershipToken, string directoryName)
+    public void ClaimStarted(string ownershipToken, string directoryName, string claimNonce)
     {
     }
 

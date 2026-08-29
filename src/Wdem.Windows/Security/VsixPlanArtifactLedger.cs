@@ -63,7 +63,8 @@ internal readonly record struct VsixPlanArtifactLedgerState(
     string ActivationCommitment,
     Guid BootIdentifier,
     long ExpiresAtUptimeMilliseconds,
-    VsixPlanArtifactLedgerStatus Status)
+    VsixPlanArtifactLedgerStatus Status,
+    string? ClaimNonce = null)
 {
   internal bool IsTerminal => Status is VsixPlanArtifactLedgerStatus.ClaimStarted or
       VsixPlanArtifactLedgerStatus.Consumed or VsixPlanArtifactLedgerStatus.Revoked;
@@ -82,6 +83,7 @@ internal static class VsixPlanArtifactLedger
 {
   private const int ExpiryDigits = 19;
   private const int CommitmentDigits = 64;
+  private const int ClaimNonceDigits = 64;
   private const int BootIdentifierDigits = 32;
   private const int UptimeDigits = 19;
   private const int ReadBufferBytes = 4096;
@@ -127,8 +129,22 @@ internal static class VsixPlanArtifactLedger
   internal static byte[] CreateActivatedRecord(string ownershipToken, string directoryName) =>
       CreateFixedRecord(ActivatedPrefix, ownershipToken, directoryName);
 
-  internal static byte[] CreateClaimStartedRecord(string ownershipToken, string directoryName) =>
-      CreateFixedRecord(ClaimStartedPrefix, ownershipToken, directoryName);
+  internal static byte[] CreateClaimStartedRecord(
+      string ownershipToken,
+      string directoryName,
+      string claimNonce)
+  {
+    if (claimNonce.Length != ClaimNonceDigits || !claimNonce.All(Uri.IsHexDigit))
+    {
+      throw new ArgumentException(
+          "The claim nonce must contain exactly 64 hexadecimal characters.",
+          nameof(claimNonce));
+    }
+
+    return Encoding.ASCII.GetBytes(
+        $"{ClaimStartedPrefix}{CreateIdentity(ownershipToken, directoryName)}:" +
+        $"{claimNonce.ToUpperInvariant()}\n");
+  }
 
   internal static byte[] CreateConsumedRecord(string ownershipToken, string directoryName) =>
       CreateFixedRecord(ConsumedPrefix, ownershipToken, directoryName);
@@ -163,7 +179,8 @@ internal static class VsixPlanArtifactLedger
     var identity = CreateIdentity(ownershipToken, directoryName);
     var issuedPrefix = Encoding.ASCII.GetBytes($"{IssuedPrefix}{identity}:");
     var activated = Encoding.ASCII.GetBytes($"{ActivatedPrefix}{identity}");
-    var claimStarted = Encoding.ASCII.GetBytes($"{ClaimStartedPrefix}{identity}");
+    var legacyClaimStarted = Encoding.ASCII.GetBytes($"{ClaimStartedPrefix}{identity}");
+    var claimStartedPrefix = Encoding.ASCII.GetBytes($"{ClaimStartedPrefix}{identity}:");
     var consumed = Encoding.ASCII.GetBytes($"{ConsumedPrefix}{identity}");
     var revoked = Encoding.ASCII.GetBytes($"{RevokedPrefix}{identity}");
     var maximumRecordLength = new[]
@@ -171,7 +188,7 @@ internal static class VsixPlanArtifactLedger
       issuedPrefix.Length + ExpiryDigits + 1 + CommitmentDigits + 1 +
           BootIdentifierDigits + 1 + UptimeDigits + 1,
       activated.Length + 1,
-      claimStarted.Length + 1,
+      claimStartedPrefix.Length + ClaimNonceDigits + 1,
       consumed.Length + 1,
       revoked.Length + 1
     }.Max();
@@ -181,7 +198,8 @@ internal static class VsixPlanArtifactLedger
     Guid? bootIdentifier = null;
     long? expiresAtUptimeMilliseconds = null;
     var activatedSeen = false;
-    var claimStartedSeen = false;
+    var legacyClaimStartedSeen = false;
+    string? claimNonce = null;
     var consumedSeen = false;
     var revokedSeen = false;
     var invalid = false;
@@ -240,7 +258,19 @@ internal static class VsixPlanArtifactLedger
         }
 
         activatedSeen |= IsCompleteFixedRecord(remaining, activated);
-        claimStartedSeen |= IsCompleteFixedRecord(remaining, claimStarted);
+        legacyClaimStartedSeen |= IsCompleteFixedRecord(remaining, legacyClaimStarted);
+        if (claimNonce is null && remaining.StartsWith(claimStartedPrefix))
+        {
+          var recordLength = claimStartedPrefix.Length + ClaimNonceDigits + 1;
+          if (remaining.Length >= recordLength)
+          {
+            var nonceBytes = remaining.Slice(claimStartedPrefix.Length, ClaimNonceDigits);
+            if (IsHex(nonceBytes) && remaining[recordLength - 1] == (byte)'\n')
+            {
+              claimNonce = Encoding.ASCII.GetString(nonceBytes).ToUpperInvariant();
+            }
+          }
+        }
         consumedSeen |= IsCompleteFixedRecord(remaining, consumed);
         revokedSeen |= IsCompleteFixedRecord(remaining, revoked);
       }
@@ -264,7 +294,7 @@ internal static class VsixPlanArtifactLedger
         ? VsixPlanArtifactLedgerStatus.Revoked
         : consumedSeen
             ? VsixPlanArtifactLedgerStatus.Consumed
-            : claimStartedSeen
+            : legacyClaimStartedSeen || claimNonce is not null
                 ? VsixPlanArtifactLedgerStatus.ClaimStarted
                 : activatedSeen
                     ? VsixPlanArtifactLedgerStatus.Active
@@ -274,7 +304,8 @@ internal static class VsixPlanArtifactLedger
         activationCommitment,
         bootIdentifier.Value,
         expiresAtUptimeMilliseconds.Value,
-        status);
+        status,
+        claimNonce);
   }
 
   private static long? ParsePositiveInt64(ReadOnlySpan<byte> value)

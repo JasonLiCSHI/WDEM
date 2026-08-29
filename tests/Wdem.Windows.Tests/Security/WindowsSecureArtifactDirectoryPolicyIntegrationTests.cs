@@ -265,6 +265,10 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
   {
     const string ownershipToken = "00112233445566778899AABBCCDDEEFF";
     const string directoryName = "00112233445566778899aabbccddeeff";
+    const string winningClaimNonce =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+    const string losingClaimNonce =
+        "2222222222222222222222222222222222222222222222222222222222222222";
     var expiry = new DateTimeOffset(2026, 8, 30, 0, 0, 0, TimeSpan.Zero);
     var issued = VsixPlanArtifactLedger.CreateIssuedRecord(
         ownershipToken,
@@ -278,7 +282,12 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
         directoryName);
     var claimStarted = VsixPlanArtifactLedger.CreateClaimStartedRecord(
         ownershipToken,
-        directoryName);
+        directoryName,
+        winningClaimNonce);
+    var competingClaim = VsixPlanArtifactLedger.CreateClaimStartedRecord(
+        ownershipToken,
+        directoryName,
+        losingClaimNonce);
     var consumed = VsixPlanArtifactLedger.CreateConsumedRecord(
         ownershipToken,
         directoryName);
@@ -288,13 +297,15 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
 
     var pending = ReadState(issued);
     var active = ReadState([.. issued, .. activated]);
-    var claiming = ReadState([.. issued, .. activated, .. claimStarted, .. activated]);
+    var claiming = ReadState(
+        [.. issued, .. activated, .. claimStarted, .. competingClaim, .. activated]);
     var consumedState = ReadState([.. issued, .. activated, .. claimStarted, .. consumed]);
     var revokedState = ReadState([.. issued, .. activated, .. consumed, .. revoked, .. activated]);
 
     Assert.Equal(VsixPlanArtifactLedgerStatus.Pending, pending.Status);
     Assert.Equal(VsixPlanArtifactLedgerStatus.Active, active.Status);
     Assert.Equal(VsixPlanArtifactLedgerStatus.ClaimStarted, claiming.Status);
+    Assert.Equal(winningClaimNonce, claiming.ClaimNonce);
     Assert.Equal(VsixPlanArtifactLedgerStatus.Consumed, consumedState.Status);
     Assert.Equal(VsixPlanArtifactLedgerStatus.Revoked, revokedState.Status);
 
@@ -303,6 +314,33 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
       using var stream = new MemoryStream(contents, writable: false);
       return VsixPlanArtifactLedger.ReadState(stream, ownershipToken, directoryName);
     }
+  }
+
+  [Fact]
+  public void RevocationLedger_LegacyClaimStartedRecordRemainsTerminalWithoutNonce()
+  {
+    const string ownershipToken = "00112233445566778899AABBCCDDEEFF";
+    const string directoryName = "00112233445566778899aabbccddeeff";
+    var issued = VsixPlanArtifactLedger.CreateIssuedRecord(
+        ownershipToken,
+        directoryName,
+        new DateTimeOffset(2026, 8, 30, 0, 0, 0, TimeSpan.Zero),
+        new string('A', 64),
+        Guid.Parse("00112233-4455-6677-8899-AABBCCDDEEFF"),
+        123456);
+    var activated = VsixPlanArtifactLedger.CreateActivatedRecord(
+        ownershipToken,
+        directoryName);
+    var legacyClaimStarted = Encoding.ASCII.GetBytes(
+        $"wdem-vsix-claim-started-v1:{ownershipToken}:{directoryName}\n");
+    using var stream = new MemoryStream(
+        [.. issued, .. activated, .. legacyClaimStarted, .. activated],
+        writable: false);
+
+    var state = VsixPlanArtifactLedger.ReadState(stream, ownershipToken, directoryName);
+
+    Assert.Equal(VsixPlanArtifactLedgerStatus.ClaimStarted, state.Status);
+    Assert.Null(state.ClaimNonce);
   }
 
   [Fact]

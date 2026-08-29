@@ -178,10 +178,14 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
   internal static void AppendClaimStarted(
       string rootPath,
       string ownershipToken,
-      string directoryName) =>
+      string directoryName,
+      string claimNonce) =>
       AppendLedgerRecord(
           rootPath,
-          VsixPlanArtifactLedger.CreateClaimStartedRecord(ownershipToken, directoryName));
+          VsixPlanArtifactLedger.CreateClaimStartedRecord(
+              ownershipToken,
+              directoryName,
+              claimNonce));
 
   internal static void AppendConsumed(
       string rootPath,
@@ -279,10 +283,14 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
   internal static void WriteClaimStartedRecord(
       SafeFileHandle ledgerHandle,
       string ownershipToken,
-      string directoryName) =>
+      string directoryName,
+      string claimNonce) =>
       WriteRevocationRecord(
           ledgerHandle,
-          VsixPlanArtifactLedger.CreateClaimStartedRecord(ownershipToken, directoryName));
+          VsixPlanArtifactLedger.CreateClaimStartedRecord(
+              ownershipToken,
+              directoryName,
+              claimNonce));
 
   internal static void WriteConsumedRecord(
       SafeFileHandle ledgerHandle,
