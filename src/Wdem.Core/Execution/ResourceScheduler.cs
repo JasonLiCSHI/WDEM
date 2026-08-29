@@ -9,6 +9,17 @@ public sealed class ResourceScheduler : IResourceScheduler
 {
   private const int MinimumConcurrency = 1;
   private const int MaximumConcurrency = 32;
+  private static readonly TimeSpan DefaultDrainTimeout = TimeSpan.FromSeconds(1);
+  private readonly TimeSpan _drainTimeout;
+
+  public ResourceScheduler(TimeSpan? drainTimeout = null)
+  {
+    _drainTimeout = drainTimeout ?? DefaultDrainTimeout;
+    if (_drainTimeout <= TimeSpan.Zero)
+    {
+      throw new ArgumentOutOfRangeException(nameof(drainTimeout));
+    }
+  }
 
   public async Task<SchedulerResult> ExecuteAsync(
       ExecutionPlan plan,
@@ -63,7 +74,7 @@ public sealed class ResourceScheduler : IResourceScheduler
     }
 
     var scheduling = CreateSchedulingMetadata(resources, capabilitiesFor);
-    using var globalSemaphore = new SemaphoreSlim(maximumConcurrency, maximumConcurrency);
+    var globalSemaphore = new SemaphoreSlim(maximumConcurrency, maximumConcurrency);
     var providerSemaphores = scheduling.GroupLimits.ToDictionary(
         pair => pair.Key,
         pair => new SemaphoreSlim(pair.Value, pair.Value),
@@ -73,6 +84,7 @@ public sealed class ResourceScheduler : IResourceScheduler
     var executionToken = executionCancellation.Token;
     var running = new Dictionary<string, Task<CompletedExecution>>(
         StringComparer.OrdinalIgnoreCase);
+    var semaphoreDisposalDeferred = false;
 
     try
     {
@@ -189,7 +201,20 @@ public sealed class ResourceScheduler : IResourceScheduler
     }
     catch (Exception exception)
     {
-      await CancelAndDrainAsync(executionCancellation, running.Values).ConfigureAwait(false);
+      var runningTasks = running.Values.ToArray();
+      var drained = await CancelAndDrainAsync(
+          executionCancellation,
+          runningTasks,
+          _drainTimeout).ConfigureAwait(false);
+      if (!drained)
+      {
+        semaphoreDisposalDeferred = true;
+        DisposeSemaphoresAfterCompletion(
+            runningTasks,
+            globalSemaphore,
+            providerSemaphores.Values.ToArray());
+      }
+
       if (exception is TransitionObserverException transitionException)
       {
         ExceptionDispatchInfo.Capture(transitionException.Cause).Throw();
@@ -199,9 +224,13 @@ public sealed class ResourceScheduler : IResourceScheduler
     }
     finally
     {
-      foreach (var semaphore in providerSemaphores.Values)
+      if (!semaphoreDisposalDeferred)
       {
-        semaphore.Dispose();
+        globalSemaphore.Dispose();
+        foreach (var semaphore in providerSemaphores.Values)
+        {
+          semaphore.Dispose();
+        }
       }
     }
   }
@@ -429,6 +458,7 @@ public sealed class ResourceScheduler : IResourceScheduler
       throw;
     }
     catch (OperationCanceledException exception)
+        when (cancellationToken.IsCancellationRequested)
     {
       return new CompletedExecution(id, Cancelled(id, exception, startedAt));
     }
@@ -504,28 +534,68 @@ public sealed class ResourceScheduler : IResourceScheduler
     }
   }
 
-  private static async Task CancelAndDrainAsync(
+  private static async Task<bool> CancelAndDrainAsync(
       CancellationTokenSource cancellation,
-      IEnumerable<Task<CompletedExecution>> running)
+      IReadOnlyList<Task<CompletedExecution>> running,
+      TimeSpan timeout)
   {
+    var runningCompletion = Task.WhenAll(running);
+    var cancellationCompletion = IgnoreFailureAsync(cancellation.CancelAsync());
+    var combined = Task.WhenAll(runningCompletion, cancellationCompletion);
     try
     {
-      await cancellation.CancelAsync().ConfigureAwait(false);
+      await combined.WaitAsync(timeout).ConfigureAwait(false);
     }
     catch (Exception)
     {
       // The initiating exception remains the scheduler failure.
     }
 
+    ObserveFault(combined);
+    ObserveFault(runningCompletion);
+    return runningCompletion.IsCompleted;
+  }
+
+  private static async Task IgnoreFailureAsync(Task task)
+  {
     try
     {
-      await Task.WhenAll(running).ConfigureAwait(false);
+      await task.ConfigureAwait(false);
     }
     catch (Exception)
     {
-      // Running work is drained before the initiating exception is rethrown.
+      // Cancellation callback failures do not replace the initiating exception.
     }
   }
+
+  private static void DisposeSemaphoresAfterCompletion(
+      IReadOnlyList<Task<CompletedExecution>> running,
+      SemaphoreSlim globalSemaphore,
+      IReadOnlyList<SemaphoreSlim> providerSemaphores)
+  {
+    var completion = Task.WhenAll(running);
+    ObserveFault(completion);
+    _ = completion.ContinueWith(
+        static (_, state) =>
+        {
+          var owned = ((SemaphoreSlim Global, IReadOnlyList<SemaphoreSlim> Providers))state!;
+          owned.Global.Dispose();
+          foreach (var semaphore in owned.Providers)
+          {
+            semaphore.Dispose();
+          }
+        },
+        (globalSemaphore, providerSemaphores),
+        CancellationToken.None,
+        TaskContinuationOptions.ExecuteSynchronously,
+        TaskScheduler.Default);
+  }
+
+  private static void ObserveFault(Task task) => _ = task.ContinueWith(
+      static completed => _ = completed.Exception,
+      CancellationToken.None,
+      TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+      TaskScheduler.Default);
 
   private static ResourceResult Blocked(string id, string failedDependency) => new()
   {

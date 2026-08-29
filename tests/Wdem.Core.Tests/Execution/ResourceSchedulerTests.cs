@@ -93,6 +93,42 @@ public sealed class ResourceSchedulerTests
   }
 
   [Fact]
+  public async Task ExecuteAsync_ObserverFailurePreservesCauseWhenRunningWorkIgnoresCancellation()
+  {
+    var scheduler = new ResourceScheduler(TimeSpan.FromMilliseconds(50));
+    var runningStarted = NewGate();
+    var releaseRunning = new TaskCompletionSource<ResourceResult>(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var execution = scheduler.ExecuteAsync(
+        IndependentPlan("a", "b"),
+        async (resource, _) =>
+        {
+          runningStarted.TrySetResult();
+          return await releaseRunning.Task;
+        },
+        _ => new ProviderCapabilities { MaxConcurrentOperations = 2 },
+        maximumConcurrency: 2,
+        CancellationToken.None,
+        transition => transition.ResourceId == "b" &&
+            transition.State == ExecutionState.Ready
+            ? Task.FromException(new InvalidOperationException("snapshot failed promptly"))
+            : Task.CompletedTask);
+
+    try
+    {
+      await runningStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+      var error = await Assert.ThrowsAsync<InvalidOperationException>(
+          () => execution.WaitAsync(TimeSpan.FromSeconds(1)));
+
+      Assert.Equal("snapshot failed promptly", error.Message);
+    }
+    finally
+    {
+      releaseRunning.TrySetResult(Result("a", ExecutionOutcome.Succeeded));
+    }
+  }
+
+  [Fact]
   public async Task ExecuteAsync_AlreadyCancelledReportsTerminalTransitionsBeforeReturning()
   {
     using var cancellation = new CancellationTokenSource();
@@ -490,7 +526,7 @@ public sealed class ResourceSchedulerTests
   }
 
   [Fact]
-  public async Task ExecuteAsync_DelegateCancellationCancelsResourceAndBlocksDependent()
+  public async Task ExecuteAsync_UnsolicitedDelegateCancellationFailsResourceAndBlocksDependent()
   {
     var result = await _scheduler.ExecuteAsync(
         ChainPlan("a", "b"),
@@ -502,8 +538,8 @@ public sealed class ResourceSchedulerTests
         CancellationToken.None);
 
     Assert.Equal(ExecutionState.Completed, result.Results["a"].State);
-    Assert.Equal(ExecutionOutcome.Cancelled, result.Results["a"].Outcome);
-    Assert.Equal(WdemErrorCode.CancellationError, result.Results["a"].Error?.Code);
+    Assert.Equal(ExecutionOutcome.Failed, result.Results["a"].Outcome);
+    Assert.Equal(WdemErrorCode.ProviderError, result.Results["a"].Error?.Code);
     Assert.NotNull(result.Results["a"].StartedAtUtc);
     Assert.Equal(ExecutionState.Blocked, result.Results["b"].State);
     Assert.Equal(ExecutionOutcome.Skipped, result.Results["b"].Outcome);

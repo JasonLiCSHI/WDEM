@@ -86,10 +86,11 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
         timeProvider: null,
         sink,
         redactor);
+    var output = new StringWriter();
     var handler = new WdemCommandHandler(
         service,
         store,
-        new StringWriter(),
+        output,
         new StringWriter(),
         redactor,
         sink);
@@ -102,12 +103,24 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
         CancellationToken.None);
 
     var run = Assert.Single(await store.ListAsync(CancellationToken.None));
+    var log = await store.ReadLogPageAsync(run.RunId, 0, 1000, CancellationToken.None);
+    var completedEntry = Assert.Single(log, entry => entry.Kind == RunEventKind.Completed);
+    var completedEvent = Assert.Single(
+        output.ToString()
+            .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => JsonSerializer.Deserialize<RunEvent>(line, JsonOptions)!),
+        runEvent => runEvent.Kind == RunEventKind.Completed);
     Assert.Equal(3, exitCode);
-    Assert.Equal(ExecutionOutcome.Succeeded, run.Outcome);
+    Assert.Equal(ExecutionState.Completed, run.State);
+    Assert.Equal(ExecutionOutcome.Failed, run.Outcome);
     Assert.Equal(ExecutionOutcome.Skipped, run.ResourceResults["git"].Outcome);
     Assert.Equal(
         WdemErrorCode.DetectionError,
         Assert.Single(run.Plan!.Errors).Code);
+    Assert.Equal("Failed", completedEntry.Message);
+    Assert.Equal(ProviderLogLevel.Error, completedEntry.Level);
+    Assert.Equal("Failed", completedEvent.Message);
+    Assert.Equal(1, completedEvent.Progress);
     Assert.Equal(0, provider.ApplyCalls);
   }
 
@@ -292,6 +305,19 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
 
     var exitCode = await handler.ResumeAsync(prior.RunId, json, CancellationToken.None);
 
+    var secondOutput = new StringWriter();
+    var secondHandler = new WdemCommandHandler(
+        service,
+        store,
+        secondOutput,
+        new StringWriter(),
+        redactor,
+        sink);
+    var secondExitCode = await secondHandler.ResumeAsync(
+        prior.RunId,
+        json,
+        CancellationToken.None);
+
     var historyAfter = await store.ReadLogPageAsync(
         replacement.RunId,
         0,
@@ -301,9 +327,11 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
         Environment.NewLine,
         StringSplitOptions.RemoveEmptyEntries);
     Assert.Equal(0, exitCode);
+    Assert.Equal(0, secondExitCode);
     Assert.Equal(1, provider.ApplyCalls);
     Assert.Equal(historyBefore, historyAfter);
     Assert.Equal(historyBefore.Count, lines.Length);
+    Assert.Equal(output.ToString(), secondOutput.ToString());
     Assert.DoesNotContain(secret, output.ToString(), StringComparison.Ordinal);
     if (json)
     {
@@ -328,6 +356,189 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
           line.Contains(nameof(RunEventKind.StepProgress), StringComparison.Ordinal));
       Assert.Contains(nameof(RunEventKind.Completed), lines[^1], StringComparison.Ordinal);
     }
+  }
+
+  [Fact]
+  public async Task ResumeAsync_UnrelatedPublishedEventDoesNotSuppressPersistedReplay()
+  {
+    var redactor = new LogRedactor();
+    var sink = new RunEventHub();
+    var store = new JsonExecutionRunStore(new WdemDataPaths(_directory), redactor);
+    var run = InterruptedRun();
+    await store.CreateAsync(run, CancellationToken.None);
+    await store.AppendLogAsync(
+        run.RunId,
+        new RunLogEntry(
+            1,
+            DateTimeOffset.UtcNow,
+            ProviderLogLevel.Info,
+            "git",
+            null,
+            "persisted resume event",
+            Kind: RunEventKind.RunStateChanged),
+        CancellationToken.None);
+    var unrelatedRunId = Guid.NewGuid();
+    var service = new UnrelatedPublishingRecoveryService(run, unrelatedRunId, sink);
+    var output = new StringWriter();
+    var handler = new WdemCommandHandler(
+        service,
+        store,
+        output,
+        new StringWriter(),
+        redactor,
+        sink);
+
+    await handler.ResumeAsync(run.RunId, json: true, CancellationToken.None);
+
+    var events = output.ToString()
+        .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+        .Select(line => JsonSerializer.Deserialize<RunEvent>(line, JsonOptions)!)
+        .ToArray();
+    Assert.Contains(events, runEvent => runEvent.RunId == unrelatedRunId);
+    Assert.Contains(events, runEvent =>
+        runEvent.RunId == run.RunId && runEvent.Message == "persisted resume event");
+  }
+
+  [Fact]
+  public async Task ResumeAsync_OutputFailureAfterSuccessfulRecoveryCanBeRetriedWithoutApplyingAgain()
+  {
+    const string secret = "resume-output-failure-secret";
+    var provider = new SuccessfulProvider(secret);
+    var profile = Profile() with
+    {
+      Resources = new Dictionary<string, ResourceDefinition>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = Profile().Resources["git"] with
+        {
+          Provider = provider.ProviderName,
+          Parameters = new Dictionary<string, string?> { ["access_token"] = secret }
+        }
+      }
+    };
+    var registry = new ResourceProviderRegistry([provider]);
+    var compliance = new ComplianceEvaluator();
+    var redactor = new LogRedactor();
+    var sink = new RunEventHub();
+    var store = new JsonExecutionRunStore(new WdemDataPaths(_directory), redactor);
+    var service = new EnvironmentRunService(
+        new FixedProfileCatalog(profile),
+        new ResourceGraphBuilder(),
+        registry,
+        compliance,
+        new ExecutionPlanner(registry, compliance),
+        new ResourceScheduler(),
+        store,
+        new DirectResourceApplyDispatcher(),
+        timeProvider: null,
+        sink,
+        redactor);
+    var prior = InterruptedRun();
+    await store.CreateAsync(prior, CancellationToken.None);
+    var failingHandler = new WdemCommandHandler(
+        service,
+        store,
+        new ThrowOnCompletedEventTextWriter(),
+        new StringWriter(),
+        redactor,
+        sink);
+
+    var failedExitCode = await failingHandler.ResumeAsync(
+        prior.RunId,
+        json: true,
+        CancellationToken.None);
+
+    var replacement = Assert.Single(
+        await store.ListAsync(CancellationToken.None),
+        run => run.RetriedFromRunId == prior.RunId);
+    var historyBeforeRetry = await store.ReadLogPageAsync(
+        replacement.RunId,
+        0,
+        1000,
+        CancellationToken.None);
+    var retryOutput = new StringWriter();
+    var retryHandler = new WdemCommandHandler(
+        service,
+        store,
+        retryOutput,
+        new StringWriter(),
+        redactor,
+        sink);
+
+    var retryExitCode = await retryHandler.ResumeAsync(
+        prior.RunId,
+        json: true,
+        CancellationToken.None);
+
+    var historyAfterRetry = await store.ReadLogPageAsync(
+        replacement.RunId,
+        0,
+        1000,
+        CancellationToken.None);
+    var retriedPrior = await store.GetAsync(prior.RunId, CancellationToken.None);
+    Assert.Equal(1, failedExitCode);
+    Assert.Equal(0, retryExitCode);
+    Assert.Equal(1, provider.ApplyCalls);
+    Assert.Equal(ExecutionState.Completed, replacement.State);
+    Assert.Equal(ExecutionOutcome.Succeeded, replacement.Outcome);
+    Assert.Equal(ExecutionState.Completed, retriedPrior!.State);
+    Assert.Equal(historyBeforeRetry, historyAfterRetry);
+    Assert.DoesNotContain(secret, retryOutput.ToString(), StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_InternalProgressDrainTimeoutReturnsExecutionFailureNotCancellation()
+  {
+    var provider = new SuccessfulProvider("progress-timeout-secret");
+    var profile = Profile() with
+    {
+      Resources = new Dictionary<string, ResourceDefinition>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = Profile().Resources["git"] with { Provider = provider.ProviderName }
+      }
+    };
+    var registry = new ResourceProviderRegistry([provider]);
+    var compliance = new ComplianceEvaluator();
+    var redactor = new LogRedactor();
+    var sink = new RunEventHub();
+    using var blockedProgress = sink.SubscribeRequired((runEvent, cancellationToken) =>
+        runEvent.Kind == RunEventKind.StepProgress
+            ? Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
+            : Task.CompletedTask);
+    var store = new JsonExecutionRunStore(new WdemDataPaths(_directory), redactor);
+    var service = new EnvironmentRunService(
+        new FixedProfileCatalog(profile),
+        new ResourceGraphBuilder(),
+        registry,
+        compliance,
+        new ExecutionPlanner(registry, compliance),
+        new ResourceScheduler(),
+        store,
+        new DirectResourceApplyDispatcher(),
+        timeProvider: null,
+        sink,
+        redactor,
+        TimeSpan.FromMilliseconds(500));
+    var output = new StringWriter();
+    var handler = new WdemCommandHandler(
+        service,
+        store,
+        output,
+        new StringWriter(),
+        redactor,
+        sink);
+
+    var exitCode = await handler.ApplyAsync(
+        new RunRequest(
+            Path.GetFullPath("developer.yaml"),
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)),
+        json: true,
+        CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+
+    var run = Assert.Single(await store.ListAsync(CancellationToken.None));
+    Assert.Equal(3, exitCode);
+    Assert.Equal(ExecutionOutcome.Failed, run.Outcome);
+    Assert.Equal(ExecutionOutcome.Failed, run.ResourceResults["git"].Outcome);
+    Assert.NotEqual(WdemErrorCode.CancellationError, run.ResourceResults["git"].Error?.Code);
   }
 
   public void Dispose()
@@ -562,5 +773,65 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
             Exists = true
           }
         });
+  }
+
+  private sealed class ThrowOnCompletedEventTextWriter : StringWriter
+  {
+    public override Task WriteLineAsync(string? value) =>
+        value?.Contains("\"kind\":\"completed\"", StringComparison.Ordinal) == true
+            ? Task.FromException(new IOException("completed event output failed"))
+            : base.WriteLineAsync(value);
+
+    public override Task WriteLineAsync(
+        ReadOnlyMemory<char> buffer,
+        CancellationToken cancellationToken = default) =>
+        buffer.Span.Contains("\"kind\":\"completed\"", StringComparison.Ordinal)
+            ? Task.FromException(new IOException("completed event output failed"))
+            : base.WriteLineAsync(buffer, cancellationToken);
+  }
+
+  private sealed class UnrelatedPublishingRecoveryService(
+      ExecutionRun run,
+      Guid unrelatedRunId,
+      IRunEventSink sink) : IEnvironmentRunService
+  {
+    public Task<ExecutionRun> InspectAsync(
+        RunRequest request,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+
+    public Task<ExecutionRun> ApplyAsync(
+        RunRequest request,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+
+    public Task<ExecutionRun> RetryAsync(
+        Guid priorRunId,
+        IReadOnlySet<string> resourceIds,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+
+    public Task<IReadOnlyList<RecoveryCandidate>> FindRecoveryCandidatesAsync(
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+
+    public async Task<ExecutionRun> RecoverAsync(
+        Guid priorRunId,
+        CancellationToken cancellationToken)
+    {
+      await sink.PublishAsync(
+          new RunEvent(
+              unrelatedRunId,
+              1,
+              DateTimeOffset.UtcNow,
+              RunEventKind.Log,
+              null,
+              null,
+              null,
+              "unrelated event",
+              null),
+          cancellationToken);
+      return run;
+    }
+
+    public Task AbandonAsync(
+        Guid priorRunId,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
   }
 }

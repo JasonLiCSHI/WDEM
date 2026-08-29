@@ -1131,6 +1131,7 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
   private static void ValidateLogEntryForPersistence(RunLogEntry entry)
   {
     ValidateEnum(entry.Level, "log level");
+    ValidateOptionalEnum(entry.Kind, "run event kind");
     if (entry.Error is not null)
     {
       ValidateStructuredError(entry.Error);

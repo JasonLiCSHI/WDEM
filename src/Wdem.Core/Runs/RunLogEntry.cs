@@ -12,4 +12,31 @@ public sealed record RunLogEntry(
     string Message,
     StructuredError? Error = null,
     RunEventKind? Kind = null,
-    double? Progress = null);
+    double? Progress = null)
+{
+  public static RunLogEntry FromEvent(RunEvent runEvent, ProviderLogLevel level)
+  {
+    ArgumentNullException.ThrowIfNull(runEvent);
+    return new RunLogEntry(
+        runEvent.Sequence,
+        runEvent.TimestampUtc,
+        level,
+        runEvent.ResourceId,
+        runEvent.StepId,
+        runEvent.Message,
+        runEvent.Error,
+        runEvent.Kind,
+        runEvent.Progress);
+  }
+
+  public RunEvent ToEvent(Guid runId) => new(
+      runId,
+      Sequence,
+      TimestampUtc,
+      Kind ?? RunEventKind.Log,
+      ResourceId,
+      StepId,
+      Progress,
+      Message,
+      Error);
+}

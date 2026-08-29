@@ -20,10 +20,12 @@ The current projects are:
 - `tests\Wdem.Core.Tests`
 - `tests\Wdem.LegacySource.Tests`
 
-Use focused commits and add tests for changes in either library. Configuration
-and state use the WDEM contract: `%LOCALAPPDATA%\WDEM`,
-`WDEM_CONFIG_PATH`, `WDEM_STATE_PATH`, and `.wdem-state.json`. Legacy values
-are migration fallbacks only.
+Use focused commits and add tests for changes in either library. Supported
+hosts accept configuration through the explicit `--profile` option and keep
+state under `%LOCALAPPDATA%\WDEM`; they do not read `WDEM_CONFIG_PATH`,
+`WDEM_STATE_PATH`, or `WINHOME_STATE_PATH` as path overrides. The
+`WINHOME_STATE_PATH` name is retained only inside isolated transition-library
+migration behavior and must not become a supported host setting.
 
 For source attribution and the transition boundary, see
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) and

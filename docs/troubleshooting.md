@@ -9,7 +9,8 @@ dotnet build Wdem.sln -p:EnableWindowsTargeting=true --no-restore
 dotnet test Wdem.sln -p:EnableWindowsTargeting=true --no-build
 ```
 
-Use `%LOCALAPPDATA%\WDEM`, `WDEM_CONFIG_PATH`, and `WDEM_STATE_PATH` for
-development of transition-library behavior. Old `%LOCALAPPDATA%\WinHome`
-state is read once and moved aside; `WINHOME_STATE_PATH` is the only
-deliberate legacy migration input. Neither is a supported WDEM interface.
+Supported WDEM hosts use an explicit `--profile` path and isolated state under
+`%LOCALAPPDATA%\WDEM`. They intentionally ignore `WDEM_CONFIG_PATH`,
+`WDEM_STATE_PATH`, and `WINHOME_STATE_PATH` as environment overrides.
+`WINHOME_STATE_PATH` exists only as an isolated transition-library migration
+input and is not a supported WDEM interface.

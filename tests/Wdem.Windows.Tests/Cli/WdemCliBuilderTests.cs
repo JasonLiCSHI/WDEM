@@ -467,6 +467,96 @@ public sealed class WdemCliBuilderTests
   }
 
   [Fact]
+  public async Task CommandHandler_HangingOutputReturnsUnexpectedHostExitWithinWriteDeadline()
+  {
+    var run = CompletedRun(ExecutionOutcome.Succeeded);
+    var sink = new RunEventHub();
+    var service = new StubEnvironmentRunService
+    {
+      Result = run,
+      EventSink = sink,
+      Events = [Event(run, "Succeeded")]
+    };
+    var output = new BlockingTextWriter();
+    var error = new StringWriter();
+    var handler = new WdemCommandHandler(
+        service,
+        new StubExecutionRunStore(),
+        output,
+        error,
+        new LogRedactor(),
+        sink,
+        TimeSpan.FromMilliseconds(50));
+
+    var exitCode = await handler.ApplyAsync(Request(), json: true, CancellationToken.None)
+        .WaitAsync(TimeSpan.FromSeconds(2));
+    output.FailPendingWrite();
+
+    Assert.Equal(1, exitCode);
+    var failure = Assert.Single(DeserializeEvents(error));
+    Assert.Equal(WdemErrorCode.ProviderError, failure.Error?.Code);
+  }
+
+  [Fact]
+  public async Task CommandHandler_ConcurrentOperationsDoNotShareRequiredOutputSubscriptions()
+  {
+    var firstRun = CompletedRun(ExecutionOutcome.Succeeded);
+    var secondRun = firstRun with
+    {
+      RunId = Guid.Parse("0d294b18-8fc7-4a02-b47c-411b8aaec27b")
+    };
+    var sink = new RunEventHub();
+    using var ready = new CountdownEvent(2);
+    var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var firstService = new CoordinatedEnvironmentRunService(
+        firstRun,
+        sink,
+        Event(firstRun, "first"),
+        ready,
+        start.Task);
+    var secondService = new CoordinatedEnvironmentRunService(
+        secondRun,
+        sink,
+        Event(secondRun, "second"),
+        ready,
+        start.Task);
+    var firstError = new StringWriter();
+    var firstHandler = new WdemCommandHandler(
+        firstService,
+        new StubExecutionRunStore(),
+        new ThrowingTextWriter(),
+        firstError,
+        new LogRedactor(),
+        sink);
+    var secondOutput = new StringWriter();
+    var secondHandler = new WdemCommandHandler(
+        secondService,
+        new StubExecutionRunStore(),
+        secondOutput,
+        new StringWriter(),
+        new LogRedactor(),
+        sink);
+    var first = Task.Run(() => firstHandler.ApplyAsync(
+        Request(),
+        json: true,
+        CancellationToken.None));
+    var second = Task.Run(() => secondHandler.ApplyAsync(
+        Request(),
+        json: true,
+        CancellationToken.None));
+    Assert.True(ready.Wait(TimeSpan.FromSeconds(5)));
+
+    start.SetResult();
+
+    Assert.Equal(1, await first.WaitAsync(TimeSpan.FromSeconds(5)));
+    Assert.Equal(0, await second.WaitAsync(TimeSpan.FromSeconds(5)));
+    var observed = Assert.Single(DeserializeEvents(secondOutput));
+    Assert.Equal(secondRun.RunId, observed.RunId);
+    Assert.Equal("second", observed.Message);
+    Assert.Single(DeserializeEvents(firstError));
+  }
+
+  [Fact]
   public async Task CommandHandler_CommandsCallMatchingRunOperations()
   {
     var run = CompletedRun(ExecutionOutcome.Succeeded);
@@ -917,6 +1007,17 @@ public sealed class WdemCliBuilderTests
           .OfType<RunEvent>()
           .ToArray();
 
+  private static RunEvent Event(ExecutionRun run, string message) => new(
+      run.RunId,
+      1,
+      run.EndedAtUtc!.Value,
+      RunEventKind.Completed,
+      null,
+      null,
+      1,
+      message,
+      null);
+
   private static RunRequest Request() => new(
       Path.GetFullPath("developer.yaml"),
       new HashSet<string>(StringComparer.OrdinalIgnoreCase));
@@ -1088,6 +1189,45 @@ public sealed class WdemCliBuilderTests
     }
   }
 
+  private sealed class CoordinatedEnvironmentRunService(
+      ExecutionRun result,
+      IRunEventSink eventSink,
+      RunEvent runEvent,
+      CountdownEvent ready,
+      Task start) : IEnvironmentRunService
+  {
+    public Task<ExecutionRun> InspectAsync(
+        RunRequest request,
+        CancellationToken cancellationToken) => ApplyAsync(request, cancellationToken);
+
+    public async Task<ExecutionRun> ApplyAsync(
+        RunRequest request,
+        CancellationToken cancellationToken)
+    {
+      ready.Signal();
+      await start.WaitAsync(cancellationToken);
+      await eventSink.PublishAsync(runEvent, cancellationToken);
+      return result;
+    }
+
+    public Task<ExecutionRun> RetryAsync(
+        Guid priorRunId,
+        IReadOnlySet<string> resourceIds,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+
+    public Task<IReadOnlyList<RecoveryCandidate>> FindRecoveryCandidatesAsync(
+        CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<RecoveryCandidate>>([]);
+
+    public Task<ExecutionRun> RecoverAsync(
+        Guid priorRunId,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+
+    public Task AbandonAsync(
+        Guid priorRunId,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+  }
+
   private sealed class StubExecutionRunStore : IExecutionRunStore
   {
     public IReadOnlyList<StructuredError> Diagnostics => StoreDiagnostics;
@@ -1147,5 +1287,25 @@ public sealed class WdemCliBuilderTests
 
     public override Task WriteLineAsync(string? value) =>
         Task.FromException(new IOException("output failed"));
+
+    public override Task WriteLineAsync(
+        ReadOnlyMemory<char> buffer,
+        CancellationToken cancellationToken = default) =>
+        Task.FromException(new IOException("output failed"));
+  }
+
+  private sealed class BlockingTextWriter : TextWriter
+  {
+    private readonly TaskCompletionSource _pending = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public override Encoding Encoding => Encoding.UTF8;
+
+    public override Task WriteLineAsync(
+        ReadOnlyMemory<char> buffer,
+        CancellationToken cancellationToken = default) => _pending.Task;
+
+    public void FailPendingWrite() =>
+        _pending.TrySetException(new IOException("late output failure"));
   }
 }

@@ -796,21 +796,25 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Theory]
-  [InlineData(false)]
-  [InlineData(true)]
-  public async Task AppendLogAsync_RejectsUndefinedEnumsBeforeWriting(bool invalidErrorCode)
+  [InlineData("level")]
+  [InlineData("error")]
+  [InlineData("kind")]
+  public async Task AppendLogAsync_RejectsUndefinedEnumsBeforeWriting(string invalidField)
   {
     var run = SampleRun();
     await _store.CreateAsync(run, CancellationToken.None);
-    var entry = invalidErrorCode
-        ? SampleLog(1) with
-        {
-          Error = new StructuredError(
+    var entry = invalidField switch
+    {
+      "error" => SampleLog(1) with
+      {
+        Error = new StructuredError(
               (WdemErrorCode)999,
               "Invalid code",
               "Invalid code")
-        }
-        : SampleLog(1) with { Level = (ProviderLogLevel)999 };
+      },
+      "kind" => SampleLog(1) with { Kind = (RunEventKind)999 },
+      _ => SampleLog(1) with { Level = (ProviderLogLevel)999 }
+    };
 
     await Assert.ThrowsAsync<ArgumentException>(() =>
         _store.AppendLogAsync(run.RunId, entry, CancellationToken.None));

@@ -160,6 +160,61 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
   }
 
   [Fact]
+  public async Task ApplyAsync_CoalescesBurstProgressAndPreservesTerminalUpdate()
+  {
+    var persistenceEntered = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var releasePersistence = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var allProgressReported = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var progress = Enumerable.Range(0, 100)
+        .Select(index => new ProviderProgress(
+            "install",
+            index / 200d,
+            $"flood-{index}",
+            "install"))
+        .Append(new ProviderProgress("install", 1, "flood-terminal", "install"))
+        .Append(new ProviderProgress("install", 0.5, "flood-regression", "install"))
+        .ToArray();
+    var provider = new GatedProvider
+    {
+      WaitForRelease = false,
+      ProgressEvents = progress,
+      AfterProgress = allProgressReported.SetResult
+    };
+    var store = CreateStore();
+    var sink = new RunEventHub();
+    using var subscription = sink.SubscribeRequired(async (runEvent, cancellationToken) =>
+    {
+      if (runEvent.Kind == RunEventKind.StepProgress &&
+          runEvent.Message.StartsWith("flood-", StringComparison.Ordinal) &&
+          !persistenceEntered.Task.IsCompleted)
+      {
+        persistenceEntered.SetResult();
+        await releasePersistence.Task.WaitAsync(cancellationToken);
+      }
+    });
+    var service = CreateService(provider, store, eventSink: sink);
+    var execution = service.ApplyAsync(Request(), CancellationToken.None);
+
+    await persistenceEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await allProgressReported.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    releasePersistence.SetResult();
+    var run = await execution.WaitAsync(TimeSpan.FromSeconds(15));
+
+    var log = await store.ReadLogPageAsync(run.RunId, 0, 1000, CancellationToken.None);
+    var persistedProgress = log
+        .Where(entry => entry.Kind == RunEventKind.StepProgress &&
+            entry.Message.StartsWith("flood-", StringComparison.Ordinal))
+        .ToArray();
+    Assert.InRange(persistedProgress.Length, 2, 34);
+    Assert.Equal("flood-terminal", persistedProgress[^1].Message);
+    Assert.Equal(1, persistedProgress[^1].Progress);
+    Assert.Equal(ExecutionOutcome.Succeeded, run.Outcome);
+  }
+
+  [Fact]
   public async Task RecoverAsync_ConcurrentJsonStoresOnlyOneExecutesReplacement()
   {
     var provider = new GatedProvider();

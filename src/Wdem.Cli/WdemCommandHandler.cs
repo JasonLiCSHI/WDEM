@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using Wdem.Core.Execution;
 using Wdem.Core.Runs;
@@ -8,12 +9,14 @@ namespace Wdem.Cli;
 
 public sealed class WdemCommandHandler : IWdemCommandHandler
 {
+  private static readonly TimeSpan DefaultWriteTimeout = TimeSpan.FromSeconds(1);
   private readonly IEnvironmentRunService _environmentRuns;
   private readonly IExecutionRunStore _runStore;
   private readonly TextWriter _output;
   private readonly TextWriter _error;
   private readonly LogRedactor _redactor;
   private readonly IRunEventSink _eventSink;
+  private readonly TimeSpan _writeTimeout;
 
   public WdemCommandHandler(
       IEnvironmentRunService environmentRuns,
@@ -21,7 +24,8 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
       TextWriter? output,
       TextWriter? error,
       LogRedactor redactor,
-      IRunEventSink eventSink)
+      IRunEventSink eventSink,
+      TimeSpan? writeTimeout = null)
   {
     _environmentRuns = environmentRuns ?? throw new ArgumentNullException(nameof(environmentRuns));
     _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
@@ -29,6 +33,11 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
     _error = error ?? Console.Error;
     _redactor = redactor ?? throw new ArgumentNullException(nameof(redactor));
     _eventSink = eventSink ?? throw new ArgumentNullException(nameof(eventSink));
+    _writeTimeout = writeTimeout ?? DefaultWriteTimeout;
+    if (_writeTimeout <= TimeSpan.Zero)
+    {
+      throw new ArgumentOutOfRangeException(nameof(writeTimeout));
+    }
   }
 
   public static async Task<WdemCommandHandler> CreateAsync(
@@ -109,7 +118,7 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
             null,
             null,
             $"{run.Mode} {run.State} {run.Outcome} {run.ProfileId}",
-            null), json).ConfigureAwait(false);
+            null), json, cancellationToken: cancellationToken).ConfigureAwait(false);
       }
 
       var diagnostics = _runStore.Diagnostics;
@@ -125,19 +134,19 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
             diagnostic.StepId,
             null,
             diagnostic.Summary,
-            diagnostic), json).ConfigureAwait(false);
+            diagnostic), json, cancellationToken: cancellationToken).ConfigureAwait(false);
       }
 
       return DiagnosticsExitCode(diagnostics);
     }
     catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
     {
-      await WriteExceptionAsync(exception, json, cancelled: true).ConfigureAwait(false);
+      await TryWriteExceptionAsync(exception, json, cancelled: true).ConfigureAwait(false);
       return 130;
     }
     catch (Exception exception)
     {
-      await WriteExceptionAsync(exception, json, cancelled: false).ConfigureAwait(false);
+      await TryWriteExceptionAsync(exception, json, cancelled: false).ConfigureAwait(false);
       return 1;
     }
   }
@@ -150,15 +159,18 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
   {
     try
     {
-      var observedEventCount = 0;
-      using var subscription = _eventSink.SubscribeRequired(
-          async (runEvent, _) =>
+      var observedRunIds = new ConcurrentDictionary<Guid, byte>();
+      using var subscription = _eventSink.SubscribeRequiredScoped(
+          async (runEvent, observerCancellationToken) =>
           {
-            await WriteEventAsync(runEvent, json).ConfigureAwait(false);
-            Interlocked.Increment(ref observedEventCount);
+            await WriteEventAsync(
+                runEvent,
+                json,
+                cancellationToken: observerCancellationToken).ConfigureAwait(false);
+            observedRunIds.TryAdd(runEvent.RunId, 0);
           });
       var run = await operation().ConfigureAwait(false);
-      if (replayPersistedEventsWhenSilent && Volatile.Read(ref observedEventCount) == 0)
+      if (replayPersistedEventsWhenSilent && !observedRunIds.ContainsKey(run.RunId))
       {
         await ReplayPersistedEventsAsync(run.RunId, json, cancellationToken)
             .ConfigureAwait(false);
@@ -168,12 +180,12 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
     }
     catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
     {
-      await WriteExceptionAsync(exception, json, cancelled: true).ConfigureAwait(false);
+      await TryWriteExceptionAsync(exception, json, cancelled: true).ConfigureAwait(false);
       return 130;
     }
     catch (Exception exception)
     {
-      await WriteExceptionAsync(exception, json, cancelled: false).ConfigureAwait(false);
+      await TryWriteExceptionAsync(exception, json, cancelled: false).ConfigureAwait(false);
       return 1;
     }
   }
@@ -204,16 +216,10 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
           throw new InvalidDataException("Persisted run events are not in sequence order.");
         }
 
-        await WriteEventAsync(new RunEvent(
-            runId,
-            entry.Sequence,
-            entry.TimestampUtc,
-            entry.Kind ?? RunEventKind.Log,
-            entry.ResourceId,
-            entry.StepId,
-            entry.Progress,
-            entry.Message,
-            entry.Error), json).ConfigureAwait(false);
+        await WriteEventAsync(
+            entry.ToEvent(runId),
+            json,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
         afterSequence = entry.Sequence;
       }
 
@@ -227,12 +233,17 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
   private Task WriteEventAsync(
       RunEvent runEvent,
       bool json,
-      TextWriter? writer = null)
+      TextWriter? writer = null,
+      CancellationToken cancellationToken = default)
   {
     var redacted = _redactor.Redact(runEvent);
-    return (writer ?? _output).WriteLineAsync(json
-        ? JsonSerializer.Serialize(redacted, WdemJson.Options)
-        : FormatEvent(redacted));
+    return WriteLineWithDeadlineAsync(
+        writer ?? _output,
+        json
+            ? JsonSerializer.Serialize(redacted, WdemJson.Options)
+            : FormatEvent(redacted),
+        cancellationToken,
+        _writeTimeout);
   }
 
   private Task WriteExceptionAsync(
@@ -245,13 +256,35 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
           _error,
           _redactor);
 
+  private async Task TryWriteExceptionAsync(
+      Exception exception,
+      bool json,
+      bool cancelled)
+  {
+    try
+    {
+      await WriteExceptionEventAsync(
+          exception,
+          json,
+          cancelled,
+          _error,
+          _redactor,
+          writeTimeout: _writeTimeout).ConfigureAwait(false);
+    }
+    catch (Exception)
+    {
+      // Failure reporting must not prevent a bounded command exit.
+    }
+  }
+
   internal static Task WriteExceptionEventAsync(
       Exception exception,
       bool json,
       bool cancelled,
       TextWriter writer,
       LogRedactor? redactor = null,
-      WdemErrorCode? errorCode = null)
+      WdemErrorCode? errorCode = null,
+      TimeSpan? writeTimeout = null)
   {
     ArgumentNullException.ThrowIfNull(exception);
     ArgumentNullException.ThrowIfNull(writer);
@@ -273,10 +306,42 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
         null,
         exception.Message,
         error));
-    return writer.WriteLineAsync(json
-        ? JsonSerializer.Serialize(runEvent, WdemJson.Options)
-        : FormatEvent(runEvent));
+    return WriteLineWithDeadlineAsync(
+        writer,
+        json
+            ? JsonSerializer.Serialize(runEvent, WdemJson.Options)
+            : FormatEvent(runEvent),
+        CancellationToken.None,
+        writeTimeout ?? DefaultWriteTimeout);
   }
+
+  private static async Task WriteLineWithDeadlineAsync(
+      TextWriter writer,
+      string value,
+      CancellationToken cancellationToken,
+      TimeSpan timeout)
+  {
+    var pendingWrite = writer.WriteLineAsync(value.AsMemory(), cancellationToken);
+    try
+    {
+      await pendingWrite.WaitAsync(timeout, cancellationToken).ConfigureAwait(false);
+    }
+    catch
+    {
+      if (!pendingWrite.IsCompleted)
+      {
+        ObserveFault(pendingWrite);
+      }
+
+      throw;
+    }
+  }
+
+  private static void ObserveFault(Task task) => _ = task.ContinueWith(
+      static completed => _ = completed.Exception,
+      CancellationToken.None,
+      TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+      TaskScheduler.Default);
 
   private static string FormatEvent(RunEvent runEvent)
   {

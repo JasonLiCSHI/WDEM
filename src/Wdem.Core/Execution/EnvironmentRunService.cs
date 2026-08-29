@@ -14,7 +14,7 @@ namespace Wdem.Core.Execution;
 public sealed class EnvironmentRunService : IEnvironmentRunService
 {
   private static readonly StringComparer IdComparer = StringComparer.OrdinalIgnoreCase;
-  private static readonly TimeSpan PersistenceTimeout = TimeSpan.FromSeconds(10);
+  private static readonly TimeSpan DefaultPersistenceTimeout = TimeSpan.FromSeconds(10);
   private readonly IProfileCatalog _profiles;
   private readonly ResourceGraphBuilder _graphBuilder;
   private readonly IResourceProviderRegistry _providers;
@@ -26,6 +26,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
   private readonly TimeProvider _timeProvider;
   private readonly IRunEventSink _eventSink;
   private readonly LogRedactor _redactor;
+  private readonly TimeSpan _persistenceTimeout;
 
   public EnvironmentRunService(
       IProfileCatalog profiles,
@@ -38,7 +39,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       IResourceApplyDispatcher dispatcher,
       TimeProvider? timeProvider,
       IRunEventSink eventSink,
-      LogRedactor redactor)
+      LogRedactor redactor,
+      TimeSpan? persistenceTimeout = null)
   {
     _profiles = profiles ?? throw new ArgumentNullException(nameof(profiles));
     _graphBuilder = graphBuilder ?? throw new ArgumentNullException(nameof(graphBuilder));
@@ -52,6 +54,11 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     _timeProvider = timeProvider ?? TimeProvider.System;
     _eventSink = eventSink ?? throw new ArgumentNullException(nameof(eventSink));
     _redactor = redactor ?? throw new ArgumentNullException(nameof(redactor));
+    _persistenceTimeout = persistenceTimeout ?? DefaultPersistenceTimeout;
+    if (_persistenceTimeout <= TimeSpan.Zero)
+    {
+      throw new ArgumentOutOfRangeException(nameof(persistenceTimeout));
+    }
   }
 
   public Task<ExecutionRun> InspectAsync(
@@ -177,6 +184,14 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     var now = _timeProvider.GetUtcNow();
     if (!IsRecoverableState(prior))
     {
+      var associatedReplacement = await FindSuccessfulRecoveryReplacementAsync(
+          prior.RunId,
+          cancellationToken).ConfigureAwait(false);
+      if (associatedReplacement is not null)
+      {
+        return associatedReplacement;
+      }
+
       throw new InvalidOperationException(
           $"Execution run '{priorRunId:D}' is not eligible for recovery.");
     }
@@ -210,10 +225,13 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     ExecutionRun recovered;
     try
     {
-      recovered = await FindSuccessfulRecoveryReplacementAsync(
-          claimed.RunId,
-          remaining,
-          cancellationToken).ConfigureAwait(false) ??
+      var associatedReplacement = await FindSuccessfulRecoveryReplacementAsync(
+          prior.RunId,
+          cancellationToken).ConfigureAwait(false);
+      recovered = associatedReplacement is not null &&
+          remaining.All(associatedReplacement.ResourceResults.ContainsKey)
+          ? associatedReplacement
+          :
           await ExecuteFreshAsync(
               request,
               RunMode.Apply,
@@ -457,10 +475,14 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
 
     if (mode == RunMode.Inspect)
     {
+      var outcome = plan.Errors.Any(error =>
+          error.Code is WdemErrorCode.DetectionError or WdemErrorCode.ProviderError)
+          ? ExecutionOutcome.Failed
+          : ExecutionOutcome.Succeeded;
       var completed = run with
       {
         State = ExecutionState.Completed,
-        Outcome = ExecutionOutcome.Succeeded,
+        Outcome = outcome,
         EndedAtUtc = DateTimeOffset.UtcNow
       };
       return await PersistTerminalAsync(completed, events).ConfigureAwait(false);
@@ -471,7 +493,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       return await CompleteUnexecutableAsync(run, events, cancellationToken).ConfigureAwait(false);
     }
 
-    var transitions = new RunTransitions(_runStore, events, run);
+    var transitions = new RunTransitions(_runStore, events, run, _persistenceTimeout);
     await transitions.SetRunningAsync(cancellationToken).ConfigureAwait(false);
     var scheduled = await _scheduler.ExecuteAsync(
         plan,
@@ -527,15 +549,11 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     var startedAt = DateTimeOffset.UtcNow;
     var provider = _providers.GetRequired(definition.Type, definition.Provider);
     ResourceApplyResult applied;
-    var progressChannel = Channel.CreateUnbounded<ProviderProgress>(new UnboundedChannelOptions
-    {
-      SingleReader = true,
-      SingleWriter = false,
-      AllowSynchronousContinuations = false
-    });
+    var progressBuffer = new ProviderProgressBuffer(
+        planned.ResourcePlan.Steps.Select(step => step.Id));
     using var progressPersistence = new CancellationTokenSource();
     var progressPump = PumpProgressAsync(
-        progressChannel.Reader,
+        progressBuffer,
         events,
         id,
         progressPersistence.Token);
@@ -545,13 +563,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           provider,
           definition,
           planned.ResourcePlan,
-          new InlineProgress<ProviderProgress>(progressEvent =>
-          {
-            if (!progressChannel.Writer.TryWrite(progressEvent))
-            {
-              throw new InvalidOperationException("Provider progress could not be queued.");
-            }
-          }),
+          new InlineProgress<ProviderProgress>(progressBuffer.Report),
           cancellationToken).ConfigureAwait(false);
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -564,17 +576,30 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     }
     finally
     {
-      progressChannel.Writer.TryComplete();
-      progressPersistence.CancelAfter(PersistenceTimeout);
+      progressBuffer.Complete();
+      progressPersistence.CancelAfter(_persistenceTimeout);
       try
       {
-        await progressPump.ConfigureAwait(false);
+        await progressPump.WaitAsync(_persistenceTimeout).ConfigureAwait(false);
       }
       catch (OperationCanceledException) when (
-          cancellationToken.IsCancellationRequested &&
           progressPersistence.IsCancellationRequested)
       {
-        // Preserve caller cancellation if bounded progress draining times out.
+        if (!cancellationToken.IsCancellationRequested)
+        {
+          throw new TimeoutException("Timed out while persisting provider progress.");
+        }
+      }
+      catch (TimeoutException exception)
+      {
+        ObserveFault(progressPersistence.CancelAsync());
+        ObserveFault(progressPump);
+        if (!cancellationToken.IsCancellationRequested)
+        {
+          throw new TimeoutException(
+              "Timed out while persisting provider progress.",
+              exception);
+        }
       }
     }
 
@@ -821,7 +846,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       ExecutionRun run,
       RunEventPublisher events)
   {
-    using var timeout = new CancellationTokenSource(PersistenceTimeout);
+    using var timeout = new CancellationTokenSource(_persistenceTimeout);
     var saved = await _runStore.SaveAsync(run, timeout.Token).ConfigureAwait(false);
     await events.PublishCompletedAsync(saved, timeout.Token).ConfigureAwait(false);
     return saved;
@@ -1028,7 +1053,6 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
 
   private async Task<ExecutionRun?> FindSuccessfulRecoveryReplacementAsync(
       Guid priorRunId,
-      IReadOnlySet<string> resourceIds,
       CancellationToken cancellationToken)
   {
     var runs = await _runStore.ListAsync(cancellationToken).ConfigureAwait(false);
@@ -1036,8 +1060,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         .Where(run => run.RetriedFromRunId == priorRunId &&
             run.Mode == RunMode.Apply &&
             run.State == ExecutionState.Completed &&
-            run.Outcome == ExecutionOutcome.Succeeded &&
-            resourceIds.All(run.ResourceResults.ContainsKey))
+            run.Outcome == ExecutionOutcome.Succeeded)
         .OrderBy(run => run.StartedAtUtc)
         .ThenBy(run => run.RunId)
         .FirstOrDefault();
@@ -1062,7 +1085,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       long expectedRevision,
       Guid? expectedRecoveryClaimId)
   {
-    using var timeout = new CancellationTokenSource(PersistenceTimeout);
+    using var timeout = new CancellationTokenSource(_persistenceTimeout);
     return await _runStore.TrySaveAsync(
         run,
         expectedRevision,
@@ -1213,12 +1236,12 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       Environment.UserName);
 
   private static async Task PumpProgressAsync(
-      ChannelReader<ProviderProgress> reader,
+      ProviderProgressBuffer buffer,
       RunEventPublisher events,
       string resourceId,
       CancellationToken cancellationToken)
   {
-    await foreach (var progress in reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+    await foreach (var progress in buffer.ReadAllAsync(cancellationToken).ConfigureAwait(false))
     {
       await events.PublishStepAsync(
           resourceId,
@@ -1237,9 +1260,125 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     }
   }
 
+  private static void ObserveFault(Task task) => _ = task.ContinueWith(
+      static completed => _ = completed.Exception,
+      CancellationToken.None,
+      TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+      TaskScheduler.Default);
+
   private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
   {
     public void Report(T value) => report(value);
+  }
+
+  private sealed class ProviderProgressBuffer
+  {
+    private const int Capacity = 32;
+    private const string UnknownStep = "\0";
+    private readonly object _gate = new();
+    private readonly Channel<ProviderProgress> _channel = Channel.CreateBounded<ProviderProgress>(
+        new BoundedChannelOptions(Capacity)
+        {
+          SingleReader = true,
+          SingleWriter = false,
+          AllowSynchronousContinuations = false,
+          FullMode = BoundedChannelFullMode.Wait
+        });
+    private readonly HashSet<string> _knownSteps;
+    private readonly Dictionary<string, ProviderProgress> _coalesced = [];
+    private readonly HashSet<string> _terminalSteps = [];
+    private bool _completed;
+
+    public ProviderProgressBuffer(IEnumerable<string> knownSteps)
+    {
+      _knownSteps = knownSteps.ToHashSet(IdComparer);
+    }
+
+    public void Report(ProviderProgress progress)
+    {
+      ArgumentNullException.ThrowIfNull(progress);
+      var key = progress.StepId is not null && _knownSteps.Contains(progress.StepId)
+          ? progress.StepId
+          : UnknownStep;
+      lock (_gate)
+      {
+        if (_completed)
+        {
+          throw new InvalidOperationException("Provider progress was reported after completion.");
+        }
+
+        if (_terminalSteps.Contains(key) && progress.Percent < 1)
+        {
+          return;
+        }
+
+        if (progress.Percent >= 1)
+        {
+          _terminalSteps.Add(key);
+        }
+
+        if (_channel.Writer.TryWrite(progress))
+        {
+          _coalesced.Remove(key);
+        }
+        else
+        {
+          _coalesced[key] = progress;
+        }
+      }
+    }
+
+    public void Complete()
+    {
+      lock (_gate)
+      {
+        if (_completed)
+        {
+          return;
+        }
+
+        _completed = true;
+        _channel.Writer.TryComplete();
+      }
+    }
+
+    public async IAsyncEnumerable<ProviderProgress> ReadAllAsync(
+        [System.Runtime.CompilerServices.EnumeratorCancellation]
+        CancellationToken cancellationToken)
+    {
+      while (await _channel.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+      {
+        while (_channel.Reader.TryRead(out var progress))
+        {
+          yield return progress;
+        }
+
+        foreach (var progress in DrainCoalesced())
+        {
+          yield return progress;
+        }
+      }
+
+      foreach (var progress in DrainCoalesced())
+      {
+        yield return progress;
+      }
+    }
+
+    private IReadOnlyList<ProviderProgress> DrainCoalesced()
+    {
+      lock (_gate)
+      {
+        if (_coalesced.Count == 0)
+        {
+          return [];
+        }
+
+        var progress = _coalesced.Values.ToArray();
+        _coalesced.Clear();
+        return progress;
+      }
+    }
   }
 
   private sealed class RunEventPublisher(
@@ -1364,16 +1503,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
             error));
         await store.AppendLogAsync(
             runId,
-            new RunLogEntry(
-                runEvent.Sequence,
-                runEvent.TimestampUtc,
-                level,
-                runEvent.ResourceId,
-                runEvent.StepId,
-                runEvent.Message,
-                runEvent.Error,
-                runEvent.Kind,
-                runEvent.Progress),
+            RunLogEntry.FromEvent(runEvent, level),
             cancellationToken).ConfigureAwait(false);
         await sink.PublishAsync(runEvent, cancellationToken).ConfigureAwait(false);
       }
@@ -1387,7 +1517,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
   private sealed class RunTransitions(
       IExecutionRunStore store,
       RunEventPublisher events,
-      ExecutionRun initial)
+      ExecutionRun initial,
+      TimeSpan persistenceTimeout)
   {
     private readonly SemaphoreSlim _gate = new(1, 1);
     private ExecutionRun _current = initial;
@@ -1401,7 +1532,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
                 new LogRedactor(),
                 TimeProvider.System,
                 initial.RunId),
-            initial)
+            initial,
+            DefaultPersistenceTimeout)
     {
     }
 
@@ -1452,7 +1584,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
 
     public async Task PersistSchedulerTransitionAsync(ResourceResult result)
     {
-      using var timeout = new CancellationTokenSource(PersistenceTimeout);
+      using var timeout = new CancellationTokenSource(persistenceTimeout);
       await SetResourceAsync(result, timeout.Token).ConfigureAwait(false);
     }
   }

@@ -542,7 +542,7 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
-  public async Task RecoverAsync_SuccessConsumesIncompletePriorAcrossServices()
+  public async Task RecoverAsync_SuccessIsIdempotentAcrossServices()
   {
     var provider = new ScriptedProvider(Satisfied("git", "2.52.1"));
     var sharedRuns = new Dictionary<Guid, ExecutionRun>();
@@ -557,15 +557,17 @@ public sealed class EnvironmentRunServiceTests
     var (secondService, _) = CreateService(provider, store: secondStore);
     var persistedPrior = await secondStore.GetAsync(interrupted.RunId, CancellationToken.None);
     var candidates = await secondService.FindRecoveryCandidatesAsync(CancellationToken.None);
-    var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-        secondService.RecoverAsync(interrupted.RunId, CancellationToken.None));
+    var recoveredAgain = await secondService.RecoverAsync(
+        interrupted.RunId,
+        CancellationToken.None);
     Assert.Equal(ExecutionOutcome.Succeeded, recovered.Outcome);
+    Assert.Equal(recovered.RunId, recoveredAgain.RunId);
+    Assert.Equal(0, provider.ApplyCalls);
     Assert.Equal(ExecutionState.Completed, persistedPrior!.State);
     Assert.Equal(ExecutionOutcome.Cancelled, persistedPrior.Outcome);
     Assert.NotNull(persistedPrior.EndedAtUtc);
     Assert.False(persistedPrior.ResourceResults["git"].DetectedBefore!.Exists);
     Assert.DoesNotContain(candidates, candidate => candidate.RunId == interrupted.RunId);
-    Assert.Contains("not eligible for recovery", error.Message, StringComparison.Ordinal);
   }
 
   [Theory]

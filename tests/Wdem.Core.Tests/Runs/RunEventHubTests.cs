@@ -80,7 +80,7 @@ public sealed class RunEventHubTests
     var releaseFirst = new TaskCompletionSource(
         TaskCreationOptions.RunContinuationsAsynchronously);
     IRunEventSink sink = new RunEventHub();
-    using var subscription = sink.Subscribe(async (runEvent, cancellationToken) =>
+    using var subscription = sink.SubscribeRequired(async (runEvent, cancellationToken) =>
     {
       received.Add(runEvent.Sequence);
       if (runEvent.Sequence == 1)
@@ -99,6 +99,89 @@ public sealed class RunEventHubTests
     releaseFirst.SetResult();
     await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(5));
     Assert.Equal([1L, 2L], received);
+  }
+
+  [Fact]
+  public async Task PublishAsync_ReentrantPublicationDoesNotDeadlock()
+  {
+    var received = new List<long>();
+    IRunEventSink sink = new RunEventHub();
+    using var subscription = sink.SubscribeRequired(async (runEvent, cancellationToken) =>
+    {
+      received.Add(runEvent.Sequence);
+      if (runEvent.Sequence == 1)
+      {
+        await sink.PublishAsync(Event(2), cancellationToken);
+      }
+    });
+
+    await sink.PublishAsync(Event(1), CancellationToken.None)
+        .WaitAsync(TimeSpan.FromSeconds(5));
+
+    await AssertEventuallyAsync(() => received.Count == 2);
+    Assert.Equal([1L, 2L], received);
+  }
+
+  [Fact]
+  public async Task PublishAsync_HangingOptionalObserverDoesNotBlockRequiredDelivery()
+  {
+    var optionalEntered = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var neverCompletes = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var received = new List<long>();
+    IRunEventSink sink = new RunEventHub();
+    using var optional = sink.Subscribe(async (_, cancellationToken) =>
+    {
+      optionalEntered.TrySetResult();
+      await neverCompletes.Task.WaitAsync(cancellationToken);
+    });
+    using var required = sink.SubscribeRequired((runEvent, _) =>
+    {
+      received.Add(runEvent.Sequence);
+      return Task.CompletedTask;
+    });
+
+    await sink.PublishAsync(Event(1), CancellationToken.None)
+        .WaitAsync(TimeSpan.FromSeconds(1));
+    await optionalEntered.Task.WaitAsync(TimeSpan.FromSeconds(1));
+    await sink.PublishAsync(Event(2), CancellationToken.None)
+        .WaitAsync(TimeSpan.FromSeconds(1));
+
+    Assert.Equal([1L, 2L], received);
+  }
+
+  [Fact]
+  public async Task ScopedRequiredSubscriptionsOnlyReceiveTheirOperationPublications()
+  {
+    IRunEventSink sink = new RunEventHub();
+    using var ready = new CountdownEvent(2);
+    var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var firstReceived = new List<long>();
+    var secondReceived = new List<long>();
+    var first = Task.Run(() => PublishInScopeAsync(
+        sink,
+        Event(1),
+        firstReceived,
+        ready,
+        start.Task,
+        throwOnDelivery: true));
+    var second = Task.Run(() => PublishInScopeAsync(
+        sink,
+        Event(2),
+        secondReceived,
+        ready,
+        start.Task,
+        throwOnDelivery: false));
+    Assert.True(ready.Wait(TimeSpan.FromSeconds(5)));
+
+    start.SetResult();
+
+    var error = await Assert.ThrowsAsync<IOException>(() => first);
+    await second.WaitAsync(TimeSpan.FromSeconds(5));
+    Assert.Equal("scoped output failed", error.Message);
+    Assert.Equal([1L], firstReceived);
+    Assert.Equal([2L], secondReceived);
   }
 
   [Fact]
@@ -173,4 +256,33 @@ public sealed class RunEventHubTests
       null,
       $"event-{sequence}",
       null);
+
+  private static async Task PublishInScopeAsync(
+      IRunEventSink sink,
+      RunEvent runEvent,
+      List<long> received,
+      CountdownEvent ready,
+      Task start,
+      bool throwOnDelivery)
+  {
+    using var subscription = sink.SubscribeRequiredScoped((observed, _) =>
+    {
+      received.Add(observed.Sequence);
+      return throwOnDelivery
+          ? Task.FromException(new IOException("scoped output failed"))
+          : Task.CompletedTask;
+    });
+    ready.Signal();
+    await start;
+    await sink.PublishAsync(runEvent, CancellationToken.None);
+  }
+
+  private static async Task AssertEventuallyAsync(Func<bool> condition)
+  {
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    while (!condition())
+    {
+      await Task.Delay(10, timeout.Token);
+    }
+  }
 }
