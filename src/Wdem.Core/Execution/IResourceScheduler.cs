@@ -6,6 +6,8 @@ namespace Wdem.Core.Execution;
 
 public interface IResourceScheduler
 {
+  TimeSpan CancellationDrainTimeout { get; }
+
   Task<SchedulerResult> ExecuteAsync(
       ExecutionPlan plan,
       Func<PlannedResource, CancellationToken, Task<ResourceResult>> executeAsync,

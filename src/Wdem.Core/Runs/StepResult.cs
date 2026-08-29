@@ -19,6 +19,7 @@ public sealed record StepResult
   public long FirstLogSequence { get; init; }
   public long LastLogSequence { get; init; }
   public int? ProcessExitCode { get; init; }
+  public bool? ProcessSucceeded { get; init; }
   public DateTimeOffset? StartedAtUtc { get; init; }
   public DateTimeOffset? EndedAtUtc { get; init; }
   public StructuredError? Error { get; init; }

@@ -11,21 +11,27 @@ internal interface IArtifactCleanupFileSystem
 internal sealed class ArtifactCleanupQueue
 {
   private static readonly TimeSpan DefaultRetryDelay = TimeSpan.FromMilliseconds(250);
+  private static readonly TimeSpan DefaultMinimumSweepAge = TimeSpan.FromHours(1);
   private readonly object _gate = new();
   private readonly IArtifactCleanupFileSystem _fileSystem;
   private readonly int _maxAttempts;
   private readonly TimeSpan _retryDelay;
   private readonly int _maxDelayedRetryRounds;
   private readonly IReadOnlyList<string> _knownStagingRoots;
+  private readonly TimeSpan _minimumSweepAge;
+  private readonly Action? _beforeRetryScheduledReset;
   private readonly List<PendingCleanup> _pending = [];
   private bool _retryScheduled;
+  private long _enqueueVersion;
 
   public ArtifactCleanupQueue(
       IArtifactCleanupFileSystem? fileSystem = null,
       int maxAttempts = 3,
       TimeSpan? retryDelay = null,
       int maxDelayedRetryRounds = 4,
-      IReadOnlyList<string>? knownStagingRoots = null)
+      IReadOnlyList<string>? knownStagingRoots = null,
+      TimeSpan? minimumSweepAge = null,
+      Action? beforeRetryScheduledReset = null)
   {
     if (maxAttempts <= 0)
     {
@@ -42,12 +48,19 @@ internal sealed class ArtifactCleanupQueue
       throw new ArgumentOutOfRangeException(nameof(maxDelayedRetryRounds));
     }
 
+    if (minimumSweepAge is { } sweepAge && sweepAge < TimeSpan.Zero)
+    {
+      throw new ArgumentOutOfRangeException(nameof(minimumSweepAge));
+    }
+
     _fileSystem = fileSystem ?? new SystemArtifactCleanupFileSystem();
     _maxAttempts = maxAttempts;
     _retryDelay = retryDelay ?? DefaultRetryDelay;
     _maxDelayedRetryRounds = maxDelayedRetryRounds;
     _knownStagingRoots = knownStagingRoots ??
         (fileSystem is null ? GetKnownStagingRoots() : []);
+    _minimumSweepAge = minimumSweepAge ?? DefaultMinimumSweepAge;
+    _beforeRetryScheduledReset = beforeRetryScheduledReset;
     SweepKnownStagingArtifacts();
   }
 
@@ -116,6 +129,10 @@ internal sealed class ArtifactCleanupQueue
       if (!_pending.Contains(cleanup))
       {
         _pending.Add(cleanup);
+        if (scheduleOnFailure)
+        {
+          _enqueueVersion++;
+        }
       }
     }
 
@@ -142,6 +159,12 @@ internal sealed class ArtifactCleanupQueue
 
   private async Task RetryPendingAfterDelayAsync()
   {
+    long enqueueVersionAtStart;
+    lock (_gate)
+    {
+      enqueueVersionAtStart = _enqueueVersion;
+    }
+
     try
     {
       for (var round = 0; round < _maxDelayedRetryRounds; round++)
@@ -161,9 +184,21 @@ internal sealed class ArtifactCleanupQueue
     }
     finally
     {
+      _beforeRetryScheduledReset?.Invoke();
+      var retryAgain = false;
       lock (_gate)
       {
         _retryScheduled = false;
+        if (_pending.Count > 0 && _enqueueVersion != enqueueVersionAtStart)
+        {
+          _retryScheduled = true;
+          retryAgain = true;
+        }
+      }
+
+      if (retryAgain)
+      {
+        _ = RetryPendingAfterDelayAsync();
       }
     }
   }
@@ -199,15 +234,21 @@ internal sealed class ArtifactCleanupQueue
           }
 
           var attributes = File.GetAttributes(fullPath);
-          if (attributes.HasFlag(FileAttributes.ReparsePoint))
+          if (!attributes.HasFlag(FileAttributes.Directory) ||
+              attributes.HasFlag(FileAttributes.ReparsePoint))
           {
             Trace.WriteLine("[ArtifactCleanup] Skipped redirected staging artifact.");
             continue;
           }
 
-          TryExecute(new PendingCleanup(
-              fullPath,
-              attributes.HasFlag(FileAttributes.Directory)));
+          if (!ArtifactLease.CanAcquireForCleanup(
+                  fullPath,
+                  DateTime.UtcNow - _minimumSweepAge))
+          {
+            continue;
+          }
+
+          TryExecute(new PendingCleanup(fullPath, true));
         }
       }
       catch (Exception exception) when (exception is ArgumentException or IOException or
@@ -240,5 +281,90 @@ internal sealed class ArtifactCleanupQueue
   {
     public void DeleteFile(string path) => File.Delete(path);
     public void DeleteDirectory(string path) => Directory.Delete(path, recursive: true);
+  }
+}
+
+internal sealed class ArtifactLease : IDisposable
+{
+  internal const string OwnershipMarkerFileName = ".wdem-artifact";
+  internal const string LeaseFileName = ".wdem-lease";
+  internal const string OwnershipMarkerContent = "wdem-artifact-v1\n";
+  private FileStream? _lease;
+
+  private ArtifactLease(FileStream lease)
+  {
+    _lease = lease;
+  }
+
+  public static ArtifactLease Create(string directoryPath)
+  {
+    var markerPath = Path.Combine(directoryPath, OwnershipMarkerFileName);
+    var leasePath = Path.Combine(directoryPath, LeaseFileName);
+    using (var marker = new FileStream(
+                   markerPath,
+                   FileMode.CreateNew,
+                   FileAccess.Write,
+                   FileShare.None))
+    {
+      marker.Write("wdem-artifact-v1\n"u8);
+      marker.Flush(flushToDisk: true);
+    }
+
+    try
+    {
+      return new ArtifactLease(new FileStream(
+          leasePath,
+          FileMode.CreateNew,
+          FileAccess.ReadWrite,
+          FileShare.None,
+          bufferSize: 1,
+          FileOptions.WriteThrough));
+    }
+    catch
+    {
+      File.Delete(markerPath);
+      throw;
+    }
+  }
+
+  public void Dispose()
+  {
+    Interlocked.Exchange(ref _lease, null)?.Dispose();
+  }
+
+  internal static bool CanAcquireForCleanup(
+      string directoryPath,
+      DateTime staleBeforeUtc)
+  {
+    var markerPath = Path.Combine(directoryPath, OwnershipMarkerFileName);
+    var leasePath = Path.Combine(directoryPath, LeaseFileName);
+    try
+    {
+      if (!File.Exists(markerPath) || !File.Exists(leasePath) ||
+          File.GetAttributes(markerPath).HasFlag(FileAttributes.ReparsePoint) ||
+          File.GetAttributes(leasePath).HasFlag(FileAttributes.ReparsePoint) ||
+          File.GetLastWriteTimeUtc(markerPath) >= staleBeforeUtc ||
+          !string.Equals(
+              File.ReadAllText(markerPath),
+              OwnershipMarkerContent,
+              StringComparison.Ordinal))
+      {
+        return false;
+      }
+
+      using var lease = new FileStream(
+          leasePath,
+          FileMode.Open,
+          FileAccess.ReadWrite,
+          FileShare.None,
+          bufferSize: 1,
+          FileOptions.None);
+      return true;
+    }
+    catch (Exception exception) when (exception is IOException or
+        UnauthorizedAccessException or System.Security.SecurityException)
+    {
+      return false;
+    }
   }
 }

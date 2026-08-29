@@ -52,6 +52,50 @@ public sealed class EnvironmentRunServiceTests
     Assert.Contains(RestartPolicy.RestartRecommended, run.RestartRequirements);
   }
 
+  [Theory]
+  [InlineData(3010, RestartPolicy.RestartRecommended)]
+  [InlineData(1641, RestartPolicy.RestartRequired)]
+  public async Task ApplyAsync_SuccessfulRestartExitRemainsSuccessful(
+      int exitCode,
+      RestartPolicy restartRequirement)
+  {
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyResult = new ResourceApplyResult
+      {
+        ResourceId = "git",
+        Outcome = ApplyOutcome.Succeeded,
+        RestartRequirement = restartRequirement,
+        StepResults =
+        [
+          new ProviderStepResult
+          {
+            StepId = "install",
+            Action = PlanAction.Install,
+            Progress = 1,
+            ProcessExitCode = exitCode,
+            Succeeded = true,
+            Message = $"restartRequirement={restartRequirement}"
+          }
+        ]
+      }
+    };
+    var (service, store) = CreateService(provider);
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+    var persisted = await store.GetAsync(run.RunId, CancellationToken.None);
+
+    var resource = run.ResourceResults["git"];
+    var step = Assert.Single(resource.StepResults);
+    Assert.Equal(ExecutionOutcome.Succeeded, run.Outcome);
+    Assert.Equal(ExecutionOutcome.Succeeded, resource.Outcome);
+    Assert.Equal(ExecutionOutcome.Succeeded, step.Outcome);
+    Assert.Equal(exitCode, step.ProcessExitCode);
+    Assert.True(step.ProcessSucceeded);
+    Assert.Equal(restartRequirement, resource.RestartRequirement);
+    Assert.Contains(restartRequirement, persisted!.RestartRequirements);
+  }
+
   [Fact]
   public async Task ApplyAsync_FailedProviderRetainsAndPersistsRestartEvidence()
   {
@@ -706,6 +750,49 @@ public sealed class EnvironmentRunServiceTests
     await applyCancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
     releaseApply.SetResult();
     var run = await apply;
+    var persisted = await store.GetAsync(run.RunId, CancellationToken.None);
+
+    var resource = run.ResourceResults["git"];
+    var step = Assert.Single(resource.StepResults);
+    Assert.Equal(ExecutionOutcome.Cancelled, resource.Outcome);
+    Assert.Equal(RestartPolicy.RestartRecommended, resource.RestartRequirement);
+    Assert.Equal(3010, step.ProcessExitCode);
+    Assert.Equal(resource, persisted!.ResourceResults["git"]);
+    Assert.Contains(RestartPolicy.RestartRecommended, persisted.RestartRequirements);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_CancellationPreservesProviderEvidenceBeyondSchedulerDrainDefault()
+  {
+    using var cancellation = new CancellationTokenSource();
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyOperation = async _ =>
+      {
+        cancellation.Cancel();
+        await Task.Delay(TimeSpan.FromMilliseconds(1200));
+        return new ResourceApplyResult
+        {
+          ResourceId = "git",
+          Outcome = ApplyOutcome.Cancelled,
+          RestartRequirement = RestartPolicy.RestartRecommended,
+          StepResults =
+          [
+            new ProviderStepResult
+            {
+              StepId = "install",
+              Action = PlanAction.Install,
+              Progress = 0.75,
+              ProcessExitCode = 3010,
+              Message = "The update completed before cancellation."
+            }
+          ]
+        };
+      }
+    };
+    var (service, store) = CreateService(provider);
+
+    var run = await service.ApplyAsync(Request(), cancellation.Token);
     var persisted = await store.GetAsync(run.RunId, CancellationToken.None);
 
     var resource = run.ResourceResults["git"];

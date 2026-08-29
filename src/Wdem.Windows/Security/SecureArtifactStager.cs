@@ -35,17 +35,20 @@ public sealed class SecureStagedArtifact : IAsyncDisposable
 {
   private readonly string _directoryPath;
   private FileStream? _readLock;
+  private ArtifactLease? _artifactLease;
 
   internal SecureStagedArtifact(
       string directoryPath,
       string path,
       string sha256,
-      FileStream readLock)
+      FileStream readLock,
+      ArtifactLease artifactLease)
   {
     _directoryPath = directoryPath;
     Path = path;
     Sha256 = sha256;
     _readLock = readLock;
+    _artifactLease = artifactLease;
   }
 
   public string Path { get; }
@@ -60,6 +63,7 @@ public sealed class SecureStagedArtifact : IAsyncDisposable
     }
 
     readLock.Dispose();
+    Interlocked.Exchange(ref _artifactLease, null)?.Dispose();
     TryDeleteDirectory(_directoryPath);
     return ValueTask.CompletedTask;
   }
@@ -70,6 +74,8 @@ public sealed class SecureStagedArtifact : IAsyncDisposable
 
 public sealed class SecureArtifactStager : ISecureArtifactStager
 {
+  private const long MaxExecutableBytes = 64L * 1024 * 1024;
+  private const long MaxVisualStudioConfigurationBytes = 1024L * 1024;
   private readonly ISecureArtifactDirectoryPolicy _directoryPolicy;
   private readonly ITrustedFileVerifier _verifier;
 
@@ -80,6 +86,8 @@ public sealed class SecureArtifactStager : ISecureArtifactStager
     _directoryPolicy = directoryPolicy ?? new WindowsSecureArtifactDirectoryPolicy();
     _verifier = verifier ?? new TrustedFileVerifier();
   }
+
+  internal Action? AfterSourceLengthChecked { get; init; }
 
   public async Task<SecureArtifactStageResult> StageVerifiedAsync(
       string sourcePath,
@@ -101,6 +109,7 @@ public sealed class SecureArtifactStager : ISecureArtifactStager
     string? partialPath = null;
     string? finalPath = null;
     FileStream? readLock = null;
+    ArtifactLease? artifactLease = null;
     try
     {
       directoryPath = _directoryPolicy.CreateRestrictedStagingDirectory();
@@ -116,11 +125,13 @@ public sealed class SecureArtifactStager : ISecureArtifactStager
             "The secure staging policy did not create a new empty directory.");
       }
 
+      artifactLease = ArtifactLease.Create(directoryPath);
+
       await using (var source = new FileStream(
                        Path.GetFullPath(sourcePath),
                        FileMode.Open,
                        FileAccess.Read,
-                       FileShare.Read,
+                       FileShare.ReadWrite | FileShare.Delete,
                        bufferSize: 81920,
                        FileOptions.Asynchronous | FileOptions.SequentialScan))
       await using (var destination = new FileStream(
@@ -131,7 +142,20 @@ public sealed class SecureArtifactStager : ISecureArtifactStager
                        bufferSize: 81920,
                        FileOptions.Asynchronous | FileOptions.SequentialScan))
       {
-        await source.CopyToAsync(destination, cancellationToken).ConfigureAwait(false);
+        var maxBytes = kind == SecureArtifactKind.Executable
+            ? MaxExecutableBytes
+            : MaxVisualStudioConfigurationBytes;
+        if (source.Length > maxBytes)
+        {
+          throw new ArtifactTooLargeException(maxBytes);
+        }
+
+        AfterSourceLengthChecked?.Invoke();
+        await CopyWithinLimitAsync(
+            source,
+            destination,
+            maxBytes,
+            cancellationToken).ConfigureAwait(false);
         await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
         destination.Flush(flushToDisk: true);
       }
@@ -152,21 +176,25 @@ public sealed class SecureArtifactStager : ISecureArtifactStager
       {
         readLock.Dispose();
         readLock = null;
+        artifactLease.Dispose();
+        artifactLease = null;
         SecureStagedArtifact.TryDeleteDirectory(directoryPath);
         return new SecureArtifactStageResult(null, verification.Error);
       }
 
-      return new SecureArtifactStageResult(
-          new SecureStagedArtifact(
+      var artifact = new SecureStagedArtifact(
               directoryPath,
               verification.VerifiedPath!,
               verification.Sha256!,
-              readLock),
-          null);
+              readLock,
+              artifactLease);
+      artifactLease = null;
+      return new SecureArtifactStageResult(artifact, null);
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
       readLock?.Dispose();
+      artifactLease?.Dispose();
       if (directoryPath is not null)
       {
         SecureStagedArtifact.TryDeleteDirectory(directoryPath);
@@ -174,12 +202,24 @@ public sealed class SecureArtifactStager : ISecureArtifactStager
 
       throw;
     }
+    catch (ArtifactTooLargeException exception)
+    {
+      readLock?.Dispose();
+      artifactLease?.Dispose();
+      if (directoryPath is not null)
+      {
+        SecureStagedArtifact.TryDeleteDirectory(directoryPath);
+      }
+
+      return Failure($"The artifact exceeds the {exception.MaxBytes} byte staging limit.");
+    }
     catch (Exception exception) when (exception is IOException or
         Win32Exception or
         UnauthorizedAccessException or InvalidOperationException or
         PlatformNotSupportedException or SecurityException)
     {
       readLock?.Dispose();
+      artifactLease?.Dispose();
       if (directoryPath is not null)
       {
         SecureStagedArtifact.TryDeleteDirectory(directoryPath);
@@ -189,12 +229,49 @@ public sealed class SecureArtifactStager : ISecureArtifactStager
     }
   }
 
+  private static async Task CopyWithinLimitAsync(
+      Stream source,
+      Stream destination,
+      long maxBytes,
+      CancellationToken cancellationToken)
+  {
+    var buffer = new byte[81920];
+    long copiedBytes = 0;
+    while (true)
+    {
+      var remainingBytes = maxBytes - copiedBytes;
+      var bytesToRead = (int)Math.Min(buffer.Length, remainingBytes + 1);
+      var bytesRead = await source.ReadAsync(
+          buffer.AsMemory(0, bytesToRead),
+          cancellationToken).ConfigureAwait(false);
+      if (bytesRead == 0)
+      {
+        return;
+      }
+
+      if (bytesRead > remainingBytes)
+      {
+        throw new ArtifactTooLargeException(maxBytes);
+      }
+
+      await destination.WriteAsync(
+          buffer.AsMemory(0, bytesRead),
+          cancellationToken).ConfigureAwait(false);
+      copiedBytes += bytesRead;
+    }
+  }
+
   private static SecureArtifactStageResult Failure(string detail) => new(
       null,
       new StructuredError(
           WdemErrorCode.ConfigurationError,
           "Secure artifact staging failed.",
           detail));
+
+  private sealed class ArtifactTooLargeException(long maxBytes) : IOException
+  {
+    public long MaxBytes { get; } = maxBytes;
+  }
 }
 
 public sealed class WindowsSecureArtifactDirectoryPolicy : ISecureArtifactDirectoryPolicy

@@ -9,7 +9,7 @@ public sealed class ResourceScheduler : IResourceScheduler
 {
   private const int MinimumConcurrency = 1;
   private const int MaximumConcurrency = 32;
-  private static readonly TimeSpan DefaultDrainTimeout = TimeSpan.FromSeconds(1);
+  private static readonly TimeSpan DefaultDrainTimeout = TimeSpan.FromSeconds(2);
   private readonly TimeSpan _drainTimeout;
 
   public ResourceScheduler(TimeSpan? drainTimeout = null)
@@ -20,6 +20,8 @@ public sealed class ResourceScheduler : IResourceScheduler
       throw new ArgumentOutOfRangeException(nameof(drainTimeout));
     }
   }
+
+  public TimeSpan CancellationDrainTimeout => _drainTimeout;
 
   public async Task<SchedulerResult> ExecuteAsync(
       ExecutionPlan plan,
@@ -536,7 +538,8 @@ public sealed class ResourceScheduler : IResourceScheduler
           step is null ||
           step.State != ExecutionState.Completed ||
           step.Outcome is not (ExecutionOutcome.Succeeded or ExecutionOutcome.NotRequired) ||
-          step.ProcessExitCode is { } exitCode && exitCode != 0);
+          step.ProcessExitCode is { } exitCode && exitCode != 0 &&
+          step.ProcessSucceeded != true);
 
   private static ResourceResult Pending(string id) => new()
   {

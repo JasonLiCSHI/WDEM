@@ -520,6 +520,41 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   }
 
   [Fact]
+  public async Task ApplyAsync_BootstrapperStagingFailureCorrelatesResourceAndStep()
+  {
+    var bootstrapperBytes = "trusted Visual Studio bootstrapper"u8.ToArray();
+    var bootstrapperHash = Convert.ToHexString(SHA256.HashData(bootstrapperBytes));
+    var stagingError = new StructuredError(
+        WdemErrorCode.ConfigurationError,
+        "Secure artifact staging failed.",
+        "The artifact exceeds the permitted staging size.");
+    var process = new RecordingRealProcessExecutor();
+    using var httpClient = new HttpClient(new CountingContentHandler(bootstrapperBytes));
+    var installer = new VisualStudioInstallerClient(
+        process,
+        httpClient: httpClient,
+        secureArtifactStager: new FailingArtifactStager(stagingError),
+        bootstrapperDownloadDirectory: Path.Combine(_root, "failed-download"));
+    var provider = Provider(new SequenceDiscovery([]), installer);
+    var resource = Resource(
+        useBootstrapper: true,
+        bootstrapperSha256: bootstrapperHash);
+    var plan = await provider.PlanAsync(resource, MissingState(), CancellationToken.None);
+    var plannedStep = Assert.Single(plan.Steps);
+
+    var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(resource.Id, result.Error!.ResourceId);
+    Assert.Equal(plannedStep.Id, result.Error.StepId);
+    Assert.Equal(stagingError.Detail, result.Error.Detail);
+    var step = Assert.Single(result.StepResults);
+    Assert.Equal(resource.Id, step.Error!.ResourceId);
+    Assert.Equal(plannedStep.Id, step.Error.StepId);
+    Assert.Equal(stagingError.Detail, step.Error.Detail);
+    Assert.Empty(process.Requests);
+  }
+
+  [Fact]
   public async Task ApplyAsync_MissingModifyInstanceDisposesBootstrapperLease()
   {
     var installer = new RecordingInstallerClient();
@@ -759,6 +794,16 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
       : IProgress<ProviderProgress>
   {
     public void Report(ProviderProgress value) => report(value);
+  }
+
+  private sealed class FailingArtifactStager(StructuredError error) : ISecureArtifactStager
+  {
+    public Task<SecureArtifactStageResult> StageVerifiedAsync(
+        string sourcePath,
+        string expectedSha256,
+        SecureArtifactKind kind,
+        CancellationToken cancellationToken) =>
+        Task.FromResult(new SecureArtifactStageResult(null, error));
   }
 
   private sealed class RecordingRealProcessExecutor : IProcessExecutor

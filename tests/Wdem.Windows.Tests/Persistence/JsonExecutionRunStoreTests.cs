@@ -414,6 +414,7 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     Assert.Equal("git", Assert.Single(restored.Graph!.Nodes).Key);
     Assert.Equal("git", Assert.Single(restored.Plan!.Resources).Definition.Id);
     Assert.Equal("2.52.0", restored.ResourceResults["git"].DetectedBefore!.Version);
+    Assert.True(Assert.Single(restored.ResourceResults["git"].StepResults).ProcessSucceeded);
     Assert.DoesNotContain("abc.def.ghi", log, StringComparison.Ordinal);
     Assert.DoesNotContain("summary-secret", log, StringComparison.Ordinal);
     Assert.DoesNotContain("detail-secret", log, StringComparison.Ordinal);
@@ -1736,7 +1737,9 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     State = ExecutionState.Running,
     Progress = 0.5,
     FirstLogSequence = 1,
-    LastLogSequence = 1
+    LastLogSequence = 1,
+    ProcessExitCode = 3010,
+    ProcessSucceeded = true
   };
 
   private static ResourceGraph SampleGraph()

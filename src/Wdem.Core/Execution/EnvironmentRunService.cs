@@ -27,6 +27,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
   private readonly IRunEventSink _eventSink;
   private readonly LogRedactor _redactor;
   private readonly TimeSpan _persistenceTimeout;
+  private readonly TimeSpan _cancellationDrainTimeout;
 
   public EnvironmentRunService(
       IProfileCatalog profiles,
@@ -49,6 +50,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         throw new ArgumentNullException(nameof(complianceEvaluator));
     _planner = planner ?? throw new ArgumentNullException(nameof(planner));
     _scheduler = scheduler ?? throw new ArgumentNullException(nameof(scheduler));
+    _cancellationDrainTimeout = scheduler.CancellationDrainTimeout;
     _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
     _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
     _timeProvider = timeProvider ?? TimeProvider.System;
@@ -626,7 +628,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           progressBuffer.StopAccepting();
           try
           {
-            await applyTask.WaitAsync(_persistenceTimeout).ConfigureAwait(false);
+            await applyTask.WaitAsync(_cancellationDrainTimeout).ConfigureAwait(false);
           }
           catch (TimeoutException)
           {
@@ -1311,7 +1313,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     var endedAt = DateTimeOffset.UtcNow;
     return applied.StepResults.Select(step =>
     {
-      var failed = step.Error is not null || step.ProcessExitCode is { } exitCode && exitCode != 0;
+      var failed = step.Error is not null ||
+          step.Succeeded == false ||
+          step.Succeeded is null && step.ProcessExitCode is { } exitCode && exitCode != 0;
       return new StepResult
       {
         StepId = step.StepId,
@@ -1320,6 +1324,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         Outcome = failed ? ExecutionOutcome.Failed : ExecutionOutcome.Succeeded,
         Progress = step.Progress,
         ProcessExitCode = step.ProcessExitCode,
+        ProcessSucceeded = step.Succeeded,
         StartedAtUtc = startedAt,
         EndedAtUtc = endedAt,
         Error = step.Error

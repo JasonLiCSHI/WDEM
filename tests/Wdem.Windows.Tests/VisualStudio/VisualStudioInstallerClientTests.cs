@@ -283,7 +283,10 @@ public sealed class VisualStudioInstallerClientTests
     }
     finally
     {
-      File.Delete(acquired.VerifiedPath!);
+      if (File.Exists(acquired.VerifiedPath))
+      {
+        File.Delete(acquired.VerifiedPath);
+      }
     }
   }
 
@@ -348,7 +351,10 @@ public sealed class VisualStudioInstallerClientTests
     }
     finally
     {
-      File.Delete(acquired.VerifiedPath!);
+      if (File.Exists(acquired.VerifiedPath))
+      {
+        File.Delete(acquired.VerifiedPath);
+      }
     }
   }
 
@@ -431,6 +437,7 @@ public sealed class VisualStudioInstallerClientTests
     {
       BeforeExecute = request =>
       {
+        Directory.CreateDirectory(Path.GetDirectoryName(acquiredPath!)!);
         File.WriteAllText(acquiredPath!, "replacement payload");
         launchedBytes = File.ReadAllBytes(request.FileName);
       }
@@ -460,7 +467,16 @@ public sealed class VisualStudioInstallerClientTests
     }
     finally
     {
-      File.Delete(acquiredPath!);
+      if (File.Exists(acquiredPath))
+      {
+        File.Delete(acquiredPath);
+      }
+
+      var acquiredDirectory = Path.GetDirectoryName(acquiredPath);
+      if (Directory.Exists(acquiredDirectory))
+      {
+        Directory.Delete(acquiredDirectory, recursive: true);
+      }
     }
   }
 
@@ -486,6 +502,66 @@ public sealed class VisualStudioInstallerClientTests
     finally
     {
       File.Delete(sourcePath);
+    }
+  }
+
+  [Theory]
+  [InlineData(SecureArtifactKind.VisualStudioConfiguration, 1024L * 1024, false)]
+  [InlineData(SecureArtifactKind.Executable, 64L * 1024 * 1024, false)]
+  [InlineData(SecureArtifactKind.VisualStudioConfiguration, 1024L * 1024, true)]
+  public async Task SecureArtifactStager_RejectsSourcesAboveKindByteLimit(
+      SecureArtifactKind kind,
+      long byteLimit,
+      bool growAfterLengthCheck)
+  {
+    var sourcePath = Path.GetTempFileName();
+    var policy = new RecordingSecureDirectoryPolicy();
+    await using var writer = new FileStream(
+        sourcePath,
+        FileMode.Open,
+        FileAccess.ReadWrite,
+        FileShare.ReadWrite | FileShare.Delete);
+    writer.SetLength(byteLimit + (growAfterLengthCheck ? 0 : 1));
+    writer.Flush(flushToDisk: true);
+    var stager = new SecureArtifactStager(policy)
+    {
+      AfterSourceLengthChecked = () =>
+        {
+          if (growAfterLengthCheck)
+          {
+            writer.Position = writer.Length;
+            writer.WriteByte(0x2A);
+            writer.Flush(flushToDisk: true);
+          }
+        }
+    };
+
+    try
+    {
+      var result = await stager.StageVerifiedAsync(
+          sourcePath,
+          new string('A', 64),
+          kind,
+          CancellationToken.None);
+
+      Assert.Null(result.Artifact);
+      Assert.Equal(WdemErrorCode.ConfigurationError, result.Error!.Code);
+      Assert.Contains(byteLimit.ToString(), result.Error.Detail);
+      Assert.DoesNotContain(sourcePath, result.Error.Detail, StringComparison.OrdinalIgnoreCase);
+      var stagingDirectory = Assert.Single(policy.SecuredDirectories);
+      Assert.False(Directory.Exists(stagingDirectory));
+    }
+    finally
+    {
+      writer.Dispose();
+      File.Delete(sourcePath);
+      foreach (var directory in policy.SecuredDirectories)
+      {
+        if (Directory.Exists(directory))
+        {
+          Directory.Delete(directory, recursive: true);
+        }
+      }
     }
   }
 

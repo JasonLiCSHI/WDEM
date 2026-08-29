@@ -281,6 +281,7 @@ public sealed record ProviderStepResult
   }
 
   public int? ProcessExitCode { get; init; }
+  public bool? Succeeded { get; init; }
   public string? Message
   {
     get => _message;

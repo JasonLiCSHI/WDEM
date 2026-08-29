@@ -46,6 +46,7 @@ public sealed record VisualStudioInstallerResult(
 public sealed class VisualStudioBootstrapperAcquisition : IAsyncDisposable
 {
   private readonly Action<VisualStudioBootstrapperAcquisition>? _abandon;
+  private ArtifactLease? _artifactLease;
   private int _state;
 
   public VisualStudioBootstrapperAcquisition(TrustedFileVerificationResult verification)
@@ -55,10 +56,12 @@ public sealed class VisualStudioBootstrapperAcquisition : IAsyncDisposable
 
   internal VisualStudioBootstrapperAcquisition(
       TrustedFileVerificationResult verification,
-      Action<VisualStudioBootstrapperAcquisition>? abandon)
+      Action<VisualStudioBootstrapperAcquisition>? abandon,
+      ArtifactLease? artifactLease = null)
   {
     Verification = verification ?? throw new ArgumentNullException(nameof(verification));
     _abandon = abandon;
+    _artifactLease = artifactLease;
   }
 
   public TrustedFileVerificationResult Verification { get; }
@@ -72,6 +75,7 @@ public sealed class VisualStudioBootstrapperAcquisition : IAsyncDisposable
   {
     if (Interlocked.CompareExchange(ref _state, 2, 0) == 0)
     {
+      ReleaseLease();
       _abandon?.Invoke(this);
     }
 
@@ -90,6 +94,9 @@ public sealed class VisualStudioBootstrapperAcquisition : IAsyncDisposable
     expectedSha256 = string.Empty;
     return false;
   }
+
+  internal void ReleaseLease() =>
+      Interlocked.Exchange(ref _artifactLease, null)?.Dispose();
 }
 
 public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
@@ -164,12 +171,19 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
     }
 
     string? localPath = null;
+    string? artifactDirectory = null;
+    ArtifactLease? artifactLease = null;
     try
     {
       Directory.CreateDirectory(_bootstrapperDownloadDirectory);
-      localPath = Path.Combine(
+      artifactDirectory = Path.Combine(
           _bootstrapperDownloadDirectory,
-          $"vs-bootstrapper-{Guid.NewGuid():N}.exe");
+          Guid.NewGuid().ToString("N"));
+      Directory.CreateDirectory(artifactDirectory);
+      artifactLease = ArtifactLease.Create(artifactDirectory);
+      localPath = Path.Combine(
+          artifactDirectory,
+          "vs-bootstrapper.exe");
       using var response = await _httpClient.SendAsync(
           new HttpRequestMessage(HttpMethod.Get, source),
           HttpCompletionOption.ResponseHeadersRead,
@@ -216,30 +230,37 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
           cancellationToken).ConfigureAwait(false);
       if (!verification.IsTrusted)
       {
-        TryDelete(localPath);
+        artifactLease.Dispose();
+        artifactLease = null;
+        TryDeleteDirectory(artifactDirectory);
         return new VisualStudioBootstrapperAcquisition(verification);
       }
 
       var acquisition = new VisualStudioBootstrapperAcquisition(
           verification,
-          AbandonBootstrapper);
+          AbandonBootstrapper,
+          artifactLease);
+      artifactLease = null;
       _verifiedBootstrappers[verification.VerifiedPath!] = acquisition;
       return acquisition;
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
-      TryDelete(localPath);
+      artifactLease?.Dispose();
+      TryDeleteDirectory(artifactDirectory);
       throw;
     }
     catch (BootstrapperTooLargeException)
     {
-      TryDelete(localPath);
+      artifactLease?.Dispose();
+      TryDeleteDirectory(artifactDirectory);
       return ConfigurationFailure(
           "The Visual Studio bootstrapper exceeds the configured download size limit.");
     }
     catch (Exception)
     {
-      TryDelete(localPath);
+      artifactLease?.Dispose();
+      TryDeleteDirectory(artifactDirectory);
       return new VisualStudioBootstrapperAcquisition(
           new TrustedFileVerificationResult(
               false,
@@ -380,7 +401,8 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
       }
       finally
       {
-        TryDelete(fullPath);
+        acquisition.ReleaseLease();
+        TryDeleteDirectory(Path.GetDirectoryName(fullPath));
       }
 
       if (staged.Artifact is null)
@@ -487,14 +509,15 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
         new KeyValuePair<string, VisualStudioBootstrapperAcquisition>(
             acquisition.VerifiedPath,
             acquisition));
-    TryDelete(acquisition.VerifiedPath);
+    acquisition.ReleaseLease();
+    TryDeleteDirectory(Path.GetDirectoryName(acquisition.VerifiedPath));
   }
 
-  private void TryDelete(string? path)
+  private void TryDeleteDirectory(string? path)
   {
     if (path is not null)
     {
-      _cleanup.DeleteFile(path);
+      _cleanup.DeleteDirectory(path);
     }
   }
 

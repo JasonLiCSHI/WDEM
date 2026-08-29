@@ -546,15 +546,17 @@ public sealed class VisualStudioProvider : IResourceProvider
 
     if (!InstallerSucceeded(command))
     {
-      var error = command.Process.Error ?? new StructuredError(
-          WdemErrorCode.InstallationError,
-          "Visual Studio installer failed.",
-          "The Visual Studio installer did not complete successfully.")
-      {
-        ResourceId = resource.Id,
-        StepId = step.Id,
-        ProcessExitCode = command.Process.ExitCode
-      };
+      var error = command.Process.Error is { } processError
+          ? processError with { ResourceId = resource.Id, StepId = step.Id }
+          : new StructuredError(
+              WdemErrorCode.InstallationError,
+              "Visual Studio installer failed.",
+              "The Visual Studio installer did not complete successfully.")
+          {
+            ResourceId = resource.Id,
+            StepId = step.Id,
+            ProcessExitCode = command.Process.ExitCode
+          };
       return ApplyFailure(
           resource,
           step,
@@ -612,6 +614,7 @@ public sealed class VisualStudioProvider : IResourceProvider
           Action = step.Action,
           Progress = 1,
           ProcessExitCode = command.Process.ExitCode,
+          Succeeded = true,
           Message = evidence
         }
       ]
