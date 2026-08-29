@@ -76,15 +76,6 @@ public sealed class ElevatedResourceWorker
       return Refused(request.ResourceId, "The resource is not running in the persisted run state.");
     }
 
-    if (!planned.Dependencies.All(dependency =>
-            run.ResourceResults.TryGetValue(dependency, out var dependencyResult) &&
-            dependencyResult.State == ExecutionState.Completed &&
-            dependencyResult.Outcome is ExecutionOutcome.Succeeded or
-                ExecutionOutcome.NotRequired))
-    {
-      return Refused(request.ResourceId, "The resource dependencies have not succeeded.");
-    }
-
     if (planned.Status != PlannedResourceStatus.Ready ||
         !planned.RequiresElevation ||
         !planned.ResourcePlan.IsExecutable ||
@@ -110,6 +101,22 @@ public sealed class ElevatedResourceWorker
             ApprovedResourceFingerprint.Create(approved.Definition, planned.ResourcePlan)))
     {
       return Refused(request.ResourceId, "The approved resource fingerprint does not match.");
+    }
+
+    if (!DependenciesEqual(planned.Dependencies, approved.Definition.Dependencies))
+    {
+      return Refused(
+          request.ResourceId,
+          "The persisted resource dependencies do not match the protected approval.");
+    }
+
+    if (!approved.Definition.Dependencies.All(dependency =>
+            run.ResourceResults.TryGetValue(dependency, out var dependencyResult) &&
+            dependencyResult.State == ExecutionState.Completed &&
+            dependencyResult.Outcome is ExecutionOutcome.Succeeded or
+                ExecutionOutcome.NotRequired))
+    {
+      return Refused(request.ResourceId, "The resource dependencies have not succeeded.");
     }
 
     if (!string.Equals(
@@ -247,6 +254,15 @@ public sealed class ElevatedResourceWorker
       return false;
     }
   }
+
+  private static bool DependenciesEqual(
+      IReadOnlyList<string> persisted,
+      IReadOnlyList<string> approved) =>
+      persisted.Count == approved.Count &&
+      persisted.Zip(approved).All(pair => string.Equals(
+          pair.First,
+          pair.Second,
+          StringComparison.OrdinalIgnoreCase));
 
   private static ResourceApplyResult Refused(string resourceId, string detail) => new()
   {

@@ -4,6 +4,7 @@ using System.Text.Json.Serialization;
 using Wdem.Cli;
 using Wdem.Core.Execution;
 using Wdem.Core.Planning;
+using Wdem.Core.Resources;
 using Wdem.Core.Runs;
 using Xunit;
 
@@ -1370,6 +1371,11 @@ public sealed class WdemCliBuilderTests
 
     public Task CreateAsync(ExecutionRun run, CancellationToken cancellationToken) =>
         Task.CompletedTask;
+
+    public Task CreateAsync(
+        ExecutionRun run,
+        IReadOnlyList<ApprovedResourceSeal> approvedResources,
+        CancellationToken cancellationToken) => Task.CompletedTask;
 
     public Task<ExecutionRun?> GetAsync(Guid runId, CancellationToken cancellationToken) =>
         Task.FromResult<ExecutionRun?>(null);

@@ -79,7 +79,10 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
       }
     };
 
-    await store.CreateAsync(run, CancellationToken.None);
+    await store.CreateAsync(
+        run,
+        [new ApprovedResourceSeal(original, executablePlan)],
+        CancellationToken.None);
 
     var approved = await ((IApprovedResourceStore)store).GetApprovedResourceAsync(
         run.RunId,
@@ -109,7 +112,7 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
         new LogRedactor(),
         new DeterministicApprovedResourceProtector());
     var run = ElevatedRunWithSecret("tamper-secret");
-    await store.CreateAsync(run, CancellationToken.None);
+    await CreateWithApprovedResourceAsync(store, run);
     var path = store.ApprovedResourcesPath(run.RunId);
     var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
     var payload = document["resources"]![0]!["protectedPayload"]!.GetValue<string>();
@@ -135,7 +138,7 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
         paths,
         new LogRedactor(),
         new DeterministicApprovedResourceProtector("first-user"));
-    await creator.CreateAsync(run, CancellationToken.None);
+    await CreateWithApprovedResourceAsync(creator, run);
     var otherUser = new JsonExecutionRunStore(
         paths,
         new LogRedactor(),
@@ -157,7 +160,7 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
         new LogRedactor(),
         new DeterministicApprovedResourceProtector());
     var run = ElevatedRunWithSecret("terminal-secret");
-    await store.CreateAsync(run, CancellationToken.None);
+    await CreateWithApprovedResourceAsync(store, run);
 
     await store.SaveAsync(
         run with
@@ -179,7 +182,7 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
         new LogRedactor(),
         new DeterministicApprovedResourceProtector());
     var run = ElevatedRunWithSecret("cleanup-secret");
-    await store.CreateAsync(run, CancellationToken.None);
+    await CreateWithApprovedResourceAsync(store, run);
     var approvedPath = store.ApprovedResourcesPath(run.RunId);
     ExecutionRun saved;
 
@@ -222,7 +225,7 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
         paths,
         new LogRedactor(),
         new DeterministicApprovedResourceProtector());
-    await creator.CreateAsync(run, CancellationToken.None);
+    await CreateWithApprovedResourceAsync(creator, run);
     var hostStore = new JsonExecutionRunStore(
         paths,
         new LogRedactor(),
@@ -1586,6 +1589,17 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     RestartRequirements = [RestartPolicy.RestartRecommended],
     RestartReasons = ["PATH changed"]
   };
+
+  private static Task CreateWithApprovedResourceAsync(
+      JsonExecutionRunStore store,
+      ExecutionRun run)
+  {
+    var planned = Assert.Single(run.Plan!.Resources);
+    return store.CreateAsync(
+        run,
+        [new ApprovedResourceSeal(planned.Definition, planned.ResourcePlan)],
+        CancellationToken.None);
+  }
 
   private static ExecutionRun ElevatedRunWithSecret(string secret)
   {

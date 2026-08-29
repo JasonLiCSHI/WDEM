@@ -466,7 +466,11 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           $"Execution run '{run.RunId:D}' already has an active operation.");
     }
 
-    await _runStore.CreateAsync(run, cancellationToken).ConfigureAwait(false);
+    var approvedResources = mode == RunMode.Apply
+        ? CreateApprovedResourceSeals(graph, plan)
+        : [];
+    await _runStore.CreateAsync(run, approvedResources, cancellationToken)
+        .ConfigureAwait(false);
     var events = new RunEventPublisher(
         _runStore,
         _eventSink,
@@ -993,6 +997,18 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         .ToArray();
     return new ResourceGraph(nodes, layers);
   }
+
+  private static IReadOnlyList<ApprovedResourceSeal> CreateApprovedResourceSeals(
+      ResourceGraph graph,
+      ExecutionPlan plan) => plan.Resources
+      .Where(resource =>
+          resource.Status == PlannedResourceStatus.Ready &&
+          resource.RequiresElevation &&
+          resource.ResourcePlan.IsExecutable)
+      .Select(resource => new ApprovedResourceSeal(
+          graph.Nodes[resource.Definition.Id].Definition,
+          resource.ResourcePlan))
+      .ToArray();
 
   private static string CanonicalizeOrPreservePath(string path)
   {

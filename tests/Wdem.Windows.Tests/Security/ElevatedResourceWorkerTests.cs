@@ -249,6 +249,71 @@ public sealed class ElevatedResourceWorkerTests
     Assert.Equal(0, provider.ApplyCalls);
   }
 
+  [Theory]
+  [InlineData("deleted", "dependency-a")]
+  [InlineData("added", "dependency-a,dependency-b,dependency-c")]
+  [InlineData("reordered", "dependency-b,dependency-a")]
+  public async Task ApplyAsync_PublicDependenciesWereTampered_RefusesWithoutCallingProvider(
+      string _,
+      string publicDependencies)
+  {
+    var provider = new RecordingProvider();
+    var approved = ApprovedRun(provider, out _);
+    var persisted = approved.Plan!.Resources.Single();
+    var original = persisted.Definition with
+    {
+      Dependencies = ["dependency-a", "dependency-b"]
+    };
+    var approvedPlan = persisted.ResourcePlan with
+    {
+      DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(original)
+    };
+    var fingerprint = ApprovedResourceFingerprint.Create(original, approvedPlan);
+    var tampered = approved with
+    {
+      Plan = approved.Plan with
+      {
+        Resources =
+        [
+          persisted with
+          {
+            Definition = original,
+            Dependencies = publicDependencies.Split(','),
+            ResourcePlan = approvedPlan
+          }
+        ]
+      },
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        [original.Id] = approved.ResourceResults[original.Id],
+        ["dependency-a"] = SucceededDependency("dependency-a"),
+        ["dependency-b"] = SucceededDependency("dependency-b"),
+        ["dependency-c"] = SucceededDependency("dependency-c")
+      }
+    };
+    var worker = new ElevatedResourceWorker(
+        new StubRunStore(tampered),
+        new StubApprovedResourceStore(new ApprovedResource(
+            original,
+            approvedPlan,
+            fingerprint)),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+
+    var result = await worker.ApplyAsync(
+        new ElevatedResourceRequest(
+            approved.RunId,
+            original.Id,
+            fingerprint,
+            "pipe"),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(WdemErrorCode.PermissionError, result.Error!.Code);
+    Assert.Equal(0, provider.ApplyCalls);
+  }
+
   [Fact]
   public async Task ApplyAsync_SameApprovedRequestIsReplayed_ExecutesProviderOnce()
   {
@@ -405,6 +470,13 @@ public sealed class ElevatedResourceWorkerTests
   private static string Mutate(string fingerprint) =>
       $"{(fingerprint[0] == 'A' ? 'B' : 'A')}{fingerprint[1..]}";
 
+  private static ResourceResult SucceededDependency(string resourceId) => new()
+  {
+    ResourceId = resourceId,
+    State = ExecutionState.Completed,
+    Outcome = ExecutionOutcome.Succeeded
+  };
+
   private sealed class StubRunStore(ExecutionRun run) :
       IExecutionRunStore,
       IApprovedResourceStore
@@ -437,6 +509,10 @@ public sealed class ElevatedResourceWorkerTests
 
     public Task CreateAsync(ExecutionRun value, CancellationToken cancellationToken) =>
         throw new NotSupportedException();
+    public Task CreateAsync(
+        ExecutionRun value,
+        IReadOnlyList<ApprovedResourceSeal> approvedResources,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
     public Task<IReadOnlyList<ExecutionRun>> ListAsync(CancellationToken cancellationToken) =>
         throw new NotSupportedException();
     public Task<IReadOnlyList<ExecutionRun>> ListIncompleteAsync(

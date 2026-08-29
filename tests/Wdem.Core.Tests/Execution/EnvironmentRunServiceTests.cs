@@ -1290,6 +1290,11 @@ public sealed class EnvironmentRunServiceTests
       return Task.CompletedTask;
     }
 
+    public Task CreateAsync(
+        ExecutionRun run,
+        IReadOnlyList<ApprovedResourceSeal> approvedResources,
+        CancellationToken cancellationToken) => CreateAsync(run, cancellationToken);
+
     public Task<ExecutionRun?> GetAsync(Guid runId, CancellationToken cancellationToken)
     {
       cancellationToken.ThrowIfCancellationRequested();

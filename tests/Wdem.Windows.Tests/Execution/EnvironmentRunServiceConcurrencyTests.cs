@@ -887,6 +887,12 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     public Task CreateAsync(ExecutionRun run, CancellationToken cancellationToken) =>
         Inner.CreateAsync(run, cancellationToken);
 
+    public Task CreateAsync(
+        ExecutionRun run,
+        IReadOnlyList<ApprovedResourceSeal> approvedResources,
+        CancellationToken cancellationToken) =>
+        Inner.CreateAsync(run, approvedResources, cancellationToken);
+
     public Task<ExecutionRun?> GetAsync(Guid runId, CancellationToken cancellationToken) =>
         Inner.GetAsync(runId, cancellationToken);
 

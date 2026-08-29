@@ -111,9 +111,16 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
   public string ApprovedResourcesPath(Guid runId) =>
       Path.Combine(_paths.RunsDirectory, $"{runId:D}.approved.json");
 
-  public async Task CreateAsync(ExecutionRun run, CancellationToken cancellationToken)
+  public Task CreateAsync(ExecutionRun run, CancellationToken cancellationToken) =>
+      CreateAsync(run, [], cancellationToken);
+
+  public async Task CreateAsync(
+      ExecutionRun run,
+      IReadOnlyList<ApprovedResourceSeal> approvedResources,
+      CancellationToken cancellationToken)
   {
     ArgumentNullException.ThrowIfNull(run);
+    ArgumentNullException.ThrowIfNull(approvedResources);
     ValidateRunForPersistence(run);
     cancellationToken.ThrowIfCancellationRequested();
     await using var runLock = await AcquireRunLockAsync(run.RunId, cancellationToken)
@@ -128,7 +135,10 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     var approvedWritten = false;
     try
     {
-      approvedWritten = await WriteApprovedResourcesAsync(run, cancellationToken)
+      approvedWritten = await WriteApprovedResourcesAsync(
+          run,
+          approvedResources,
+          cancellationToken)
           .ConfigureAwait(false);
       await WriteSnapshotAsync(path, Redact(run), cancellationToken).ConfigureAwait(false);
     }
@@ -630,32 +640,63 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
 
   private async Task<bool> WriteApprovedResourcesAsync(
       ExecutionRun run,
+      IReadOnlyList<ApprovedResourceSeal> approvedResources,
       CancellationToken cancellationToken)
   {
-    if (run.State == ExecutionState.Completed || run.Plan is null)
+    if (run.State == ExecutionState.Completed ||
+        run.Mode != RunMode.Apply ||
+        run.Plan is null ||
+        approvedResources.Count == 0)
     {
       return false;
     }
 
-    var entries = new List<ProtectedApprovedResource>();
-    foreach (var planned in run.Plan.Resources.Where(resource =>
-                 resource.Status == PlannedResourceStatus.Ready &&
-                 resource.RequiresElevation &&
-                 resource.ResourcePlan.IsExecutable))
+    var expected = run.Plan.Resources.Where(resource =>
+        resource.Status == PlannedResourceStatus.Ready &&
+        resource.RequiresElevation &&
+        resource.ResourcePlan.IsExecutable).ToArray();
+    if (expected.Length != approvedResources.Count)
     {
+      throw new InvalidOperationException(
+          "The approved resource seals do not match the elevated execution plan.");
+    }
+
+    var entries = new List<ProtectedApprovedResource>();
+    foreach (var approvedResource in approvedResources)
+    {
+      var matches = expected.Where(resource => string.Equals(
+          resource.Definition.Id,
+          approvedResource.Definition.Id,
+          StringComparison.OrdinalIgnoreCase)).ToArray();
+      if (matches.Length != 1 ||
+          !FixedEquals(
+              ApprovedResourceFingerprint.Create(
+                  approvedResource.Definition,
+                  approvedResource.Plan),
+              ApprovedResourceFingerprint.Create(
+                  approvedResource.Definition,
+                  matches[0].ResourcePlan)))
+      {
+        throw new InvalidOperationException(
+            "An approved resource seal does not match the elevated execution plan.");
+      }
+
       var fingerprint = ApprovedResourceFingerprint.Create(
-          planned.Definition,
-          planned.ResourcePlan);
+          approvedResource.Definition,
+          approvedResource.Plan);
       var approved = new ApprovedResource(
-          planned.Definition,
-          planned.ResourcePlan,
+          approvedResource.Definition,
+          approvedResource.Plan,
           fingerprint);
       var plaintext = JsonSerializer.SerializeToUtf8Bytes(approved, _snapshotJsonOptions);
       var protectedData = _approvedResourceProtector.Protect(
           plaintext,
-          ApprovedResourceEntropy(run.RunId, planned.Definition.Id, fingerprint));
+          ApprovedResourceEntropy(
+              run.RunId,
+              approvedResource.Definition.Id,
+              fingerprint));
       entries.Add(new ProtectedApprovedResource(
-          planned.Definition.Id,
+          approvedResource.Definition.Id,
           fingerprint,
           Convert.ToBase64String(protectedData)));
     }
