@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Security.Cryptography;
 using Wdem.Core.Execution;
 using Wdem.Core.Processes;
@@ -143,7 +144,9 @@ public sealed class VisualStudioInstallerClientTests
     var process = new RecordingProcessExecutor();
     var client = new VisualStudioInstallerClient(
         process,
-        httpClient: new HttpClient(new ContentHandler(bytes)));
+        httpClient: new HttpClient(new ContentHandler(bytes)),
+        secureArtifactStager: new SecureArtifactStager(
+            new RecordingSecureDirectoryPolicy()));
     var verified = await client.AcquireBootstrapperAsync(
         new Uri("https://example.test/vs.exe"), hash, CancellationToken.None);
 
@@ -154,9 +157,11 @@ public sealed class VisualStudioInstallerClientTests
         @"C:\VS", [], [], null, CancellationToken.None);
 
     Assert.True(verified.IsTrusted);
-    Assert.Equal(verified.VerifiedPath, Assert.Single(process.Requests).FileName);
-    Assert.Equal(verified.VerifiedPath, result.Evidence["installerPath"]);
+    var request = Assert.Single(process.Requests);
+    Assert.NotEqual(verified.VerifiedPath, request.FileName);
+    Assert.Equal(request.FileName, result.Evidence["installerPath"]);
     Assert.Equal(hash, result.Evidence["installerSha256"]);
+    Assert.False(File.Exists(request.FileName));
   }
 
   [Fact]
@@ -167,7 +172,9 @@ public sealed class VisualStudioInstallerClientTests
     var process = new RecordingProcessExecutor();
     var client = new VisualStudioInstallerClient(
         process,
-        httpClient: new HttpClient(new ContentHandler(bytes)));
+        httpClient: new HttpClient(new ContentHandler(bytes)),
+        secureArtifactStager: new SecureArtifactStager(
+            new RecordingSecureDirectoryPolicy()));
     var verified = await client.AcquireBootstrapperAsync(
         new Uri("https://example.test/vs.exe"), hash, CancellationToken.None);
     await File.WriteAllTextAsync(verified.VerifiedPath!, "tampered");
@@ -179,6 +186,69 @@ public sealed class VisualStudioInstallerClientTests
         @"C:\VS", [], [], null, CancellationToken.None));
 
     Assert.Empty(process.Requests);
+  }
+
+  [Fact]
+  public async Task VerifiedBootstrapper_SourceReplacementCannotChangeRestrictedStagedLaunch()
+  {
+    var trustedBytes = "trusted bootstrapper"u8.ToArray();
+    var hash = Convert.ToHexString(SHA256.HashData(trustedBytes));
+    var policy = new RecordingSecureDirectoryPolicy();
+    string? acquiredPath = null;
+    byte[]? launchedBytes = null;
+    var process = new RecordingProcessExecutor
+    {
+      BeforeExecute = request =>
+      {
+        File.WriteAllText(acquiredPath!, "replacement payload");
+        launchedBytes = File.ReadAllBytes(request.FileName);
+      }
+    };
+    var client = new VisualStudioInstallerClient(
+        process,
+        httpClient: new HttpClient(new ContentHandler(trustedBytes)),
+        secureArtifactStager: new SecureArtifactStager(policy));
+    var acquired = await client.AcquireBootstrapperAsync(
+        new Uri("https://example.test/vs.exe"), hash, CancellationToken.None);
+    acquiredPath = acquired.VerifiedPath;
+
+    var result = await client.InstallAsync(
+        acquiredPath!,
+        "Microsoft.VisualStudio.Product.Community",
+        null,
+        @"C:\VS", [], [], null, CancellationToken.None);
+
+    var request = Assert.Single(process.Requests);
+    Assert.NotEqual(acquiredPath, request.FileName);
+    Assert.Equal(trustedBytes, launchedBytes);
+    Assert.Contains(Path.GetDirectoryName(request.FileName)!, policy.SecuredDirectories);
+    Assert.Equal(hash, result.Evidence["installerSha256"]);
+    Assert.False(File.Exists(request.FileName));
+  }
+
+  [Fact]
+  public async Task SecureStaging_NativeDirectoryFailureReturnsStructuredError()
+  {
+    var sourcePath = Path.GetTempFileName();
+    try
+    {
+      var sourceBytes = "trusted artifact"u8.ToArray();
+      await File.WriteAllBytesAsync(sourcePath, sourceBytes);
+      var stager = new SecureArtifactStager(new NativeFailureSecureDirectoryPolicy());
+
+      var result = await stager.StageVerifiedAsync(
+          sourcePath,
+          Convert.ToHexString(SHA256.HashData(sourceBytes)),
+          SecureArtifactKind.Executable,
+          CancellationToken.None);
+
+      Assert.Null(result.Artifact);
+      Assert.Equal(WdemErrorCode.ConfigurationError, result.Error!.Code);
+    }
+    finally
+    {
+      File.Delete(sourcePath);
+    }
   }
 
   [Fact]
@@ -255,6 +325,7 @@ public sealed class VisualStudioInstallerClientTests
     public List<ProcessExecutionRequest> Requests { get; } = [];
     public ProcessExecutionResult Result { get; init; } =
         new(true, 0, [], []);
+    public Action<ProcessExecutionRequest>? BeforeExecute { get; init; }
 
     public Task<ProcessExecutionResult> ExecuteAsync(
         ProcessExecutionRequest request,
@@ -263,8 +334,30 @@ public sealed class VisualStudioInstallerClientTests
     {
       cancellationToken.ThrowIfCancellationRequested();
       Requests.Add(request);
+      BeforeExecute?.Invoke(request);
       return Task.FromResult(Result);
     }
+  }
+
+  private sealed class RecordingSecureDirectoryPolicy : ISecureArtifactDirectoryPolicy
+  {
+    public List<string> SecuredDirectories { get; } = [];
+
+    public string CreateRestrictedStagingDirectory()
+    {
+      var path = Path.Combine(
+          Path.GetTempPath(),
+          $"wdem-secure-test-{Guid.NewGuid():N}");
+      Directory.CreateDirectory(path);
+      Assert.Empty(Directory.EnumerateFileSystemEntries(path));
+      SecuredDirectories.Add(path);
+      return path;
+    }
+  }
+
+  private sealed class NativeFailureSecureDirectoryPolicy : ISecureArtifactDirectoryPolicy
+  {
+    public string CreateRestrictedStagingDirectory() => throw new Win32Exception(5);
   }
 
   private sealed class ThrowingHandler(string secret) : HttpMessageHandler

@@ -43,17 +43,21 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
   private readonly IProcessExecutor _processExecutor;
   private readonly ITrustedFileVerifier _trustedFileVerifier;
   private readonly HttpClient _httpClient;
+  private readonly ISecureArtifactStager _secureArtifactStager;
   private readonly ConcurrentDictionary<string, string> _verifiedBootstrappers =
       new(StringComparer.OrdinalIgnoreCase);
 
   public VisualStudioInstallerClient(
       IProcessExecutor processExecutor,
       ITrustedFileVerifier? trustedFileVerifier = null,
-      HttpClient? httpClient = null)
+      HttpClient? httpClient = null,
+      ISecureArtifactStager? secureArtifactStager = null)
   {
     _processExecutor = processExecutor ?? throw new ArgumentNullException(nameof(processExecutor));
     _trustedFileVerifier = trustedFileVerifier ?? new TrustedFileVerifier();
     _httpClient = httpClient ?? new HttpClient();
+    _secureArtifactStager = secureArtifactStager ?? new SecureArtifactStager(
+        verifier: _trustedFileVerifier);
     SetupExecutablePath = GetDefaultSetupPath();
   }
 
@@ -214,6 +218,7 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
           nameof(executablePath));
     }
 
+    SecureStagedArtifact? stagedArtifact = null;
     string? installerSha256 = null;
     if (!string.Equals(fullPath, SetupExecutablePath, StringComparison.OrdinalIgnoreCase))
     {
@@ -223,24 +228,38 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
             "The Visual Studio installer executable has not been verified.");
       }
 
-      var verification = await _trustedFileVerifier.VerifySha256Async(
+      var staged = await _secureArtifactStager.StageVerifiedAsync(
           fullPath,
           expectedSha256,
+          SecureArtifactKind.Executable,
           cancellationToken).ConfigureAwait(false);
-      if (!verification.IsTrusted)
+      if (staged.Artifact is null)
       {
         _verifiedBootstrappers.TryRemove(fullPath, out _);
         throw new InvalidOperationException(
-            "The Visual Studio installer executable no longer matches its verified hash.");
+            "The Visual Studio installer executable could not be staged as a verified artifact.");
       }
 
-      installerSha256 = verification.Sha256;
+      stagedArtifact = staged.Artifact;
+      fullPath = stagedArtifact.Path;
+      installerSha256 = stagedArtifact.Sha256;
     }
 
-    var process = await _processExecutor.ExecuteAsync(
-        new ProcessExecutionRequest(fullPath, arguments),
-        null,
-        cancellationToken).ConfigureAwait(false);
+    ProcessExecutionResult process;
+    try
+    {
+      process = await _processExecutor.ExecuteAsync(
+          new ProcessExecutionRequest(fullPath, arguments),
+          null,
+          cancellationToken).ConfigureAwait(false);
+    }
+    finally
+    {
+      if (stagedArtifact is not null)
+      {
+        await stagedArtifact.DisposeAsync().ConfigureAwait(false);
+      }
+    }
     var restart = process.ExitCode switch
     {
       1641 => RestartPolicy.RestartRequired,

@@ -51,7 +51,7 @@ public sealed class PrivilegeAwareResourceApplyDispatcher(
 
     var stepResults = new List<ProviderStepResult>();
     var diagnostics = new List<StructuredError>();
-    var restartRequirement = RestartPolicy.NoRestart;
+    RestartPolicy? restartRequirement = null;
     foreach (var segment in segments)
     {
       cancellationToken.ThrowIfCancellationRequested();
@@ -79,9 +79,12 @@ public sealed class PrivilegeAwareResourceApplyDispatcher(
               cancellationToken).ConfigureAwait(false);
       stepResults.AddRange(result.StepResults);
       diagnostics.AddRange(result.Diagnostics);
-      restartRequirement = (RestartPolicy)Math.Max(
-          (int)restartRequirement,
-          (int)result.RestartRequirement);
+      if (result.RestartRequirement is { } actualRestart)
+      {
+        restartRequirement = restartRequirement is { } accumulatedRestart
+            ? (RestartPolicy)Math.Max((int)accumulatedRestart, (int)actualRestart)
+            : actualRestart;
+      }
       if (result.Outcome != ApplyOutcome.Succeeded)
       {
         return result with

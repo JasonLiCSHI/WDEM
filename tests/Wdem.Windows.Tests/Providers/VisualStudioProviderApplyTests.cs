@@ -39,6 +39,8 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
     var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
 
     Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
+    Assert.True(result.RestartRequirement.HasValue);
+    Assert.Equal(RestartPolicy.NoRestart, result.RestartRequirement.Value);
     Assert.Equal(
         [
           "modify", "--installPath", @"C:\VS",
@@ -100,7 +102,8 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
 
     Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
     Assert.Contains("--config", installer.LastArguments);
-    Assert.Contains(Path.GetFullPath(vsconfig), installer.LastArguments);
+    Assert.NotEqual(Path.GetFullPath(vsconfig), installer.LastVsConfigPath);
+    Assert.Contains(installer.LastVsConfigPath, installer.LastArguments);
     Assert.Contains("Microsoft.VisualStudio.Workload.NetWeb", discovery.RequestedWorkloads);
     Assert.Contains("Microsoft.VisualStudio.Component.Git", discovery.RequestedComponents);
   }
@@ -144,6 +147,58 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
     Assert.Equal(ApplyOutcome.Failed, result.Outcome);
     Assert.Equal(WdemErrorCode.ConfigurationError, result.Error!.Code);
     Assert.Contains("Microsoft.VisualStudio.Component.Git", discovery.RequestedComponents);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_VsconfigReplacementCannotChangeRestrictedStagedConfiguration()
+  {
+    Directory.CreateDirectory(_root);
+    var vsconfig = Path.Combine(_root, "profile.vsconfig");
+    var trustedContents = Vsconfig("Microsoft.VisualStudio.Component.Git");
+    await File.WriteAllTextAsync(vsconfig, trustedContents);
+    var trustedBytes = await File.ReadAllBytesAsync(vsconfig);
+    var hash = Convert.ToHexString(SHA256.HashData(trustedBytes));
+    var policy = new RecordingSecureDirectoryPolicy();
+    byte[]? configuredBytes = null;
+    var installer = new RecordingInstallerClient
+    {
+      BeforeModify = stagedPath =>
+      {
+        File.WriteAllText(
+            vsconfig,
+            Vsconfig("Microsoft.VisualStudio.Component.Replacement"));
+        configuredBytes = File.ReadAllBytes(stagedPath!);
+      }
+    };
+    var discovery = new SequenceDiscovery(
+    [
+      [Instance("17.0_a")],
+      [Instance(
+          "17.0_a",
+          workloads: ["Microsoft.VisualStudio.Workload.ManagedDesktop"],
+          components:
+          [
+            "Microsoft.NetCore.Component.Runtime.10.0",
+            "Microsoft.VisualStudio.Component.Git"
+          ])]
+    ]);
+    var provider = Provider(
+        discovery,
+        installer,
+        new SecureArtifactStager(policy));
+    var resource = Resource(vsconfig, hash);
+    var plan = await provider.PlanAsync(
+        resource, State(Instance("17.0_a")), CancellationToken.None);
+
+    var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
+    Assert.NotEqual(Path.GetFullPath(vsconfig), installer.LastVsConfigPath);
+    Assert.Equal(trustedBytes, configuredBytes);
+    Assert.Contains(
+        Path.GetDirectoryName(installer.LastVsConfigPath!)!,
+        policy.SecuredDirectories);
+    Assert.False(File.Exists(installer.LastVsConfigPath));
   }
 
   [Fact]
@@ -274,11 +329,14 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
 
   private static VisualStudioProvider Provider(
       IVisualStudioDiscovery discovery,
-      IVisualStudioInstallerClient installer) => new(
+      IVisualStudioInstallerClient installer,
+      ISecureArtifactStager? secureArtifactStager = null) => new(
           discovery,
           installer,
           new TrustedFileVerifier(),
-          new ComplianceEvaluator());
+          new ComplianceEvaluator(),
+          secureArtifactStager ?? new SecureArtifactStager(
+              new RecordingSecureDirectoryPolicy()));
 
   private static ResourceDefinition Resource(
       string? vsconfigPath = null,
@@ -388,6 +446,8 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   private sealed class RecordingInstallerClient : IVisualStudioInstallerClient
   {
     public IReadOnlyList<string> LastArguments { get; private set; } = [];
+    public string? LastVsConfigPath { get; private set; }
+    public Action<string?>? BeforeModify { get; init; }
     public VisualStudioInstallerResult Result { get; init; } = Success(@"C:\setup.exe");
 
     public Task<TrustedFileVerificationResult> AcquireBootstrapperAsync(
@@ -423,6 +483,8 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
         string? vsconfigPath,
         CancellationToken cancellationToken)
     {
+      LastVsConfigPath = vsconfigPath;
+      BeforeModify?.Invoke(vsconfigPath);
       LastArguments = VisualStudioInstallerClient.CreateModifyArguments(
           installPath, workloads, components, vsconfigPath);
       return Task.FromResult(Result);
@@ -438,5 +500,21 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
       : IProgress<ProviderProgress>
   {
     public void Report(ProviderProgress value) => report(value);
+  }
+
+  private sealed class RecordingSecureDirectoryPolicy : ISecureArtifactDirectoryPolicy
+  {
+    public List<string> SecuredDirectories { get; } = [];
+
+    public string CreateRestrictedStagingDirectory()
+    {
+      var path = Path.Combine(
+          Path.GetTempPath(),
+          $"wdem-secure-test-{Guid.NewGuid():N}");
+      Directory.CreateDirectory(path);
+      Assert.Empty(Directory.EnumerateFileSystemEntries(path));
+      SecuredDirectories.Add(path);
+      return path;
+    }
   }
 }

@@ -14,6 +14,23 @@ namespace Wdem.Core.Tests.Execution;
 public sealed class EnvironmentRunServiceTests
 {
   [Fact]
+  public async Task ApplyAsync_AbsentActualRestartEvidenceRetainsPlannedRestartPolicy()
+  {
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      PlannedRestartPolicy = RestartPolicy.RestartRequired
+    };
+    var (service, _) = CreateService(provider);
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    Assert.Equal(
+        RestartPolicy.RestartRequired,
+        run.ResourceResults["git"].RestartRequirement);
+    Assert.Contains(RestartPolicy.RestartRequired, run.RestartRequirements);
+  }
+
+  [Fact]
   public async Task ApplyAsync_UsesActualProviderRestartEvidence()
   {
     var provider = new ScriptedProvider(Missing("git"))
@@ -1207,6 +1224,7 @@ public sealed class EnvironmentRunServiceTests
     public Func<ResourceDefinition, DetectedState>? DetectState { get; init; }
     public Func<CancellationToken, ValueTask<ResourceApplyResult>>? ApplyOperation { get; init; }
     public IReadOnlyList<ProviderProgress> ProgressEvents { get; init; } = [];
+    public RestartPolicy PlannedRestartPolicy { get; init; }
     public List<string> DetectedResourceIds { get; } = [];
     public ResourceApplyResult ApplyResult { get; init; } = new()
     {
@@ -1279,7 +1297,7 @@ public sealed class EnvironmentRunServiceTests
                 Description = "Install git",
                 Action = PlanAction.Install,
                 PrivilegeRequirement = PrivilegeRequirement.CurrentUser,
-                RestartPolicy = RestartPolicy.NoRestart
+                RestartPolicy = PlannedRestartPolicy
               }
             ]
       });

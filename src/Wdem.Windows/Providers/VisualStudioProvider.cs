@@ -13,6 +13,7 @@ public sealed class VisualStudioProvider : IResourceProvider
   private readonly IVisualStudioDiscovery _discovery;
   private readonly IVisualStudioInstallerClient? _installer;
   private readonly ITrustedFileVerifier _trustedFileVerifier;
+  private readonly ISecureArtifactStager _secureArtifactStager;
   private readonly IComplianceEvaluator _complianceEvaluator;
 
   public VisualStudioProvider(
@@ -21,6 +22,7 @@ public sealed class VisualStudioProvider : IResourceProvider
   {
     _discovery = discovery ?? throw new ArgumentNullException(nameof(discovery));
     _trustedFileVerifier = new TrustedFileVerifier();
+    _secureArtifactStager = new SecureArtifactStager(verifier: _trustedFileVerifier);
     _complianceEvaluator = complianceEvaluator ??
         throw new ArgumentNullException(nameof(complianceEvaluator));
     Capabilities = CreateCapabilities(supportsInstallerParameters: false);
@@ -30,12 +32,15 @@ public sealed class VisualStudioProvider : IResourceProvider
       IVisualStudioDiscovery discovery,
       IVisualStudioInstallerClient installer,
       ITrustedFileVerifier trustedFileVerifier,
-      IComplianceEvaluator complianceEvaluator)
+      IComplianceEvaluator complianceEvaluator,
+      ISecureArtifactStager? secureArtifactStager = null)
   {
     _discovery = discovery ?? throw new ArgumentNullException(nameof(discovery));
     _installer = installer ?? throw new ArgumentNullException(nameof(installer));
     _trustedFileVerifier = trustedFileVerifier ??
         throw new ArgumentNullException(nameof(trustedFileVerifier));
+    _secureArtifactStager = secureArtifactStager ?? new SecureArtifactStager(
+        verifier: _trustedFileVerifier);
     _complianceEvaluator = complianceEvaluator ??
         throw new ArgumentNullException(nameof(complianceEvaluator));
     Capabilities = CreateCapabilities(supportsInstallerParameters: true);
@@ -388,22 +393,51 @@ public sealed class VisualStudioProvider : IResourceProvider
     var step = plan.Steps[0];
     progress?.Report(new ProviderProgress(
         "BootstrapperVerification", 0.1, "Verifying Visual Studio installer inputs.", step.Id));
-    var resolved = await ResolveConfigurationAsync(
-        resource,
-        options!,
-        cancellationToken).ConfigureAwait(false);
-    if (resolved.Error is not null)
+    SecureStagedArtifact? stagedConfiguration = null;
+    if (options!.VsConfigPath is not null)
     {
-      return ApplyFailure(
-          resource,
-          step,
-          resolved.Error with { ResourceId = resource.Id, StepId = step.Id },
-          null,
-          0.1);
+      var staged = await _secureArtifactStager.StageVerifiedAsync(
+          options.VsConfigPath,
+          GetExpectedSha256(resource)!,
+          SecureArtifactKind.VisualStudioConfiguration,
+          cancellationToken).ConfigureAwait(false);
+      if (staged.Artifact is null)
+      {
+        return ApplyFailure(
+            resource,
+            step,
+            staged.Error! with { ResourceId = resource.Id, StepId = step.Id },
+            null,
+            0.1);
+      }
+
+      stagedConfiguration = staged.Artifact;
     }
 
-    options = resolved.Options;
-    var verifiedVsConfig = resolved.VerifiedPath;
+    await using var configurationLease = stagedConfiguration;
+    if (stagedConfiguration is not null)
+    {
+      var parsed = await VisualStudioConfigurationParser.ParseAsync(
+          stagedConfiguration.Path,
+          cancellationToken).ConfigureAwait(false);
+      if (parsed.Error is not null)
+      {
+        return ApplyFailure(
+            resource,
+            step,
+            parsed.Error with { ResourceId = resource.Id, StepId = step.Id },
+            null,
+            0.1);
+      }
+
+      options = options with
+      {
+        Workloads = MergeIds(options.Workloads, parsed.Configuration!.Workloads),
+        Components = MergeIds(options.Components, parsed.Configuration.Components)
+      };
+    }
+
+    var verifiedVsConfig = stagedConfiguration?.Path;
 
     var setupPath = DefaultSetupPath();
     if (options.BootstrapperUri is not null)
@@ -495,7 +529,11 @@ public sealed class VisualStudioProvider : IResourceProvider
         "Configuration", 0.65, "Applying Visual Studio workloads and components.", step.Id));
     progress?.Report(new ProviderProgress(
         "Verification", 0.85, "Verifying Visual Studio configuration.", step.Id));
-    var finalVerification = await VerifyAsync(resource, cancellationToken).ConfigureAwait(false);
+    var finalVerification = await VerifyAppliedConfigurationAsync(
+        resource,
+        options,
+        stagedConfiguration?.Sha256,
+        cancellationToken).ConfigureAwait(false);
     if (finalVerification.Compliance != ComplianceStatus.Satisfied)
     {
       var compliance = Evaluate(resource, finalVerification.DetectedState, options);
@@ -832,6 +870,75 @@ public sealed class VisualStudioProvider : IResourceProvider
         verification.VerifiedPath,
         verification.Sha256,
         null);
+  }
+
+  private async Task<VerificationResult> VerifyAppliedConfigurationAsync(
+      ResourceDefinition resource,
+      VisualStudioResourceOptions options,
+      string? configurationSha256,
+      CancellationToken cancellationToken)
+  {
+    var instances = await _discovery.DiscoverAsync(
+        options.Workloads,
+        options.Components,
+        cancellationToken).ConfigureAwait(false);
+    var selected = SelectInstance(instances, options);
+    if (selected is null || !MatchesVersion(selected, resource.VersionConstraint))
+    {
+      return new VerificationResult
+      {
+        ResourceId = resource.Id,
+        Compliance = ComplianceStatus.ConfigurationMismatch,
+        DetectedState = new DetectedState
+        {
+          ResourceId = resource.Id,
+          Outcome = DetectionOutcome.Succeeded,
+          Exists = selected is not null
+        },
+        Message = "Visual Studio did not reach the requested state."
+      };
+    }
+
+    var evidence = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+      ["instanceId"] = selected.InstanceId,
+      ["installationPath"] = selected.InstallationPath,
+      ["productId"] = selected.ProductId,
+      ["productPath"] = selected.ProductPath,
+      ["productDisplayVersion"] = selected.ProductDisplayVersion,
+      ["installationVersion"] = selected.InstallationVersion,
+      ["edition"] = selected.Edition,
+      ["channel"] = selected.ChannelId,
+      ["isComplete"] = selected.IsComplete.ToString().ToLowerInvariant(),
+      ["isLaunchable"] = selected.IsLaunchable.ToString().ToLowerInvariant(),
+      ["workloads"] = JoinIds(selected.Workloads),
+      ["components"] = JoinIds(selected.Components)
+    };
+    if (options.VsConfigPath is not null && configurationSha256 is not null)
+    {
+      var sourcePath = Path.GetFullPath(options.VsConfigPath);
+      evidence["vsconfigPath"] = sourcePath;
+      evidence["vsconfigSource"] = sourcePath;
+      evidence["vsconfigSha256"] = configurationSha256;
+    }
+
+    var detected = new DetectedState
+    {
+      ResourceId = resource.Id,
+      Outcome = DetectionOutcome.Succeeded,
+      Exists = true,
+      Version = selected.ProductDisplayVersion,
+      ConfigurationHash = configurationSha256,
+      Evidence = evidence
+    };
+    var compliance = Evaluate(resource, detected, options);
+    return new VerificationResult
+    {
+      ResourceId = resource.Id,
+      Compliance = compliance.Status,
+      DetectedState = detected,
+      Message = compliance.Status == ComplianceStatus.Satisfied ? null : compliance.Summary
+    };
   }
 
   private static IReadOnlyList<string> MergeIds(
