@@ -287,6 +287,35 @@ public sealed class NamedPipePrivilegeBrokerTests
   }
 
   [Fact]
+  public async Task CompleteRunAsync_RacingDispose_ObservesSharedCleanupFailure()
+  {
+    var launcher = new RecordingElevatedHostLauncher();
+    launcher.Session.WaitForApplyRelease = true;
+    launcher.Session.WaitForTerminationRelease = true;
+    launcher.Session.TerminateException = new IOException("termination failed");
+    var broker = new NamedPipePrivilegeBroker(launcher);
+    var runId = Guid.NewGuid();
+    var apply = broker.ApplyAsync(
+        Request(runId, "visual-studio"),
+        null,
+        CancellationToken.None);
+    await launcher.Session.RequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    var completing = broker.CompleteRunAsync(runId, CancellationToken.None);
+    var disposing = broker.DisposeAsync().AsTask();
+    await launcher.Session.Terminated.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    launcher.Session.ApplyRelease.TrySetResult();
+    await apply.WaitAsync(TimeSpan.FromSeconds(5));
+    launcher.Session.TerminationRelease.TrySetResult();
+
+    var disposeError = await Assert.ThrowsAsync<IOException>(() => disposing);
+    var completionError = await Assert.ThrowsAsync<IOException>(() => completing);
+    Assert.Equal("termination failed", disposeError.Message);
+    Assert.Equal(disposeError.Message, completionError.Message);
+    Assert.Equal(1, launcher.Session.TerminateCalls);
+  }
+
+  [Fact]
   public async Task DisposeAsync_ActiveApplyWaitsForCancellationWithoutDisposedSemaphoreRace()
   {
     var launcher = new RecordingElevatedHostLauncher();
@@ -313,6 +342,24 @@ public sealed class NamedPipePrivilegeBrokerTests
         Request(Guid.NewGuid(), "vsix"),
         null,
         CancellationToken.None));
+  }
+
+  [Fact]
+  public async Task DisposeAsync_TerminateFailure_StillDisposesSession()
+  {
+    var launcher = new RecordingElevatedHostLauncher();
+    launcher.Session.TerminateException = new IOException("termination failed");
+    var broker = new NamedPipePrivilegeBroker(launcher);
+    await broker.ApplyAsync(
+        Request(Guid.NewGuid(), "visual-studio"),
+        null,
+        CancellationToken.None);
+
+    var error = await Assert.ThrowsAsync<IOException>(() => broker.DisposeAsync().AsTask());
+
+    Assert.Equal("termination failed", error.Message);
+    Assert.Equal(1, launcher.Session.TerminateCalls);
+    Assert.Equal(1, launcher.Session.DisposeCalls);
   }
 
   [Fact]
@@ -523,11 +570,16 @@ public sealed class NamedPipePrivilegeBrokerTests
   {
     public List<ElevatedResourceRequest> Requests { get; } = [];
     public bool WaitForCancellation { get; set; }
+    public bool WaitForApplyRelease { get; set; }
     public bool WaitForTerminationRelease { get; set; }
+    public Exception? TerminateException { get; set; }
     public int TerminateCalls { get; private set; }
+    public int DisposeCalls { get; private set; }
     public TaskCompletionSource RequestStarted { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource Terminated { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource ApplyRelease { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource TerminationRelease { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
@@ -540,7 +592,11 @@ public sealed class NamedPipePrivilegeBrokerTests
       cancellationToken.ThrowIfCancellationRequested();
       Requests.Add(request);
       RequestStarted.TrySetResult();
-      if (WaitForCancellation)
+      if (WaitForApplyRelease)
+      {
+        await ApplyRelease.Task.WaitAsync(cancellationToken);
+      }
+      else if (WaitForCancellation)
       {
         await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
       }
@@ -560,9 +616,18 @@ public sealed class NamedPipePrivilegeBrokerTests
       {
         await TerminationRelease.Task.WaitAsync(cancellationToken);
       }
+
+      if (TerminateException is not null)
+      {
+        throw TerminateException;
+      }
     }
 
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    public ValueTask DisposeAsync()
+    {
+      DisposeCalls++;
+      return ValueTask.CompletedTask;
+    }
   }
 
   private sealed class RecordingPrivilegeBroker : IPrivilegeBroker

@@ -97,28 +97,34 @@ public sealed class NamedPipePrivilegeBroker :
   {
     cancellationToken.ThrowIfCancellationRequested();
     var lifecycle = _runLifecycles.GetOrAdd(runId, static _ => new RunLifecycle());
-    var closing = lifecycle.BeginClose();
-    if (!closing.IsOwner)
-    {
-      await closing.Completion.ConfigureAwait(false);
-      return;
-    }
-
-    try
-    {
-      // After closure starts, cleanup must finish before any completion caller returns.
-      await closing.OperationsDrained.ConfigureAwait(false);
-      await CleanupRunAsync(runId).ConfigureAwait(false);
-      lifecycle.Complete();
-    }
-    catch (Exception exception)
-    {
-      lifecycle.Fail(exception);
-      throw;
-    }
+    var operationsDrained = lifecycle.Close();
+    await operationsDrained.ConfigureAwait(false);
+    await EnsureRunCleanupAsync(runId, lifecycle, operationsDrained).ConfigureAwait(false);
   }
 
-  private async Task CleanupRunAsync(Guid runId)
+  private async Task EnsureRunCleanupAsync(
+      Guid runId,
+      RunLifecycle lifecycle,
+      Task operationsDrained)
+  {
+    var cleanup = lifecycle.BeginCleanup();
+    if (cleanup.IsOwner)
+    {
+      try
+      {
+        await CleanupRunAsync(runId, operationsDrained).ConfigureAwait(false);
+        lifecycle.CompleteCleanup();
+      }
+      catch (Exception exception)
+      {
+        lifecycle.FailCleanup(exception);
+      }
+    }
+
+    await cleanup.Completion.ConfigureAwait(false);
+  }
+
+  private async Task CleanupRunAsync(Guid runId, Task operationsDrained)
   {
     HostSession? session = null;
     await _sessionsGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
@@ -136,23 +142,35 @@ public sealed class NamedPipePrivilegeBroker :
       _sessionsGate.Release();
     }
 
+    Exception? cleanupFailure = null;
     if (session is not null)
     {
       try
       {
-        try
-        {
-          await session.Session.TerminateAsync(CancellationToken.None).ConfigureAwait(false);
-        }
-        finally
-        {
-          await session.Session.DisposeAsync().ConfigureAwait(false);
-        }
+        await session.Session.TerminateAsync(CancellationToken.None).ConfigureAwait(false);
       }
-      finally
+      catch (Exception exception)
       {
-        session.RequestGate.Dispose();
+        cleanupFailure = exception;
       }
+
+      try
+      {
+        await session.Session.DisposeAsync().ConfigureAwait(false);
+      }
+      catch (Exception exception)
+      {
+        cleanupFailure = cleanupFailure is null
+            ? exception
+            : new AggregateException(cleanupFailure, exception);
+      }
+    }
+
+    await operationsDrained.ConfigureAwait(false);
+    session?.RequestGate.Dispose();
+    if (cleanupFailure is not null)
+    {
+      throw cleanupFailure;
     }
   }
 
@@ -199,39 +217,40 @@ public sealed class NamedPipePrivilegeBroker :
 
   private async Task DisposeCoreAsync()
   {
-    HostSession[] sessions;
+    KeyValuePair<Guid, RunLifecycle>[] runs;
     await _sessionsGate.WaitAsync().ConfigureAwait(false);
     try
     {
-      sessions = _sessions.Values.ToArray();
-      _sessions.Clear();
-      _terminalLaunchFailures.Clear();
+      runs = _runLifecycles.Keys
+          .Concat(_sessions.Keys)
+          .Concat(_terminalLaunchFailures.Keys)
+          .Distinct()
+          .Select(runId => new KeyValuePair<Guid, RunLifecycle>(
+              runId,
+              _runLifecycles.GetOrAdd(runId, static _ => new RunLifecycle())))
+          .ToArray();
     }
     finally
     {
       _sessionsGate.Release();
     }
 
-    Exception? cleanupFailure = null;
-    foreach (var session in sessions)
+    var cleanupTasks = runs.Select(run =>
     {
-      try
-      {
-        await session.Session.TerminateAsync(CancellationToken.None).ConfigureAwait(false);
-        await session.Session.DisposeAsync().ConfigureAwait(false);
-      }
-      catch (Exception exception)
-      {
-        cleanupFailure ??= exception;
-      }
+      var operationsDrained = run.Value.Close();
+      return EnsureRunCleanupAsync(run.Key, run.Value, operationsDrained);
+    }).ToArray();
+    Exception? cleanupFailure = null;
+    try
+    {
+      await Task.WhenAll(cleanupTasks).ConfigureAwait(false);
+    }
+    catch (Exception exception)
+    {
+      cleanupFailure = exception;
     }
 
     await WaitForOperationsAsync().ConfigureAwait(false);
-    foreach (var session in sessions)
-    {
-      session.RequestGate.Dispose();
-    }
-
     _runLifecycles.Clear();
     _sessionsGate.Dispose();
     if (cleanupFailure is not null)
@@ -420,10 +439,11 @@ public sealed class NamedPipePrivilegeBroker :
   private sealed class RunLifecycle
   {
     private readonly object _gate = new();
-    private readonly TaskCompletionSource _completion = new(
+    private readonly TaskCompletionSource _cleanupCompletion = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     private TaskCompletionSource? _operationsDrained;
     private int _activeOperations;
+    private bool _cleanupStarted;
     private bool _closed;
 
     public bool IsClosed
@@ -451,35 +471,38 @@ public sealed class NamedPipePrivilegeBroker :
       }
     }
 
-    public RunClosing BeginClose()
+    public Task Close()
     {
       lock (_gate)
       {
-        if (_closed)
+        if (!_closed)
         {
-          return new RunClosing(false, Task.CompletedTask, _completion.Task);
+          _closed = true;
+          if (_activeOperations > 0)
+          {
+            _operationsDrained = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+          }
         }
 
-        _closed = true;
-        Task operationsDrained;
-        if (_activeOperations == 0)
-        {
-          operationsDrained = Task.CompletedTask;
-        }
-        else
-        {
-          _operationsDrained = new TaskCompletionSource(
-              TaskCreationOptions.RunContinuationsAsynchronously);
-          operationsDrained = _operationsDrained.Task;
-        }
-
-        return new RunClosing(true, operationsDrained, _completion.Task);
+        return _operationsDrained?.Task ?? Task.CompletedTask;
       }
     }
 
-    public void Complete() => _completion.TrySetResult();
+    public RunCleanup BeginCleanup()
+    {
+      lock (_gate)
+      {
+        var isOwner = !_cleanupStarted;
+        _cleanupStarted = true;
+        return new RunCleanup(isOwner, _cleanupCompletion.Task);
+      }
+    }
 
-    public void Fail(Exception exception) => _completion.TrySetException(exception);
+    public void CompleteCleanup() => _cleanupCompletion.TrySetResult();
+
+    public void FailCleanup(Exception exception) =>
+        _cleanupCompletion.TrySetException(exception);
 
     private void Exit()
     {
@@ -505,9 +528,8 @@ public sealed class NamedPipePrivilegeBroker :
     }
   }
 
-  private sealed record RunClosing(
+  private sealed record RunCleanup(
       bool IsOwner,
-      Task OperationsDrained,
       Task Completion);
 
   private sealed record LaunchFailure(
