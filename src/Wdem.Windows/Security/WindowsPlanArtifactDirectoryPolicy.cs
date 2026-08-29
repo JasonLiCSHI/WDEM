@@ -37,16 +37,12 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
         rootPath,
         security,
         currentUser,
-        administrators,
-        system,
         mustCreate: false);
     var stagingPath = Path.Combine(rootPath, Guid.NewGuid().ToString("N"));
     CreateRestrictedDirectory(
         stagingPath,
         security,
         currentUser,
-        administrators,
-        system,
         mustCreate: true);
     return stagingPath;
   }
@@ -59,11 +55,31 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
     ValidateRestrictedDirectory(
         path,
         currentUser,
-        new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
-        new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null));
+        currentUser,
+        new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator));
   }
 
-  private static DirectorySecurity CreateSecurity(
+  internal static string GetCurrentUserSid()
+  {
+    using var identity = WindowsIdentity.GetCurrent();
+    return identity.User?.Value ??
+        throw new InvalidOperationException("The current Windows user SID is unavailable.");
+  }
+
+  internal static void ValidateRestrictedDirectory(string path, string creatorSid)
+  {
+    var creator = new SecurityIdentifier(creatorSid);
+    using var identity = WindowsIdentity.GetCurrent();
+    var claimant = identity.User ??
+        throw new InvalidOperationException("The current Windows user SID is unavailable.");
+    ValidateRestrictedDirectory(
+        path,
+        creator,
+        claimant,
+        new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator));
+  }
+
+  internal static DirectorySecurity CreateSecurity(
       SecurityIdentifier currentUser,
       SecurityIdentifier administrators,
       SecurityIdentifier system)
@@ -89,8 +105,6 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
       string path,
       DirectorySecurity security,
       SecurityIdentifier currentUser,
-      SecurityIdentifier administrators,
-      SecurityIdentifier system,
       bool mustCreate)
   {
     var parent = Path.GetDirectoryName(path);
@@ -122,14 +136,18 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
       descriptorHandle.Free();
     }
 
-    ValidateRestrictedDirectory(path, currentUser, administrators, system);
+    ValidateRestrictedDirectory(
+        path,
+        currentUser,
+        currentUser,
+        claimantIsAdministrator: false);
   }
 
   private static void ValidateRestrictedDirectory(
       string path,
-      SecurityIdentifier currentUser,
-      SecurityIdentifier administrators,
-      SecurityIdentifier system)
+      SecurityIdentifier creator,
+      SecurityIdentifier claimant,
+      bool claimantIsAdministrator)
   {
     var info = new DirectoryInfo(path);
     if (!info.Exists || info.Attributes.HasFlag(FileAttributes.ReparsePoint))
@@ -138,24 +156,44 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
           $"The restricted plan-artifact directory '{path}' is unavailable or redirected.");
     }
 
-    var security = info.GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
-    if (!currentUser.Equals(security.GetOwner(typeof(SecurityIdentifier))) ||
+    var security = info.GetAccessControl(
+        AccessControlSections.Access | AccessControlSections.Owner);
+    ValidateRestrictedSecurity(security, creator, claimant, claimantIsAdministrator);
+  }
+
+  internal static void ValidateRestrictedSecurity(
+      DirectorySecurity security,
+      SecurityIdentifier creator,
+      SecurityIdentifier claimant,
+      bool claimantIsAdministrator)
+  {
+    ArgumentNullException.ThrowIfNull(security);
+    ArgumentNullException.ThrowIfNull(creator);
+    ArgumentNullException.ThrowIfNull(claimant);
+    var administrators = new SecurityIdentifier(
+        WellKnownSidType.BuiltinAdministratorsSid,
+        null);
+    var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+    if (!creator.Equals(claimant) && !system.Equals(claimant) && !claimantIsAdministrator)
+    {
+      throw new SecurityException("The current identity cannot claim this plan artifact.");
+    }
+
+    if (!creator.Equals(security.GetOwner(typeof(SecurityIdentifier))) ||
         !security.AreAccessRulesProtected)
     {
-      throw new SecurityException(
-          $"The restricted plan-artifact directory '{path}' has untrusted ownership.");
+      throw new SecurityException("The restricted plan-artifact directory has untrusted ownership.");
     }
 
     var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier))
         .Cast<FileSystemAccessRule>()
         .ToArray();
     if (rules.Length != 3 ||
-        !HasRequiredRule(rules, currentUser) ||
+        !HasRequiredRule(rules, creator) ||
         !HasRequiredRule(rules, administrators) ||
         !HasRequiredRule(rules, system))
     {
-      throw new SecurityException(
-          $"The restricted plan-artifact directory '{path}' grants unexpected access.");
+      throw new SecurityException("The restricted plan-artifact directory grants unexpected access.");
     }
   }
 

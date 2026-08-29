@@ -78,7 +78,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
   private readonly ISecureArtifactStager _stager;
   private readonly ITrustedFileVerifier _verifier;
   private readonly IVsixManifestReader _manifestReader;
-  private readonly Action<string> _validateRestrictedDirectory;
+  private readonly Action<string, string> _validateRestrictedDirectory;
+  private readonly Func<string> _getCurrentUserSid;
   private readonly TimeSpan _handoffLifetime;
   private readonly ConcurrentDictionary<string, HandoffRegistration> _handoffs =
       new(StringComparer.OrdinalIgnoreCase);
@@ -97,6 +98,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
           verifier,
           manifestReader,
           WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedDirectory,
+          WindowsPlanArtifactDirectoryPolicy.GetCurrentUserSid,
           TimeSpan.FromHours(24))
   {
   }
@@ -105,7 +107,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       ISecureArtifactStager stager,
       ITrustedFileVerifier verifier,
       IVsixManifestReader manifestReader,
-      Action<string> validateRestrictedDirectory,
+      Action<string, string> validateRestrictedDirectory,
+      Func<string> getCurrentUserSid,
       TimeSpan? handoffLifetime = null)
   {
     _stager = stager ?? throw new ArgumentNullException(nameof(stager));
@@ -113,6 +116,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     _manifestReader = manifestReader ?? throw new ArgumentNullException(nameof(manifestReader));
     _validateRestrictedDirectory = validateRestrictedDirectory ??
         throw new ArgumentNullException(nameof(validateRestrictedDirectory));
+    _getCurrentUserSid = getCurrentUserSid ?? throw new ArgumentNullException(nameof(getCurrentUserSid));
     _handoffLifetime = handoffLifetime ?? TimeSpan.FromHours(24);
     if (_handoffLifetime <= TimeSpan.Zero)
     {
@@ -143,7 +147,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       }
 
       var directory = Path.GetFullPath(staged.DirectoryPath);
-      _validateRestrictedDirectory(directory);
+      var creatorSid = _getCurrentUserSid();
+      _validateRestrictedDirectory(directory, creatorSid);
       var artifactPath = Path.Combine(directory, "extension.vsix");
       if (!string.Equals(staged.Path, artifactPath, StringComparison.OrdinalIgnoreCase))
       {
@@ -169,7 +174,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       }
 
       var ownerToken = Convert.ToHexString(Guid.NewGuid().ToByteArray());
-      WriteOwnerToken(directory, ownerToken);
+      WriteOwnershipMarker(directory, creatorSid, ownerToken);
       var evidence = new VsixPlanArtifactEvidence(
           1,
           resourceId,
@@ -180,6 +185,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
           manifestResult.Manifest.ManifestPath,
           manifestResult.Manifest.VisualStudioInstanceId,
           manifestResult.Manifest.Targets.ToArray(),
+          creatorSid,
           directory,
           ownerToken);
       var encoded = EncodeEvidence(evidence);
@@ -238,9 +244,12 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
             "The approved VSIX evidence does not match the desired resource.");
       }
 
-      _validateRestrictedDirectory(evidence!.OwnershipDirectory);
+      _validateRestrictedDirectory(evidence!.OwnershipDirectory, evidence.CreatorSid);
       lease = ArtifactLease.Acquire(evidence.OwnershipDirectory);
-      ValidateOwnerToken(evidence.OwnershipDirectory, evidence.OwnershipToken);
+      ValidateOwnershipMarker(
+          evidence.OwnershipDirectory,
+          evidence.CreatorSid,
+          evidence.OwnershipToken);
       directoryValidated = true;
       readLock = new FileStream(
           evidence.ArtifactPath,
@@ -322,9 +331,12 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     ArtifactLease? lease = null;
     try
     {
-      _validateRestrictedDirectory(evidence!.OwnershipDirectory);
+      _validateRestrictedDirectory(evidence!.OwnershipDirectory, evidence.CreatorSid);
       lease = ArtifactLease.Acquire(evidence.OwnershipDirectory);
-      ValidateOwnerToken(evidence.OwnershipDirectory, evidence.OwnershipToken);
+      ValidateOwnershipMarker(
+          evidence.OwnershipDirectory,
+          evidence.CreatorSid,
+          evidence.OwnershipToken);
       RemoveHandoff(resourceId, evidence.OwnershipDirectory);
     }
     catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
@@ -389,9 +401,9 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     }
   }
 
-  private static void WriteOwnerToken(string directory, string token)
+  private static void WriteOwnershipMarker(string directory, string creatorSid, string token)
   {
-    var bytes = Encoding.UTF8.GetBytes(token + "\n");
+    var bytes = Encoding.UTF8.GetBytes(creatorSid + "\n" + token + "\n");
     using var stream = new FileStream(
         Path.Combine(directory, OwnerFileName),
         FileMode.CreateNew,
@@ -403,7 +415,10 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     stream.Flush(flushToDisk: true);
   }
 
-  private static void ValidateOwnerToken(string directory, string expectedToken)
+  private static void ValidateOwnershipMarker(
+      string directory,
+      string expectedCreatorSid,
+      string expectedToken)
   {
     var path = Path.Combine(directory, OwnerFileName);
     using var stream = new FileStream(
@@ -413,7 +428,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
         FileShare.Read,
         bufferSize: 1,
         FileOptions.SequentialScan);
-    var expected = Encoding.UTF8.GetBytes(expectedToken + "\n");
+    var expected = Encoding.UTF8.GetBytes(expectedCreatorSid + "\n" + expectedToken + "\n");
     if (File.GetAttributes(stream.SafeFileHandle).HasFlag(FileAttributes.ReparsePoint) ||
         stream.Length != expected.Length)
     {
@@ -442,6 +457,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
         evidence.InstallationTargets is null ||
         evidence.InstallationTargets.Any(target =>
             target is null || string.IsNullOrWhiteSpace(target.Id)) ||
+        string.IsNullOrWhiteSpace(evidence.CreatorSid) ||
+        evidence.CreatorSid.Any(char.IsControl) ||
         string.IsNullOrWhiteSpace(evidence.OwnershipDirectory) ||
         string.IsNullOrWhiteSpace(evidence.OwnershipToken) ||
         evidence.OwnershipToken.Length != 32 || !evidence.OwnershipToken.All(Uri.IsHexDigit) ||
@@ -571,6 +588,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       string ManifestPath,
       string VisualStudioInstanceId,
       IReadOnlyList<VsixInstallationTarget> InstallationTargets,
+      string CreatorSid,
       string OwnershipDirectory,
       string OwnershipToken);
 

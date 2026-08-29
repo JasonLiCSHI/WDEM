@@ -25,6 +25,95 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
     }
   }
 
+  [WindowsFact]
+  public void ValidatePlanArtifactSecurity_AllowsDifferentAdministratorForRecordedCreator()
+  {
+    var creator = TestSid(1001);
+    var claimant = TestSid(1002);
+    var security = WindowsPlanArtifactDirectoryPolicy.CreateSecurity(
+        creator,
+        Administrators,
+        LocalSystem);
+
+    WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedSecurity(
+        security,
+        creator,
+        claimant,
+        claimantIsAdministrator: true);
+  }
+
+  [WindowsFact]
+  public void ValidatePlanArtifactSecurity_AllowsSystemForRecordedCreator()
+  {
+    var creator = TestSid(1001);
+    var security = WindowsPlanArtifactDirectoryPolicy.CreateSecurity(
+        creator,
+        Administrators,
+        LocalSystem);
+
+    WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedSecurity(
+        security,
+        creator,
+        LocalSystem,
+        claimantIsAdministrator: false);
+  }
+
+  [WindowsFact]
+  public void ValidatePlanArtifactSecurity_RejectsUntrustedClaimant()
+  {
+    var creator = TestSid(1001);
+    var security = WindowsPlanArtifactDirectoryPolicy.CreateSecurity(
+        creator,
+        Administrators,
+        LocalSystem);
+
+    Assert.Throws<SecurityException>(() =>
+        WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedSecurity(
+            security,
+            creator,
+            TestSid(1002),
+            claimantIsAdministrator: false));
+  }
+
+  [WindowsFact]
+  public void ValidatePlanArtifactSecurity_RejectsTamperedOwner()
+  {
+    var creator = TestSid(1001);
+    var security = WindowsPlanArtifactDirectoryPolicy.CreateSecurity(
+        creator,
+        Administrators,
+        LocalSystem);
+    security.SetOwner(TestSid(1002));
+
+    Assert.Throws<SecurityException>(() =>
+        WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedSecurity(
+            security,
+            creator,
+            creator,
+            claimantIsAdministrator: false));
+  }
+
+  [WindowsFact]
+  public void ValidatePlanArtifactSecurity_RejectsTamperedAccessRule()
+  {
+    var creator = TestSid(1001);
+    var security = WindowsPlanArtifactDirectoryPolicy.CreateSecurity(
+        creator,
+        Administrators,
+        LocalSystem);
+    security.AddAccessRule(new FileSystemAccessRule(
+        TestSid(1002),
+        FileSystemRights.Read,
+        AccessControlType.Allow));
+
+    Assert.Throws<SecurityException>(() =>
+        WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedSecurity(
+            security,
+            creator,
+            creator,
+            claimantIsAdministrator: false));
+  }
+
   [WindowsAdministratorFact]
   public void CreateRestrictedStagingDirectory_CreatesProtectedAdministratorSystemAcl()
   {
@@ -86,6 +175,17 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
       rule.InheritanceFlags ==
           (InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit) &&
       rule.PropagationFlags == PropagationFlags.None;
+
+  private static SecurityIdentifier Administrators { get; } = new(
+      WellKnownSidType.BuiltinAdministratorsSid,
+      null);
+
+  private static SecurityIdentifier LocalSystem { get; } = new(
+      WellKnownSidType.LocalSystemSid,
+      null);
+
+  private static SecurityIdentifier TestSid(int relativeId) => new(
+      $"S-1-5-21-111111111-222222222-333333333-{relativeId}");
 }
 
 internal sealed class WindowsFactAttribute : FactAttribute

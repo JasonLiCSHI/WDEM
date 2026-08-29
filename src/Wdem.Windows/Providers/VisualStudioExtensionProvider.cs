@@ -197,7 +197,7 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
           cancellationToken).ConfigureAwait(false);
       var requestedExtensionId = GetParameter(resource, ExtensionIdParameter)!;
       var relevantError = installed.Errors.FirstOrDefault(error =>
-          Matches(error.ClaimedId, requestedExtensionId));
+          error.ClaimedIds.Any(candidate => Matches(candidate, requestedExtensionId)));
       if (relevantError is not null)
       {
         return DetectionFailure(resource, new StructuredError(
@@ -326,56 +326,53 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
       IProgress<ProviderProgress>? progress,
       CancellationToken cancellationToken)
   {
-    cancellationToken.ThrowIfCancellationRequested();
     ArgumentNullException.ThrowIfNull(resource);
     ArgumentNullException.ThrowIfNull(plan);
-    var validation = await ValidateAsync(resource, cancellationToken).ConfigureAwait(false);
-    var invalidResource = ProviderLifecycleSupport.RejectInvalidResource(resource, validation);
-    if (invalidResource is not null)
-    {
-      return invalidResource;
-    }
-
-    var invalidPlan = ProviderLifecycleSupport.RejectInvalidPlan(
-        resource,
-        plan,
-        ResourceType,
-        ProviderName,
-        static (definition, step) => VsixPlanArtifactStore.HasValidStepEvidence(
-            definition.Id,
-            step.Id));
-    if (invalidPlan is not null)
-    {
-      return invalidPlan;
-    }
-
-    if (!plan.RequiresApply)
-    {
-      return new ResourceApplyResult { ResourceId = resource.Id, Outcome = ApplyOutcome.NotRequired };
-    }
-
-    var step = plan.Steps[0];
-    var instance = await SelectInstanceAsync(resource, cancellationToken).ConfigureAwait(false);
-    if (instance.Instance is null)
-    {
-      await _planArtifactStore.AbandonAsync(
-          resource.Id,
-          step.Id,
-          cancellationToken).ConfigureAwait(false);
-      return ProviderLifecycleSupport.Failure(
-          resource,
-          step,
-          instance.Error ?? new StructuredError(
-              WdemErrorCode.DependencyError,
-              "Visual Studio instance is unavailable.",
-              "The selected Visual Studio instance was not found."),
-          null,
-          0);
-    }
-
+    var artifactsToAbandon = GetPlanArtifactsToAbandon(resource, plan);
     ClaimedVsixPlanArtifact? approvedArtifact = null;
     try
     {
+      cancellationToken.ThrowIfCancellationRequested();
+      var validation = await ValidateAsync(resource, cancellationToken).ConfigureAwait(false);
+      var invalidResource = ProviderLifecycleSupport.RejectInvalidResource(resource, validation);
+      if (invalidResource is not null)
+      {
+        return invalidResource;
+      }
+
+      var invalidPlan = ProviderLifecycleSupport.RejectInvalidPlan(
+          resource,
+          plan,
+          ResourceType,
+          ProviderName,
+          static (definition, step) => VsixPlanArtifactStore.HasValidStepEvidence(
+              definition.Id,
+              step.Id));
+      if (invalidPlan is not null)
+      {
+        return invalidPlan;
+      }
+
+      if (!plan.RequiresApply)
+      {
+        return new ResourceApplyResult { ResourceId = resource.Id, Outcome = ApplyOutcome.NotRequired };
+      }
+
+      var step = plan.Steps[0];
+      var instance = await SelectInstanceAsync(resource, cancellationToken).ConfigureAwait(false);
+      if (instance.Instance is null)
+      {
+        return ProviderLifecycleSupport.Failure(
+            resource,
+            step,
+            instance.Error ?? new StructuredError(
+                WdemErrorCode.DependencyError,
+                "Visual Studio instance is unavailable.",
+                "The selected Visual Studio instance was not found."),
+            null,
+            0);
+      }
+
       progress?.Report(new ProviderProgress("Apply", 0.25, "Validating the approved VSIX artifact.", step.Id));
       var claim = await _planArtifactStore.ClaimAsync(
           resource.Id,
@@ -474,6 +471,16 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
       if (approvedArtifact is not null)
       {
         await approvedArtifact.DisposeAsync().ConfigureAwait(false);
+      }
+      else
+      {
+        foreach (var artifact in artifactsToAbandon)
+        {
+          await _planArtifactStore.AbandonAsync(
+              artifact.ResourceId,
+              artifact.StepId,
+              CancellationToken.None).ConfigureAwait(false);
+        }
       }
     }
   }
@@ -901,6 +908,22 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
   private static bool Matches(string? left, string? right) =>
       string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
 
+  private static IReadOnlyList<PlanArtifactReference> GetPlanArtifactsToAbandon(
+      ResourceDefinition resource,
+      ResourcePlan plan)
+  {
+    if (!string.Equals(resource.Id, plan.ResourceId, StringComparison.Ordinal))
+    {
+      return [];
+    }
+
+    return plan.Steps
+        .Where(step => VsixPlanArtifactStore.HasValidStepEvidence(resource.Id, step.Id))
+        .Select(step => new PlanArtifactReference(resource.Id, step.Id))
+        .Distinct()
+        .ToArray();
+  }
+
   private static StructuredError ConfigurationError(
       ResourceDefinition? resource,
       string detail,
@@ -958,4 +981,5 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
   private sealed record InstanceSelection(VisualStudioInstance? Instance, StructuredError? Error);
   private sealed record AcquiredSource(string? Path, bool Temporary, StructuredError? Error);
   private sealed record PreparedPlanArtifact(string? StepEvidence, StructuredError? Error);
+  private sealed record PlanArtifactReference(string ResourceId, string StepId);
 }

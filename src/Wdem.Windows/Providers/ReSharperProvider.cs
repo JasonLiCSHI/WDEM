@@ -187,7 +187,8 @@ public sealed class ReSharperProvider : IResourceProvider
           instance,
           cancellationToken)
           .ConfigureAwait(false);
-      var relevantError = installed.Errors.FirstOrDefault(error => Matches(error.ClaimedId, PackageId));
+      var relevantError = installed.Errors.FirstOrDefault(error =>
+          error.ClaimedIds.Any(candidate => Matches(candidate, PackageId)));
       if (relevantError is not null)
       {
         return Failure(resource, Error(

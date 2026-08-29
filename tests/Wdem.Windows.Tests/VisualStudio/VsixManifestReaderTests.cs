@@ -17,7 +17,10 @@ public sealed class VsixManifestReaderTests
     "<PackageManifest xmlns=\"http://schemas.microsoft.com/developer/vsx-schema/2011\"><Metadata><Identity Id=\"Contoso.DeveloperTools\" Version=\"3.2.0\" /></Metadata><Installation><InstallationTarget Version=\"[17.0,18.0)\" /></Installation></PackageManifest>",
     "<PackageManifest xmlns=\"http://schemas.microsoft.com/developer/vsx-schema/2011\" xmlns:evil=\"urn:evil\"><Metadata><Identity Id=\"Contoso.DeveloperTools\" Version=\"3.2.0\" /></Metadata><Installation><InstallationTarget Id=\"Microsoft.VisualStudio.Community\" evil:Id=\"Other\" /></Installation></PackageManifest>",
     "<PackageManifest xmlns=\"http://schemas.microsoft.com/developer/vsx-schema/2011\"><Metadata><Identity Id=\"Contoso.DeveloperTools\" Version=\"3.2.0\" /></Metadata><Installation><InstallationTarget Id=\"Microsoft.VisualStudio.Community\" Version=\"not-a-range\" /></Installation></PackageManifest>",
-    "<PackageManifest xmlns=\"http://schemas.microsoft.com/developer/vsx-schema/2011\"><Metadata><Identity Id=\"Contoso.DeveloperTools\" Version=\"3.2.0\" /></Metadata><Installation><InstallationTarget Id=\"Microsoft.VisualStudio.Community\" Version=\"[18.0,17.0)\" /></Installation></PackageManifest>"
+    "<PackageManifest xmlns=\"http://schemas.microsoft.com/developer/vsx-schema/2011\"><Metadata><Identity Id=\"Contoso.DeveloperTools\" Version=\"3.2.0\" /></Metadata><Installation><InstallationTarget Id=\"Microsoft.VisualStudio.Community\" Version=\"[18.0,17.0)\" /></Installation></PackageManifest>",
+    "<PackageManifest xmlns=\"http://schemas.microsoft.com/developer/vsx-schema/2011\"><Metadata><Identity Id=\"Contoso.DeveloperTools\" Version=\"3.2.0\" /></Metadata><Installation><InstallationTarget Id=\"Microsoft.VisualStudio.Community\" /></Installation><Assets><Identity Id=\"Other.Extension\" Version=\"1.0.0\" /></Assets></PackageManifest>",
+    "<PackageManifest xmlns=\"http://schemas.microsoft.com/developer/vsx-schema/2011\"><Metadata><Identity Id=\"Contoso.DeveloperTools\" Version=\"3.2.0\" /></Metadata><Installation><InstallationTarget Id=\"Microsoft.VisualStudio.Community\" /></Installation><Assets><Installation><InstallationTarget Id=\"Microsoft.VisualStudio.Enterprise\" /></Installation></Assets></PackageManifest>",
+    "<PackageManifest xmlns=\"http://schemas.microsoft.com/developer/vsx-schema/2011\"><Metadata><Identity Id=\"Contoso.DeveloperTools\" Version=\"3.2.0\" /></Metadata><Installation><InstallationTarget Id=\"Microsoft.VisualStudio.Community\" /></Installation><Assets><InstallationTarget Id=\"Microsoft.VisualStudio.Enterprise\" /></Assets></PackageManifest>"
   };
 
   [Fact]
@@ -76,6 +79,42 @@ public sealed class VsixManifestReaderTests
         instance);
 
     Assert.True(compatible);
+  }
+
+  [Fact]
+  public async Task ReadInstalledWithDiagnosticsAsync_PreservesAllAmbiguousClaimedIds()
+  {
+    var root = Path.Combine(Path.GetTempPath(), $"wdem-vsix-ambiguous-{Guid.NewGuid():N}");
+    var path = Path.Combine(
+        root,
+        "Microsoft",
+        "VisualStudio",
+        "17.0_a",
+        "Extensions",
+        "candidate",
+        "extension.vsixmanifest");
+    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+    var manifest = ValidManifest("3.2.0")
+        .Replace("<PackageManifest ", "<PackageManifest xmlns:other=\"urn:other\" ", StringComparison.Ordinal)
+        .Replace(
+            "Identity Id=\"Contoso.DeveloperTools\"",
+            "Identity Id=\"Contoso.DeveloperTools\" other:Id=\"Other.Extension\"",
+            StringComparison.Ordinal);
+    await File.WriteAllTextAsync(path, manifest);
+    try
+    {
+      var result = await new VsixManifestReader(root)
+          .ReadInstalledWithDiagnosticsAsync(Instance("a"), CancellationToken.None);
+
+      Assert.Empty(result.Manifests);
+      var error = Assert.Single(result.Errors);
+      Assert.Contains("Contoso.DeveloperTools", error.ClaimedIds);
+      Assert.Contains("Other.Extension", error.ClaimedIds);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
   }
 
   [Theory]

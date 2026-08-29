@@ -23,12 +23,30 @@ public sealed record VsixInstallationTarget(string Id, string? VersionRange);
 public sealed record VsixManifestReadResult(
     VsixManifest? Manifest,
     StructuredError? Error,
-    string? ClaimedId = null);
+    string? ClaimedId = null,
+    IReadOnlyList<string>? CandidateClaimedIds = null)
+{
+  public IReadOnlyList<string> ClaimedIds { get; } = CandidateClaimedIds is null
+      ? ClaimedId is null ? [] : [ClaimedId]
+      : CandidateClaimedIds
+          .Where(id => !string.IsNullOrWhiteSpace(id))
+          .Distinct(StringComparer.OrdinalIgnoreCase)
+          .ToArray();
+}
 
 public sealed record VsixInstalledManifestError(
     string ManifestPath,
     string? ClaimedId,
-    StructuredError Error);
+    StructuredError Error,
+    IReadOnlyList<string>? CandidateClaimedIds = null)
+{
+  public IReadOnlyList<string> ClaimedIds { get; } = CandidateClaimedIds is null
+      ? ClaimedId is null ? [] : [ClaimedId]
+      : CandidateClaimedIds
+          .Where(id => !string.IsNullOrWhiteSpace(id))
+          .Distinct(StringComparer.OrdinalIgnoreCase)
+          .ToArray();
+}
 
 public sealed record VsixInstalledManifestReadResult(
     IReadOnlyList<VsixManifest> Manifests,
@@ -123,7 +141,8 @@ public sealed class VsixManifestReader : IVsixManifestReader
           errors.Add(new VsixInstalledManifestError(
               Path.GetFullPath(path),
               result.ClaimedId,
-              error));
+              error,
+              result.ClaimedIds));
           Trace.WriteLine("[VSIX] Skipped an invalid installed extension manifest.");
           continue;
         }
@@ -248,11 +267,27 @@ public sealed class VsixManifestReader : IVsixManifestReader
         reader,
         LoadOptions.None,
         cancellationToken).ConfigureAwait(false);
+    var claimedIds = document.Root?.DescendantsAndSelf()
+        .Where(element => string.Equals(
+            element.Name.LocalName,
+            "Identity",
+            StringComparison.Ordinal))
+        .SelectMany(element => element.Attributes())
+        .Where(attribute => string.Equals(
+            attribute.Name.LocalName,
+            "Id",
+            StringComparison.Ordinal))
+        .Select(attribute => attribute.Value)
+        .Where(value => !string.IsNullOrWhiteSpace(value))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray() ?? [];
     XNamespace schema = VsixNamespace;
     var root = document.Root;
     if (root?.Name != schema + "PackageManifest")
     {
-      return Failure("The VSIX manifest root must be PackageManifest in the supported namespace.");
+      return Failure(
+          "The VSIX manifest root must be PackageManifest in the supported namespace.",
+          claimedIds: claimedIds);
     }
 
     var structuralNames = new HashSet<string>(StringComparer.Ordinal)
@@ -266,25 +301,32 @@ public sealed class VsixManifestReader : IVsixManifestReader
     if (root.DescendantsAndSelf().Any(element =>
             structuralNames.Contains(element.Name.LocalName) && element.Name.Namespace != schema))
     {
-      return Failure("VSIX structural elements must use the supported manifest namespace.");
+      return Failure(
+          "VSIX structural elements must use the supported manifest namespace.",
+          claimedIds: claimedIds);
     }
 
     var metadata = root.Elements(schema + "Metadata").ToArray();
-    if (metadata.Length != 1)
+    if (metadata.Length != 1 || root.Descendants(schema + "Metadata").Count() != 1)
     {
-      return Failure("The VSIX manifest must contain one direct Metadata element.");
+      return Failure(
+          "The VSIX manifest must contain one direct Metadata element.",
+          claimedIds: claimedIds);
     }
 
-    var identities = metadata[0].Elements(schema + "Identity").ToArray();
-    if (identities.Length != 1 ||
-        metadata[0].Descendants(schema + "Identity").Count() != 1)
+    var identities = root.Descendants(schema + "Identity").ToArray();
+    if (identities.Length != 1 || identities[0].Parent != metadata[0])
     {
-      return Failure("VSIX Metadata must contain exactly one direct Identity element.");
+      return Failure(
+          "VSIX Metadata must contain exactly one direct Identity element.",
+          claimedIds: claimedIds);
     }
 
     if (!TryGetRequiredUnqualifiedAttribute(identities[0], "Id", out var id))
     {
-      return Failure("The VSIX Identity must contain an unambiguous Id attribute.");
+      return Failure(
+          "The VSIX Identity must contain an unambiguous Id attribute.",
+          claimedIds: claimedIds);
     }
 
     if (!TryGetRequiredUnqualifiedAttribute(identities[0], "Version", out var version) ||
@@ -292,24 +334,27 @@ public sealed class VsixManifestReader : IVsixManifestReader
     {
       return Failure(
           "The VSIX Identity must contain an unambiguous semantic Version attribute.",
-          claimedId: id);
+          claimedId: id,
+          claimedIds: claimedIds);
     }
 
     var installations = root.Elements(schema + "Installation").ToArray();
-    if (installations.Length != 1)
+    if (installations.Length != 1 || root.Descendants(schema + "Installation").Count() != 1)
     {
       return Failure(
           "The VSIX manifest must contain one direct Installation element.",
-          claimedId: id);
+          claimedId: id,
+          claimedIds: claimedIds);
     }
 
     var targetElements = installations[0].Elements(schema + "InstallationTarget").ToArray();
     if (targetElements.Length == 0 ||
-        installations[0].Descendants(schema + "InstallationTarget").Count() != targetElements.Length)
+        root.Descendants(schema + "InstallationTarget").Count() != targetElements.Length)
     {
       return Failure(
           "VSIX Installation must contain at least one direct InstallationTarget.",
-          claimedId: id);
+          claimedId: id,
+          claimedIds: claimedIds);
     }
 
     var targets = new List<VsixInstallationTarget>(targetElements.Length);
@@ -321,7 +366,8 @@ public sealed class VsixManifestReader : IVsixManifestReader
       {
         return Failure(
             "Every VSIX InstallationTarget must contain an unambiguous Id and valid optional Version range.",
-            claimedId: id);
+            claimedId: id,
+            claimedIds: claimedIds);
       }
 
       targets.Add(new VsixInstallationTarget(targetId, versionRange));
@@ -441,7 +487,8 @@ public sealed class VsixManifestReader : IVsixManifestReader
   private static VsixManifestReadResult Failure(
       string detail,
       Exception? exception = null,
-      string? claimedId = null) => new(
+      string? claimedId = null,
+      IReadOnlyList<string>? claimedIds = null) => new(
       null,
       new StructuredError(
           WdemErrorCode.ConfigurationError,
@@ -450,5 +497,6 @@ public sealed class VsixManifestReader : IVsixManifestReader
       {
         UnderlyingException = exception
       },
-      claimedId);
+      claimedId ?? (claimedIds?.Count == 1 ? claimedIds[0] : null),
+      claimedIds);
 }

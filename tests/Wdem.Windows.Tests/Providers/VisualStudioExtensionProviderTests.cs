@@ -139,6 +139,34 @@ public sealed class VisualStudioExtensionProviderTests
   }
 
   [Fact]
+  public async Task DetectAsync_RealReaderFailsWhenAmbiguousIdentityIncludesRequestedId()
+  {
+    var root = Path.Combine(Path.GetTempPath(), $"wdem-provider-ambiguous-{Guid.NewGuid():N}");
+    var path = ProfileManifestPath(root, "17.0_a", "candidate", "extension.vsixmanifest");
+    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+    var manifest = InstalledManifest("3.2.0")
+        .Replace("<PackageManifest ", "<PackageManifest xmlns:other=\"urn:other\" ", StringComparison.Ordinal)
+        .Replace(
+            "Identity Id=\"Contoso.DeveloperTools\"",
+            "Identity Id=\"Contoso.DeveloperTools\" other:Id=\"Other.Extension\"",
+            StringComparison.Ordinal);
+    await File.WriteAllTextAsync(path, manifest);
+    try
+    {
+      var state = await RealReaderProvider(root).DetectAsync(
+          ExtensionResource("Contoso.DeveloperTools", "3.2.x", "a"),
+          CancellationToken.None);
+
+      Assert.Equal(DetectionOutcome.Failed, state.Outcome);
+      Assert.Equal(WdemErrorCode.DetectionError, state.StructuredError!.Code);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
   public async Task DetectAndVerify_RejectInstalledManifestIncompatibleWithSelectedInstance()
   {
     var manifests = new FakeVsixManifestReader();
@@ -331,6 +359,155 @@ public sealed class VisualStudioExtensionProviderTests
 
       Assert.True(plan.IsExecutable);
       Assert.False(Directory.Exists(directory));
+    }
+    finally
+    {
+      File.Delete(source);
+    }
+  }
+
+  [Fact]
+  public async Task ApplyAsync_InvalidResourceImmediatelyAbandonsApprovedArtifact()
+  {
+    var source = TempFile("vsix");
+    var manifests = SourceManifestReader();
+    await using var stager = new RotatingStager();
+    try
+    {
+      var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
+      var provider = Provider(manifests, new ThrowingProcessExecutor(), stager);
+      var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+      var directory = Assert.Single(stager.Directories);
+      var invalidParameters = resource.Parameters.ToDictionary(pair => pair.Key, pair => pair.Value);
+      invalidParameters["expectedSha256"] = "invalid";
+      var invalidResource = resource with { Parameters = invalidParameters };
+
+      var result = await provider.ApplyAsync(
+          invalidResource,
+          plan,
+          null,
+          CancellationToken.None);
+
+      Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+      Assert.False(Directory.Exists(directory));
+    }
+    finally
+    {
+      File.Delete(source);
+    }
+  }
+
+  [Fact]
+  public async Task ApplyAsync_InvalidPlanImmediatelyAbandonsApprovedArtifact()
+  {
+    var source = TempFile("vsix");
+    var manifests = SourceManifestReader();
+    await using var stager = new RotatingStager();
+    try
+    {
+      var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
+      var provider = Provider(manifests, new ThrowingProcessExecutor(), stager);
+      var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+      var directory = Assert.Single(stager.Directories);
+      var step = Assert.Single(plan.Steps);
+      var invalidPlan = plan with { Steps = [step with { IsDestructive = true }] };
+
+      var result = await provider.ApplyAsync(
+          resource,
+          invalidPlan,
+          null,
+          CancellationToken.None);
+
+      Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+      Assert.False(Directory.Exists(directory));
+    }
+    finally
+    {
+      File.Delete(source);
+    }
+  }
+
+  [Fact]
+  public async Task ApplyAsync_InvalidPlanWithExtraStepImmediatelyAbandonsApprovedArtifact()
+  {
+    var source = TempFile("vsix");
+    var manifests = SourceManifestReader();
+    await using var stager = new RotatingStager();
+    try
+    {
+      var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
+      var provider = Provider(manifests, new ThrowingProcessExecutor(), stager);
+      var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+      var directory = Assert.Single(stager.Directories);
+      var step = Assert.Single(plan.Steps);
+      var invalidPlan = plan with { Steps = [step, step with { Id = "unexpected" }] };
+
+      var result = await provider.ApplyAsync(
+          resource,
+          invalidPlan,
+          null,
+          CancellationToken.None);
+
+      Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+      Assert.False(Directory.Exists(directory));
+    }
+    finally
+    {
+      File.Delete(source);
+    }
+  }
+
+  [Fact]
+  public async Task ApplyAsync_PreClaimCancellationImmediatelyAbandonsApprovedArtifact()
+  {
+    var source = TempFile("vsix");
+    var manifests = SourceManifestReader();
+    await using var stager = new RotatingStager();
+    try
+    {
+      var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
+      var provider = Provider(manifests, new ThrowingProcessExecutor(), stager);
+      var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+      var directory = Assert.Single(stager.Directories);
+      using var cancellation = new CancellationTokenSource();
+      cancellation.Cancel();
+
+      await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+          provider.ApplyAsync(resource, plan, null, cancellation.Token).AsTask());
+
+      Assert.False(Directory.Exists(directory));
+    }
+    finally
+    {
+      File.Delete(source);
+    }
+  }
+
+  [Fact]
+  public async Task ApplyAsync_MismatchedResourceDoesNotAbandonAnotherApprovedPlan()
+  {
+    var source = TempFile("vsix");
+    var manifests = SourceManifestReader();
+    await using var stager = new RotatingStager();
+    try
+    {
+      var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
+      var otherResource = resource with { Id = "other-extension" };
+      var provider = Provider(manifests, new ThrowingProcessExecutor(), stager);
+      var otherPlan = await provider.PlanAsync(
+          otherResource,
+          Missing(otherResource),
+          CancellationToken.None);
+      var directory = Assert.Single(stager.Directories);
+
+      var result = await provider.ApplyAsync(
+          resource,
+          otherPlan,
+          null,
+          CancellationToken.None);
+
+      Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+      Assert.True(Directory.Exists(directory));
     }
     finally
     {
@@ -636,6 +813,49 @@ public sealed class VisualStudioExtensionProviderTests
   }
 
   [Fact]
+  public async Task PlanArtifactStore_SealsCreatorSidAndReusesItDuringClaim()
+  {
+    const string creatorSid = "S-1-5-21-111111111-222222222-333333333-1001";
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    var validatedCreators = new List<string>();
+    await using var stager = new ScriptedStager();
+    var stagingStore = new VsixPlanArtifactStore(
+        stager,
+        verifier,
+        manifests,
+        (_, recordedCreator) => validatedCreators.Add(recordedCreator),
+        () => creatorSid);
+    var claimingStore = new VsixPlanArtifactStore(
+        stager,
+        verifier,
+        manifests,
+        (_, recordedCreator) => validatedCreators.Add(recordedCreator),
+        () => "S-1-5-18");
+    var expectedHash = new string('A', 64);
+
+    var staged = await stagingStore.StageAsync(
+        "extension",
+        stager.StagedPath,
+        expectedHash,
+        "17.0_a",
+        CancellationToken.None);
+    var marker = await File.ReadAllTextAsync(Path.Combine(
+        Path.GetDirectoryName(stager.VerifiedVsixPath)!,
+        ".wdem-vsix-owner"));
+    var claimed = await claimingStore.ClaimAsync(
+        "extension",
+        $"extension:install:{staged.StepEvidence}",
+        expectedHash,
+        "17.0_a",
+        CancellationToken.None);
+
+    await using var artifact = Assert.IsType<ClaimedVsixPlanArtifact>(claimed.Artifact);
+    Assert.StartsWith(creatorSid + "\n", marker, StringComparison.Ordinal);
+    Assert.Equal([creatorSid, creatorSid], validatedCreators);
+  }
+
+  [Fact]
   public async Task ApplyAsync_RebindsApprovedEvidenceToDesiredHash()
   {
     var source = TempFile("vsix");
@@ -788,7 +1008,8 @@ public sealed class VisualStudioExtensionProviderTests
         artifactStager,
         verifier,
         manifests,
-        validateRestrictedDirectory: _ => { },
+        validateRestrictedDirectory: (_, _) => { },
+        getCurrentUserSid: static () => "S-1-0-0",
         handoffLifetime: handoffLifetime);
     return new VisualStudioExtensionProvider(
         new FakeVisualStudioDiscovery(Instance("17.0_a"), Instance("17.0_b")),
@@ -829,6 +1050,15 @@ public sealed class VisualStudioExtensionProviderTests
       $"<Metadata><Identity Id=\"Contoso.DeveloperTools\" Version=\"{version}\" /></Metadata>" +
       "<Installation><InstallationTarget Id=\"Microsoft.VisualStudio.Community\" " +
       "Version=\"[17.0,18.0)\" /></Installation></PackageManifest>";
+
+  private static FakeVsixManifestReader SourceManifestReader() => new()
+  {
+    SourceManifest = new VsixManifest(
+        "Contoso.DeveloperTools",
+        "3.2.0",
+        "source!/extension.vsixmanifest",
+        "17.0_a")
+  };
 
   private static ResourceDefinition ExtensionResource(
       string extensionId,
