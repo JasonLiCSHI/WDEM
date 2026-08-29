@@ -7,6 +7,7 @@ using Wdem.LegacySource.Services.System;
 using Wdem.Windows.Composition;
 using Wdem.Windows.Persistence;
 using Wdem.Windows.Processes;
+using Wdem.Windows.Providers;
 using Wdem.Windows.Security;
 using Xunit;
 
@@ -114,6 +115,9 @@ public sealed class WdemWindowsFactoryTests : IDisposable
     Assert.IsType<LogRedactor>(composition.Redactor);
     Assert.Equal("winget", composition.Providers
         .GetRequired("winget-package", "winget").ProviderName);
+    var visualStudio = Assert.IsType<VisualStudioProvider>(composition.Providers
+        .GetRequired("visual-studio", "visual-studio"));
+    Assert.True(visualStudio.Capabilities.SupportsInstallerParameters);
     Assert.False(Directory.Exists(paths.Root));
     Assert.False(File.Exists(Path.Combine(paths.Root, "migration-v1.json")));
     Assert.False(File.Exists(Path.Combine(paths.Root, ".wdem-state.json")));

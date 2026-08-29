@@ -9,6 +9,7 @@ using Wdem.LegacySource.Services.Managers;
 using Wdem.LegacySource.Services.System;
 using Wdem.Windows.Processes;
 using Wdem.Windows.Providers;
+using Wdem.Windows.Security;
 using Wdem.Windows.VisualStudio;
 
 namespace Wdem.Windows.Composition;
@@ -40,6 +41,7 @@ internal static class WindowsProviderCompositionFactory
         runtimeResolver);
     var complianceEvaluator = new ComplianceEvaluator();
     var winGetCommandClient = new WinGetCommandClient(processExecutor);
+    var trustedFileVerifier = new TrustedFileVerifier();
     var providers = new ResourceProviderRegistry(
     [
       new LegacyPackageManagerProviderAdapter("winget", winget, supportsSource: true),
@@ -48,6 +50,8 @@ internal static class WindowsProviderCompositionFactory
       new DotNetSdkProvider(processExecutor, winGetCommandClient, complianceEvaluator),
       new VisualStudioProvider(
           new VsWhereVisualStudioDiscovery(processExecutor),
+          new VisualStudioInstallerClient(processExecutor, trustedFileVerifier),
+          trustedFileVerifier,
           complianceEvaluator)
     ]);
 

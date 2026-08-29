@@ -23,6 +23,7 @@ public sealed class VisualStudioProvider : IResourceProvider
     _trustedFileVerifier = new TrustedFileVerifier();
     _complianceEvaluator = complianceEvaluator ??
         throw new ArgumentNullException(nameof(complianceEvaluator));
+    Capabilities = CreateCapabilities(supportsInstallerParameters: false);
   }
 
   public VisualStudioProvider(
@@ -37,15 +38,12 @@ public sealed class VisualStudioProvider : IResourceProvider
         throw new ArgumentNullException(nameof(trustedFileVerifier));
     _complianceEvaluator = complianceEvaluator ??
         throw new ArgumentNullException(nameof(complianceEvaluator));
+    Capabilities = CreateCapabilities(supportsInstallerParameters: true);
   }
 
   public string ResourceType => "visual-studio";
   public string ProviderName => "visual-studio";
-  public ProviderCapabilities Capabilities { get; } = new()
-  {
-    SupportsVersionConstraints = true,
-    SupportsInProgressCancellation = true
-  };
+  public ProviderCapabilities Capabilities { get; }
 
   public ValueTask<ProviderValidationResult> ValidateAsync(
       ResourceDefinition resource,
@@ -802,6 +800,13 @@ public sealed class VisualStudioProvider : IResourceProvider
         channelVersion,
         options.Edition);
   }
+
+  private static ProviderCapabilities CreateCapabilities(bool supportsInstallerParameters) => new()
+  {
+    SupportsVersionConstraints = true,
+    SupportsInstallerParameters = supportsInstallerParameters,
+    SupportsInProgressCancellation = true
+  };
 
   private static ResourcePlan BasePlan(
       ResourceDefinition resource,
