@@ -32,7 +32,14 @@ internal interface IVsixPlanArtifactRevocationStore
 
   void ClaimStarted(string ownershipToken, string directoryName, string claimNonce);
 
-  void Consume(string ownershipToken, string directoryName);
+  void Consume(
+      string ownershipToken,
+      string directoryName,
+      string claimNonce,
+      string activationCommitment,
+      DateTimeOffset utcNow,
+      Guid bootIdentifier,
+      long uptimeMilliseconds);
 
   VsixPlanArtifactLedgerState GetState(string ownershipToken, string directoryName);
 
@@ -81,11 +88,23 @@ internal sealed class WindowsVsixPlanArtifactRevocationStore(string planArtifact
           directoryName,
           claimNonce);
 
-  public void Consume(string ownershipToken, string directoryName) =>
-      WindowsPlanArtifactDirectoryPolicy.AppendConsumed(
+  public void Consume(
+      string ownershipToken,
+      string directoryName,
+      string claimNonce,
+      string activationCommitment,
+      DateTimeOffset utcNow,
+      Guid bootIdentifier,
+      long uptimeMilliseconds) =>
+      WindowsPlanArtifactDirectoryPolicy.ConsumeClaim(
           planArtifactRoot,
           ownershipToken,
-          directoryName);
+          directoryName,
+          claimNonce,
+          activationCommitment,
+          utcNow,
+          bootIdentifier,
+          uptimeMilliseconds);
 
   public VsixPlanArtifactLedgerState GetState(string ownershipToken, string directoryName) =>
       WindowsPlanArtifactDirectoryPolicy.GetLedgerState(
@@ -613,7 +632,12 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
 
       _revocationStore.Consume(
           evidence.OwnershipToken,
-          Path.GetFileName(evidence.OwnershipDirectory));
+          Path.GetFileName(evidence.OwnershipDirectory),
+          claimNonce!,
+          CreateActivationCommitment(locator.ActivationProof),
+          _getUtcNow(),
+          _getBootIdentifier(),
+          _getUptimeMilliseconds());
       evidence = PersistConsumedEvidence(evidence);
       readLock.Dispose();
       readLock = null;
@@ -1914,8 +1938,27 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
                   ClaimNonce = claimNonce
                 });
 
-    public void Consume(string ownershipToken, string directoryName) =>
-        SetStatus(ownershipToken, directoryName, VsixPlanArtifactLedgerStatus.Consumed);
+    public void Consume(
+        string ownershipToken,
+        string directoryName,
+        string claimNonce,
+        string activationCommitment,
+        DateTimeOffset utcNow,
+        Guid bootIdentifier,
+        long uptimeMilliseconds) =>
+        _issuances.AddOrUpdate(
+            (ownershipToken, directoryName),
+            static _ => throw new SecurityException("The VSIX issuance record is missing."),
+            (_, existing) => VsixPlanArtifactLedger.IsAuthorizedClaimForConsumption(
+                existing,
+                claimNonce,
+                activationCommitment,
+                utcNow,
+                bootIdentifier,
+                uptimeMilliseconds)
+                    ? existing with { Status = VsixPlanArtifactLedgerStatus.Consumed }
+                    : throw new SecurityException(
+                        "The durable VSIX claim is no longer authorized for consumption."));
 
     public VsixPlanArtifactLedgerState GetState(string ownershipToken, string directoryName) =>
         _issuances.TryGetValue((ownershipToken, directoryName), out var state)
@@ -1934,10 +1977,9 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
                 Guid.Empty,
                 long.MaxValue,
                 VsixPlanArtifactLedgerStatus.Revoked),
-            static (_, existing) => existing with
-            {
-              Status = VsixPlanArtifactLedgerStatus.Revoked
-            });
+            static (_, existing) => existing.Status == VsixPlanArtifactLedgerStatus.Consumed
+                ? existing
+                : existing with { Status = VsixPlanArtifactLedgerStatus.Revoked });
 
     public bool IsRevoked(string ownershipToken, string directoryName) =>
         GetState(ownershipToken, directoryName).Status == VsixPlanArtifactLedgerStatus.Revoked;

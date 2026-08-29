@@ -3127,6 +3127,150 @@ public sealed class VisualStudioExtensionProviderTests
   }
 
   [Fact]
+  public async Task PlanArtifactStore_RevokeAfterValidationPreventsConsumeAcrossStores()
+  {
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new ScriptedStager();
+    var revocationPath = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-test-revocations-{Guid.NewGuid():N}");
+    using var consumeEntered = new ManualResetEventSlim();
+    using var releaseConsume = new ManualResetEventSlim();
+    var revocationStore = new TestPlanArtifactRevocationStore(revocationPath)
+    {
+      BeforeConsume = () =>
+      {
+        consumeEntered.Set();
+        Assert.True(releaseConsume.Wait(TimeSpan.FromSeconds(5)));
+      }
+    };
+    var expectedHash = new string('A', 64);
+    ClaimedVsixPlanArtifact? claimedArtifact = null;
+    try
+    {
+      var staged = await PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              deleteDirectory: static _ => { },
+              revocationStore: revocationStore)
+          .StageAsync(
+              "extension",
+              stager.StagedPath,
+              expectedHash,
+              "17.0_a",
+              CancellationToken.None);
+      var claimingStore = PlanArtifactStore(
+          stager,
+          verifier,
+          manifests,
+          deleteDirectory: static _ => { },
+          revocationStore: revocationStore);
+      var abandoningStore = PlanArtifactStore(
+          stager,
+          verifier,
+          manifests,
+          deleteDirectory: static _ => { },
+          revocationStore: revocationStore);
+
+      var claimTask = Task.Run(() => claimingStore.ClaimAsync(
+          "extension",
+          staged.StepEvidence!,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None));
+      Assert.True(consumeEntered.Wait(TimeSpan.FromSeconds(5)));
+      await abandoningStore.AbandonAsync(
+          "extension",
+          staged.StepEvidence!,
+          CancellationToken.None);
+      releaseConsume.Set();
+      var claim = await claimTask;
+      claimedArtifact = claim.Artifact;
+
+      Assert.True(revocationStore.IsRevoked(
+          staged.StepEvidence!.Split(':')[1],
+          Path.GetFileName(Path.GetDirectoryName(stager.VerifiedVsixPath)!)));
+      Assert.Null(claim.Artifact);
+      Assert.NotNull(claim.Error);
+    }
+    finally
+    {
+      releaseConsume.Set();
+      if (claimedArtifact is not null)
+      {
+        await claimedArtifact.DisposeAsync();
+      }
+
+      File.Delete(revocationPath);
+    }
+  }
+
+  [Theory]
+  [InlineData("consumed")]
+  [InlineData("claimNonce")]
+  [InlineData("activationCommitment")]
+  [InlineData("expired")]
+  public async Task PlanArtifactStore_AuthoritativeStateChangeBeforeConsumeFailsClosed(
+      string changedField)
+  {
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new ScriptedStager();
+    var revocationPath = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-test-revocations-{Guid.NewGuid():N}");
+    var revocationStore = new TestPlanArtifactRevocationStore(revocationPath);
+    var expectedHash = new string('A', 64);
+    string? ownershipToken = null;
+    string? directoryName = null;
+    try
+    {
+      var store = PlanArtifactStore(
+          stager,
+          verifier,
+          manifests,
+          deleteDirectory: static _ => { },
+          revocationStore: revocationStore);
+      var staged = await store.StageAsync(
+          "extension",
+          stager.StagedPath,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None);
+      ownershipToken = staged.StepEvidence!.Split(':')[1];
+      directoryName = Path.GetFileName(Path.GetDirectoryName(stager.VerifiedVsixPath)!);
+      revocationStore.BeforeConsume = () =>
+      {
+        var state = revocationStore.GetState(ownershipToken, directoryName);
+        revocationStore.StateOverride = changedField switch
+        {
+          "consumed" => state with { Status = VsixPlanArtifactLedgerStatus.Consumed },
+          "claimNonce" => state with { ClaimNonce = new string('B', 64) },
+          "activationCommitment" => state with { ActivationCommitment = new string('B', 64) },
+          "expired" => state with { ExpiresAtUtc = DateTimeOffset.MinValue },
+          _ => throw new InvalidOperationException($"Unknown field: {changedField}")
+        };
+      };
+
+      var claim = await store.ClaimAsync(
+          "extension",
+          staged.StepEvidence,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None);
+
+      Assert.Null(claim.Artifact);
+      Assert.NotNull(claim.Error);
+    }
+    finally
+    {
+      File.Delete(revocationPath);
+    }
+  }
+
+  [Fact]
   public async Task PlanArtifactStore_LedgerPoisoningCannotHideRevocationFromFreshStore()
   {
     var manifests = SourceManifestReader();
@@ -3832,7 +3976,9 @@ public sealed class VisualStudioExtensionProviderTests
   private sealed class TestPlanArtifactRevocationStore(string path)
       : IVsixPlanArtifactRevocationStore
   {
+    private readonly object _transitionSync = new();
     public Action? BeforeRevoke { get; init; }
+    public Action? BeforeConsume { get; set; }
     public Exception? RevokeFailure { get; set; }
     public Exception? ClaimStartedFailure { get; set; }
     public Exception? GetStateFailure { get; set; }
@@ -3880,11 +4026,36 @@ public sealed class VisualStudioExtensionProviderTests
           claimNonce));
     }
 
-    public void Consume(string ownershipToken, string directoryName) =>
+    public void Consume(
+        string ownershipToken,
+        string directoryName,
+        string claimNonce,
+        string activationCommitment,
+        DateTimeOffset utcNow,
+        Guid bootIdentifier,
+        long uptimeMilliseconds)
+    {
+      BeforeConsume?.Invoke();
+      lock (_transitionSync)
+      {
+        if (!VsixPlanArtifactLedger.IsAuthorizedClaimForConsumption(
+                GetState(ownershipToken, directoryName),
+                claimNonce,
+                activationCommitment,
+                utcNow,
+                bootIdentifier,
+                uptimeMilliseconds))
+        {
+          throw new System.Security.SecurityException(
+              "The durable VSIX claim is no longer authorized for consumption.");
+        }
+
         Append(handle => WindowsPlanArtifactDirectoryPolicy.WriteConsumedRecord(
             handle,
             ownershipToken,
             directoryName));
+      }
+    }
 
     public VsixPlanArtifactLedgerState GetState(string ownershipToken, string directoryName)
     {
@@ -3910,17 +4081,40 @@ public sealed class VisualStudioExtensionProviderTests
         throw RevokeFailure;
       }
 
-      Append(handle => WindowsPlanArtifactDirectoryPolicy.WriteRevocationRecord(
-          handle,
-          ownershipToken,
-          directoryName));
+      lock (_transitionSync)
+      {
+        if (File.Exists(path))
+        {
+          using var stream = File.OpenRead(path);
+          if (VsixPlanArtifactLedger.ReadFirstTerminalStatus(
+                  stream,
+                  ownershipToken,
+                  directoryName) is not null)
+          {
+            return;
+          }
+        }
+
+        Append(handle => WindowsPlanArtifactDirectoryPolicy.WriteRevocationRecord(
+            handle,
+            ownershipToken,
+            directoryName));
+      }
     }
 
-    public bool IsRevoked(string ownershipToken, string directoryName) =>
-        File.Exists(path) && WindowsPlanArtifactDirectoryPolicy.ContainsRevocationRecord(
-            File.ReadAllBytes(path),
-            ownershipToken,
-            directoryName);
+    public bool IsRevoked(string ownershipToken, string directoryName)
+    {
+      if (!File.Exists(path))
+      {
+        return false;
+      }
+
+      using var stream = File.OpenRead(path);
+      return VsixPlanArtifactLedger.ReadFirstTerminalStatus(
+          stream,
+          ownershipToken,
+          directoryName) == VsixPlanArtifactLedgerStatus.Revoked;
+    }
 
     private void Append(Action<Microsoft.Win32.SafeHandles.SafeFileHandle> write)
     {
@@ -4007,11 +4201,29 @@ public sealed class VisualStudioExtensionProviderTests
       Assert.True(_claimsWritten.SignalAndWait(TimeSpan.FromSeconds(5)));
     }
 
-    public void Consume(string ownershipToken, string directoryName)
+    public void Consume(
+        string ownershipToken,
+        string directoryName,
+        string claimNonce,
+        string activationCommitment,
+        DateTimeOffset utcNow,
+        Guid bootIdentifier,
+        long uptimeMilliseconds)
     {
       lock (_sync)
       {
-        _state = _state!.Value with { Status = VsixPlanArtifactLedgerStatus.Consumed };
+        var state = _state ?? throw new System.Security.SecurityException(
+            "The VSIX issuance record is missing.");
+        _state = VsixPlanArtifactLedger.IsAuthorizedClaimForConsumption(
+            state,
+            claimNonce,
+            activationCommitment,
+            utcNow,
+            bootIdentifier,
+            uptimeMilliseconds)
+                ? state with { Status = VsixPlanArtifactLedgerStatus.Consumed }
+                : throw new System.Security.SecurityException(
+                    "The durable VSIX claim is no longer authorized for consumption.");
       }
     }
 
@@ -4028,7 +4240,10 @@ public sealed class VisualStudioExtensionProviderTests
     {
       lock (_sync)
       {
-        _state = _state!.Value with { Status = VsixPlanArtifactLedgerStatus.Revoked };
+        if (_state is { Status: not VsixPlanArtifactLedgerStatus.Consumed } state)
+        {
+          _state = state with { Status = VsixPlanArtifactLedgerStatus.Revoked };
+        }
       }
     }
 
@@ -4071,7 +4286,14 @@ public sealed class VisualStudioExtensionProviderTests
     {
     }
 
-    public void Consume(string ownershipToken, string directoryName)
+    public void Consume(
+        string ownershipToken,
+        string directoryName,
+        string claimNonce,
+        string activationCommitment,
+        DateTimeOffset utcNow,
+        Guid bootIdentifier,
+        long uptimeMilliseconds)
     {
     }
 

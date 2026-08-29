@@ -299,8 +299,10 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
     var active = ReadState([.. issued, .. activated]);
     var claiming = ReadState(
         [.. issued, .. activated, .. claimStarted, .. competingClaim, .. activated]);
-    var consumedState = ReadState([.. issued, .. activated, .. claimStarted, .. consumed]);
-    var revokedState = ReadState([.. issued, .. activated, .. consumed, .. revoked, .. activated]);
+    var consumedState = ReadState(
+        [.. issued, .. activated, .. claimStarted, .. consumed, .. revoked, .. activated]);
+    var revokedState = ReadState(
+        [.. issued, .. activated, .. claimStarted, .. revoked, .. consumed, .. activated]);
 
     Assert.Equal(VsixPlanArtifactLedgerStatus.Pending, pending.Status);
     Assert.Equal(VsixPlanArtifactLedgerStatus.Active, active.Status);
@@ -313,6 +315,36 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
     {
       using var stream = new MemoryStream(contents, writable: false);
       return VsixPlanArtifactLedger.ReadState(stream, ownershipToken, directoryName);
+    }
+  }
+
+  [Fact]
+  public void RevocationLedger_FindsFirstTerminalWithoutIssuance()
+  {
+    const string ownershipToken = "00112233445566778899AABBCCDDEEFF";
+    const string directoryName = "00112233445566778899aabbccddeeff";
+    var consumed = VsixPlanArtifactLedger.CreateConsumedRecord(
+        ownershipToken,
+        directoryName);
+    var revoked = VsixPlanArtifactLedger.CreateRevokedRecord(
+        ownershipToken,
+        directoryName);
+
+    Assert.Equal(
+        VsixPlanArtifactLedgerStatus.Consumed,
+        ReadTerminalStatus([.. consumed, .. revoked]));
+    Assert.Equal(
+        VsixPlanArtifactLedgerStatus.Revoked,
+        ReadTerminalStatus([.. revoked, .. consumed]));
+    Assert.Null(ReadTerminalStatus([]));
+
+    VsixPlanArtifactLedgerStatus? ReadTerminalStatus(byte[] contents)
+    {
+      using var stream = new MemoryStream(contents, writable: false);
+      return VsixPlanArtifactLedger.ReadFirstTerminalStatus(
+          stream,
+          ownershipToken,
+          directoryName);
     }
   }
 
@@ -1090,7 +1122,7 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
   {
     var handle = NativeMethods.CreateFile(
         path,
-        desiredAccess: 0x00000004,
+        desiredAccess: 0x40000000,
         FileShare.ReadWrite,
         IntPtr.Zero,
         creationDisposition: 3,

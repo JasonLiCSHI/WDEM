@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Security;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace Wdem.Windows.Security;
@@ -170,6 +171,57 @@ internal static class VsixPlanArtifactLedger
       string directoryName) =>
       ReadState(ledger, ownershipToken, directoryName).ExpiresAtUtc;
 
+  internal static bool IsAuthorizedClaimForConsumption(
+      VsixPlanArtifactLedgerState state,
+      string claimNonce,
+      string activationCommitment,
+      DateTimeOffset utcNow,
+      Guid bootIdentifier,
+      long uptimeMilliseconds) =>
+      state.Status == VsixPlanArtifactLedgerStatus.ClaimStarted &&
+      FixedTimeEqualsHex(state.ClaimNonce, claimNonce) &&
+      FixedTimeEqualsHex(state.ActivationCommitment, activationCommitment) &&
+      !state.IsExpired(utcNow, bootIdentifier, uptimeMilliseconds);
+
+  internal static VsixPlanArtifactLedgerStatus? ReadFirstTerminalStatus(
+      Stream ledger,
+      string ownershipToken,
+      string directoryName)
+  {
+    ArgumentNullException.ThrowIfNull(ledger);
+    var identity = CreateIdentity(ownershipToken, directoryName);
+    var consumed = Encoding.ASCII.GetBytes($"{ConsumedPrefix}{identity}");
+    var revoked = Encoding.ASCII.GetBytes($"{RevokedPrefix}{identity}");
+    var maximumRecordLength = Math.Max(consumed.Length, revoked.Length) + 1;
+    var buffer = new byte[ReadBufferBytes + maximumRecordLength - 1];
+    var carry = 0;
+    while (true)
+    {
+      var bytesRead = ledger.Read(buffer, carry, ReadBufferBytes);
+      var available = carry + bytesRead;
+      for (var offset = 0; offset < available; offset++)
+      {
+        var remaining = buffer.AsSpan(offset, available - offset);
+        if (IsCompleteFixedRecord(remaining, consumed))
+        {
+          return VsixPlanArtifactLedgerStatus.Consumed;
+        }
+        if (IsCompleteFixedRecord(remaining, revoked))
+        {
+          return VsixPlanArtifactLedgerStatus.Revoked;
+        }
+      }
+
+      if (bytesRead == 0)
+      {
+        return null;
+      }
+
+      carry = Math.Min(maximumRecordLength - 1, available);
+      buffer.AsSpan(available - carry, carry).CopyTo(buffer);
+    }
+  }
+
   internal static VsixPlanArtifactLedgerState ReadState(
       Stream ledger,
       string ownershipToken,
@@ -200,8 +252,7 @@ internal static class VsixPlanArtifactLedger
     var activatedSeen = false;
     var legacyClaimStartedSeen = false;
     string? claimNonce = null;
-    var consumedSeen = false;
-    var revokedSeen = false;
+    VsixPlanArtifactLedgerStatus? terminalStatus = null;
     var invalid = false;
     var carry = 0;
     while (true)
@@ -271,8 +322,14 @@ internal static class VsixPlanArtifactLedger
             }
           }
         }
-        consumedSeen |= IsCompleteFixedRecord(remaining, consumed);
-        revokedSeen |= IsCompleteFixedRecord(remaining, revoked);
+        if (terminalStatus is null && IsCompleteFixedRecord(remaining, consumed))
+        {
+          terminalStatus = VsixPlanArtifactLedgerStatus.Consumed;
+        }
+        if (terminalStatus is null && IsCompleteFixedRecord(remaining, revoked))
+        {
+          terminalStatus = VsixPlanArtifactLedgerStatus.Revoked;
+        }
       }
 
       if (bytesRead == 0)
@@ -290,15 +347,12 @@ internal static class VsixPlanArtifactLedger
       throw new SecurityException("The VSIX issuance state is missing, conflicting, or invalid.");
     }
 
-    var status = revokedSeen
-        ? VsixPlanArtifactLedgerStatus.Revoked
-        : consumedSeen
-            ? VsixPlanArtifactLedgerStatus.Consumed
-            : legacyClaimStartedSeen || claimNonce is not null
-                ? VsixPlanArtifactLedgerStatus.ClaimStarted
-                : activatedSeen
-                    ? VsixPlanArtifactLedgerStatus.Active
-                    : VsixPlanArtifactLedgerStatus.Pending;
+    var status = terminalStatus ??
+        (legacyClaimStartedSeen || claimNonce is not null
+            ? VsixPlanArtifactLedgerStatus.ClaimStarted
+            : activatedSeen
+                ? VsixPlanArtifactLedgerStatus.Active
+                : VsixPlanArtifactLedgerStatus.Pending);
     return new VsixPlanArtifactLedgerState(
         expiry.Value,
         activationCommitment,
@@ -306,6 +360,25 @@ internal static class VsixPlanArtifactLedger
         expiresAtUptimeMilliseconds.Value,
         status,
         claimNonce);
+  }
+
+  private static bool FixedTimeEqualsHex(string? left, string right)
+  {
+    if (left is null || left.Length != 64 || right.Length != 64)
+    {
+      return false;
+    }
+
+    try
+    {
+      return CryptographicOperations.FixedTimeEquals(
+          Convert.FromHexString(left),
+          Convert.FromHexString(right));
+    }
+    catch (FormatException)
+    {
+      return false;
+    }
   }
 
   private static long? ParsePositiveInt64(ReadOnlySpan<byte> value)

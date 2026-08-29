@@ -12,7 +12,6 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
   private const int ErrorAlreadyExists = 183;
   private const uint ErrorSuccess = 0;
   private const uint ReadControl = 0x00020000;
-  private const uint FileAppendData = 0x00000004;
   private const uint GenericRead = 0x80000000;
   private const uint GenericWrite = 0x40000000;
   private const uint Synchronize = 0x00100000;
@@ -22,6 +21,7 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
   private const uint FileFlagWriteThrough = 0x80000000;
   private const uint FileFlagBackupSemantics = 0x02000000;
   private const uint FileFlagOpenReparsePoint = 0x00200000;
+  private const uint LockFileExclusiveLock = 0x00000002;
   internal const string RevocationLedgerFileName = ".wdem-vsix-revocations";
   private readonly string _rootPath;
 
@@ -137,8 +137,19 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
     using var rootHandle = OpenValidatedIdentityNeutralRoot(fullRootPath);
     using var ledgerHandle = OpenValidatedRevocationLedger(
         fullRootPath,
-        FileAppendData | ReadControl | Synchronize);
-    WriteRevocationRecord(ledgerHandle, record);
+        GenericRead | GenericWrite | ReadControl | Synchronize);
+    LockLedger(ledgerHandle);
+    try
+    {
+      if (ReadLedgerTerminalStatus(ledgerHandle, ownershipToken, directoryName) is null)
+      {
+        WriteRevocationRecordCore(ledgerHandle, record);
+      }
+    }
+    finally
+    {
+      UnlockLedger(ledgerHandle);
+    }
   }
 
   internal static void AppendIssuance(
@@ -163,7 +174,7 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
     using var rootHandle = OpenValidatedIdentityNeutralRoot(fullRootPath);
     using var ledgerHandle = OpenValidatedRevocationLedger(
         fullRootPath,
-        FileAppendData | ReadControl | Synchronize);
+        GenericWrite | ReadControl | Synchronize);
     WriteRevocationRecord(ledgerHandle, record);
   }
 
@@ -187,13 +198,47 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
               directoryName,
               claimNonce));
 
-  internal static void AppendConsumed(
+  internal static void ConsumeClaim(
       string rootPath,
       string ownershipToken,
-      string directoryName) =>
-      AppendLedgerRecord(
-          rootPath,
-          VsixPlanArtifactLedger.CreateConsumedRecord(ownershipToken, directoryName));
+      string directoryName,
+      string claimNonce,
+      string activationCommitment,
+      DateTimeOffset utcNow,
+      Guid bootIdentifier,
+      long uptimeMilliseconds)
+  {
+    var record = VsixPlanArtifactLedger.CreateConsumedRecord(ownershipToken, directoryName);
+    var fullRootPath = ValidateRevocationRootPath(rootPath);
+    var productPath = Path.GetDirectoryName(fullRootPath)!;
+    using var productHandle = OpenValidatedProductRoot(productPath);
+    using var rootHandle = OpenValidatedIdentityNeutralRoot(fullRootPath);
+    using var ledgerHandle = OpenValidatedRevocationLedger(
+        fullRootPath,
+        GenericRead | GenericWrite | ReadControl | Synchronize);
+    LockLedger(ledgerHandle);
+    try
+    {
+      var state = ReadLedgerState(ledgerHandle, ownershipToken, directoryName);
+      if (!VsixPlanArtifactLedger.IsAuthorizedClaimForConsumption(
+              state,
+              claimNonce,
+              activationCommitment,
+              utcNow,
+              bootIdentifier,
+              uptimeMilliseconds))
+      {
+        throw new SecurityException(
+            "The durable VSIX claim is no longer authorized for consumption.");
+      }
+
+      WriteRevocationRecordCore(ledgerHandle, record);
+    }
+    finally
+    {
+      UnlockLedger(ledgerHandle);
+    }
+  }
 
   internal static bool ContainsRevocation(
       string rootPath,
@@ -208,10 +253,10 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
         fullRootPath,
         GenericRead | ReadControl);
     using var stream = new FileStream(ledgerHandle, FileAccess.Read, bufferSize: 4096, isAsync: false);
-    return VsixPlanArtifactLedger.ContainsRevokedRecord(
+    return VsixPlanArtifactLedger.ReadFirstTerminalStatus(
         stream,
         ownershipToken,
-        directoryName);
+        directoryName) == VsixPlanArtifactLedgerStatus.Revoked;
   }
 
   internal static DateTimeOffset GetIssuedExpiry(
@@ -319,6 +364,32 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
       throw new ArgumentException("The VSIX revocation ledger handle is invalid.", nameof(ledgerHandle));
     }
 
+    LockLedger(ledgerHandle);
+    try
+    {
+      WriteRevocationRecordCore(ledgerHandle, record);
+    }
+    finally
+    {
+      UnlockLedger(ledgerHandle);
+    }
+  }
+
+  private static void WriteRevocationRecordCore(
+      SafeFileHandle ledgerHandle,
+      byte[] record)
+  {
+    if (!NativeMethods.SetFilePointerEx(
+            ledgerHandle,
+            distanceToMove: 0,
+            out _,
+            moveMethod: SeekOrigin.End))
+    {
+      throw new IOException(
+          "The VSIX revocation ledger could not be positioned for append.",
+          new Win32Exception(Marshal.GetLastWin32Error()));
+    }
+
     if (!NativeMethods.WriteFile(
             ledgerHandle,
             record,
@@ -340,6 +411,74 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
     }
   }
 
+  private static VsixPlanArtifactLedgerState ReadLedgerState(
+      SafeFileHandle ledgerHandle,
+      string ownershipToken,
+      string directoryName)
+  {
+    using var borrowedHandle = new SafeFileHandle(
+        ledgerHandle.DangerousGetHandle(),
+        ownsHandle: false);
+    using var stream = new FileStream(
+        borrowedHandle,
+        FileAccess.Read,
+        bufferSize: 4096,
+        isAsync: false);
+    return VsixPlanArtifactLedger.ReadState(stream, ownershipToken, directoryName);
+  }
+
+  private static VsixPlanArtifactLedgerStatus? ReadLedgerTerminalStatus(
+      SafeFileHandle ledgerHandle,
+      string ownershipToken,
+      string directoryName)
+  {
+    using var borrowedHandle = new SafeFileHandle(
+        ledgerHandle.DangerousGetHandle(),
+        ownsHandle: false);
+    using var stream = new FileStream(
+        borrowedHandle,
+        FileAccess.Read,
+        bufferSize: 4096,
+        isAsync: false);
+    return VsixPlanArtifactLedger.ReadFirstTerminalStatus(
+        stream,
+        ownershipToken,
+        directoryName);
+  }
+
+  private static void LockLedger(SafeFileHandle ledgerHandle)
+  {
+    var overlapped = default(FileLockOverlapped);
+    if (!NativeMethods.LockFileEx(
+            ledgerHandle,
+            LockFileExclusiveLock,
+            reserved: 0,
+            uint.MaxValue,
+            uint.MaxValue,
+            ref overlapped))
+    {
+      throw new IOException(
+          "The VSIX revocation ledger could not be exclusively locked.",
+          new Win32Exception(Marshal.GetLastWin32Error()));
+    }
+  }
+
+  private static void UnlockLedger(SafeFileHandle ledgerHandle)
+  {
+    var overlapped = default(FileLockOverlapped);
+    if (!NativeMethods.UnlockFileEx(
+            ledgerHandle,
+            reserved: 0,
+            uint.MaxValue,
+            uint.MaxValue,
+            ref overlapped))
+    {
+      throw new IOException(
+          "The VSIX revocation ledger could not be unlocked.",
+          new Win32Exception(Marshal.GetLastWin32Error()));
+    }
+  }
+
   private static void AppendLedgerRecord(string rootPath, byte[] record)
   {
     var fullRootPath = ValidateRevocationRootPath(rootPath);
@@ -348,7 +487,7 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
     using var rootHandle = OpenValidatedIdentityNeutralRoot(fullRootPath);
     using var ledgerHandle = OpenValidatedRevocationLedger(
         fullRootPath,
-        FileAppendData | ReadControl | Synchronize);
+        GenericWrite | ReadControl | Synchronize);
     WriteRevocationRecord(ledgerHandle, record);
   }
 
@@ -1165,6 +1304,16 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
     public uint ReparseTag;
   }
 
+  [StructLayout(LayoutKind.Sequential)]
+  private struct FileLockOverlapped
+  {
+    public IntPtr Internal;
+    public IntPtr InternalHigh;
+    public uint Offset;
+    public uint OffsetHigh;
+    public IntPtr EventHandle;
+  }
+
   private enum SeObjectType
   {
     FileObject = 1
@@ -1221,6 +1370,33 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool FlushFileBuffers(SafeFileHandle file);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetFilePointerEx(
+        SafeFileHandle file,
+        long distanceToMove,
+        out long newFilePointer,
+        SeekOrigin moveMethod);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool LockFileEx(
+        SafeFileHandle file,
+        uint flags,
+        uint reserved,
+        uint numberOfBytesToLockLow,
+        uint numberOfBytesToLockHigh,
+        ref FileLockOverlapped overlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool UnlockFileEx(
+        SafeFileHandle file,
+        uint reserved,
+        uint numberOfBytesToUnlockLow,
+        uint numberOfBytesToUnlockHigh,
+        ref FileLockOverlapped overlapped);
 
     [DllImport("advapi32.dll")]
     public static extern uint GetSecurityInfo(
