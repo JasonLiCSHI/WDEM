@@ -1,10 +1,16 @@
 using Wdem.Core.Execution;
 using Wdem.Core.Processes;
+using Wdem.Core.Versions;
 
 namespace Wdem.Windows.Providers;
 
 public sealed record WinGetCommandResult(
     ProcessExecutionResult Process,
+    StructuredError? Error);
+
+public sealed record WinGetVersionQueryResult(
+    ProcessExecutionResult Process,
+    IReadOnlyList<string> Versions,
     StructuredError? Error);
 
 public sealed class WinGetCommandClient
@@ -62,18 +68,42 @@ public sealed class WinGetCommandClient
       return new WinGetCommandResult(result, null);
     }
 
-    return new WinGetCommandResult(result, new StructuredError(
-        WdemErrorCode.DownloadError,
-        "WinGet package source is unavailable.",
-        string.IsNullOrWhiteSpace(preferredVersion)
-            ? $"Package '{packageId}' is unavailable from the configured WinGet sources."
-            : $"Exact package version '{preferredVersion}' is unavailable for '{packageId}'.")
+    return new WinGetCommandResult(
+        result,
+        CreateAvailabilityError(resourceId, packageId, preferredVersion, result.ExitCode));
+  }
+
+  public async Task<WinGetVersionQueryResult> QueryVersionsAsync(
+      string resourceId,
+      string packageId,
+      string? source,
+      CancellationToken cancellationToken)
+  {
+    var arguments = new List<string>
     {
-      ResourceId = resourceId,
-      ProcessExitCode = result.ExitCode,
-      LogLocation = _logLocation,
-      IsRetryable = true
-    });
+      "show", "--id", packageId, "--exact", "--versions"
+    };
+    AddSource(arguments, source);
+    arguments.Add("--accept-source-agreements");
+    arguments.Add("--disable-interactivity");
+    var result = await _processExecutor.ExecuteAsync(
+        new ProcessExecutionRequest(FileName, arguments),
+        null,
+        cancellationToken).ConfigureAwait(false);
+    if (!result.Started || result.ExitCode != 0 || result.Error is not null)
+    {
+      return new WinGetVersionQueryResult(
+          result,
+          [],
+          CreateAvailabilityError(resourceId, packageId, null, result.ExitCode));
+    }
+
+    var versions = result.StandardOutput
+        .Select(line => line.Trim().Trim('"'))
+        .Where(version => SemanticVersion.TryParse(version, out _))
+        .Distinct(StringComparer.Ordinal)
+        .ToArray();
+    return new WinGetVersionQueryResult(result, versions, null);
   }
 
   private static bool ContainsExactVersionToken(
@@ -141,6 +171,23 @@ public sealed class WinGetCommandClient
       {
         ResourceId = resourceId,
         StepId = stepId,
+        ProcessExitCode = exitCode,
+        LogLocation = _logLocation,
+        IsRetryable = true
+      };
+
+  private StructuredError CreateAvailabilityError(
+      string resourceId,
+      string packageId,
+      string? preferredVersion,
+      int? exitCode) => new(
+          WdemErrorCode.DownloadError,
+          "WinGet package source is unavailable.",
+          string.IsNullOrWhiteSpace(preferredVersion)
+              ? $"Package '{packageId}' is unavailable from the configured WinGet sources."
+              : $"Exact package version '{preferredVersion}' is unavailable for '{packageId}'.")
+      {
+        ResourceId = resourceId,
         ProcessExitCode = exitCode,
         LogLocation = _logLocation,
         IsRetryable = true

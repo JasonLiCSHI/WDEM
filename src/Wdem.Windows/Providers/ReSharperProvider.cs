@@ -309,10 +309,9 @@ public sealed class ReSharperProvider : IResourceProvider
       };
     }
 
-    var source = await _winGet.QueryAvailabilityAsync(
+    var source = await _winGet.QueryVersionsAsync(
         resource.Id,
         PackageId,
-        resource.PreferredVersion,
         GetParameter(resource, SourceParameter),
         cancellationToken).ConfigureAwait(false);
     if (source.Error is not null)
@@ -324,13 +323,28 @@ public sealed class ReSharperProvider : IResourceProvider
       };
     }
 
+    var exactVersion = ResolveExactVersion(resource, source.Versions);
+    if (exactVersion is null)
+    {
+      var error = Error(
+          resource,
+          WdemErrorCode.VersionError,
+          "No compatible ReSharper version is available.",
+          $"No available version of '{PackageId}' satisfies the requested version constraint.");
+      return CreatePlan(resource, compliance.Status, false) with
+      {
+        Error = error.Detail,
+        StructuredErrors = [error]
+      };
+    }
+
     return CreatePlan(resource, compliance.Status, true) with
     {
       Steps =
       [
         new PlanStep
         {
-          Id = CreateStepId(instance.Instance),
+          Id = CreateStepId(instance.Instance, exactVersion),
           Description = "Install JetBrains ReSharper with WinGet.",
           Action = compliance.Status == ComplianceStatus.Missing
               ? PlanAction.Install
@@ -363,7 +377,7 @@ public sealed class ReSharperProvider : IResourceProvider
         plan,
         ResourceType,
         ProviderName,
-        static (_, step) => HasValidStepId(step.Id));
+        static (_, step) => TryParseStepId(step.Id, out string _));
     if (invalidPlan is not null)
     {
       return invalidPlan;
@@ -375,9 +389,13 @@ public sealed class ReSharperProvider : IResourceProvider
     }
 
     var step = plan.Steps[0];
+    _ = TryParseStepId(step.Id, out var exactVersion);
     var instance = await SelectInstanceAsync(resource, cancellationToken).ConfigureAwait(false);
     if (instance.Instance is null ||
-        !string.Equals(step.Id, CreateStepId(instance.Instance), StringComparison.Ordinal))
+        !string.Equals(
+            step.Id,
+            CreateStepId(instance.Instance, exactVersion),
+            StringComparison.Ordinal))
     {
       return ProviderLifecycleSupport.Failure(
           resource,
@@ -395,7 +413,7 @@ public sealed class ReSharperProvider : IResourceProvider
     var source = await _winGet.QueryAvailabilityAsync(
         resource.Id,
         PackageId,
-        resource.PreferredVersion,
+        exactVersion,
         GetParameter(resource, SourceParameter),
         cancellationToken).ConfigureAwait(false);
     if (source.Error is not null)
@@ -413,7 +431,7 @@ public sealed class ReSharperProvider : IResourceProvider
         resource.Id,
         step.Id,
         PackageId,
-        resource.PreferredVersion,
+        exactVersion,
         GetParameter(resource, SourceParameter),
         null,
         cancellationToken).ConfigureAwait(false);
@@ -512,21 +530,75 @@ public sealed class ReSharperProvider : IResourceProvider
     }
   }
 
-  private static string CreateStepId(VisualStudioInstance instance)
+  private static string CreateStepId(
+      VisualStudioInstance instance,
+      string exactVersion)
   {
     var evidence = JsonSerializer.SerializeToUtf8Bytes(new InstanceEvidence(
         instance.InstanceId,
         instance.ProductId,
-        instance.InstallationVersion));
-    return "resharper:install:" + Convert.ToHexString(SHA256.HashData(evidence));
+        instance.InstallationVersion,
+        exactVersion));
+    return $"resharper:install:{exactVersion}:" +
+        Convert.ToHexString(SHA256.HashData(evidence));
   }
 
-  private static bool HasValidStepId(string stepId)
+  private static bool TryParseStepId(string stepId, out string exactVersion)
   {
     const string prefix = "resharper:install:";
-    return stepId.Length == prefix.Length + 64 &&
-        stepId.StartsWith(prefix, StringComparison.Ordinal) &&
-        stepId[prefix.Length..].All(Uri.IsHexDigit);
+    exactVersion = string.Empty;
+    if (!stepId.StartsWith(prefix, StringComparison.Ordinal))
+    {
+      return false;
+    }
+
+    var hashSeparator = stepId.LastIndexOf(':');
+    if (hashSeparator <= prefix.Length || stepId.Length != hashSeparator + 1 + 64)
+    {
+      return false;
+    }
+
+    var candidate = stepId[prefix.Length..hashSeparator];
+    if (!SemanticVersion.TryParse(candidate, out _) ||
+        !candidate.All(character => char.IsAsciiDigit(character) || character == '.') ||
+        !stepId[(hashSeparator + 1)..].All(Uri.IsHexDigit))
+    {
+      return false;
+    }
+
+    exactVersion = candidate;
+    return true;
+  }
+
+  private static string? ResolveExactVersion(
+      ResourceDefinition resource,
+      IReadOnlyList<string> availableVersions)
+  {
+    VersionConstraint? constraint = string.IsNullOrWhiteSpace(resource.VersionConstraint)
+        ? null
+        : VersionConstraint.Parse(resource.VersionConstraint);
+    var candidates = availableVersions
+        .Select(text => (Text: text, Parsed: SemanticVersion.TryParse(text, out var parsed)
+            ? parsed
+            : (SemanticVersion?)null))
+        .Where(candidate => candidate.Parsed is { } parsed &&
+            (constraint is null || constraint.IsSatisfiedBy(parsed)));
+    if (!string.IsNullOrWhiteSpace(resource.PreferredVersion))
+    {
+      var preferred = resource.PreferredVersion.Trim();
+      return candidates.Any(candidate => string.Equals(
+          candidate.Text,
+          preferred,
+          StringComparison.Ordinal))
+          ? preferred
+          : null;
+    }
+
+    return candidates
+        .OrderByDescending(candidate => candidate.Parsed)
+        .ThenByDescending(candidate => candidate.Text, StringComparer.Ordinal)
+        .Select(candidate => candidate.Text)
+        .FirstOrDefault();
   }
 
   private static DetectedState CreateMissingState(
@@ -576,7 +648,8 @@ public sealed class ReSharperProvider : IResourceProvider
   private sealed record InstanceEvidence(
       string InstanceId,
       string ProductId,
-      string InstallationVersion);
+      string InstallationVersion,
+      string ExactVersion);
 
   private sealed record InstanceSelection(
       VisualStudioInstance? Instance,

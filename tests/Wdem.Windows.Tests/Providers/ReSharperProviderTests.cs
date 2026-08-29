@@ -66,6 +66,30 @@ public sealed class ReSharperProviderTests
   }
 
   [Fact]
+  public async Task PlanAsync_NoAvailableVersionSatisfiesConstraintReturnsVersionError()
+  {
+    var process = new ScriptedProcessExecutor();
+    process.Enqueue(
+        "winget",
+        ["show", "--id", "JetBrains.ReSharper", "--exact", "--versions",
+         "--accept-source-agreements", "--disable-interactivity"],
+        result: new ProcessExecutionResult(
+            true,
+            0,
+            ["2026.1.0", "2025.1.9"],
+            []));
+    var provider = Provider(new FakeManifestReader(), process);
+    var resource = ReSharperResource(["visual-studio"]);
+
+    var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    var error = Assert.Single(plan.StructuredErrors);
+    Assert.Equal(WdemErrorCode.VersionError, error.Code);
+    Assert.Empty(process.Remaining);
+  }
+
+  [Fact]
   public async Task DetectAsync_RequiresManifestInSelectedVisualStudioInstance()
   {
     var manifests = new FakeManifestReader();
@@ -125,16 +149,18 @@ public sealed class ReSharperProviderTests
     process.Enqueue(
         "winget",
         ["show", "--id", "JetBrains.ReSharper", "--exact",
-         "--accept-source-agreements", "--disable-interactivity"]);
+         "--versions", "--accept-source-agreements", "--disable-interactivity"],
+        result: Success("2026.1.0", "2025.2.1", "2025.2.3"));
     process.Enqueue(
         "winget",
         ["show", "--id", "JetBrains.ReSharper", "--exact",
-         "--accept-source-agreements", "--disable-interactivity"]);
+         "--versions", "--accept-source-agreements", "--disable-interactivity"],
+        result: Success("2025.2.3"));
     process.Enqueue(
-        "winget",
-        ["install", "--id", "JetBrains.ReSharper", "--exact", "--silent",
+        "winget", ["install", "--id", "JetBrains.ReSharper", "--exact",
+         "--version", "2025.2.3", "--silent",
          "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"],
-        () => manifests.Add("JetBrains.ReSharper", "2025.2.1", "17.0_a"));
+        () => manifests.Add("JetBrains.ReSharper", "2025.2.3", "17.0_a"));
     var provider = Provider(manifests, process);
     var resource = ReSharperResource(["visual-studio"]);
     var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
@@ -147,6 +173,56 @@ public sealed class ReSharperProviderTests
   }
 
   [Fact]
+  public async Task ApplyAsync_SourceCannotSubstituteAnotherSatisfyingVersion()
+  {
+    var process = new ScriptedProcessExecutor();
+    process.Enqueue(
+        "winget",
+        ["show", "--id", "JetBrains.ReSharper", "--exact", "--versions",
+         "--accept-source-agreements", "--disable-interactivity"],
+        result: Success("2025.2.1"));
+    process.Enqueue(
+        "winget",
+        ["show", "--id", "JetBrains.ReSharper", "--exact", "--versions",
+         "--accept-source-agreements", "--disable-interactivity"],
+        result: Success("2025.2.2"));
+    var provider = Provider(new FakeManifestReader(), process);
+    var resource = ReSharperResource(["visual-studio"]);
+    var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+
+    var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(WdemErrorCode.DownloadError, result.Error!.Code);
+    Assert.Empty(process.Remaining);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_ReplacedExactVersionEvidenceRefusesBeforeSourceQuery()
+  {
+    var process = new ScriptedProcessExecutor();
+    process.Enqueue(
+        "winget",
+        ["show", "--id", "JetBrains.ReSharper", "--exact", "--versions",
+         "--accept-source-agreements", "--disable-interactivity"],
+        result: Success("2025.2.1"));
+    var provider = Provider(new FakeManifestReader(), process);
+    var resource = ReSharperResource(["visual-studio"]);
+    var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+    var step = Assert.Single(plan.Steps);
+    var replaced = plan with
+    {
+      Steps = [step with { Id = step.Id.Replace("2025.2.1", "2025.2.2") }]
+    };
+
+    var result = await provider.ApplyAsync(resource, replaced, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Empty(process.Remaining);
+    Assert.Single(process.Requests);
+  }
+
+  [Fact]
   public async Task ApplyAsync_WinGetFailureRemainsFailedWhenManifestBecomesCompliant()
   {
     var manifests = new FakeManifestReader();
@@ -154,14 +230,16 @@ public sealed class ReSharperProviderTests
     process.Enqueue(
         "winget",
         ["show", "--id", "JetBrains.ReSharper", "--exact",
-         "--accept-source-agreements", "--disable-interactivity"]);
+         "--versions", "--accept-source-agreements", "--disable-interactivity"],
+        result: Success("2025.2.1"));
     process.Enqueue(
         "winget",
         ["show", "--id", "JetBrains.ReSharper", "--exact",
-         "--accept-source-agreements", "--disable-interactivity"]);
+         "--versions", "--accept-source-agreements", "--disable-interactivity"],
+        result: Success("2025.2.1"));
     process.Enqueue(
-        "winget",
-        ["install", "--id", "JetBrains.ReSharper", "--exact", "--silent",
+        "winget", ["install", "--id", "JetBrains.ReSharper", "--exact",
+         "--version", "2025.2.1", "--silent",
          "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"],
         () => manifests.Add("JetBrains.ReSharper", "2025.2.1", "17.0_a"),
         new ProcessExecutionResult(true, 1, [], []));
@@ -222,6 +300,9 @@ public sealed class ReSharperProviderTests
     Outcome = DetectionOutcome.Succeeded,
     Exists = false
   };
+
+  private static ProcessExecutionResult Success(params string[] output) =>
+      new(true, 0, output, []);
 
   private static VisualStudioInstance Instance(string instanceId) => new()
   {
@@ -338,7 +419,7 @@ public sealed class ReSharperProviderTests
         CancellationToken cancellationToken)
     {
       Requests.Add(request);
-      return Task.FromResult(new ProcessExecutionResult(true, 0, ["available"], []));
+      return Task.FromResult(Success("2025.2.1"));
     }
   }
 }
