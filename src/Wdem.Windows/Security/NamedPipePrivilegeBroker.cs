@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.ComponentModel;
 using Wdem.Core.Execution;
 using Wdem.Core.Providers;
@@ -14,6 +15,8 @@ public sealed class NamedPipePrivilegeBroker :
   private readonly SemaphoreSlim _sessionsGate = new(1, 1);
   private readonly Dictionary<Guid, HostSession> _sessions = [];
   private readonly Dictionary<Guid, LaunchFailure> _terminalLaunchFailures = [];
+  // Closed entries remain until broker disposal so a completed run ID cannot reopen.
+  private readonly ConcurrentDictionary<Guid, RunLifecycle> _runLifecycles = [];
   private TaskCompletionSource? _operationsDrained;
   private Task? _disposeTask;
   private int _activeOperations;
@@ -33,14 +36,49 @@ public sealed class NamedPipePrivilegeBroker :
     Validate(request);
     using var operation = EnterOperation();
 
+    try
+    {
+      return await ApplyWithinRunAsync(request, progress, cancellationToken)
+          .ConfigureAwait(false);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      await CompleteRunCoreAsync(request.RunId, CancellationToken.None).ConfigureAwait(false);
+      throw;
+    }
+  }
+
+  public async Task CompleteRunAsync(Guid runId, CancellationToken cancellationToken)
+  {
+    using var operation = EnterOperation();
+    await CompleteRunCoreAsync(runId, cancellationToken).ConfigureAwait(false);
+  }
+
+  private async Task<ResourceApplyResult> ApplyWithinRunAsync(
+      ElevatedResourceRequest request,
+      IProgress<ProviderProgress>? progress,
+      CancellationToken cancellationToken)
+  {
+    var lifecycle = _runLifecycles.GetOrAdd(request.RunId, static _ => new RunLifecycle());
+    using var runOperation = lifecycle.TryEnter();
+    if (runOperation is null)
+    {
+      return ClosedRunFailure(request.ResourceId);
+    }
+
     HostSession session;
     try
     {
-      session = await GetOrStartAsync(request.RunId, cancellationToken).ConfigureAwait(false);
+      session = await GetOrStartAsync(request.RunId, lifecycle, cancellationToken)
+          .ConfigureAwait(false);
     }
     catch (CachedLaunchFailureException exception)
     {
       return exception.Failure.ForResource(request.ResourceId);
+    }
+    catch (ClosedRunException)
+    {
+      return ClosedRunFailure(request.ResourceId);
     }
 
     await session.RequestGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -49,21 +87,41 @@ public sealed class NamedPipePrivilegeBroker :
       return await session.Session.ApplyAsync(request, progress, cancellationToken)
           .ConfigureAwait(false);
     }
-    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-    {
-      await TerminateRunAsync(request.RunId, CancellationToken.None).ConfigureAwait(false);
-      throw;
-    }
     finally
     {
       session.RequestGate.Release();
     }
   }
 
-  public async Task CompleteRunAsync(Guid runId, CancellationToken cancellationToken)
+  private async Task CompleteRunCoreAsync(Guid runId, CancellationToken cancellationToken)
+  {
+    cancellationToken.ThrowIfCancellationRequested();
+    var lifecycle = _runLifecycles.GetOrAdd(runId, static _ => new RunLifecycle());
+    var closing = lifecycle.BeginClose();
+    if (!closing.IsOwner)
+    {
+      await closing.Completion.ConfigureAwait(false);
+      return;
+    }
+
+    try
+    {
+      // After closure starts, cleanup must finish before any completion caller returns.
+      await closing.OperationsDrained.ConfigureAwait(false);
+      await CleanupRunAsync(runId).ConfigureAwait(false);
+      lifecycle.Complete();
+    }
+    catch (Exception exception)
+    {
+      lifecycle.Fail(exception);
+      throw;
+    }
+  }
+
+  private async Task CleanupRunAsync(Guid runId)
   {
     HostSession? session = null;
-    await _sessionsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+    await _sessionsGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
     try
     {
       if (_sessions.Remove(runId, out var removed))
@@ -80,8 +138,21 @@ public sealed class NamedPipePrivilegeBroker :
 
     if (session is not null)
     {
-      await session.Session.TerminateAsync(cancellationToken).ConfigureAwait(false);
-      await session.Session.DisposeAsync().ConfigureAwait(false);
+      try
+      {
+        try
+        {
+          await session.Session.TerminateAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        finally
+        {
+          await session.Session.DisposeAsync().ConfigureAwait(false);
+        }
+      }
+      finally
+      {
+        session.RequestGate.Dispose();
+      }
     }
   }
 
@@ -161,6 +232,7 @@ public sealed class NamedPipePrivilegeBroker :
       session.RequestGate.Dispose();
     }
 
+    _runLifecycles.Clear();
     _sessionsGate.Dispose();
     if (cleanupFailure is not null)
     {
@@ -170,12 +242,18 @@ public sealed class NamedPipePrivilegeBroker :
 
   private async Task<HostSession> GetOrStartAsync(
       Guid runId,
+      RunLifecycle lifecycle,
       CancellationToken cancellationToken)
   {
     await _sessionsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
     try
     {
       ThrowIfDisposing();
+      if (lifecycle.IsClosed)
+      {
+        throw new ClosedRunException();
+      }
+
       if (_sessions.TryGetValue(runId, out var existing))
       {
         return existing;
@@ -197,10 +275,30 @@ public sealed class NamedPipePrivilegeBroker :
           exception is not OperationCanceledException ||
           !cancellationToken.IsCancellationRequested)
       {
+        if (lifecycle.IsClosed)
+        {
+          throw new ClosedRunException();
+        }
+
         var failure = LaunchFailure.From(exception);
         _terminalLaunchFailures.Add(runId, failure);
         throw new CachedLaunchFailureException(failure);
       }
+
+      if (lifecycle.IsClosed)
+      {
+        try
+        {
+          await launched.TerminateAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        finally
+        {
+          await launched.DisposeAsync().ConfigureAwait(false);
+        }
+
+        throw new ClosedRunException();
+      }
+
       var session = new HostSession(launched, new SemaphoreSlim(1, 1));
       _sessions.Add(runId, session);
       return session;
@@ -210,9 +308,6 @@ public sealed class NamedPipePrivilegeBroker :
       _sessionsGate.Release();
     }
   }
-
-  private Task TerminateRunAsync(Guid runId, CancellationToken cancellationToken) =>
-      CompleteRunAsync(runId, cancellationToken);
 
   private OperationLease EnterOperation()
   {
@@ -298,6 +393,19 @@ public sealed class NamedPipePrivilegeBroker :
         }
       };
 
+  private static ResourceApplyResult ClosedRunFailure(string resourceId) => new()
+  {
+    ResourceId = resourceId,
+    Outcome = ApplyOutcome.Failed,
+    Error = new StructuredError(
+        WdemErrorCode.PermissionError,
+        "Execution run is closed.",
+        "The elevated resource cannot run because administrator cleanup has begun for its execution run.")
+    {
+      ResourceId = resourceId
+    }
+  };
+
   private sealed record HostSession(
       IElevatedHostSession Session,
       SemaphoreSlim RequestGate);
@@ -308,6 +416,99 @@ public sealed class NamedPipePrivilegeBroker :
 
     public void Dispose() => Interlocked.Exchange(ref _owner, null)?.ExitOperation();
   }
+
+  private sealed class RunLifecycle
+  {
+    private readonly object _gate = new();
+    private readonly TaskCompletionSource _completion = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    private TaskCompletionSource? _operationsDrained;
+    private int _activeOperations;
+    private bool _closed;
+
+    public bool IsClosed
+    {
+      get
+      {
+        lock (_gate)
+        {
+          return _closed;
+        }
+      }
+    }
+
+    public RunOperationLease? TryEnter()
+    {
+      lock (_gate)
+      {
+        if (_closed)
+        {
+          return null;
+        }
+
+        _activeOperations++;
+        return new RunOperationLease(this);
+      }
+    }
+
+    public RunClosing BeginClose()
+    {
+      lock (_gate)
+      {
+        if (_closed)
+        {
+          return new RunClosing(false, Task.CompletedTask, _completion.Task);
+        }
+
+        _closed = true;
+        Task operationsDrained;
+        if (_activeOperations == 0)
+        {
+          operationsDrained = Task.CompletedTask;
+        }
+        else
+        {
+          _operationsDrained = new TaskCompletionSource(
+              TaskCreationOptions.RunContinuationsAsynchronously);
+          operationsDrained = _operationsDrained.Task;
+        }
+
+        return new RunClosing(true, operationsDrained, _completion.Task);
+      }
+    }
+
+    public void Complete() => _completion.TrySetResult();
+
+    public void Fail(Exception exception) => _completion.TrySetException(exception);
+
+    private void Exit()
+    {
+      TaskCompletionSource? drained = null;
+      lock (_gate)
+      {
+        _activeOperations--;
+        if (_activeOperations == 0)
+        {
+          drained = _operationsDrained;
+          _operationsDrained = null;
+        }
+      }
+
+      drained?.TrySetResult();
+    }
+
+    public sealed class RunOperationLease(RunLifecycle owner) : IDisposable
+    {
+      private RunLifecycle? _owner = owner;
+
+      public void Dispose() => Interlocked.Exchange(ref _owner, null)?.Exit();
+    }
+  }
+
+  private sealed record RunClosing(
+      bool IsOwner,
+      Task OperationsDrained,
+      Task Completion);
 
   private sealed record LaunchFailure(
       ApplyOutcome Outcome,
@@ -341,4 +542,6 @@ public sealed class NamedPipePrivilegeBroker :
   {
     public LaunchFailure Failure { get; } = failure;
   }
+
+  private sealed class ClosedRunException : Exception;
 }

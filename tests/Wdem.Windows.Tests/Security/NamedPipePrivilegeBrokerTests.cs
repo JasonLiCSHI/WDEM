@@ -222,6 +222,71 @@ public sealed class NamedPipePrivilegeBrokerTests
   }
 
   [Fact]
+  public async Task CompleteRunAsync_RacingAndLateApply_ReturnClosedFailureWithoutRestart()
+  {
+    var launcher = new RecordingElevatedHostLauncher();
+    launcher.Session.WaitForTerminationRelease = true;
+    var broker = new NamedPipePrivilegeBroker(launcher);
+    var runId = Guid.NewGuid();
+    await broker.ApplyAsync(
+        Request(runId, "visual-studio"),
+        null,
+        CancellationToken.None);
+
+    var completing = broker.CompleteRunAsync(runId, CancellationToken.None);
+    await launcher.Session.Terminated.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    ResourceApplyResult racing;
+    try
+    {
+      racing = await broker.ApplyAsync(
+          Request(runId, "vsix"),
+          null,
+          CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+    }
+    finally
+    {
+      launcher.Session.TerminationRelease.TrySetResult();
+      await completing.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    var late = await broker.ApplyAsync(
+        Request(runId, "windows-feature"),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(1, launcher.StartCalls);
+    AssertClosedRunFailure(racing, "vsix");
+    AssertClosedRunFailure(late, "windows-feature");
+  }
+
+  [Fact]
+  public async Task CompleteRunAsync_ActiveApplyDrainsBeforeHostTermination()
+  {
+    var launcher = new RecordingElevatedHostLauncher();
+    launcher.Session.WaitForCancellation = true;
+    var broker = new NamedPipePrivilegeBroker(launcher);
+    var runId = Guid.NewGuid();
+    using var cancellation = new CancellationTokenSource();
+    var apply = broker.ApplyAsync(
+        Request(runId, "visual-studio"),
+        null,
+        cancellation.Token);
+    await launcher.Session.RequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    var completing = broker.CompleteRunAsync(runId, CancellationToken.None);
+    var completedBeforeApplyDrained = completing.IsCompleted;
+    var terminatedBeforeApplyDrained = launcher.Session.Terminated.Task.IsCompleted;
+    cancellation.Cancel();
+
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => apply);
+    await completing.WaitAsync(TimeSpan.FromSeconds(5));
+
+    Assert.False(completedBeforeApplyDrained);
+    Assert.False(terminatedBeforeApplyDrained);
+    Assert.Equal(1, launcher.Session.TerminateCalls);
+  }
+
+  [Fact]
   public async Task DisposeAsync_ActiveApplyWaitsForCancellationWithoutDisposedSemaphoreRace()
   {
     var launcher = new RecordingElevatedHostLauncher();
@@ -421,6 +486,15 @@ public sealed class NamedPipePrivilegeBrokerTests
         }).ToArray()
       };
 
+  private static void AssertClosedRunFailure(ResourceApplyResult result, string resourceId)
+  {
+    Assert.Equal(resourceId, result.ResourceId);
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(WdemErrorCode.PermissionError, result.Error!.Code);
+    Assert.Equal("Execution run is closed.", result.Error.Summary);
+    Assert.Equal(resourceId, result.Error.ResourceId);
+  }
+
   private sealed class RecordingElevatedHostLauncher : IElevatedHostLauncher
   {
     public int StartCalls { get; private set; }
@@ -449,10 +523,13 @@ public sealed class NamedPipePrivilegeBrokerTests
   {
     public List<ElevatedResourceRequest> Requests { get; } = [];
     public bool WaitForCancellation { get; set; }
+    public bool WaitForTerminationRelease { get; set; }
     public int TerminateCalls { get; private set; }
     public TaskCompletionSource RequestStarted { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource Terminated { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource TerminationRelease { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
 
     public async Task<ResourceApplyResult> ApplyAsync(
@@ -475,11 +552,14 @@ public sealed class NamedPipePrivilegeBrokerTests
       };
     }
 
-    public Task TerminateAsync(CancellationToken cancellationToken)
+    public async Task TerminateAsync(CancellationToken cancellationToken)
     {
       TerminateCalls++;
       Terminated.TrySetResult();
-      return Task.CompletedTask;
+      if (WaitForTerminationRelease)
+      {
+        await TerminationRelease.Task.WaitAsync(cancellationToken);
+      }
     }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
