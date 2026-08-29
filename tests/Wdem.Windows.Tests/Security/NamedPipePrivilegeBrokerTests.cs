@@ -226,6 +226,12 @@ public sealed class NamedPipePrivilegeBrokerTests
       launcher.Session.TerminationRelease.TrySetResult();
       await launcher.Session.TerminationCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
     }
+
+    await broker.CompleteRunAsync(runId, CancellationToken.None);
+    await broker.DisposeAsync();
+
+    Assert.Equal(1, launcher.Session.TerminateCalls);
+    Assert.Equal(1, launcher.Session.DisposeCalls);
   }
 
   [Fact]

@@ -383,8 +383,29 @@ internal sealed class ArtifactLease : IDisposable
 
     try
     {
-      return Directory.GetLastWriteTimeUtc(directoryPath) < staleBeforeUtc &&
-          !Directory.EnumerateFileSystemEntries(directoryPath).Any();
+      if (File.GetAttributes(directoryPath).HasFlag(FileAttributes.ReparsePoint) ||
+          Directory.GetLastWriteTimeUtc(directoryPath) >= staleBeforeUtc)
+      {
+        return false;
+      }
+
+      var entries = Directory.EnumerateFileSystemEntries(directoryPath).Take(2).ToArray();
+      if (entries.Length == 0)
+      {
+        return true;
+      }
+
+      var markerPath = Path.Combine(directoryPath, OwnershipMarkerFileName);
+      var markerAttributes = File.GetAttributes(markerPath);
+      return entries.Length == 1 &&
+          string.Equals(entries[0], markerPath, StringComparison.OrdinalIgnoreCase) &&
+          !markerAttributes.HasFlag(FileAttributes.Directory) &&
+          !markerAttributes.HasFlag(FileAttributes.ReparsePoint) &&
+          File.GetLastWriteTimeUtc(markerPath) < staleBeforeUtc &&
+          string.Equals(
+              File.ReadAllText(markerPath),
+              OwnershipMarkerContent,
+              StringComparison.Ordinal);
     }
     catch (Exception exception) when (exception is IOException or
         UnauthorizedAccessException or System.Security.SecurityException)

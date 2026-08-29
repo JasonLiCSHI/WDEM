@@ -544,12 +544,20 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       Task? cleanupTask = null;
       try
       {
-        var remaining = cancellationDeadline.Remaining;
-        using var cleanupCancellation = new CancellationTokenSource(remaining);
-        cleanupTask = _dispatcher.CompleteRunAsync(
-            run.RunId,
-            cleanupCancellation.Token);
-        await cleanupTask.WaitAsync(cancellationDeadline.Remaining).ConfigureAwait(false);
+        if (!cancellationDeadline.IsStarted)
+        {
+          await _dispatcher.CompleteRunAsync(run.RunId, CancellationToken.None)
+              .ConfigureAwait(false);
+        }
+        else
+        {
+          var remaining = cancellationDeadline.Remaining;
+          using var cleanupCancellation = new CancellationTokenSource(remaining);
+          cleanupTask = _dispatcher.CompleteRunAsync(
+              run.RunId,
+              cleanupCancellation.Token);
+          await cleanupTask.WaitAsync(cancellationDeadline.Remaining).ConfigureAwait(false);
+        }
       }
       catch (Exception exception)
       {
@@ -839,9 +847,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           : (evaluated.Error ?? VerificationError(definition.Id, verification.Message)) with
           {
             ResourceId = definition.Id,
-            StepId = processStep?.StepId ?? evaluated.Error?.StepId,
-            ProcessExitCode = processStep?.ProcessExitCode ??
-                evaluated.Error?.ProcessExitCode
+            StepId = evaluated.Error?.StepId ?? processStep?.StepId,
+            ProcessExitCode = evaluated.Error?.ProcessExitCode ??
+                processStep?.ProcessExitCode
           };
       return new ResourceResult
       {

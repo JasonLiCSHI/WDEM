@@ -13,6 +13,23 @@ public sealed class ResourceSchedulerTests
   private readonly IResourceScheduler _scheduler = new ResourceScheduler();
 
   [Fact]
+  public void CancellationDrainDeadline_EnforcesPlatformTimerUpperBound()
+  {
+    var maximumSupportedBudget = TimeSpan.FromMilliseconds(uint.MaxValue - 1d);
+
+    using var deadline = new CancellationDrainDeadline(
+        maximumSupportedBudget,
+        CancellationToken.None);
+    var error = Assert.Throws<ArgumentOutOfRangeException>(() =>
+        new CancellationDrainDeadline(
+            maximumSupportedBudget + TimeSpan.FromTicks(1),
+            CancellationToken.None));
+
+    Assert.Equal(maximumSupportedBudget, deadline.Remaining);
+    Assert.Equal("budget", error.ParamName);
+  }
+
+  [Fact]
   public async Task ExecuteAsync_ReportsReadyRunningCompletedAndBlockedBeforeAdvancing()
   {
     var transitions = new List<(string Id, ExecutionState State, ExecutionOutcome? Outcome)>();

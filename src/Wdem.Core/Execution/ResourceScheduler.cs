@@ -23,14 +23,29 @@ public sealed class ResourceScheduler : IResourceScheduler
 
   public TimeSpan CancellationDrainTimeout => _drainTimeout;
 
+  public Task<SchedulerResult> ExecuteAsync(
+      ExecutionPlan plan,
+      Func<PlannedResource, CancellationToken, Task<ResourceResult>> executeAsync,
+      Func<PlannedResource, ProviderCapabilities> capabilitiesFor,
+      int maximumConcurrency,
+      CancellationToken cancellationToken,
+      Func<ResourceResult, Task>? transitionAsync = null) => ExecuteAsync(
+          plan,
+          executeAsync,
+          capabilitiesFor,
+          maximumConcurrency,
+          cancellationToken,
+          transitionAsync,
+          null);
+
   public async Task<SchedulerResult> ExecuteAsync(
       ExecutionPlan plan,
       Func<PlannedResource, CancellationToken, Task<ResourceResult>> executeAsync,
       Func<PlannedResource, ProviderCapabilities> capabilitiesFor,
       int maximumConcurrency,
       CancellationToken cancellationToken,
-      Func<ResourceResult, Task>? transitionAsync = null,
-      CancellationDrainDeadline? cancellationDeadline = null)
+      Func<ResourceResult, Task>? transitionAsync,
+      CancellationDrainDeadline? cancellationDeadline)
   {
     ArgumentNullException.ThrowIfNull(plan);
     ArgumentNullException.ThrowIfNull(executeAsync);

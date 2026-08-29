@@ -298,6 +298,35 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   }
 
   [Fact]
+  public async Task ApplyAsync_StaleInstallPlanWithAmbiguousInstancesFailsBeforeInstall()
+  {
+    var discovery = new SequenceDiscovery(
+    [
+      [Instance("17.0_a"), Instance("17.0_b")]
+    ]);
+    var installer = new RecordingInstallerClient();
+    var provider = Provider(discovery, installer);
+    var resource = Resource();
+    var staleInstallPlan = await provider.PlanAsync(
+        resource,
+        MissingState(),
+        CancellationToken.None);
+
+    var result = await provider.ApplyAsync(
+        resource,
+        staleInstallPlan,
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(WdemErrorCode.DetectionError, result.Error!.Code);
+    Assert.Equal("Multiple Visual Studio instances match.", result.Error.Summary);
+    Assert.Contains("17.0_a, 17.0_b", result.Error.Detail, StringComparison.Ordinal);
+    Assert.Empty(installer.Operations);
+    Assert.Equal(1, discovery.AttemptCount);
+  }
+
+  [Fact]
   public async Task ApplyAsync_CancelledAfterUpdatePreservesRestartEvidenceWithoutModify()
   {
     using var cancellation = new CancellationTokenSource();

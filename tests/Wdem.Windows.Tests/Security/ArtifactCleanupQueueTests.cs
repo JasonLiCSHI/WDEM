@@ -194,6 +194,77 @@ public sealed class ArtifactCleanupQueueTests
   }
 
   [Fact]
+  public void StartupSweep_ReclaimsOnlyStaleMarkerOnlyStrictlyNamedDirectory()
+  {
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-cleanup-marker-only-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    var staleMarkerOnly = Path.Combine(root, Guid.NewGuid().ToString("N"));
+    var recentMarker = Path.Combine(root, Guid.NewGuid().ToString("N"));
+    var invalidMarker = Path.Combine(root, Guid.NewGuid().ToString("N"));
+    var markerWithPayload = Path.Combine(root, Guid.NewGuid().ToString("N"));
+    var stale = DateTime.UtcNow - TimeSpan.FromHours(2);
+    foreach (var directory in new[]
+             {
+               staleMarkerOnly,
+               recentMarker,
+               invalidMarker,
+               markerWithPayload
+             })
+    {
+      Directory.CreateDirectory(directory);
+      File.WriteAllText(
+          Path.Combine(directory, ".wdem-artifact"),
+          "wdem-artifact-v1\n");
+    }
+
+    File.WriteAllText(Path.Combine(invalidMarker, ".wdem-artifact"), "invalid\n");
+    File.WriteAllText(Path.Combine(markerWithPayload, "partial.bin"), "partial");
+    foreach (var directory in new[]
+             {
+               staleMarkerOnly,
+               recentMarker,
+               invalidMarker,
+               markerWithPayload
+             })
+    {
+      Directory.SetLastWriteTimeUtc(directory, stale);
+    }
+
+    foreach (var directory in new[]
+             {
+               staleMarkerOnly,
+               invalidMarker,
+               markerWithPayload
+             })
+    {
+      File.SetLastWriteTimeUtc(Path.Combine(directory, ".wdem-artifact"), stale);
+    }
+
+    try
+    {
+      _ = new ArtifactCleanupQueue(
+          maxAttempts: 1,
+          retryDelay: TimeSpan.FromSeconds(30),
+          maxDelayedRetryRounds: 1,
+          knownStagingRoots: [root]);
+
+      Assert.False(Directory.Exists(staleMarkerOnly));
+      Assert.True(Directory.Exists(recentMarker));
+      Assert.True(Directory.Exists(invalidMarker));
+      Assert.True(Directory.Exists(markerWithPayload));
+    }
+    finally
+    {
+      if (Directory.Exists(root))
+      {
+        Directory.Delete(root, recursive: true);
+      }
+    }
+  }
+
+  [Fact]
   public async Task DelayedRetry_ReschedulesCleanupEnqueuedDuringScheduledReset()
   {
     var fileSystem = new RecordingCleanupFileSystem

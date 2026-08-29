@@ -7,15 +7,20 @@ namespace Wdem.Core.Execution;
 
 public sealed class CancellationDrainDeadline : IDisposable
 {
+  private static readonly TimeSpan MaximumTimerDuration =
+      TimeSpan.FromMilliseconds(uint.MaxValue - 1d);
   private readonly TimeSpan _budget;
   private readonly CancellationTokenRegistration _registration;
   private long _startedTimestamp = long.MinValue;
 
   public CancellationDrainDeadline(TimeSpan budget, CancellationToken cancellationToken)
   {
-    if (budget <= TimeSpan.Zero)
+    if (budget <= TimeSpan.Zero || budget > MaximumTimerDuration)
     {
-      throw new ArgumentOutOfRangeException(nameof(budget));
+      throw new ArgumentOutOfRangeException(
+          nameof(budget),
+          budget,
+          $"The budget must be positive and no greater than {MaximumTimerDuration}.");
     }
 
     _budget = budget;
@@ -51,7 +56,7 @@ public sealed class CancellationDrainDeadline : IDisposable
 
 public interface IResourceScheduler
 {
-  TimeSpan CancellationDrainTimeout { get; }
+  TimeSpan CancellationDrainTimeout => TimeSpan.FromSeconds(2);
 
   Task<SchedulerResult> ExecuteAsync(
       ExecutionPlan plan,
@@ -59,6 +64,20 @@ public interface IResourceScheduler
       Func<PlannedResource, ProviderCapabilities> capabilitiesFor,
       int maximumConcurrency,
       CancellationToken cancellationToken,
-      Func<ResourceResult, Task>? transitionAsync = null,
-      CancellationDrainDeadline? cancellationDeadline = null);
+      Func<ResourceResult, Task>? transitionAsync = null);
+
+  Task<SchedulerResult> ExecuteAsync(
+      ExecutionPlan plan,
+      Func<PlannedResource, CancellationToken, Task<ResourceResult>> executeAsync,
+      Func<PlannedResource, ProviderCapabilities> capabilitiesFor,
+      int maximumConcurrency,
+      CancellationToken cancellationToken,
+      Func<ResourceResult, Task>? transitionAsync,
+      CancellationDrainDeadline? cancellationDeadline) => ExecuteAsync(
+          plan,
+          executeAsync,
+          capabilitiesFor,
+          maximumConcurrency,
+          cancellationToken,
+          transitionAsync);
 }

@@ -172,11 +172,7 @@ public sealed class NamedPipePrivilegeBroker :
     await _sessionsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
     try
     {
-      if (_sessions.Remove(runId, out var removed))
-      {
-        session = removed;
-      }
-
+      _sessions.TryGetValue(runId, out session);
       _terminalLaunchFailures.Remove(runId);
     }
     finally
@@ -189,7 +185,7 @@ public sealed class NamedPipePrivilegeBroker :
     {
       try
       {
-        var terminateTask = session.Session.TerminateAsync(cancellationToken);
+        var terminateTask = session.GetTerminationTask(cancellationToken);
         try
         {
           await terminateTask.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -207,7 +203,7 @@ public sealed class NamedPipePrivilegeBroker :
 
       try
       {
-        var disposeTask = session.Session.DisposeAsync().AsTask();
+        var disposeTask = session.GetDisposalTask();
         try
         {
           await disposeTask.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -226,11 +222,29 @@ public sealed class NamedPipePrivilegeBroker :
       }
     }
 
-    await operationsDrained.WaitAsync(cancellationToken).ConfigureAwait(false);
-    session?.RequestGate.Dispose();
     if (cleanupFailure is not null)
     {
       throw cleanupFailure;
+    }
+
+    await operationsDrained.WaitAsync(cancellationToken).ConfigureAwait(false);
+    if (session is not null)
+    {
+      await _sessionsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+      try
+      {
+        if (_sessions.TryGetValue(runId, out var current) &&
+            ReferenceEquals(current, session))
+        {
+          _sessions.Remove(runId);
+        }
+      }
+      finally
+      {
+        _sessionsGate.Release();
+      }
+
+      session.RequestGate.Dispose();
     }
   }
 
@@ -495,9 +509,50 @@ public sealed class NamedPipePrivilegeBroker :
     }
   };
 
-  private sealed record HostSession(
-      IElevatedHostSession Session,
-      SemaphoreSlim RequestGate);
+  private sealed class HostSession(
+      IElevatedHostSession session,
+      SemaphoreSlim requestGate)
+  {
+    private Task? _disposalTask;
+    private Task? _terminationTask;
+
+    public IElevatedHostSession Session { get; } = session;
+    public SemaphoreSlim RequestGate { get; } = requestGate;
+
+    public Task GetTerminationTask(CancellationToken cancellationToken)
+    {
+      if (_terminationTask is null || _terminationTask.IsCanceled || _terminationTask.IsFaulted)
+      {
+        try
+        {
+          _terminationTask = Session.TerminateAsync(cancellationToken);
+        }
+        catch (Exception exception)
+        {
+          _terminationTask = Task.FromException(exception);
+        }
+      }
+
+      return _terminationTask;
+    }
+
+    public Task GetDisposalTask()
+    {
+      if (_disposalTask is null || _disposalTask.IsCanceled || _disposalTask.IsFaulted)
+      {
+        try
+        {
+          _disposalTask = Session.DisposeAsync().AsTask();
+        }
+        catch (Exception exception)
+        {
+          _disposalTask = Task.FromException(exception);
+        }
+      }
+
+      return _disposalTask;
+    }
+  }
 
   private sealed class OperationLease(NamedPipePrivilegeBroker owner) : IDisposable
   {
@@ -509,11 +564,12 @@ public sealed class NamedPipePrivilegeBroker :
   private sealed class RunLifecycle
   {
     private readonly object _gate = new();
-    private readonly TaskCompletionSource _cleanupCompletion = new(
+    private TaskCompletionSource _cleanupCompletion = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     private TaskCompletionSource? _operationsDrained;
     private int _activeOperations;
     private bool _cleanupStarted;
+    private bool _cleanupSucceeded;
     private bool _closed;
 
     public bool IsClosed
@@ -563,16 +619,39 @@ public sealed class NamedPipePrivilegeBroker :
     {
       lock (_gate)
       {
-        var isOwner = !_cleanupStarted;
-        _cleanupStarted = true;
+        var isOwner = !_cleanupStarted && !_cleanupSucceeded;
+        if (isOwner)
+        {
+          if (_cleanupCompletion.Task.IsCompleted)
+          {
+            _cleanupCompletion = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+          }
+
+          _cleanupStarted = true;
+        }
+
         return new RunCleanup(isOwner, _cleanupCompletion.Task);
       }
     }
 
-    public void CompleteCleanup() => _cleanupCompletion.TrySetResult();
+    public void CompleteCleanup()
+    {
+      lock (_gate)
+      {
+        _cleanupSucceeded = true;
+        _cleanupCompletion.TrySetResult();
+      }
+    }
 
-    public void FailCleanup(Exception exception) =>
+    public void FailCleanup(Exception exception)
+    {
+      lock (_gate)
+      {
         _cleanupCompletion.TrySetException(exception);
+        _cleanupStarted = false;
+      }
+    }
 
     private void Exit()
     {

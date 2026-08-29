@@ -422,7 +422,23 @@ public sealed class VisualStudioProvider : IResourceProvider
           options.Workloads,
           options.Components,
           cancellationToken).ConfigureAwait(false);
-      applyInstance = SelectInstance(currentInstances, options);
+      applyInstance = SelectInstance(
+          currentInstances,
+          options,
+          out var ambiguousCandidateIds);
+      if (ambiguousCandidateIds.Length > 0)
+      {
+        var error = new StructuredError(
+            WdemErrorCode.DetectionError,
+            "Multiple Visual Studio instances match.",
+            $"Set parameter 'instanceId' to one of: {string.Join(", ", ambiguousCandidateIds)}.")
+        {
+          ResourceId = resource.Id,
+          StepId = step.Id
+        };
+        return ApplyFailure(resource, step, error, null, 0.05);
+      }
+
       if (applyInstance is not null)
       {
         var currentState = VisualStudioStateMapper.Create(
@@ -841,7 +857,12 @@ public sealed class VisualStudioProvider : IResourceProvider
 
   private static VisualStudioInstance? SelectInstance(
       IReadOnlyList<VisualStudioInstance> instances,
-      VisualStudioResourceOptions options)
+      VisualStudioResourceOptions options) => SelectInstance(instances, options, out _);
+
+  private static VisualStudioInstance? SelectInstance(
+      IReadOnlyList<VisualStudioInstance> instances,
+      VisualStudioResourceOptions options,
+      out string[] ambiguousCandidateIds)
   {
     var candidates = instances
         .Where(instance => string.Equals(
@@ -855,16 +876,24 @@ public sealed class VisualStudioProvider : IResourceProvider
         .Where(instance => string.Equals(
             instance.ChannelId,
             options.ChannelId,
-            StringComparison.OrdinalIgnoreCase));
+            StringComparison.OrdinalIgnoreCase))
+        .ToArray();
+    IEnumerable<VisualStudioInstance> selectedCandidates = candidates;
     if (options.InstanceId is not null)
     {
-      candidates = candidates.Where(instance => string.Equals(
+      selectedCandidates = candidates.Where(instance => string.Equals(
           instance.InstanceId,
           options.InstanceId,
           StringComparison.OrdinalIgnoreCase));
     }
 
-    var selected = candidates.Take(2).ToArray();
+    var selected = selectedCandidates.Take(2).ToArray();
+    ambiguousCandidateIds = candidates.Length > 1 && selected.Length != 1
+        ? candidates
+            .Select(instance => instance.InstanceId)
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToArray()
+        : [];
     return selected.Length == 1 ? selected[0] : null;
   }
 

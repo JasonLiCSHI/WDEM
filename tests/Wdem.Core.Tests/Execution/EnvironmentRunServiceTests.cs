@@ -256,6 +256,53 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task ApplyAsync_PreservesSuppliedFinalVerificationCorrelationOverProcessEvidence()
+  {
+    var suppliedError = new StructuredError(
+        WdemErrorCode.ConfigurationError,
+        "Supplied final verification failure.",
+        "Keep this safe verification detail.")
+    {
+      StepId = "verify-configuration",
+      ProcessExitCode = 42
+    };
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyResult = new ResourceApplyResult
+      {
+        ResourceId = "git",
+        Outcome = ApplyOutcome.Succeeded,
+        StepResults =
+        [
+          new ProviderStepResult
+          {
+            StepId = "install",
+            Action = PlanAction.Install,
+            Progress = 1,
+            ProcessExitCode = 3010,
+            Succeeded = true
+          }
+        ]
+      },
+      VerificationResult = new VerificationResult
+      {
+        ResourceId = "git",
+        Compliance = ComplianceStatus.ConfigurationMismatch,
+        DetectedState = Missing("git")
+      }
+    };
+    var (service, _) = CreateService(
+        provider,
+        complianceEvaluator: new FinalErrorComplianceEvaluator(suppliedError));
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    var error = run.ResourceResults["git"].Error!;
+    Assert.Equal("verify-configuration", error.StepId);
+    Assert.Equal(42, error.ProcessExitCode);
+  }
+
+  [Fact]
   public async Task ApplyAsync_VerificationExceptionRetainsRestartEvidence()
   {
     var provider = new ScriptedProvider(Missing("git"))
@@ -1068,6 +1115,51 @@ public sealed class EnvironmentRunServiceTests
     Assert.True(
         stopwatch.Elapsed < TimeSpan.FromMilliseconds(1000),
         $"Cancellation took {stopwatch.Elapsed} for a {drainBudget} drain budget.");
+  }
+
+  [Fact]
+  public async Task ApplyAsync_SuccessWaitsForNormalRunCleanupPolicy()
+  {
+    var provider = new ScriptedProvider(Missing("git"));
+    var dispatcher = new BlockingCleanupDispatcher();
+    var (service, _) = CreateService(
+        provider,
+        dispatcher: dispatcher,
+        scheduler: new ResourceScheduler(TimeSpan.FromMilliseconds(100)));
+
+    var apply = service.ApplyAsync(Request(), CancellationToken.None);
+    await dispatcher.CleanupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    bool completedBeforeRelease;
+    bool cleanupTokenCanBeCanceled;
+    try
+    {
+      await Task.Delay(TimeSpan.FromMilliseconds(250));
+      completedBeforeRelease = apply.IsCompleted;
+      cleanupTokenCanBeCanceled = dispatcher.CleanupToken.CanBeCanceled;
+    }
+    finally
+    {
+      dispatcher.ReleaseCleanup.TrySetResult();
+    }
+
+    var run = await apply.WaitAsync(TimeSpan.FromSeconds(5));
+
+    Assert.False(completedBeforeRelease);
+    Assert.False(cleanupTokenCanBeCanceled);
+    Assert.Equal(ExecutionOutcome.Succeeded, run.Outcome);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_SupportsSchedulerImplementingLegacyInterfaceContract()
+  {
+    var provider = new ScriptedProvider(Missing("git"));
+    var scheduler = new LegacyCompatibleScheduler();
+    var (service, _) = CreateService(provider, scheduler: scheduler);
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    Assert.True(scheduler.ExecuteCalled);
+    Assert.Equal(ExecutionOutcome.Succeeded, run.Outcome);
   }
 
   [Fact]
@@ -2073,6 +2165,31 @@ public sealed class EnvironmentRunServiceTests
       CleanupToken = cancellationToken;
       CleanupStarted.TrySetResult();
       await ReleaseCleanup.Task;
+    }
+  }
+
+  private sealed class LegacyCompatibleScheduler : IResourceScheduler
+  {
+    private readonly ResourceScheduler _inner = new();
+
+    public bool ExecuteCalled { get; private set; }
+
+    public Task<SchedulerResult> ExecuteAsync(
+        ExecutionPlan plan,
+        Func<PlannedResource, CancellationToken, Task<ResourceResult>> executeAsync,
+        Func<PlannedResource, ProviderCapabilities> capabilitiesFor,
+        int maximumConcurrency,
+        CancellationToken cancellationToken,
+        Func<ResourceResult, Task>? transitionAsync = null)
+    {
+      ExecuteCalled = true;
+      return _inner.ExecuteAsync(
+          plan,
+          executeAsync,
+          capabilitiesFor,
+          maximumConcurrency,
+          cancellationToken,
+          transitionAsync);
     }
   }
 }
