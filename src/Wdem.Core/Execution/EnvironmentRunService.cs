@@ -541,13 +541,23 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     }
     finally
     {
+      Task? cleanupTask = null;
       try
       {
-        await _dispatcher.CompleteRunAsync(run.RunId, CancellationToken.None)
-            .ConfigureAwait(false);
+        var remaining = cancellationDeadline.Remaining;
+        using var cleanupCancellation = new CancellationTokenSource(remaining);
+        cleanupTask = _dispatcher.CompleteRunAsync(
+            run.RunId,
+            cleanupCancellation.Token);
+        await cleanupTask.WaitAsync(cancellationDeadline.Remaining).ConfigureAwait(false);
       }
       catch (Exception exception)
       {
+        if (cleanupTask is not null && !cleanupTask.IsCompleted)
+        {
+          ObserveFault(cleanupTask);
+        }
+
         cleanupError = new StructuredError(
             WdemErrorCode.PermissionError,
             "Elevated host cleanup failed.",
@@ -645,7 +655,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           definition,
           planned.ResourcePlan,
           new InlineProgress<ProviderProgress>(progressBuffer.Report),
-          cancellationToken);
+          cancellationToken,
+          cancellationDeadline);
       if (!applyTask.IsCompleted)
       {
         var cancellationSignal = Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
@@ -822,6 +833,16 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       var evaluated = _complianceEvaluator.Evaluate(definition, verification.DetectedState);
       var verified = verification.Compliance == ComplianceStatus.Satisfied &&
           evaluated.Status == ComplianceStatus.Satisfied;
+      var processStep = stepResults.LastOrDefault(step => step.ProcessExitCode is not null);
+      var verificationError = verified
+          ? null
+          : (evaluated.Error ?? VerificationError(definition.Id, verification.Message)) with
+          {
+            ResourceId = definition.Id,
+            StepId = processStep?.StepId ?? evaluated.Error?.StepId,
+            ProcessExitCode = processStep?.ProcessExitCode ??
+                evaluated.Error?.ProcessExitCode
+          };
       return new ResourceResult
       {
         ResourceId = definition.Id,
@@ -834,7 +855,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         Message = verification.Message,
         StartedAtUtc = startedAt,
         EndedAtUtc = DateTimeOffset.UtcNow,
-        Error = verified ? null : VerificationError(definition.Id, verification.Message),
+        Error = verificationError,
         RestartRequirement = applied.RestartRequirement ?? planned.RestartPolicy,
         StepResults = stepResults
       };
@@ -868,6 +889,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     }
     catch (Exception exception)
     {
+      var processStep = stepResults.LastOrDefault(step => step.ProcessExitCode is not null);
       return new ResourceResult
       {
         ResourceId = definition.Id,
@@ -879,6 +901,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         EndedAtUtc = DateTimeOffset.UtcNow,
         Error = VerificationError(definition.Id, exception.Message) with
         {
+          StepId = processStep?.StepId,
+          ProcessExitCode = processStep?.ProcessExitCode,
           UnderlyingException = exception
         },
         RestartRequirement = applied.RestartRequirement ?? planned.RestartPolicy,

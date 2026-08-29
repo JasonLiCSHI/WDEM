@@ -187,6 +187,48 @@ public sealed class NamedPipePrivilegeBrokerTests
   }
 
   [Fact]
+  public async Task ApplyAsync_CancellationUsesSharedDeadlineForRunCleanup()
+  {
+    var drainBudget = TimeSpan.FromMilliseconds(150);
+    var launcher = new RecordingElevatedHostLauncher();
+    launcher.Session.WaitForCancellation = true;
+    launcher.Session.WaitForTerminationRelease = true;
+    launcher.Session.IgnoreTerminationCancellation = true;
+    var broker = new NamedPipePrivilegeBroker(launcher);
+    var runId = Guid.NewGuid();
+    using var cancellation = new CancellationTokenSource();
+    using var deadline = new CancellationDrainDeadline(drainBudget, cancellation.Token);
+
+    var apply = broker.ApplyAsync(
+        Request(runId, "visual-studio"),
+        null,
+        cancellation.Token,
+        deadline);
+    await launcher.Session.RequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    cancellation.Cancel();
+
+    try
+    {
+      await Assert.ThrowsAnyAsync<OperationCanceledException>(
+          () => apply.WaitAsync(TimeSpan.FromSeconds(1)));
+      var late = await broker.ApplyAsync(
+          Request(runId, "vsix"),
+          null,
+          CancellationToken.None);
+
+      AssertClosedRunFailure(late, "vsix");
+      Assert.Equal(1, launcher.StartCalls);
+      Assert.Equal(1, launcher.Session.TerminateCalls);
+      Assert.Equal(1, launcher.Session.DisposeCalls);
+    }
+    finally
+    {
+      launcher.Session.TerminationRelease.TrySetResult();
+      await launcher.Session.TerminationCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+  }
+
+  [Fact]
   public async Task ApplyAsync_DifferentRuns_StartDifferentElevatedHosts()
   {
     var launcher = new RecordingElevatedHostLauncher();
@@ -284,6 +326,121 @@ public sealed class NamedPipePrivilegeBrokerTests
     Assert.False(completedBeforeApplyDrained);
     Assert.False(terminatedBeforeApplyDrained);
     Assert.Equal(1, launcher.Session.TerminateCalls);
+  }
+
+  [Fact]
+  public async Task CompleteRunAsync_CancellationBoundsActiveApplyDrainAndKeepsRunClosed()
+  {
+    var launcher = new RecordingElevatedHostLauncher();
+    launcher.Session.WaitForApplyRelease = true;
+    var broker = new NamedPipePrivilegeBroker(launcher);
+    var runId = Guid.NewGuid();
+    var apply = broker.ApplyAsync(
+        Request(runId, "visual-studio"),
+        null,
+        CancellationToken.None);
+    await launcher.Session.RequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    using var cleanupCancellation = new CancellationTokenSource(
+        TimeSpan.FromMilliseconds(100));
+
+    var completing = broker.CompleteRunAsync(runId, cleanupCancellation.Token);
+    try
+    {
+      await Assert.ThrowsAnyAsync<OperationCanceledException>(
+          () => completing.WaitAsync(TimeSpan.FromSeconds(1)));
+      var late = await broker.ApplyAsync(
+          Request(runId, "vsix"),
+          null,
+          CancellationToken.None);
+
+      AssertClosedRunFailure(late, "vsix");
+      Assert.Equal(1, launcher.StartCalls);
+      Assert.Equal(0, launcher.Session.TerminateCalls);
+    }
+    finally
+    {
+      launcher.Session.ApplyRelease.TrySetResult();
+      await apply.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    await broker.CompleteRunAsync(runId, CancellationToken.None);
+
+    Assert.Equal(1, launcher.StartCalls);
+    Assert.Equal(1, launcher.Session.TerminateCalls);
+  }
+
+  [Fact]
+  public async Task CompleteRunAsync_CancellationBoundsUncooperativeHostTermination()
+  {
+    var launcher = new RecordingElevatedHostLauncher();
+    launcher.Session.WaitForTerminationRelease = true;
+    launcher.Session.IgnoreTerminationCancellation = true;
+    var broker = new NamedPipePrivilegeBroker(launcher);
+    var runId = Guid.NewGuid();
+    await broker.ApplyAsync(
+        Request(runId, "visual-studio"),
+        null,
+        CancellationToken.None);
+    using var cleanupCancellation = new CancellationTokenSource(
+        TimeSpan.FromMilliseconds(100));
+
+    var completing = broker.CompleteRunAsync(runId, cleanupCancellation.Token);
+    try
+    {
+      await Assert.ThrowsAnyAsync<OperationCanceledException>(
+          () => completing.WaitAsync(TimeSpan.FromSeconds(1)));
+      var late = await broker.ApplyAsync(
+          Request(runId, "vsix"),
+          null,
+          CancellationToken.None);
+
+      AssertClosedRunFailure(late, "vsix");
+      Assert.Equal(1, launcher.StartCalls);
+      Assert.Equal(1, launcher.Session.TerminateCalls);
+      Assert.Equal(1, launcher.Session.DisposeCalls);
+    }
+    finally
+    {
+      launcher.Session.TerminationRelease.TrySetResult();
+      await launcher.Session.TerminationCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+  }
+
+  [Fact]
+  public async Task CompleteRunAsync_CancellationBoundsUncooperativeSessionDisposal()
+  {
+    var launcher = new RecordingElevatedHostLauncher();
+    launcher.Session.WaitForDisposeRelease = true;
+    var broker = new NamedPipePrivilegeBroker(launcher);
+    var runId = Guid.NewGuid();
+    await broker.ApplyAsync(
+        Request(runId, "visual-studio"),
+        null,
+        CancellationToken.None);
+    using var cleanupCancellation = new CancellationTokenSource(
+        TimeSpan.FromMilliseconds(100));
+
+    var completing = broker.CompleteRunAsync(runId, cleanupCancellation.Token);
+    await launcher.Session.DisposeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    try
+    {
+      await Assert.ThrowsAnyAsync<OperationCanceledException>(
+          () => completing.WaitAsync(TimeSpan.FromSeconds(1)));
+      var late = await broker.ApplyAsync(
+          Request(runId, "vsix"),
+          null,
+          CancellationToken.None);
+
+      AssertClosedRunFailure(late, "vsix");
+      Assert.Equal(1, launcher.StartCalls);
+      Assert.Equal(1, launcher.Session.TerminateCalls);
+      Assert.Equal(1, launcher.Session.DisposeCalls);
+    }
+    finally
+    {
+      launcher.Session.DisposeRelease.TrySetResult();
+      await launcher.Session.DisposeCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    }
   }
 
   [Fact]
@@ -413,6 +570,31 @@ public sealed class NamedPipePrivilegeBrokerTests
     Assert.Equal(
         ApprovedResourceFingerprint.Create(resource, plan),
         request.PlanFingerprint);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_AdministratorPlan_ForwardsCancellationDeadline()
+  {
+    var broker = new RecordingPrivilegeBroker();
+    var dispatcher = new PrivilegeAwareResourceApplyDispatcher(
+        new DirectResourceApplyDispatcher(),
+        broker);
+    var resource = Resource(PrivilegeRequirement.Administrator);
+    var plan = Plan(resource, PrivilegeRequirement.Administrator);
+    using var deadline = new CancellationDrainDeadline(
+        TimeSpan.FromSeconds(1),
+        CancellationToken.None);
+
+    await dispatcher.ApplyAsync(
+        Guid.NewGuid(),
+        new RecordingProvider(),
+        resource,
+        plan,
+        null,
+        CancellationToken.None,
+        deadline);
+
+    Assert.Same(deadline, broker.CancellationDeadline);
   }
 
   [Fact]
@@ -611,6 +793,8 @@ public sealed class NamedPipePrivilegeBrokerTests
     public bool WaitForCancellation { get; set; }
     public bool WaitForApplyRelease { get; set; }
     public bool WaitForTerminationRelease { get; set; }
+    public bool WaitForDisposeRelease { get; set; }
+    public bool IgnoreTerminationCancellation { get; set; }
     public Exception? TerminateException { get; set; }
     public int TerminateCalls { get; private set; }
     public int DisposeCalls { get; private set; }
@@ -621,6 +805,14 @@ public sealed class NamedPipePrivilegeBrokerTests
     public TaskCompletionSource ApplyRelease { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource TerminationRelease { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource TerminationCompleted { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource DisposeStarted { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource DisposeRelease { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource DisposeCompleted { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
 
     public async Task<ResourceApplyResult> ApplyAsync(
@@ -651,21 +843,46 @@ public sealed class NamedPipePrivilegeBrokerTests
     {
       TerminateCalls++;
       Terminated.TrySetResult();
-      if (WaitForTerminationRelease)
+      try
       {
-        await TerminationRelease.Task.WaitAsync(cancellationToken);
-      }
+        if (WaitForTerminationRelease)
+        {
+          if (IgnoreTerminationCancellation)
+          {
+            await TerminationRelease.Task;
+          }
+          else
+          {
+            await TerminationRelease.Task.WaitAsync(cancellationToken);
+          }
+        }
 
-      if (TerminateException is not null)
+        if (TerminateException is not null)
+        {
+          throw TerminateException;
+        }
+      }
+      finally
       {
-        throw TerminateException;
+        TerminationCompleted.TrySetResult();
       }
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
       DisposeCalls++;
-      return ValueTask.CompletedTask;
+      DisposeStarted.TrySetResult();
+      try
+      {
+        if (WaitForDisposeRelease)
+        {
+          await DisposeRelease.Task;
+        }
+      }
+      finally
+      {
+        DisposeCompleted.TrySetResult();
+      }
     }
   }
 
@@ -674,6 +891,7 @@ public sealed class NamedPipePrivilegeBrokerTests
     public List<ElevatedResourceRequest> Requests { get; } = [];
     public Action<ElevatedResourceRequest>? Applied { get; init; }
     public ResourceApplyResult? Result { get; set; }
+    public CancellationDrainDeadline? CancellationDeadline { get; private set; }
 
     public Task<ResourceApplyResult> ApplyAsync(
         ElevatedResourceRequest request,
@@ -687,6 +905,16 @@ public sealed class NamedPipePrivilegeBrokerTests
         ResourceId = request.ResourceId,
         Outcome = ApplyOutcome.Succeeded
       });
+    }
+
+    public Task<ResourceApplyResult> ApplyAsync(
+        ElevatedResourceRequest request,
+        IProgress<ProviderProgress>? progress,
+        CancellationToken cancellationToken,
+        CancellationDrainDeadline? cancellationDeadline)
+    {
+      CancellationDeadline = cancellationDeadline;
+      return ApplyAsync(request, progress, cancellationToken);
     }
   }
 

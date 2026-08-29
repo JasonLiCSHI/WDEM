@@ -27,10 +27,20 @@ public sealed class NamedPipePrivilegeBroker :
     _launcher = launcher ?? throw new ArgumentNullException(nameof(launcher));
   }
 
+  public Task<ResourceApplyResult> ApplyAsync(
+      ElevatedResourceRequest request,
+      IProgress<ProviderProgress>? progress,
+      CancellationToken cancellationToken) => ApplyAsync(
+          request,
+          progress,
+          cancellationToken,
+          null);
+
   public async Task<ResourceApplyResult> ApplyAsync(
       ElevatedResourceRequest request,
       IProgress<ProviderProgress>? progress,
-      CancellationToken cancellationToken)
+      CancellationToken cancellationToken,
+      CancellationDrainDeadline? cancellationDeadline)
   {
     ArgumentNullException.ThrowIfNull(request);
     Validate(request);
@@ -43,7 +53,8 @@ public sealed class NamedPipePrivilegeBroker :
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
-      await CompleteRunCoreAsync(request.RunId, CancellationToken.None).ConfigureAwait(false);
+      await CompleteCancelledRunAsync(request.RunId, cancellationDeadline)
+          .ConfigureAwait(false);
       throw;
     }
   }
@@ -95,24 +106,52 @@ public sealed class NamedPipePrivilegeBroker :
 
   private async Task CompleteRunCoreAsync(Guid runId, CancellationToken cancellationToken)
   {
-    cancellationToken.ThrowIfCancellationRequested();
     var lifecycle = _runLifecycles.GetOrAdd(runId, static _ => new RunLifecycle());
     var operationsDrained = lifecycle.Close();
-    await operationsDrained.ConfigureAwait(false);
-    await EnsureRunCleanupAsync(runId, lifecycle, operationsDrained).ConfigureAwait(false);
+    cancellationToken.ThrowIfCancellationRequested();
+    await operationsDrained.WaitAsync(cancellationToken).ConfigureAwait(false);
+    await EnsureRunCleanupAsync(
+        runId,
+        lifecycle,
+        operationsDrained,
+        cancellationToken).ConfigureAwait(false);
+  }
+
+  private async Task CompleteCancelledRunAsync(
+      Guid runId,
+      CancellationDrainDeadline? cancellationDeadline)
+  {
+    if (cancellationDeadline is null)
+    {
+      await CompleteRunCoreAsync(runId, CancellationToken.None).ConfigureAwait(false);
+      return;
+    }
+
+    try
+    {
+      using var cleanupCancellation = new CancellationTokenSource(
+          cancellationDeadline.Remaining);
+      await CompleteRunCoreAsync(runId, cleanupCancellation.Token).ConfigureAwait(false);
+    }
+    catch (Exception)
+    {
+      // Cleanup diagnostics are reported by the outer run lifecycle; preserve cancellation here.
+    }
   }
 
   private async Task EnsureRunCleanupAsync(
       Guid runId,
       RunLifecycle lifecycle,
-      Task operationsDrained)
+      Task operationsDrained,
+      CancellationToken cancellationToken)
   {
     var cleanup = lifecycle.BeginCleanup();
     if (cleanup.IsOwner)
     {
       try
       {
-        await CleanupRunAsync(runId, operationsDrained).ConfigureAwait(false);
+        await CleanupRunAsync(runId, operationsDrained, cancellationToken)
+            .ConfigureAwait(false);
         lifecycle.CompleteCleanup();
       }
       catch (Exception exception)
@@ -121,13 +160,16 @@ public sealed class NamedPipePrivilegeBroker :
       }
     }
 
-    await cleanup.Completion.ConfigureAwait(false);
+    await cleanup.Completion.WaitAsync(cancellationToken).ConfigureAwait(false);
   }
 
-  private async Task CleanupRunAsync(Guid runId, Task operationsDrained)
+  private async Task CleanupRunAsync(
+      Guid runId,
+      Task operationsDrained,
+      CancellationToken cancellationToken)
   {
     HostSession? session = null;
-    await _sessionsGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+    await _sessionsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
     try
     {
       if (_sessions.Remove(runId, out var removed))
@@ -147,7 +189,16 @@ public sealed class NamedPipePrivilegeBroker :
     {
       try
       {
-        await session.Session.TerminateAsync(CancellationToken.None).ConfigureAwait(false);
+        var terminateTask = session.Session.TerminateAsync(cancellationToken);
+        try
+        {
+          await terminateTask.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+          ObserveFault(terminateTask);
+          throw;
+        }
       }
       catch (Exception exception)
       {
@@ -156,7 +207,16 @@ public sealed class NamedPipePrivilegeBroker :
 
       try
       {
-        await session.Session.DisposeAsync().ConfigureAwait(false);
+        var disposeTask = session.Session.DisposeAsync().AsTask();
+        try
+        {
+          await disposeTask.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+          ObserveFault(disposeTask);
+          throw;
+        }
       }
       catch (Exception exception)
       {
@@ -166,7 +226,7 @@ public sealed class NamedPipePrivilegeBroker :
       }
     }
 
-    await operationsDrained.ConfigureAwait(false);
+    await operationsDrained.WaitAsync(cancellationToken).ConfigureAwait(false);
     session?.RequestGate.Dispose();
     if (cleanupFailure is not null)
     {
@@ -238,7 +298,11 @@ public sealed class NamedPipePrivilegeBroker :
     var cleanupTasks = runs.Select(run =>
     {
       var operationsDrained = run.Value.Close();
-      return EnsureRunCleanupAsync(run.Key, run.Value, operationsDrained);
+      return EnsureRunCleanupAsync(
+          run.Key,
+          run.Value,
+          operationsDrained,
+          CancellationToken.None);
     }).ToArray();
     Exception? cleanupFailure = null;
     try
@@ -394,6 +458,12 @@ public sealed class NamedPipePrivilegeBroker :
           nameof(request));
     }
   }
+
+  private static void ObserveFault(Task task) => _ = task.ContinueWith(
+      static completed => _ = completed.Exception,
+      CancellationToken.None,
+      TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+      TaskScheduler.Default);
 
   private static ResourceApplyResult Failure(
       string resourceId,

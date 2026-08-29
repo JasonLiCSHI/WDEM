@@ -14,13 +14,29 @@ public sealed class PrivilegeAwareResourceApplyDispatcher(
   private readonly IPrivilegeBroker _privilegeBroker =
       privilegeBroker ?? throw new ArgumentNullException(nameof(privilegeBroker));
 
+  public Task<ResourceApplyResult> ApplyAsync(
+      Guid runId,
+      IResourceProvider provider,
+      ResourceDefinition resource,
+      ResourcePlan plan,
+      IProgress<ProviderProgress>? progress,
+      CancellationToken cancellationToken) => ApplyAsync(
+          runId,
+          provider,
+          resource,
+          plan,
+          progress,
+          cancellationToken,
+          null);
+
   public async Task<ResourceApplyResult> ApplyAsync(
       Guid runId,
       IResourceProvider provider,
       ResourceDefinition resource,
       ResourcePlan plan,
       IProgress<ProviderProgress>? progress,
-      CancellationToken cancellationToken)
+      CancellationToken cancellationToken,
+      CancellationDrainDeadline? cancellationDeadline)
   {
     ArgumentNullException.ThrowIfNull(provider);
     ArgumentNullException.ThrowIfNull(resource);
@@ -35,7 +51,8 @@ public sealed class PrivilegeAwareResourceApplyDispatcher(
           resource,
           plan,
           progress,
-          cancellationToken).ConfigureAwait(false);
+          cancellationToken,
+          cancellationDeadline).ConfigureAwait(false);
     }
 
     var segments = PrivilegePlanSegments.Split(plan);
@@ -46,7 +63,8 @@ public sealed class PrivilegeAwareResourceApplyDispatcher(
           resource,
           plan,
           progress,
-          cancellationToken).ConfigureAwait(false);
+          cancellationToken,
+          cancellationDeadline).ConfigureAwait(false);
     }
 
     var stepResults = new List<ProviderStepResult>();
@@ -69,14 +87,16 @@ public sealed class PrivilegeAwareResourceApplyDispatcher(
               resource,
               segment,
               progress,
-              cancellationToken).ConfigureAwait(false)
+              cancellationToken,
+              cancellationDeadline).ConfigureAwait(false)
           : await _direct.ApplyAsync(
               runId,
               provider,
               resource,
               segment,
               progress,
-              cancellationToken).ConfigureAwait(false);
+              cancellationToken,
+              cancellationDeadline).ConfigureAwait(false);
       stepResults.AddRange(result.StepResults);
       diagnostics.AddRange(result.Diagnostics);
       if (result.RestartRequirement is { } actualRestart)
@@ -116,11 +136,13 @@ public sealed class PrivilegeAwareResourceApplyDispatcher(
       ResourceDefinition resource,
       ResourcePlan plan,
       IProgress<ProviderProgress>? progress,
-      CancellationToken cancellationToken) => _privilegeBroker.ApplyAsync(
+      CancellationToken cancellationToken,
+      CancellationDrainDeadline? cancellationDeadline) => _privilegeBroker.ApplyAsync(
           new ElevatedResourceRequest(
               runId,
               resource.Id,
               ApprovedResourceFingerprint.Create(resource, plan)),
           progress,
-          cancellationToken);
+          cancellationToken,
+          cancellationDeadline);
 }

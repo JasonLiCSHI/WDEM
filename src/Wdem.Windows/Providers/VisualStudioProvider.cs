@@ -414,6 +414,59 @@ public sealed class VisualStudioProvider : IResourceProvider
     }
 
     var verifiedVsConfig = stagedConfiguration?.Path;
+    var applyAction = step.Action;
+    VisualStudioInstance? applyInstance = null;
+    if (applyAction == PlanAction.Install)
+    {
+      var currentInstances = await _discovery.DiscoverAsync(
+          options.Workloads,
+          options.Components,
+          cancellationToken).ConfigureAwait(false);
+      applyInstance = SelectInstance(currentInstances, options);
+      if (applyInstance is not null)
+      {
+        var currentState = VisualStudioStateMapper.Create(
+            resource.Id,
+            applyInstance,
+            options.VsConfigPath,
+            stagedConfiguration?.Sha256);
+        applyAction = !MatchesVersion(applyInstance, resource.VersionConstraint)
+            ? PlanAction.Upgrade
+            : Evaluate(resource, currentState, options).Status == ComplianceStatus.Satisfied
+                ? PlanAction.None
+                : PlanAction.Configure;
+      }
+    }
+
+    if (applyAction == PlanAction.None)
+    {
+      progress?.Report(new ProviderProgress(
+          "Verification", 0.85, "Verifying Visual Studio configuration.", step.Id));
+      var noOpVerification = await VerifyAppliedConfigurationAsync(
+          resource,
+          options,
+          stagedConfiguration?.Sha256,
+          cancellationToken).ConfigureAwait(false);
+      if (noOpVerification.Compliance != ComplianceStatus.Satisfied)
+      {
+        var compliance = Evaluate(resource, noOpVerification.DetectedState, options);
+        var error = (compliance.Error ?? new StructuredError(
+            WdemErrorCode.VerificationError,
+            "Visual Studio verification failed.",
+            noOpVerification.Message ?? "Visual Studio did not reach the requested state.")) with
+        {
+          ResourceId = resource.Id,
+          StepId = step.Id
+        };
+        return ApplyFailure(resource, step, error, null, 0.85);
+      }
+
+      return new ResourceApplyResult
+      {
+        ResourceId = resource.Id,
+        Outcome = ApplyOutcome.Succeeded
+      };
+    }
 
     await using var bootstrapper = options.BootstrapperUri is not null
         ? await _installer.AcquireBootstrapperAsync(
@@ -438,7 +491,7 @@ public sealed class VisualStudioProvider : IResourceProvider
     }
 
     VisualStudioInstallerResult command;
-    if (step.Action == PlanAction.Install)
+    if (applyAction == PlanAction.Install)
     {
       progress?.Report(new ProviderProgress("Install", 0.35, "Installing Visual Studio.", step.Id));
       command = await _installer.InstallAsync(
@@ -453,17 +506,22 @@ public sealed class VisualStudioProvider : IResourceProvider
     }
     else
     {
-      var operation = step.Action == PlanAction.Upgrade ? "Update" : "Modify";
+      var operation = applyAction == PlanAction.Upgrade ? "Update" : "Modify";
       progress?.Report(new ProviderProgress(
           operation,
           0.35,
           $"{operation} Visual Studio.",
           step.Id));
-      var instances = await _discovery.DiscoverAsync(
-          options.Workloads,
-          options.Components,
-          cancellationToken).ConfigureAwait(false);
-      var instance = SelectInstance(instances, options);
+      var instance = applyInstance;
+      if (instance is null)
+      {
+        var instances = await _discovery.DiscoverAsync(
+            options.Workloads,
+            options.Components,
+            cancellationToken).ConfigureAwait(false);
+        instance = SelectInstance(instances, options);
+      }
+
       if (instance is null)
       {
         var error = new StructuredError(
@@ -477,7 +535,7 @@ public sealed class VisualStudioProvider : IResourceProvider
         return ApplyFailure(resource, step, error, null, 0.35);
       }
 
-      if (step.Action == PlanAction.Upgrade)
+      if (applyAction == PlanAction.Upgrade)
       {
         command = await _installer.UpdateAsync(
             setupPath,

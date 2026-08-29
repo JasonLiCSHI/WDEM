@@ -8,4 +8,13 @@ public interface IPrivilegeBroker
       ElevatedResourceRequest request,
       IProgress<ProviderProgress>? progress,
       CancellationToken cancellationToken);
+
+  Task<ResourceApplyResult> ApplyAsync(
+      ElevatedResourceRequest request,
+      IProgress<ProviderProgress>? progress,
+      CancellationToken cancellationToken,
+      CancellationDrainDeadline? cancellationDeadline) => ApplyAsync(
+          request,
+          progress,
+          cancellationToken);
 }

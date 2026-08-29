@@ -250,6 +250,53 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
     Assert.Equal(@"C:\VS", installer.LastInstallPath);
   }
 
+  [Theory]
+  [InlineData("17.9.0", false, "update,modify")]
+  [InlineData("18.3.2", false, "modify")]
+  [InlineData("18.3.2", true, "")]
+  public async Task ApplyAsync_StaleInstallPlanRediscoverUsesCurrentInstanceRemediation(
+      string version,
+      bool alreadyConfigured,
+      string expectedOperations)
+  {
+    var appeared = Instance(
+        "17.0_a",
+        workloads: alreadyConfigured
+            ? ["Microsoft.VisualStudio.Workload.ManagedDesktop"]
+            : [],
+        components: alreadyConfigured
+            ? ["Microsoft.NetCore.Component.Runtime.10.0"]
+            : [],
+        version: version);
+    var converged = Instance(
+        "17.0_a",
+        workloads: ["Microsoft.VisualStudio.Workload.ManagedDesktop"],
+        components: ["Microsoft.NetCore.Component.Runtime.10.0"]);
+    var discovery = new SequenceDiscovery([[appeared], [converged]]);
+    var installer = new RecordingInstallerClient();
+    var provider = Provider(discovery, installer);
+    var resource = Resource();
+    var staleInstallPlan = await provider.PlanAsync(
+        resource,
+        MissingState(),
+        CancellationToken.None);
+
+    var result = await provider.ApplyAsync(
+        resource,
+        staleInstallPlan,
+        null,
+        CancellationToken.None);
+
+    var expected = string.IsNullOrEmpty(expectedOperations)
+        ? []
+        : expectedOperations.Split(',');
+    Assert.Equal(PlanAction.Install, Assert.Single(staleInstallPlan.Steps).Action);
+    Assert.Equal(expected, installer.Operations);
+    Assert.DoesNotContain("install", installer.Operations);
+    Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
+    Assert.Equal(2, discovery.AttemptCount);
+  }
+
   [Fact]
   public async Task ApplyAsync_CancelledAfterUpdatePreservesRestartEvidenceWithoutModify()
   {
@@ -544,12 +591,19 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   [InlineData(1641, RestartPolicy.RestartRequired)]
   public async Task ApplyAsync_CancelledDuringFinalVerificationPreservesInstallerEvidence(
       int exitCode,
-      RestartPolicy restartRequirement)
+    RestartPolicy restartRequirement)
   {
     using var cancellation = new CancellationTokenSource();
-    var discovery = new SequenceDiscovery([[Instance("17.0_a")]])
+    SequenceDiscovery? discovery = null;
+    discovery = new SequenceDiscovery([[], [Instance("17.0_a")]])
     {
-      BeforeDiscover = cancellation.Cancel
+      BeforeDiscover = () =>
+      {
+        if (discovery!.AttemptCount == 2)
+        {
+          cancellation.Cancel();
+        }
+      }
     };
     var installer = new RecordingInstallerClient
     {
@@ -578,7 +632,7 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
         step.Message,
         StringComparison.Ordinal);
     Assert.Equal(["install"], installer.Operations);
-    Assert.Equal(1, discovery.AttemptCount);
+    Assert.Equal(2, discovery.AttemptCount);
   }
 
   [Fact]

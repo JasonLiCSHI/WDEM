@@ -203,6 +203,59 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task ApplyAsync_EnrichesSuppliedFinalVerificationErrorWithProcessEvidence()
+  {
+    var suppliedError = new StructuredError(
+        WdemErrorCode.ConfigurationError,
+        "Supplied final verification failure.",
+        "Keep this safe verification detail.")
+    {
+      SuggestedAction = "Keep this safe suggested action.",
+      IsRetryable = true
+    };
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyResult = new ResourceApplyResult
+      {
+        ResourceId = "git",
+        Outcome = ApplyOutcome.Succeeded,
+        StepResults =
+        [
+          new ProviderStepResult
+          {
+            StepId = "install",
+            Action = PlanAction.Install,
+            Progress = 1,
+            ProcessExitCode = 3010,
+            Succeeded = true
+          }
+        ]
+      },
+      VerificationResult = new VerificationResult
+      {
+        ResourceId = "git",
+        Compliance = ComplianceStatus.ConfigurationMismatch,
+        DetectedState = Missing("git")
+      }
+    };
+    var (service, _) = CreateService(
+        provider,
+        complianceEvaluator: new FinalErrorComplianceEvaluator(suppliedError));
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    var error = run.ResourceResults["git"].Error!;
+    Assert.Equal(WdemErrorCode.ConfigurationError, error.Code);
+    Assert.Equal(suppliedError.Summary, error.Summary);
+    Assert.Equal(suppliedError.Detail, error.Detail);
+    Assert.Equal(suppliedError.SuggestedAction, error.SuggestedAction);
+    Assert.True(error.IsRetryable);
+    Assert.Equal("git", error.ResourceId);
+    Assert.Equal("install", error.StepId);
+    Assert.Equal(3010, error.ProcessExitCode);
+  }
+
+  [Fact]
   public async Task ApplyAsync_VerificationExceptionRetainsRestartEvidence()
   {
     var provider = new ScriptedProvider(Missing("git"))
@@ -211,7 +264,18 @@ public sealed class EnvironmentRunServiceTests
       {
         ResourceId = "git",
         Outcome = ApplyOutcome.Succeeded,
-        RestartRequirement = RestartPolicy.RestartRequired
+        RestartRequirement = RestartPolicy.RestartRequired,
+        StepResults =
+        [
+          new ProviderStepResult
+          {
+            StepId = "install",
+            Action = PlanAction.Install,
+            Progress = 1,
+            ProcessExitCode = 1641,
+            Succeeded = true
+          }
+        ]
       },
       VerificationOperation = _ => throw new IOException("verification unavailable")
     };
@@ -219,8 +283,13 @@ public sealed class EnvironmentRunServiceTests
 
     var run = await service.ApplyAsync(Request(), CancellationToken.None);
 
-    Assert.Equal(ExecutionOutcome.Failed, run.ResourceResults["git"].Outcome);
-    Assert.Equal(RestartPolicy.RestartRequired, run.ResourceResults["git"].RestartRequirement);
+    var resource = run.ResourceResults["git"];
+    Assert.Equal(ExecutionOutcome.Failed, resource.Outcome);
+    Assert.Equal(RestartPolicy.RestartRequired, resource.RestartRequirement);
+    Assert.Equal("git", resource.Error!.ResourceId);
+    Assert.Equal("install", resource.Error.StepId);
+    Assert.Equal(1641, resource.Error.ProcessExitCode);
+    Assert.Equal(typeof(IOException).FullName, resource.Error.UnderlyingExceptionType);
   }
 
   [Fact]
@@ -932,6 +1001,76 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task ApplyAsync_CancellationBoundsRunCleanupAndPreservesProviderEvidence()
+  {
+    var drainBudget = TimeSpan.FromMilliseconds(600);
+    using var cancellation = new CancellationTokenSource();
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyOperation = _ =>
+      {
+        cancellation.Cancel();
+        return ValueTask.FromResult(new ResourceApplyResult
+        {
+          ResourceId = "git",
+          Outcome = ApplyOutcome.Cancelled,
+          RestartRequirement = RestartPolicy.RestartRequired,
+          StepResults =
+          [
+            new ProviderStepResult
+            {
+              StepId = "install",
+              Action = PlanAction.Install,
+              Progress = 0.9,
+              ProcessExitCode = 1641,
+              Error = new StructuredError(
+                  WdemErrorCode.ProviderError,
+                  "Installer cancellation recorded.",
+                  "The installer initiated a restart before cleanup began.")
+            }
+          ]
+        });
+      }
+    };
+    var dispatcher = new BlockingCleanupDispatcher();
+    var (service, store) = CreateService(
+        provider,
+        dispatcher: dispatcher,
+        scheduler: new ResourceScheduler(drainBudget));
+    var stopwatch = Stopwatch.StartNew();
+    var apply = service.ApplyAsync(Request(), cancellation.Token);
+
+    await dispatcher.CleanupStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    ExecutionRun run;
+    try
+    {
+      run = await apply.WaitAsync(TimeSpan.FromMilliseconds(1200));
+    }
+    finally
+    {
+      dispatcher.ReleaseCleanup.TrySetResult();
+    }
+
+    stopwatch.Stop();
+    var resource = run.ResourceResults["git"];
+    var step = Assert.Single(resource.StepResults);
+    var persisted = await store.GetAsync(run.RunId, CancellationToken.None);
+    Assert.Equal(ExecutionOutcome.Cancelled, resource.Outcome);
+    Assert.Equal(RestartPolicy.RestartRequired, resource.RestartRequirement);
+    Assert.Equal(1641, step.ProcessExitCode);
+    Assert.Equal(
+        "The installer initiated a restart before cleanup began.",
+        step.Error!.Detail);
+    Assert.Equal(resource, persisted!.ResourceResults["git"]);
+    Assert.NotNull(dispatcher.ApplyDeadline);
+    Assert.True(dispatcher.ApplyDeadline.IsStarted);
+    Assert.True(dispatcher.CleanupToken.CanBeCanceled);
+    Assert.True(
+        stopwatch.Elapsed < TimeSpan.FromMilliseconds(1000),
+        $"Cancellation took {stopwatch.Elapsed} for a {drainBudget} drain budget.");
+  }
+
+  [Fact]
   public async Task Recovery_RedetectsAndReplansFromAnIncompleteSnapshot()
   {
     var provider = new ScriptedProvider(Satisfied("git", "2.52.1"));
@@ -1288,11 +1427,12 @@ public sealed class EnvironmentRunServiceTests
       IExecutionPlanner? planner = null,
       IResourceApplyDispatcher? dispatcher = null,
       IResourceScheduler? scheduler = null,
-      TimeSpan? persistenceTimeout = null)
+      TimeSpan? persistenceTimeout = null,
+      IComplianceEvaluator? complianceEvaluator = null)
   {
     catalog ??= new FakeProfileCatalog(profile ?? Profile(), CanonicalProfilePath);
     var registry = new ResourceProviderRegistry([provider]);
-    var compliance = new ComplianceEvaluator();
+    var compliance = complianceEvaluator ?? new ComplianceEvaluator();
     store ??= new InMemoryRunStore();
     eventSink ??= new RunEventHub();
     return (
@@ -1310,6 +1450,26 @@ public sealed class EnvironmentRunServiceTests
             new LogRedactor(),
             persistenceTimeout),
         store);
+  }
+
+  private sealed class FinalErrorComplianceEvaluator(StructuredError finalError)
+      : IComplianceEvaluator
+  {
+    private readonly ComplianceEvaluator _inner = new();
+    private int _calls;
+
+    public ComplianceResult Evaluate(ResourceDefinition desired, DetectedState current)
+    {
+      if (Interlocked.Increment(ref _calls) <= 2)
+      {
+        return _inner.Evaluate(desired, current);
+      }
+
+      return new ComplianceResult(
+          ComplianceStatus.ConfigurationMismatch,
+          finalError.Summary,
+          finalError);
+    }
   }
 
   private static RunRequest Request() => new(
@@ -1862,5 +2022,57 @@ public sealed class EnvironmentRunServiceTests
 
     public Task CompleteRunAsync(Guid runId, CancellationToken cancellationToken) =>
         Task.FromException(new IOException("elevated cleanup unavailable"));
+  }
+
+  private sealed class BlockingCleanupDispatcher : IResourceApplyDispatcher
+  {
+    private readonly DirectResourceApplyDispatcher _direct = new();
+
+    public TaskCompletionSource CleanupStarted { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource ReleaseCleanup { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public CancellationDrainDeadline? ApplyDeadline { get; private set; }
+    public CancellationToken CleanupToken { get; private set; }
+
+    public Task<ResourceApplyResult> ApplyAsync(
+        Guid runId,
+        IResourceProvider provider,
+        ResourceDefinition resource,
+        ResourcePlan plan,
+        IProgress<ProviderProgress>? progress,
+        CancellationToken cancellationToken) => _direct.ApplyAsync(
+            runId,
+            provider,
+            resource,
+            plan,
+            progress,
+            cancellationToken);
+
+    public Task<ResourceApplyResult> ApplyAsync(
+        Guid runId,
+        IResourceProvider provider,
+        ResourceDefinition resource,
+        ResourcePlan plan,
+        IProgress<ProviderProgress>? progress,
+        CancellationToken cancellationToken,
+        CancellationDrainDeadline? cancellationDeadline)
+    {
+      ApplyDeadline = cancellationDeadline;
+      return ApplyAsync(
+          runId,
+          provider,
+          resource,
+          plan,
+          progress,
+          cancellationToken);
+    }
+
+    public async Task CompleteRunAsync(Guid runId, CancellationToken cancellationToken)
+    {
+      CleanupToken = cancellationToken;
+      CleanupStarted.TrySetResult();
+      await ReleaseCleanup.Task;
+    }
   }
 }
