@@ -1426,6 +1426,14 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
   private static void ValidateResourcePlan(ResourcePlan plan)
   {
     ArgumentNullException.ThrowIfNull(plan);
+    if (plan.ExecutionPreconditionFingerprint is { } precondition &&
+        (precondition.Length != 64 || !precondition.All(Uri.IsHexDigit)))
+    {
+      throw new ArgumentException(
+          "A resource plan execution precondition must be a SHA-256 hexadecimal value.",
+          nameof(plan));
+    }
+
     ValidateEnum(plan.Compliance, "resource plan compliance");
     ValidateElements(plan.Steps, "plan steps");
     ValidateElements(plan.StructuredErrors, "resource plan errors");

@@ -5,6 +5,7 @@ using Wdem.Core.Execution;
 using Wdem.Core.Providers;
 using Wdem.Core.Resources;
 using Wdem.Core.Versions;
+using Wdem.Windows.Configuration;
 using Wdem.Windows.Security;
 using Wdem.Windows.VisualStudio;
 
@@ -21,8 +22,15 @@ public sealed class VisualStudioProvider : IResourceProvider
 
   public VisualStudioProvider(
       IVisualStudioDiscovery discovery,
+      IComplianceEvaluator complianceEvaluator)
+      : this(discovery, complianceEvaluator, applicationRoot: null)
+  {
+  }
+
+  public VisualStudioProvider(
+      IVisualStudioDiscovery discovery,
       IComplianceEvaluator complianceEvaluator,
-      string? applicationRoot = null)
+      string? applicationRoot)
   {
     _discovery = discovery ?? throw new ArgumentNullException(nameof(discovery));
     _trustedFileVerifier = new TrustedFileVerifier();
@@ -38,8 +46,40 @@ public sealed class VisualStudioProvider : IResourceProvider
       IVisualStudioInstallerClient installer,
       ITrustedFileVerifier trustedFileVerifier,
       IComplianceEvaluator complianceEvaluator,
-      ISecureArtifactStager? secureArtifactStager = null,
-      string? applicationRoot = null)
+      ISecureArtifactStager? secureArtifactStager = null)
+      : this(
+          discovery,
+          installer,
+          trustedFileVerifier,
+          complianceEvaluator,
+          secureArtifactStager,
+          applicationRoot: null)
+  {
+  }
+
+  public VisualStudioProvider(
+      IVisualStudioDiscovery discovery,
+      IVisualStudioInstallerClient installer,
+      ITrustedFileVerifier trustedFileVerifier,
+      IComplianceEvaluator complianceEvaluator,
+      string? applicationRoot)
+      : this(
+          discovery,
+          installer,
+          trustedFileVerifier,
+          complianceEvaluator,
+          secureArtifactStager: null,
+          applicationRoot)
+  {
+  }
+
+  public VisualStudioProvider(
+      IVisualStudioDiscovery discovery,
+      IVisualStudioInstallerClient installer,
+      ITrustedFileVerifier trustedFileVerifier,
+      IComplianceEvaluator complianceEvaluator,
+      ISecureArtifactStager? secureArtifactStager,
+      string? applicationRoot)
   {
     _discovery = discovery ?? throw new ArgumentNullException(nameof(discovery));
     _installer = installer ?? throw new ArgumentNullException(nameof(installer));
@@ -291,7 +331,14 @@ public sealed class VisualStudioProvider : IResourceProvider
       };
     }
 
-    var plan = BasePlan(resource, compliance.Status, isExecutable: true);
+    var plan = BasePlan(resource, compliance.Status, isExecutable: true) with
+    {
+      ExecutionPreconditionFingerprint = resolved.VerifiedPath is null || resolved.Sha256 is null
+          ? null
+          : ConfigurationExecutionPrecondition.FromPathAndHash(
+              resolved.VerifiedPath,
+              resolved.Sha256)
+    };
     if (compliance.Status == ComplianceStatus.Satisfied)
     {
       return plan;
@@ -372,6 +419,43 @@ public sealed class VisualStudioProvider : IResourceProvider
       return ApplyFailure(resource, null, planError!, null, 0);
     }
 
+    _ = TryParseOptions(resource, out var options, out _);
+    var resolved = await _configurationResolver.ResolveAsync(
+        options!,
+        GetExpectedSha256(resource) ?? string.Empty,
+        cancellationToken).ConfigureAwait(false);
+    if (resolved.Error is not null)
+    {
+      return ApplyFailure(
+          resource,
+          plan.Steps.FirstOrDefault(),
+          resolved.Error with { ResourceId = resource.Id },
+          null,
+          0);
+    }
+
+    var currentPrecondition = resolved.VerifiedPath is null || resolved.Sha256 is null
+        ? null
+        : ConfigurationExecutionPrecondition.FromPathAndHash(
+            resolved.VerifiedPath,
+            resolved.Sha256);
+    if (!string.Equals(
+            plan.ExecutionPreconditionFingerprint,
+            currentPrecondition,
+            StringComparison.OrdinalIgnoreCase))
+    {
+      var error = new StructuredError(
+          WdemErrorCode.ConfigurationError,
+          "Visual Studio configuration source changed after planning.",
+          "The canonical .vsconfig path or SHA-256 no longer matches the approved plan.")
+      {
+        ResourceId = resource.Id
+      };
+      return ApplyFailure(resource, plan.Steps.FirstOrDefault(), error, null, 0);
+    }
+
+    options = resolved.Options;
+
     if (!plan.RequiresApply)
     {
       return new ResourceApplyResult
@@ -393,7 +477,6 @@ public sealed class VisualStudioProvider : IResourceProvider
       return ApplyFailure(resource, plan.Steps[0], error, null, 0);
     }
 
-    _ = TryParseOptions(resource, out var options, out _);
     var step = plan.Steps[0];
     progress?.Report(new ProviderProgress(
         "BootstrapperVerification", 0.1, "Verifying Visual Studio installer inputs.", step.Id));

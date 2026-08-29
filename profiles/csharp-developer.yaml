@@ -52,7 +52,7 @@ resources:
     parameters:
       sourcePath: profiles/assets/csharp-developer.DotSettings
       expectedSha256: 4B9EBCC4DD86B8DBB6F337E45160E1A4FD09DA04A04723A4E4ACC601CEBCAFFC
-      destinationPath: ReSharperPlatformVs18/GlobalSettingsStorage.DotSettings
+      destinationPath: Shared/vAny/GlobalSettingsStorage.DotSettings
   company-vs-extension:
     type: visual-studio-extension
     provider: vsix

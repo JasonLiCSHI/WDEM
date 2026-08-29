@@ -347,6 +347,7 @@ public sealed class ResourceDefinitionTests
       ResourceType = resource.Type,
       ProviderName = resource.Provider,
       DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(resource),
+      ExecutionPreconditionFingerprint = new string('A', 64),
       Compliance = ComplianceStatus.Missing,
       IsExecutable = true,
       Steps =
@@ -373,9 +374,14 @@ public sealed class ResourceDefinitionTests
     {
       Steps = [plan.Steps.Single() with { Action = PlanAction.Upgrade }]
     };
+    var changedPrecondition = plan with
+    {
+      ExecutionPreconditionFingerprint = new string('B', 64)
+    };
 
     Assert.NotEqual(approved, ApprovedResourceFingerprint.Create(changedDefinition, plan));
     Assert.NotEqual(approved, ApprovedResourceFingerprint.Create(resource, changedStep));
+    Assert.NotEqual(approved, ApprovedResourceFingerprint.Create(resource, changedPrecondition));
   }
 
   private sealed class StubProvider(string resourceType, string providerName) : IResourceProvider

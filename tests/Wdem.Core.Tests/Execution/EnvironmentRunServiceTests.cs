@@ -736,6 +736,38 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task ApplyAsync_SatisfiedPlanWithExecutionPreconditionDispatchesProviderPreflight()
+  {
+    var provider = new ScriptedProvider(Satisfied("git", "2.52.1"))
+    {
+      IncludeExecutionPrecondition = true,
+      ApplyResult = new ResourceApplyResult
+      {
+        ResourceId = "git",
+        Outcome = ApplyOutcome.NotRequired
+      }
+    };
+    var (service, _) = CreateService(provider);
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    Assert.Equal(1, provider.ApplyCalls);
+    Assert.Equal(ExecutionOutcome.NotRequired, run.ResourceResults["git"].Outcome);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_SatisfiedPlanWithoutExecutionPreconditionSkipsProviderPreflight()
+  {
+    var provider = new ScriptedProvider(Satisfied("git", "2.52.1"));
+    var (service, _) = CreateService(provider);
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    Assert.Equal(0, provider.ApplyCalls);
+    Assert.Equal(ExecutionOutcome.NotRequired, run.ResourceResults["git"].Outcome);
+  }
+
+  [Fact]
   public async Task ApplyAsync_UnexecutablePlanPreservesSatisfiedResourceEvidence()
   {
     var provider = new ScriptedProvider(Missing("git"))
@@ -1819,6 +1851,7 @@ public sealed class EnvironmentRunServiceTests
     public Func<CancellationToken, ValueTask<VerificationResult>>? VerificationOperation { get; init; }
     public IReadOnlyList<ProviderProgress> ProgressEvents { get; init; } = [];
     public RestartPolicy PlannedRestartPolicy { get; init; }
+    public bool IncludeExecutionPrecondition { get; init; }
     public List<string> DetectedResourceIds { get; } = [];
     public ResourceApplyResult ApplyResult { get; init; } = new()
     {
@@ -1877,6 +1910,9 @@ public sealed class EnvironmentRunServiceTests
         ResourceType = resource.Type,
         ProviderName = resource.Provider,
         DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(resource),
+        ExecutionPreconditionFingerprint = IncludeExecutionPrecondition
+            ? new string('A', 64)
+            : null,
         Compliance = !detectionSucceeded
             ? ComplianceStatus.DetectionFailed
             : satisfied ? ComplianceStatus.Satisfied : ComplianceStatus.Missing,

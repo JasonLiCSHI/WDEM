@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using Wdem.Windows.Configuration;
@@ -121,6 +122,38 @@ public sealed class ConfigurationSourceResolverTests : IDisposable
   }
 
   [Fact]
+  public async Task CopyAtomicallyAsync_ReparseAncestorIsRejectedBeforeCreatingExternalDirectories()
+  {
+    var outside = Path.Combine(_root, "outside");
+    var link = Path.Combine(_root, "linked");
+    Directory.CreateDirectory(outside);
+    CreateJunction(link, outside);
+
+    var contents = Encoding.UTF8.GetBytes("replacement");
+    var source = new ResolvedConfigurationSource(
+        Path.Combine(_root, "source.DotSettings"),
+        Convert.ToHexString(SHA256.HashData(contents)),
+        contents);
+    var destination = Path.Combine(link, "must-not-exist", "nested", "settings.DotSettings");
+
+    try
+    {
+      var result = await new ConfigurationImporter().CopyAtomicallyAsync(
+          source,
+          destination,
+          CancellationToken.None);
+
+      Assert.False(result.Succeeded);
+      Assert.Contains("reparse", result.Error!.Detail, StringComparison.OrdinalIgnoreCase);
+      Assert.False(Directory.Exists(Path.Combine(outside, "must-not-exist")));
+    }
+    finally
+    {
+      Directory.Delete(link);
+    }
+  }
+
+  [Fact]
   public async Task CopyAtomicallyAsync_FinalDestinationHashMismatchRestoresPreviousDestination()
   {
     Directory.CreateDirectory(_root);
@@ -150,5 +183,25 @@ public sealed class ConfigurationSourceResolverTests : IDisposable
     {
       Directory.Delete(_root, recursive: true);
     }
+  }
+
+  private static void CreateJunction(string path, string target)
+  {
+    var startInfo = new ProcessStartInfo("cmd.exe")
+    {
+      RedirectStandardError = true,
+      RedirectStandardOutput = true,
+      UseShellExecute = false,
+      CreateNoWindow = true
+    };
+    startInfo.ArgumentList.Add("/d");
+    startInfo.ArgumentList.Add("/c");
+    startInfo.ArgumentList.Add("mklink");
+    startInfo.ArgumentList.Add("/J");
+    startInfo.ArgumentList.Add(path);
+    startInfo.ArgumentList.Add(target);
+    using var process = Process.Start(startInfo)!;
+    process.WaitForExit();
+    Assert.Equal(0, process.ExitCode);
   }
 }

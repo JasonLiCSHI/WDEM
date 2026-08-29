@@ -87,6 +87,7 @@ internal sealed class VisualStudioConfigurationResolver(
       return new ResolvedVisualStudioOptions(
           options with
           {
+            VsConfigPath = fullPath,
             Workloads = Merge(options.Workloads, parsed.Configuration!.Workloads),
             Components = Merge(options.Components, parsed.Configuration.Components)
           },

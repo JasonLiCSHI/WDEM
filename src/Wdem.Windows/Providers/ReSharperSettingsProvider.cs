@@ -184,9 +184,28 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
     }
 
     var compliance = _complianceEvaluator.Evaluate(resource, currentState);
+    var precondition = ConfigurationExecutionPrecondition.FromDetectedState(
+        currentState,
+        "destinationPath");
+    if (precondition is null)
+    {
+      return Plan(resource, ComplianceStatus.DetectionFailed, false) with
+      {
+        Error = "The detected ReSharper settings destination state cannot be bound to the plan.",
+        StructuredErrors =
+        [
+          Error(resource, WdemErrorCode.DetectionError,
+              "The detected ReSharper settings destination state cannot be bound to the plan.")
+        ]
+      };
+    }
+
     if (compliance.Status == ComplianceStatus.Satisfied)
     {
-      return Plan(resource, compliance.Status, true);
+      return Plan(resource, compliance.Status, true) with
+      {
+        ExecutionPreconditionFingerprint = precondition
+      };
     }
 
     if (compliance.Status is ComplianceStatus.DetectionFailed or ComplianceStatus.Unsupported)
@@ -200,6 +219,7 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
 
     return Plan(resource, compliance.Status, true) with
     {
+      ExecutionPreconditionFingerprint = precondition,
       Steps =
       [
         new PlanStep
@@ -231,6 +251,15 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
     if (planError is not null)
     {
       return Failed(resource, planError);
+    }
+
+    var currentState = await DetectAsync(resource, cancellationToken).ConfigureAwait(false);
+    if (!ConfigurationExecutionPrecondition.Matches(plan, currentState, "destinationPath"))
+    {
+      return Failed(resource, Error(
+          resource,
+          WdemErrorCode.ConfigurationError,
+          "The ReSharper settings destination changed after planning; the approved plan is stale."));
     }
 
     if (!plan.RequiresApply)

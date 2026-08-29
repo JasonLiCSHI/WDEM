@@ -27,6 +27,15 @@ public sealed partial class ExecutionPlanner
           "The provider returned a different resource id, type, provider, or desired-state fingerprint.");
     }
 
+    if (plan.ExecutionPreconditionFingerprint is { } precondition &&
+        (precondition.Length != 64 || !precondition.All(Uri.IsHexDigit)))
+    {
+      return ProviderError(
+          definition.Id,
+          "Provider plan contains a malformed execution precondition.",
+          "Execution precondition fingerprints must be SHA-256 hexadecimal values.");
+    }
+
     if (!Enum.IsDefined(plan.Compliance))
     {
       return ProviderError(

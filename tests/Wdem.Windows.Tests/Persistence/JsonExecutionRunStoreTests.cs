@@ -1520,6 +1520,26 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task GetAsync_PreservesSnapshotWithMalformedExecutionPreconditionFingerprint()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    var snapshotPath = _store.SnapshotPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(snapshotPath))!.AsObject();
+    document["plan"]!["resources"]!.AsArray()[0]!["resourcePlan"]![
+        "executionPreconditionFingerprint"] = "not-a-sha256";
+    await File.WriteAllTextAsync(snapshotPath, document.ToJsonString());
+
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+
+    Assert.Null(restored);
+    Assert.False(File.Exists(snapshotPath));
+    Assert.Single(Directory.GetFiles(
+        Path.GetDirectoryName(snapshotPath)!, $"{run.RunId:D}.json.corrupted.*"));
+    Assert.Single(_store.Diagnostics);
+  }
+
+  [Fact]
   public async Task CreateAndSave_RedactSnapshotMessagesAndErrors()
   {
     var run = SampleRun() with

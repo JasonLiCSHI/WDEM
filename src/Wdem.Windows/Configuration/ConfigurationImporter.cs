@@ -307,6 +307,11 @@ public sealed class ConfigurationImporter
       return "The configuration destination directory is invalid.";
     }
 
+    if (ContainsReparsePointBeforeDirectoryCreation(directory))
+    {
+      return "The configuration destination directory contains an unsafe reparse point.";
+    }
+
     Directory.CreateDirectory(directory);
     if (ContainsReparsePoint(directory))
     {
@@ -323,6 +328,43 @@ public sealed class ConfigurationImporter
     }
 
     return null;
+  }
+
+  private static bool ContainsReparsePointBeforeDirectoryCreation(string directory)
+  {
+    var missingSegments = new Stack<string>();
+    var nearestExisting = new DirectoryInfo(Path.GetFullPath(directory));
+    while (!nearestExisting.Exists)
+    {
+      missingSegments.Push(nearestExisting.Name);
+      nearestExisting = nearestExisting.Parent ?? nearestExisting;
+      if (nearestExisting.Parent is null && !nearestExisting.Exists)
+      {
+        return true;
+      }
+    }
+
+    if (ContainsReparsePoint(nearestExisting.FullName))
+    {
+      return true;
+    }
+
+    var current = nearestExisting.FullName;
+    while (missingSegments.Count > 0)
+    {
+      current = Path.Combine(current, missingSegments.Pop());
+      if (!Path.Exists(current))
+      {
+        continue;
+      }
+
+      if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+      {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   private static ConfigurationStagingResult StagingFailure(

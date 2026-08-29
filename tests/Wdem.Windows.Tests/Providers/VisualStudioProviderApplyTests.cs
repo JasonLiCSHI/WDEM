@@ -131,6 +131,52 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   }
 
   [Fact]
+  public async Task ApplyAsync_RelativeVsconfigUsesOneApplicationRootCanonicalSource()
+  {
+    var assets = Path.Combine(_root, "profiles", "assets");
+    Directory.CreateDirectory(assets);
+    var relativePath = Path.Combine("profiles", "assets", "profile.vsconfig");
+    var vsconfig = Path.Combine(_root, relativePath);
+    await File.WriteAllTextAsync(vsconfig, Vsconfig("Microsoft.VisualStudio.Component.Git"));
+    var hash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(vsconfig)));
+    var compliant = Instance(
+        "17.0_a",
+        workloads: ["Microsoft.VisualStudio.Workload.ManagedDesktop"],
+        components:
+        [
+          "Microsoft.NetCore.Component.Runtime.10.0",
+          "Microsoft.VisualStudio.Component.Git"
+        ]);
+    var discovery = new SequenceDiscovery([[Instance("17.0_a")], [compliant]]);
+    var installer = new RecordingInstallerClient();
+    var provider = Provider(discovery, installer, applicationRoot: _root);
+    var resource = Resource(relativePath, hash);
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
+
+    var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
+    Assert.Equal(Path.GetFullPath(vsconfig), detected.Evidence["vsconfigSource"]);
+    Assert.NotNull(plan.ExecutionPreconditionFingerprint);
+    Assert.Contains("--config", installer.LastArguments);
+  }
+
+  [Fact]
+  public void Constructors_PreserveOriginalOverloadsAlongsideApplicationRootOverloads()
+  {
+    var parameterCounts = typeof(VisualStudioProvider)
+        .GetConstructors()
+        .Select(constructor => constructor.GetParameters().Length)
+        .ToArray();
+
+    Assert.Contains(2, parameterCounts);
+    Assert.Contains(3, parameterCounts);
+    Assert.Contains(5, parameterCounts);
+    Assert.Contains(6, parameterCounts);
+  }
+
+  [Fact]
   public async Task PlanAsync_EmptyVsconfigIsNonExecutable()
   {
     Directory.CreateDirectory(_root);
@@ -781,13 +827,15 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
       IVisualStudioDiscovery discovery,
       IVisualStudioInstallerClient installer,
       ISecureArtifactStager? secureArtifactStager = null,
-      IComplianceEvaluator? complianceEvaluator = null) => new(
+      IComplianceEvaluator? complianceEvaluator = null,
+      string? applicationRoot = null) => new(
           discovery,
           installer,
           new TrustedFileVerifier(),
           complianceEvaluator ?? new ComplianceEvaluator(),
           secureArtifactStager ?? new SecureArtifactStager(
-              new RecordingSecureDirectoryPolicy()));
+              new RecordingSecureDirectoryPolicy()),
+          applicationRoot);
 
   private static ResourceDefinition Resource(
       string? vsconfigPath = null,

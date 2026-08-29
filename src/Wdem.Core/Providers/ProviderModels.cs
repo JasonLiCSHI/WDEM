@@ -148,6 +148,7 @@ public sealed record ResourcePlan
   public required string ResourceType { get; init; }
   public required string ProviderName { get; init; }
   public required string DesiredStateFingerprint { get; init; }
+  public string? ExecutionPreconditionFingerprint { get; init; }
   public required ComplianceStatus Compliance { get; init; }
   public required bool IsExecutable { get; init; }
   public IReadOnlyList<PlanStep> Steps

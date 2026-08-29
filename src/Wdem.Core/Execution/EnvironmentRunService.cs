@@ -613,8 +613,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       CancellationToken cancellationToken)
   {
     var id = definition.Id;
-    if (planned.Status == PlannedResourceStatus.AlreadySatisfied ||
-        !planned.ResourcePlan.RequiresApply)
+    if ((planned.Status == PlannedResourceStatus.AlreadySatisfied ||
+         !planned.ResourcePlan.RequiresApply) &&
+        planned.ResourcePlan.ExecutionPreconditionFingerprint is null)
     {
       return CompletedNotRequired(id, detectedBefore, complianceBefore.Status);
     }

@@ -23,7 +23,7 @@ internal static class VisualStudioInstanceSelector
     ArgumentNullException.ThrowIfNull(instances);
     ArgumentNullException.ThrowIfNull(criteria);
     var completeInstances = instances
-        .Where(instance => instance.IsComplete)
+        .Where(instance => instance.IsComplete && instance.IsLaunchable)
         .ToArray();
     if (criteria.InstanceId is not null)
     {

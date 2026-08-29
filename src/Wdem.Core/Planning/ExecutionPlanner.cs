@@ -710,6 +710,7 @@ public sealed partial class ExecutionPlanner(
       Append(canonical, resource.ResourcePlan.ResourceType);
       Append(canonical, resource.ResourcePlan.ProviderName);
       Append(canonical, resource.ResourcePlan.DesiredStateFingerprint);
+      Append(canonical, resource.ResourcePlan.ExecutionPreconditionFingerprint);
       Append(canonical, resource.ResourcePlan.Compliance.ToString());
       Append(canonical, resource.ResourcePlan.IsExecutable.ToString());
       Append(canonical, resource.ResourcePlan.Error);

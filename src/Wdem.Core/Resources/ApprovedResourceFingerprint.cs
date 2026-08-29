@@ -17,6 +17,7 @@ public static class ApprovedResourceFingerprint
     Append(canonical, plan.ResourceType);
     Append(canonical, plan.ProviderName);
     Append(canonical, plan.DesiredStateFingerprint);
+    Append(canonical, plan.ExecutionPreconditionFingerprint);
     Append(canonical, plan.Compliance.ToString());
     Append(canonical, plan.IsExecutable.ToString());
     Append(canonical, plan.Steps.Count.ToString(System.Globalization.CultureInfo.InvariantCulture));
