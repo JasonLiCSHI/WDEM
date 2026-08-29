@@ -1,3 +1,4 @@
+using Wdem.Core.Execution;
 using Wdem.Core.Providers;
 using Wdem.Core.Versions;
 
@@ -18,6 +19,25 @@ internal static class VisualStudioStateMapper
         : SemanticVersion.TryParse(instance.InstallationVersion, out var installationVersion)
             ? [installationVersion]
             : [];
+    if (installedVersions.Length == 0)
+    {
+      var error = new StructuredError(
+          WdemErrorCode.DetectionError,
+          "Visual Studio version could not be determined.",
+          "The selected Visual Studio instance did not report a valid product or installation version.")
+      {
+        ResourceId = resourceId
+      };
+      return new DetectedState
+      {
+        ResourceId = resourceId,
+        Outcome = DetectionOutcome.Failed,
+        Exists = true,
+        Error = error.Detail,
+        StructuredError = error
+      };
+    }
+
     var evidence = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
       ["instanceId"] = instance.InstanceId,

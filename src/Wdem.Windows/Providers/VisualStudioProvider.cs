@@ -477,23 +477,37 @@ public sealed class VisualStudioProvider : IResourceProvider
         return ApplyFailure(resource, step, error, null, 0.35);
       }
 
-      command = step.Action == PlanAction.Upgrade
-          ? await _installer.UpdateAsync(
-              setupPath,
-              instance.InstallationPath,
-              cancellationToken).ConfigureAwait(false)
-          : await _installer.ModifyAsync(
+      if (step.Action == PlanAction.Upgrade)
+      {
+        command = await _installer.UpdateAsync(
+            setupPath,
+            instance.InstallationPath,
+            cancellationToken).ConfigureAwait(false);
+        if (InstallerSucceeded(command))
+        {
+          var configurationCommand = await _installer.ModifyAsync(
               setupPath,
               instance.InstallationPath,
               options.Workloads,
               options.Components,
               verifiedVsConfig,
               cancellationToken).ConfigureAwait(false);
+          command = CombineInstallerResults(command, configurationCommand);
+        }
+      }
+      else
+      {
+        command = await _installer.ModifyAsync(
+            setupPath,
+            instance.InstallationPath,
+            options.Workloads,
+            options.Components,
+            verifiedVsConfig,
+            cancellationToken).ConfigureAwait(false);
+      }
     }
 
-    if (command.Process.Error is not null ||
-        !command.Process.Started ||
-        command.Process.ExitCode is not (0 or 1641 or 3010))
+    if (!InstallerSucceeded(command))
     {
       var error = command.Process.Error ?? new StructuredError(
           WdemErrorCode.InstallationError,
@@ -871,6 +885,34 @@ public sealed class VisualStudioProvider : IResourceProvider
           .Concat(configured)
           .Distinct(StringComparer.OrdinalIgnoreCase)
           .ToArray();
+
+  private static bool InstallerSucceeded(VisualStudioInstallerResult result) =>
+      result.Process.Error is null &&
+      result.Process.Started &&
+      result.Process.ExitCode is 0 or 1641 or 3010;
+
+  private static VisualStudioInstallerResult CombineInstallerResults(
+      VisualStudioInstallerResult first,
+      VisualStudioInstallerResult second)
+  {
+    var evidence = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var pair in first.Evidence)
+    {
+      evidence[pair.Key] = pair.Value;
+    }
+
+    foreach (var pair in second.Evidence)
+    {
+      evidence[pair.Key] = pair.Value;
+    }
+
+    return new VisualStudioInstallerResult(
+        second.Process,
+        (RestartPolicy)Math.Max(
+            (int)first.RestartRequirement,
+            (int)second.RestartRequirement),
+        evidence);
+  }
 
   private static string? FormatEvidence(IReadOnlyDictionary<string, string>? evidence)
   {
