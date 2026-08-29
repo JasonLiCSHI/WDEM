@@ -1,5 +1,6 @@
 using Wdem.Core.Compliance;
 using Wdem.Core.Execution;
+using Wdem.Core.Processes;
 using Wdem.Core.Providers;
 using Wdem.Core.Resources;
 using Wdem.Windows.Composition;
@@ -237,6 +238,23 @@ public sealed class VisualStudioProviderDetectionTests
     Assert.IsType<InvalidDataException>(state.StructuredError.UnderlyingException);
   }
 
+  [Fact]
+  public async Task DetectAsync_VsWhereDoesNotStart_ReturnsStructuredDetectionError()
+  {
+    var discovery = new VsWhereVisualStudioDiscovery(
+        new SingleResultProcessExecutor(
+            new ProcessExecutionResult(false, null, [], [])),
+        @"C:\missing\vswhere.exe");
+    var provider = new VisualStudioProvider(discovery, new ComplianceEvaluator());
+
+    var state = await provider.DetectAsync(VisualStudioResource(), CancellationToken.None);
+
+    Assert.Equal(DetectionOutcome.Failed, state.Outcome);
+    Assert.Equal(WdemErrorCode.DetectionError, state.StructuredError!.Code);
+    Assert.Contains("vswhere", state.StructuredError.Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.IsType<InvalidOperationException>(state.StructuredError.UnderlyingException);
+  }
+
   private static ResourceDefinition VisualStudioResource(
       string? instanceId = null,
       string? versionConstraint = ">= 18.0",
@@ -313,6 +331,19 @@ public sealed class VisualStudioProviderDetectionTests
       RequestedWorkloads = requestedWorkloads;
       RequestedComponents = requestedComponents;
       return Task.FromResult(Instances);
+    }
+  }
+
+  private sealed class SingleResultProcessExecutor(ProcessExecutionResult result)
+      : IProcessExecutor
+  {
+    public Task<ProcessExecutionResult> ExecuteAsync(
+        ProcessExecutionRequest request,
+        IProgress<string>? output,
+        CancellationToken cancellationToken)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      return Task.FromResult(result);
     }
   }
 }

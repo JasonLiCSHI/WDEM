@@ -34,11 +34,6 @@ public sealed class VsWhereVisualStudioDiscovery : IVisualStudioDiscovery
             ["-products", "*", "-format", "json", "-utf8", "-prerelease"]),
         null,
         cancellationToken).ConfigureAwait(false);
-    if (!result.Started && result.Error is null)
-    {
-      return [];
-    }
-
     EnsureSuccessful(result, "Visual Studio instance query");
 
     var records = Deserialize(result);
@@ -83,8 +78,8 @@ public sealed class VsWhereVisualStudioDiscovery : IVisualStudioDiscovery
 
       foreach (var record in Deserialize(result))
       {
-        if (record.InstanceId is not null &&
-            membership.TryGetValue(record.InstanceId, out var instanceMembership))
+        var instanceId = Required(record.InstanceId, "instanceId");
+        if (membership.TryGetValue(instanceId, out var instanceMembership))
         {
           instanceMembership.Add(requestedId);
         }
@@ -98,7 +93,8 @@ public sealed class VsWhereVisualStudioDiscovery : IVisualStudioDiscovery
     {
       return JsonSerializer.Deserialize<VsWhereRecord[]>(
           string.Join(Environment.NewLine, result.StandardOutput),
-          JsonOptions) ?? [];
+          JsonOptions) ?? throw new InvalidDataException(
+          "vswhere returned a null JSON root instead of an array.");
     }
     catch (JsonException exception)
     {
@@ -125,19 +121,40 @@ public sealed class VsWhereVisualStudioDiscovery : IVisualStudioDiscovery
     }
   }
 
-  private static VisualStudioInstance Map(VsWhereRecord record) => new()
+  private static VisualStudioInstance Map(VsWhereRecord record)
   {
-    InstanceId = record.InstanceId ?? string.Empty,
-    InstallationPath = record.InstallationPath ?? string.Empty,
-    ProductId = record.ProductId ?? string.Empty,
-    ProductPath = record.ProductPath ?? string.Empty,
-    ProductDisplayVersion = record.Catalog?.ProductDisplayVersion ?? string.Empty,
-    InstallationVersion = record.InstallationVersion ?? string.Empty,
-    ChannelId = record.ChannelId ?? string.Empty,
-    Edition = Edition(record.ProductId),
-    IsComplete = record.IsComplete,
-    IsLaunchable = record.IsLaunchable
-  };
+    var productId = Required(record.ProductId, "productId");
+    return new VisualStudioInstance
+    {
+      InstanceId = Required(record.InstanceId, "instanceId"),
+      InstallationPath = Required(record.InstallationPath, "installationPath"),
+      ProductId = productId,
+      ProductPath = Required(record.ProductPath, "productPath"),
+      ProductDisplayVersion = Required(
+          record.Catalog?.ProductDisplayVersion,
+          "catalog.productDisplayVersion"),
+      InstallationVersion = Required(record.InstallationVersion, "installationVersion"),
+      ChannelId = Required(record.ChannelId, "channelId"),
+      Edition = Edition(productId),
+      IsComplete = Required(record.IsComplete, "isComplete"),
+      IsLaunchable = Required(record.IsLaunchable, "isLaunchable")
+    };
+  }
+
+  private static string Required(string? value, string propertyName)
+  {
+    if (string.IsNullOrWhiteSpace(value))
+    {
+      throw new InvalidDataException(
+          $"vswhere record is missing required property '{propertyName}'.");
+    }
+
+    return value;
+  }
+
+  private static bool Required(bool? value, string propertyName) =>
+      value ?? throw new InvalidDataException(
+          $"vswhere record is missing required property '{propertyName}'.");
 
   private static string Edition(string? productId)
   {
@@ -173,8 +190,8 @@ public sealed class VsWhereVisualStudioDiscovery : IVisualStudioDiscovery
     public string? ProductPath { get; init; }
     public string? InstallationVersion { get; init; }
     public string? ChannelId { get; init; }
-    public bool IsComplete { get; init; }
-    public bool IsLaunchable { get; init; }
+    public bool? IsComplete { get; init; }
+    public bool? IsLaunchable { get; init; }
     public VsWhereCatalog? Catalog { get; init; }
   }
 

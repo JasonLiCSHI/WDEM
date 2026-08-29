@@ -136,6 +136,71 @@ public sealed class VsWhereVisualStudioDiscoveryTests
     Assert.Contains("workload-a", exception.Message, StringComparison.Ordinal);
   }
 
+  [Fact]
+  public async Task DiscoverAsync_NullJsonRoot_ThrowsInvalidDataException()
+  {
+    var process = new RecordingProcessExecutor();
+    process.Enqueue(JsonResult("null"));
+    var discovery = new VsWhereVisualStudioDiscovery(process, @"C:\vswhere.exe");
+
+    var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+        discovery.DiscoverAsync([], [], CancellationToken.None));
+
+    Assert.Contains("JSON", exception.Message, StringComparison.OrdinalIgnoreCase);
+  }
+
+  [Fact]
+  public async Task DiscoverAsync_EmptyJsonArray_ReturnsNoInstances()
+  {
+    var process = new RecordingProcessExecutor();
+    process.Enqueue(JsonResult("[]"));
+    var discovery = new VsWhereVisualStudioDiscovery(process, @"C:\vswhere.exe");
+
+    var instances = await discovery.DiscoverAsync([], [], CancellationToken.None);
+
+    Assert.Empty(instances);
+  }
+
+  [Fact]
+  public async Task DiscoverAsync_PartialBaseRecord_ThrowsInvalidDataException()
+  {
+    var process = new RecordingProcessExecutor();
+    process.Enqueue(JsonResult("""[{ "instanceId": "a" }]"""));
+    var discovery = new VsWhereVisualStudioDiscovery(process, @"C:\vswhere.exe");
+
+    var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+        discovery.DiscoverAsync([], [], CancellationToken.None));
+
+    Assert.Contains("required property", exception.Message, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task DiscoverAsync_MembershipRecordWithoutInstanceId_ThrowsInvalidDataException()
+  {
+    var process = new RecordingProcessExecutor();
+    process.Enqueue(JsonResult(
+        """
+        [{
+          "instanceId": "a",
+          "installationPath": "C:\\VS-A",
+          "productId": "Microsoft.VisualStudio.Product.Community",
+          "productPath": "C:\\VS-A\\devenv.exe",
+          "installationVersion": "18.3.2.0",
+          "channelId": "VisualStudio.18.Release",
+          "isComplete": true,
+          "isLaunchable": true,
+          "catalog": { "productDisplayVersion": "18.3.2" }
+        }]
+        """));
+    process.Enqueue(JsonResult("""[{ "installationPath": "C:\\VS-A" }]"""));
+    var discovery = new VsWhereVisualStudioDiscovery(process, @"C:\vswhere.exe");
+
+    var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+        discovery.DiscoverAsync(["workload-a"], [], CancellationToken.None));
+
+    Assert.Contains("instanceId", exception.Message, StringComparison.Ordinal);
+  }
+
   private static ProcessExecutionResult JsonResult(string json) => new(
       true,
       0,
