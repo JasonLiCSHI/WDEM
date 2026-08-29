@@ -1,6 +1,7 @@
 using System.Xml.Linq;
 using Microsoft.UI.Xaml;
 using Wdem.Desktop;
+using Wdem.Tests;
 using Xunit;
 
 namespace Wdem.Desktop.Tests;
@@ -48,6 +49,24 @@ public sealed class DesktopProjectTests
             reference.Name,
             "Wdem.ElevatedHost",
             StringComparison.Ordinal));
+  }
+
+  [Fact]
+  public async Task DesktopPublishIncludesRunnableSelfContainedElevatedHost()
+  {
+    PublishedElevatedHostResult result =
+        await PublishedElevatedHostSmoke.PublishAndRunAsync(
+            useBundledCliPublishOptions: false,
+            "src",
+            "Wdem.Desktop",
+            "Wdem.Desktop.csproj");
+
+    Assert.True(result.PublishExitCode == 0, result.PublishOutput);
+    Assert.Equal(["Wdem.ElevatedHost.exe"], result.HostFiles);
+    Assert.Equal(2, result.HostExitCode);
+    Assert.Contains(PublishedElevatedHostSmoke.UsageError, result.HostStandardError);
+    Assert.DoesNotContain("hostpolicy", result.HostStandardError, StringComparison.OrdinalIgnoreCase);
+    Assert.DoesNotContain("runtime", result.HostStandardError, StringComparison.OrdinalIgnoreCase);
   }
 
   private static string GetDesktopProjectPath()

@@ -25,8 +25,9 @@ internal static class Program
     {
       options = ElevatedHostBootstrapOptions.Parse(args);
     }
-    catch (ArgumentException)
+    catch (ArgumentException exception)
     {
+      await Console.Error.WriteLineAsync(exception.Message).ConfigureAwait(false);
       return 2;
     }
 

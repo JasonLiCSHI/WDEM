@@ -20,6 +20,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="..\Shared\PublishedElevatedHostSmoke.cs"
+             Link="Shared\PublishedElevatedHostSmoke.cs" />
     <ProjectReference Include="..\..\src\Wdem.Core\Wdem.Core.csproj" />
     <ProjectReference Include="..\..\src\Wdem.Windows\Wdem.Windows.csproj" />
     <ProjectReference Include="..\..\src\Wdem.Desktop\Wdem.Desktop.csproj" />

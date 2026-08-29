@@ -1,5 +1,6 @@
 using System.Xml.Linq;
 using Wdem.Cli;
+using Wdem.Tests;
 using Wdem.Windows;
 using Xunit;
 
@@ -22,7 +23,7 @@ public sealed class ProjectBoundaryTests
   }
 
   [Fact]
-  public void CliTreatsElevatedHostAsProcessDependencyWithOutputArtifacts()
+  public void CliTreatsElevatedHostAsProcessDependencyWithSeparateBuildAndPublishArtifacts()
   {
     Assert.DoesNotContain(
         typeof(WdemCommandHandler).Assembly.GetReferencedAssemblies(),
@@ -40,9 +41,31 @@ public sealed class ProjectBoundaryTests
     Assert.All(artifacts, artifact =>
     {
       Assert.Equal("PreserveNewest", artifact.Attribute("CopyToOutputDirectory")?.Value);
-      Assert.Equal("PreserveNewest", artifact.Attribute("CopyToPublishDirectory")?.Value);
-      Assert.Equal("true", artifact.Attribute("ExcludeFromSingleFile")?.Value);
+      Assert.Equal("Never", artifact.Attribute("CopyToPublishDirectory")?.Value);
     });
+
+    XElement publishedHost = deployment.Descendants("ResolvedFileToPublish").Single();
+    Assert.Equal("Wdem.ElevatedHost.exe", publishedHost.Element("RelativePath")?.Value);
+    Assert.Equal("PreserveNewest", publishedHost.Element("CopyToPublishDirectory")?.Value);
+    Assert.Equal("true", publishedHost.Element("ExcludeFromSingleFile")?.Value);
+  }
+
+  [Fact]
+  public async Task CliPublishIncludesRunnableSelfContainedElevatedHost()
+  {
+    PublishedElevatedHostResult result =
+        await PublishedElevatedHostSmoke.PublishAndRunAsync(
+            useBundledCliPublishOptions: true,
+            "src",
+            "Wdem.Cli",
+            "Wdem.Cli.csproj");
+
+    Assert.True(result.PublishExitCode == 0, result.PublishOutput);
+    Assert.Equal(["Wdem.ElevatedHost.exe"], result.HostFiles);
+    Assert.Equal(2, result.HostExitCode);
+    Assert.Contains(PublishedElevatedHostSmoke.UsageError, result.HostStandardError);
+    Assert.DoesNotContain("hostpolicy", result.HostStandardError, StringComparison.OrdinalIgnoreCase);
+    Assert.DoesNotContain("runtime", result.HostStandardError, StringComparison.OrdinalIgnoreCase);
   }
 
   private static string FindRepositoryFile(params string[] segments)

@@ -1,28 +1,46 @@
 <Project>
   <PropertyGroup>
+    <_WdemElevatedHostProject>$(MSBuildThisFileDirectory)Wdem.ElevatedHost.csproj</_WdemElevatedHostProject>
     <_WdemElevatedHostOutputDirectory>$(MSBuildThisFileDirectory)bin\$(Configuration)\net10.0-windows\</_WdemElevatedHostOutputDirectory>
     <_WdemElevatedHostOutputDirectory Condition="'$(RuntimeIdentifier)' != ''">$(_WdemElevatedHostOutputDirectory)$(RuntimeIdentifier)\</_WdemElevatedHostOutputDirectory>
+    <_WdemElevatedHostPublishRuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</_WdemElevatedHostPublishRuntimeIdentifier>
+    <_WdemElevatedHostPublishRuntimeIdentifier Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</_WdemElevatedHostPublishRuntimeIdentifier>
   </PropertyGroup>
   <ItemGroup>
     <Content Include="$(_WdemElevatedHostOutputDirectory)Wdem.ElevatedHost.exe"
              Link="Wdem.ElevatedHost.exe"
              CopyToOutputDirectory="PreserveNewest"
-             CopyToPublishDirectory="PreserveNewest"
-             ExcludeFromSingleFile="true" />
+             CopyToPublishDirectory="Never" />
     <Content Include="$(_WdemElevatedHostOutputDirectory)Wdem.ElevatedHost.dll"
              Link="Wdem.ElevatedHost.dll"
              CopyToOutputDirectory="PreserveNewest"
-             CopyToPublishDirectory="PreserveNewest"
-             ExcludeFromSingleFile="true" />
+             CopyToPublishDirectory="Never" />
     <Content Include="$(_WdemElevatedHostOutputDirectory)Wdem.ElevatedHost.deps.json"
              Link="Wdem.ElevatedHost.deps.json"
              CopyToOutputDirectory="PreserveNewest"
-             CopyToPublishDirectory="PreserveNewest"
-             ExcludeFromSingleFile="true" />
+             CopyToPublishDirectory="Never" />
     <Content Include="$(_WdemElevatedHostOutputDirectory)Wdem.ElevatedHost.runtimeconfig.json"
              Link="Wdem.ElevatedHost.runtimeconfig.json"
              CopyToOutputDirectory="PreserveNewest"
-             CopyToPublishDirectory="PreserveNewest"
-             ExcludeFromSingleFile="true" />
+             CopyToPublishDirectory="Never" />
   </ItemGroup>
+  <Target Name="PublishWdemElevatedHost"
+          BeforeTargets="ComputeFilesToPublish"
+          Condition="'$(IsPublishable)' != 'false'">
+    <PropertyGroup>
+      <_WdemElevatedHostPublishDirectory>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\$(IntermediateOutputPath)wdem-elevated-host\$(_WdemElevatedHostPublishRuntimeIdentifier)\publish\'))</_WdemElevatedHostPublishDirectory>
+    </PropertyGroup>
+    <MSBuild Projects="$(_WdemElevatedHostProject)"
+             Targets="Restore;Publish"
+             BuildInParallel="false"
+             RemoveProperties="TargetFramework;TargetFrameworks;PublishUrl"
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=$(_WdemElevatedHostPublishRuntimeIdentifier);SelfContained=true;PublishSingleFile=true;PublishTrimmed=false;PublishAot=false;PublishDir=$(_WdemElevatedHostPublishDirectory)" />
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(_WdemElevatedHostPublishDirectory)Wdem.ElevatedHost.exe">
+        <RelativePath>Wdem.ElevatedHost.exe</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
 </Project>
