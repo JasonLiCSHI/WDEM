@@ -703,9 +703,28 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
   private void DeleteApprovedResources(Guid runId)
   {
     var path = ApprovedResourcesPath(runId);
-    if (File.Exists(path))
+    try
     {
-      File.Delete(path);
+      if (File.Exists(path))
+      {
+        File.Delete(path);
+      }
+    }
+    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+    {
+      var diagnostic = new StructuredError(
+          WdemErrorCode.PermissionError,
+          "Approved resource snapshot could not be removed.",
+          $"Run '{runId:D}' remains terminal, but its protected approval snapshot could not be removed.")
+      {
+        SuggestedAction = "Retry loading or saving the terminal run after the file becomes available.",
+        IsRetryable = true,
+        UnderlyingException = exception
+      };
+      lock (_diagnosticsGate)
+      {
+        _diagnostics.Add(diagnostic);
+      }
     }
   }
 

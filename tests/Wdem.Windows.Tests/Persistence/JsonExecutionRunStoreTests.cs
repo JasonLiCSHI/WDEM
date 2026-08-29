@@ -172,6 +172,48 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task SaveAsync_TerminalCleanupFailurePersistsRunAndRetriesCleanup()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ElevatedRunWithSecret("cleanup-secret");
+    await store.CreateAsync(run, CancellationToken.None);
+    var approvedPath = store.ApprovedResourcesPath(run.RunId);
+    ExecutionRun saved;
+
+    await using (var sidecarLock = new FileStream(
+                     approvedPath,
+                     FileMode.Open,
+                     FileAccess.Read,
+                     FileShare.None))
+    {
+      saved = await store.SaveAsync(
+          run with
+          {
+            State = ExecutionState.Completed,
+            Outcome = ExecutionOutcome.Succeeded,
+            EndedAtUtc = DateTimeOffset.UtcNow
+          },
+          CancellationToken.None);
+
+      Assert.Equal(ExecutionState.Completed, saved.State);
+      Assert.True(File.Exists(approvedPath));
+      var diagnostic = Assert.Single(store.Diagnostics);
+      Assert.Equal(WdemErrorCode.PermissionError, diagnostic.Code);
+      Assert.True(diagnostic.IsRetryable);
+      Assert.IsType<IOException>(diagnostic.UnderlyingException);
+    }
+
+    var restored = await store.GetAsync(run.RunId, CancellationToken.None);
+
+    Assert.NotNull(restored);
+    Assert.Equal(ExecutionState.Completed, restored.State);
+    Assert.False(File.Exists(approvedPath));
+  }
+
+  [Fact]
   public async Task ElevatedWorker_NewStoreInstanceExecutesWithProtectedOriginalValues()
   {
     var paths = new WdemDataPaths(_directory);
