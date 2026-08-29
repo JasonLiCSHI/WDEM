@@ -319,6 +319,23 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
     Assert.Contains("installerPath=C:\\verified\\vs.exe", Assert.Single(result.StepResults).Message);
   }
 
+  [Fact]
+  public async Task ApplyAsync_MissingModifyInstanceDisposesBootstrapperLease()
+  {
+    var installer = new RecordingInstallerClient();
+    var provider = Provider(new SequenceDiscovery([[]]), installer);
+    var resource = Resource(useBootstrapper: true);
+    var plan = await provider.PlanAsync(
+        resource, State(Instance("17.0_a")), CancellationToken.None);
+
+    var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(WdemErrorCode.VerificationError, result.Error!.Code);
+    Assert.True(installer.LastAcquisition!.IsDisposed);
+    Assert.Empty(installer.LastArguments);
+  }
+
   public void Dispose()
   {
     if (Directory.Exists(_root))
@@ -340,7 +357,8 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
 
   private static ResourceDefinition Resource(
       string? vsconfigPath = null,
-      string? expectedSha256 = null)
+      string? expectedSha256 = null,
+      bool useBootstrapper = false)
   {
     var parameters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
     {
@@ -355,6 +373,12 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
     {
       parameters["vsconfigPath"] = vsconfigPath;
       parameters["expectedSha256"] = expectedSha256;
+    }
+
+    if (useBootstrapper)
+    {
+      parameters["bootstrapperUri"] = "https://example.test/vs.exe";
+      parameters["bootstrapperSha256"] = new string('A', 64);
     }
 
     return new ResourceDefinition
@@ -449,16 +473,21 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
     public string? LastVsConfigPath { get; private set; }
     public Action<string?>? BeforeModify { get; init; }
     public VisualStudioInstallerResult Result { get; init; } = Success(@"C:\setup.exe");
+    public VisualStudioBootstrapperAcquisition? LastAcquisition { get; private set; }
 
-    public Task<TrustedFileVerificationResult> AcquireBootstrapperAsync(
+    public Task<VisualStudioBootstrapperAcquisition> AcquireBootstrapperAsync(
         Uri source,
         string expectedSha256,
-        CancellationToken cancellationToken) => Task.FromResult(
-            new TrustedFileVerificationResult(
-                true,
-                @"C:\verified\vs-bootstrapper.exe",
-                expectedSha256,
-                null));
+        CancellationToken cancellationToken)
+    {
+      LastAcquisition = new VisualStudioBootstrapperAcquisition(
+          new TrustedFileVerificationResult(
+              true,
+              @"C:\verified\vs-bootstrapper.exe",
+              expectedSha256,
+              null));
+      return Task.FromResult(LastAcquisition);
+    }
 
     public Task<VisualStudioInstallerResult> InstallAsync(
         string executablePath,

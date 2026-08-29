@@ -213,6 +213,33 @@ public sealed class VisualStudioInstallerClientTests
   }
 
   [Fact]
+  public async Task AcquiredBootstrapper_DisposalDeletesSourceAndCannotBeReused()
+  {
+    var bytes = "trusted bootstrapper"u8.ToArray();
+    var hash = Convert.ToHexString(SHA256.HashData(bytes));
+    var process = new RecordingProcessExecutor();
+    var client = new VisualStudioInstallerClient(
+        process,
+        httpClient: new HttpClient(new ContentHandler(bytes)),
+        secureArtifactStager: new SecureArtifactStager(
+            new RecordingSecureDirectoryPolicy()));
+    var acquired = await client.AcquireBootstrapperAsync(
+        new Uri("https://example.test/vs.exe"), hash, CancellationToken.None);
+    var acquiredPath = acquired.VerifiedPath!;
+
+    await acquired.DisposeAsync();
+    await acquired.DisposeAsync();
+
+    Assert.False(File.Exists(acquiredPath));
+    await Assert.ThrowsAsync<InvalidOperationException>(() => client.InstallAsync(
+        acquiredPath,
+        "Microsoft.VisualStudio.Product.Community",
+        null,
+        @"C:\VS", [], [], null, CancellationToken.None));
+    Assert.Empty(process.Requests);
+  }
+
+  [Fact]
   public async Task AcquiredBootstrapper_ExecutionFailureDeletesSourceWithoutMaskingFailure()
   {
     var bytes = "trusted bootstrapper"u8.ToArray();
@@ -338,18 +365,25 @@ public sealed class VisualStudioInstallerClientTests
         new Uri("https://example.test/vs.exe"), hash, CancellationToken.None);
     acquiredPath = acquired.VerifiedPath;
 
-    var result = await client.InstallAsync(
-        acquiredPath!,
-        "Microsoft.VisualStudio.Product.Community",
-        null,
-        @"C:\VS", [], [], null, CancellationToken.None);
+    try
+    {
+      var result = await client.InstallAsync(
+          acquiredPath!,
+          "Microsoft.VisualStudio.Product.Community",
+          null,
+          @"C:\VS", [], [], null, CancellationToken.None);
 
-    var request = Assert.Single(process.Requests);
-    Assert.NotEqual(acquiredPath, request.FileName);
-    Assert.Equal(trustedBytes, launchedBytes);
-    Assert.Contains(Path.GetDirectoryName(request.FileName)!, policy.SecuredDirectories);
-    Assert.Equal(hash, result.Evidence["installerSha256"]);
-    Assert.False(File.Exists(request.FileName));
+      var request = Assert.Single(process.Requests);
+      Assert.NotEqual(acquiredPath, request.FileName);
+      Assert.Equal(trustedBytes, launchedBytes);
+      Assert.Contains(Path.GetDirectoryName(request.FileName)!, policy.SecuredDirectories);
+      Assert.Equal(hash, result.Evidence["installerSha256"]);
+      Assert.False(File.Exists(request.FileName));
+    }
+    finally
+    {
+      File.Delete(acquiredPath!);
+    }
   }
 
   [Fact]

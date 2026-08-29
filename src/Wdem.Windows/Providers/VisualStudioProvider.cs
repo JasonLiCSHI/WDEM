@@ -439,13 +439,15 @@ public sealed class VisualStudioProvider : IResourceProvider
 
     var verifiedVsConfig = stagedConfiguration?.Path;
 
+    await using var bootstrapper = options.BootstrapperUri is not null
+        ? await _installer.AcquireBootstrapperAsync(
+            options.BootstrapperUri,
+            options.BootstrapperSha256!,
+            cancellationToken).ConfigureAwait(false)
+        : null;
     var setupPath = DefaultSetupPath();
-    if (options.BootstrapperUri is not null)
+    if (bootstrapper is not null)
     {
-      var bootstrapper = await _installer.AcquireBootstrapperAsync(
-          options.BootstrapperUri,
-          options.BootstrapperSha256!,
-          cancellationToken).ConfigureAwait(false);
       if (!bootstrapper.IsTrusted)
       {
         return ApplyFailure(

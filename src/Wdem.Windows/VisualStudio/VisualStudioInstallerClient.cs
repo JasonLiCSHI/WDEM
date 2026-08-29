@@ -9,7 +9,7 @@ namespace Wdem.Windows.VisualStudio;
 
 public interface IVisualStudioInstallerClient
 {
-  Task<TrustedFileVerificationResult> AcquireBootstrapperAsync(
+  Task<VisualStudioBootstrapperAcquisition> AcquireBootstrapperAsync(
       Uri source,
       string expectedSha256,
       CancellationToken cancellationToken);
@@ -38,13 +38,63 @@ public sealed record VisualStudioInstallerResult(
     RestartPolicy RestartRequirement,
     IReadOnlyDictionary<string, string> Evidence);
 
+public sealed class VisualStudioBootstrapperAcquisition : IAsyncDisposable
+{
+  private readonly Action<VisualStudioBootstrapperAcquisition>? _abandon;
+  private int _state;
+
+  public VisualStudioBootstrapperAcquisition(TrustedFileVerificationResult verification)
+      : this(verification, null)
+  {
+  }
+
+  internal VisualStudioBootstrapperAcquisition(
+      TrustedFileVerificationResult verification,
+      Action<VisualStudioBootstrapperAcquisition>? abandon)
+  {
+    Verification = verification ?? throw new ArgumentNullException(nameof(verification));
+    _abandon = abandon;
+  }
+
+  public TrustedFileVerificationResult Verification { get; }
+  public bool IsTrusted => Verification.IsTrusted;
+  public string? VerifiedPath => Verification.VerifiedPath;
+  public string? Sha256 => Verification.Sha256;
+  public StructuredError? Error => Verification.Error;
+  public bool IsDisposed => Volatile.Read(ref _state) == 2;
+
+  public ValueTask DisposeAsync()
+  {
+    if (Interlocked.CompareExchange(ref _state, 2, 0) == 0)
+    {
+      _abandon?.Invoke(this);
+    }
+
+    return ValueTask.CompletedTask;
+  }
+
+  internal bool TryConsume(out string expectedSha256)
+  {
+    var sha256 = Sha256;
+    if (sha256 is not null && Interlocked.CompareExchange(ref _state, 1, 0) == 0)
+    {
+      expectedSha256 = sha256;
+      return true;
+    }
+
+    expectedSha256 = string.Empty;
+    return false;
+  }
+}
+
 public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
 {
   private readonly IProcessExecutor _processExecutor;
   private readonly ITrustedFileVerifier _trustedFileVerifier;
   private readonly HttpClient _httpClient;
   private readonly ISecureArtifactStager _secureArtifactStager;
-  private readonly ConcurrentDictionary<string, string> _verifiedBootstrappers =
+  private readonly ConcurrentDictionary<string, VisualStudioBootstrapperAcquisition>
+      _verifiedBootstrappers =
       new(StringComparer.OrdinalIgnoreCase);
 
   public VisualStudioInstallerClient(
@@ -63,7 +113,7 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
 
   public string SetupExecutablePath { get; }
 
-  public async Task<TrustedFileVerificationResult> AcquireBootstrapperAsync(
+  public async Task<VisualStudioBootstrapperAcquisition> AcquireBootstrapperAsync(
       Uri source,
       string expectedSha256,
       CancellationToken cancellationToken)
@@ -107,13 +157,14 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
       if (!verification.IsTrusted)
       {
         TryDelete(localPath);
-      }
-      else
-      {
-        _verifiedBootstrappers[verification.VerifiedPath!] = verification.Sha256!;
+        return new VisualStudioBootstrapperAcquisition(verification);
       }
 
-      return verification;
+      var acquisition = new VisualStudioBootstrapperAcquisition(
+          verification,
+          AbandonBootstrapper);
+      _verifiedBootstrappers[verification.VerifiedPath!] = acquisition;
+      return acquisition;
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
@@ -123,14 +174,15 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
     catch (Exception)
     {
       TryDelete(localPath);
-      return new TrustedFileVerificationResult(
-          false,
-          null,
-          null,
-          new StructuredError(
-              WdemErrorCode.DownloadError,
-              "Visual Studio bootstrapper download failed.",
-              "The trusted Visual Studio bootstrapper could not be downloaded."));
+      return new VisualStudioBootstrapperAcquisition(
+          new TrustedFileVerificationResult(
+              false,
+              null,
+              null,
+              new StructuredError(
+                  WdemErrorCode.DownloadError,
+                  "Visual Studio bootstrapper download failed.",
+                  "The trusted Visual Studio bootstrapper could not be downloaded.")));
     }
   }
 
@@ -222,7 +274,8 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
     string? installerSha256 = null;
     if (!string.Equals(fullPath, SetupExecutablePath, StringComparison.OrdinalIgnoreCase))
     {
-      if (!_verifiedBootstrappers.TryRemove(fullPath, out var expectedSha256))
+      if (!_verifiedBootstrappers.TryRemove(fullPath, out var acquisition) ||
+          !acquisition.TryConsume(out var expectedSha256))
       {
         throw new InvalidOperationException(
             "The Visual Studio installer executable has not been verified.");
@@ -316,14 +369,29 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
     arguments.AddRange(["--passive", "--wait", "--norestart"]);
   }
 
-  private static TrustedFileVerificationResult ConfigurationFailure(string detail) => new(
-      false,
-      null,
-      null,
-      new StructuredError(
-          WdemErrorCode.ConfigurationError,
-          "Visual Studio bootstrapper is not trusted.",
-          detail));
+  private static VisualStudioBootstrapperAcquisition ConfigurationFailure(string detail) => new(
+      new TrustedFileVerificationResult(
+          false,
+          null,
+          null,
+          new StructuredError(
+              WdemErrorCode.ConfigurationError,
+              "Visual Studio bootstrapper is not trusted.",
+              detail)));
+
+  private void AbandonBootstrapper(VisualStudioBootstrapperAcquisition acquisition)
+  {
+    if (acquisition.VerifiedPath is null)
+    {
+      return;
+    }
+
+    _verifiedBootstrappers.TryRemove(
+        new KeyValuePair<string, VisualStudioBootstrapperAcquisition>(
+            acquisition.VerifiedPath,
+            acquisition));
+    TryDelete(acquisition.VerifiedPath);
+  }
 
   private static void TryDelete(string path)
   {
