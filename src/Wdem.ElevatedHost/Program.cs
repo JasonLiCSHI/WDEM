@@ -45,6 +45,7 @@ internal static class Program
 
   private static async Task RunAsync(ElevatedHostBootstrapOptions options)
   {
+    ElevatedHostProcessJob.JoinCurrentProcess(options.JobName);
     using var pipe = new NamedPipeClientStream(
         ".",
         options.PipeName,
@@ -85,9 +86,7 @@ internal static class Program
         continue;
       }
 
-      if (request is null ||
-          request.RunId != options.RunId ||
-          !string.Equals(request.PipeName, options.PipeName, StringComparison.Ordinal))
+      if (request is null || request.RunId != options.RunId)
       {
         await WriteResultAsync(writer, Refused()).ConfigureAwait(false);
         continue;

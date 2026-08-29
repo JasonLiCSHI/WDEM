@@ -4,6 +4,7 @@ using Wdem.Core.Planning;
 using Wdem.Core.Providers;
 using Wdem.Core.Resources;
 using Wdem.Core.Runs;
+using Wdem.Windows.Execution;
 
 namespace Wdem.Windows.Security;
 
@@ -109,7 +110,6 @@ public sealed class ElevatedResourceWorker
     }
 
     if (approved is null ||
-        !FixedEquals(request.PlanFingerprint, approved.Fingerprint) ||
         !FixedEquals(
             approved.Fingerprint,
             ApprovedResourceFingerprint.Create(approved.Definition, approved.Plan)) ||
@@ -119,6 +119,21 @@ public sealed class ElevatedResourceWorker
     {
       return Refused(request.ResourceId, "The approved resource fingerprint does not match.");
     }
+
+    var approvedSegments = PrivilegePlanSegments.Split(approved.Plan)
+        .Where(segment => segment.Steps.Any(step =>
+            step.Action != PlanAction.None &&
+            step.PrivilegeRequirement == PrivilegeRequirement.Administrator))
+        .Where(segment => FixedEquals(
+            request.PlanFingerprint,
+            ApprovedResourceFingerprint.Create(approved.Definition, segment)))
+        .ToArray();
+    if (approvedSegments.Length != 1)
+    {
+      return Refused(request.ResourceId, "The approved administrator segment does not match.");
+    }
+
+    var approvedSegment = approvedSegments[0];
 
     if (!DependenciesEqual(planned.Dependencies, approved.Definition.Dependencies))
     {
@@ -173,7 +188,7 @@ public sealed class ElevatedResourceWorker
       return Refused(request.ResourceId, "The approved provider identity is unavailable.");
     }
 
-    var claim = $"{request.RunId:N}\0{approved.Definition.Id}\0{approved.Fingerprint}";
+    var claim = $"{request.RunId:N}\0{approved.Definition.Id}\0{request.PlanFingerprint}";
     lock (_claimsGate)
     {
       if (!_claimedResources.Add(claim))
@@ -190,7 +205,7 @@ public sealed class ElevatedResourceWorker
     {
       var result = await provider.ApplyAsync(
           approved.Definition,
-          approved.Plan,
+          approvedSegment,
           redactingProgress,
           cancellationToken).ConfigureAwait(false);
       return Redact(result, request.ResourceId);

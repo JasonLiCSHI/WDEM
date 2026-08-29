@@ -52,13 +52,14 @@ public sealed class ElevatedHostLauncher : IElevatedHostLauncher
     ElevatedHostProcessJob? job = null;
     try
     {
+      job = ElevatedHostProcessJob.Create(ElevatedHostProcessJob.NameForPipe(pipeName));
       process = Process.Start(CreateStartInfo(
           _hostPath,
           pipeName,
           runId,
           _localApplicationData)) ?? throw new InvalidOperationException(
           "The elevated host process could not be started.");
-      job = ElevatedHostProcessJob.Attach(process);
+      job.Track(process);
       using var timeout = new CancellationTokenSource(_connectionTimeout);
       using var linked = CancellationTokenSource.CreateLinkedTokenSource(
           cancellationToken,
@@ -95,6 +96,8 @@ public sealed class ElevatedHostLauncher : IElevatedHostLauncher
     };
     startInfo.ArgumentList.Add("--pipe");
     startInfo.ArgumentList.Add(pipeName);
+    startInfo.ArgumentList.Add("--job");
+    startInfo.ArgumentList.Add(ElevatedHostProcessJob.NameForPipe(pipeName));
     startInfo.ArgumentList.Add("--run-id");
     startInfo.ArgumentList.Add(runId.ToString("D"));
     startInfo.ArgumentList.Add("--local-app-data");

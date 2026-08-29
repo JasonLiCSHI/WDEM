@@ -21,6 +21,7 @@ public sealed class ElevatedHostLauncherTests
     Assert.Equal(
         [
           "--pipe", "wdem-pipe",
+          "--job", @"Local\Wdem.ElevatedHost.wdem-pipe",
           "--run-id", runId.ToString("D"),
           "--local-app-data", @"C:\Users\user\AppData\Local"
         ],
@@ -37,6 +38,7 @@ public sealed class ElevatedHostLauncherTests
     var arguments = new[]
     {
       "--pipe", "wdem-pipe",
+      "--job", @"Local\Wdem.ElevatedHost.wdem-pipe",
       "--run-id", runId.ToString("D"),
       "--local-app-data", @"C:\Users\user\AppData\Local",
       "--command", "powershell.exe"
@@ -49,6 +51,23 @@ public sealed class ElevatedHostLauncherTests
   }
 
   [Fact]
+  public void BootstrapOptions_ParseAcceptsConstrainedJobBootstrap()
+  {
+    var runId = Guid.NewGuid();
+    const string jobName = @"Local\Wdem.ElevatedHost.wdem-pipe";
+
+    var options = ElevatedHostBootstrapOptions.Parse(
+    [
+      "--pipe", "wdem-pipe",
+      "--job", jobName,
+      "--run-id", runId.ToString("D"),
+      "--local-app-data", @"C:\Users\user\AppData\Local"
+    ]);
+
+    Assert.Equal(jobName, options.JobName);
+  }
+
+  [Fact]
   public void BootstrapOptions_ParseContainsNoProfilesDirectory()
   {
     var runId = Guid.NewGuid();
@@ -56,6 +75,7 @@ public sealed class ElevatedHostLauncherTests
     var options = ElevatedHostBootstrapOptions.Parse(
     [
       "--pipe", "wdem-pipe",
+      "--job", @"Local\Wdem.ElevatedHost.wdem-pipe",
       "--run-id", runId.ToString("D"),
       "--local-app-data", @"C:\Users\user\AppData\Local"
     ]);

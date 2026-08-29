@@ -103,6 +103,41 @@ public sealed class EnvironmentRunServiceTests
     Assert.NotNull(run.Plan);
   }
 
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public async Task ApplyAsync_CleanupDiagnosticFailure_PersistsTerminalRun(
+      bool failDurableAppend)
+  {
+    var provider = new ScriptedProvider(Missing("git"));
+    var store = new InMemoryRunStore();
+    if (failDurableAppend)
+    {
+      store.AppendLogOperation = (_, entry, _) =>
+          entry.Error?.Summary == "Elevated host cleanup failed."
+              ? Task.FromException(new IOException("cleanup log unavailable"))
+              : Task.CompletedTask;
+    }
+
+    var sink = new RunEventHub();
+    using var subscription = sink.SubscribeRequired((runEvent, _) =>
+        !failDurableAppend && runEvent.Message == "Elevated host cleanup failed."
+            ? Task.FromException(new IOException("cleanup observer unavailable"))
+            : Task.CompletedTask);
+    var (service, _) = CreateService(
+        provider,
+        store: store,
+        eventSink: sink,
+        dispatcher: new CleanupFailingDispatcher());
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    Assert.Equal(ExecutionState.Completed, run.State);
+    var persisted = await store.GetAsync(run.RunId, CancellationToken.None);
+    Assert.Equal(ExecutionState.Completed, persisted!.State);
+    Assert.Equal(run.Outcome, persisted.Outcome);
+  }
+
   [Fact]
   public async Task InspectAsync_AnyAcceptedPlanErrorFailsRunAndSkipsResource()
   {
@@ -873,7 +908,8 @@ public sealed class EnvironmentRunServiceTests
       IProfileCatalog? catalog = null,
       InMemoryRunStore? store = null,
       IRunEventSink? eventSink = null,
-      IExecutionPlanner? planner = null)
+      IExecutionPlanner? planner = null,
+      IResourceApplyDispatcher? dispatcher = null)
   {
     catalog ??= new FakeProfileCatalog(profile ?? Profile(), CanonicalProfilePath);
     var registry = new ResourceProviderRegistry([provider]);
@@ -889,7 +925,7 @@ public sealed class EnvironmentRunServiceTests
             planner ?? new ExecutionPlanner(registry, compliance),
             new ResourceScheduler(),
             store,
-            new DirectResourceApplyDispatcher(),
+            dispatcher ?? new DirectResourceApplyDispatcher(),
             timeProvider: null,
             eventSink,
             new LogRedactor()),
@@ -1281,6 +1317,7 @@ public sealed class EnvironmentRunServiceTests
     public IReadOnlyList<StructuredError> Diagnostics => [];
     public List<ExecutionRun> SavedSnapshots { get; } = [];
     public Func<ExecutionRun, CancellationToken, Task>? SaveOperation { get; init; }
+    public Func<Guid, RunLogEntry, CancellationToken, Task>? AppendLogOperation { get; set; }
 
     public Task CreateAsync(ExecutionRun run, CancellationToken cancellationToken)
     {
@@ -1394,10 +1431,16 @@ public sealed class EnvironmentRunServiceTests
       }
     }
 
-    public Task AppendLogAsync(
+    public async Task AppendLogAsync(
         Guid runId,
         RunLogEntry entry,
-        CancellationToken cancellationToken) => Task.CompletedTask;
+        CancellationToken cancellationToken)
+    {
+      if (AppendLogOperation is not null)
+      {
+        await AppendLogOperation(runId, entry, cancellationToken);
+      }
+    }
 
     public Task<IReadOnlyList<RunLogEntry>> ReadLogPageAsync(
         Guid runId,
@@ -1414,5 +1457,27 @@ public sealed class EnvironmentRunServiceTests
         return ValueTask.CompletedTask;
       }
     }
+  }
+
+  private sealed class CleanupFailingDispatcher : IResourceApplyDispatcher
+  {
+    private readonly DirectResourceApplyDispatcher _direct = new();
+
+    public Task<ResourceApplyResult> ApplyAsync(
+        Guid runId,
+        IResourceProvider provider,
+        ResourceDefinition resource,
+        ResourcePlan plan,
+        IProgress<ProviderProgress>? progress,
+        CancellationToken cancellationToken) => _direct.ApplyAsync(
+            runId,
+            provider,
+            resource,
+            plan,
+            progress,
+            cancellationToken);
+
+    public Task CompleteRunAsync(Guid runId, CancellationToken cancellationToken) =>
+        Task.FromException(new IOException("elevated cleanup unavailable"));
   }
 }

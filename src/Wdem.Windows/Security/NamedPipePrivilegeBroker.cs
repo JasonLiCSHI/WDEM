@@ -46,8 +46,7 @@ public sealed class NamedPipePrivilegeBroker :
     await session.RequestGate.WaitAsync(cancellationToken).ConfigureAwait(false);
     try
     {
-      var scopedRequest = request with { PipeName = session.PipeName };
-      return await session.Session.ApplyAsync(scopedRequest, progress, cancellationToken)
+      return await session.Session.ApplyAsync(request, progress, cancellationToken)
           .ConfigureAwait(false);
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -202,7 +201,7 @@ public sealed class NamedPipePrivilegeBroker :
         _terminalLaunchFailures.Add(runId, failure);
         throw new CachedLaunchFailureException(failure);
       }
-      var session = new HostSession(pipeName, launched, new SemaphoreSlim(1, 1));
+      var session = new HostSession(launched, new SemaphoreSlim(1, 1));
       _sessions.Add(runId, session);
       return session;
     }
@@ -300,7 +299,6 @@ public sealed class NamedPipePrivilegeBroker :
       };
 
   private sealed record HostSession(
-      string PipeName,
       IElevatedHostSession Session,
       SemaphoreSlim RequestGate);
 

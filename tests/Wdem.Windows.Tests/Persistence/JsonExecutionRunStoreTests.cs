@@ -243,8 +243,7 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
             planned.Definition.Id,
             ApprovedResourceFingerprint.Create(
                 planned.Definition,
-                planned.ResourcePlan),
-            "pipe"),
+                planned.ResourcePlan)),
         null,
         CancellationToken.None);
 
@@ -277,8 +276,7 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
         planned.Definition.Id,
         ApprovedResourceFingerprint.Create(
             planned.Definition,
-            planned.ResourcePlan),
-        "pipe");
+            planned.ResourcePlan));
     ResourceApplyResult refused;
 
     await using (var sidecarLock = new FileStream(

@@ -549,16 +549,6 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         };
       }
     }
-    if (cleanupError is not null)
-    {
-      await events.PublishLogAsync(
-          null,
-          null,
-          cleanupError.Summary,
-          cleanupError,
-          CancellationToken.None,
-          ProviderLogLevel.Warning).ConfigureAwait(false);
-    }
     if (cancellationToken.IsCancellationRequested)
     {
       await progressPumps.SealAsync().ConfigureAwait(false);
@@ -581,7 +571,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           .Select(result => $"Resource '{result.ResourceId}' requires a restart.")
           .ToArray()
     };
-    return await PersistTerminalAsync(completedRun, events).ConfigureAwait(false);
+    return await PersistTerminalAsync(completedRun, events, cleanupError).ConfigureAwait(false);
   }
 
   private async Task<ResourceResult> ExecuteResourceAsync(
@@ -927,11 +917,32 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
 
   private async Task<ExecutionRun> PersistTerminalAsync(
       ExecutionRun run,
-      RunEventPublisher events)
+      RunEventPublisher events,
+      StructuredError? cleanupError = null)
   {
-    using var timeout = new CancellationTokenSource(_persistenceTimeout);
-    var saved = await _runStore.SaveAsync(run, timeout.Token).ConfigureAwait(false);
-    await events.PublishCompletedAsync(saved, timeout.Token).ConfigureAwait(false);
+    using var saveTimeout = new CancellationTokenSource(_persistenceTimeout);
+    var saved = await _runStore.SaveAsync(run, saveTimeout.Token).ConfigureAwait(false);
+    if (cleanupError is not null)
+    {
+      try
+      {
+        using var diagnosticTimeout = new CancellationTokenSource(_persistenceTimeout);
+        await events.PublishLogAsync(
+            null,
+            null,
+            cleanupError.Summary,
+            cleanupError,
+            diagnosticTimeout.Token,
+            ProviderLogLevel.Warning).ConfigureAwait(false);
+      }
+      catch (Exception)
+      {
+        // Terminal state is durable; cleanup diagnostics are best effort.
+      }
+    }
+
+    using var completionTimeout = new CancellationTokenSource(_persistenceTimeout);
+    await events.PublishCompletedAsync(saved, completionTimeout.Token).ConfigureAwait(false);
     return saved;
   }
 
@@ -1716,9 +1727,10 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
       try
       {
+        var sequence = checked(_sequence + 1);
         var runEvent = redactor.Redact(new RunEvent(
             runId,
-            checked(++_sequence),
+            sequence,
             timeProvider.GetUtcNow(),
             kind,
             resourceId,
@@ -1730,6 +1742,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
             runId,
             RunLogEntry.FromEvent(runEvent, level),
             cancellationToken).ConfigureAwait(false);
+        _sequence = sequence;
         await sink.PublishAsync(runEvent, cancellationToken).ConfigureAwait(false);
       }
       finally

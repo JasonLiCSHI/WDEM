@@ -25,9 +25,8 @@ public sealed class NamedPipePrivilegeBrokerTests
     Assert.All(launcher.Session.Requests, request =>
     {
       Assert.Equal(runId, request.RunId);
-      Assert.False(string.IsNullOrWhiteSpace(request.PipeName));
-      Assert.Equal(launcher.PipeNames.Single(), request.PipeName);
     });
+    Assert.Single(launcher.PipeNames);
   }
 
   [Fact]
@@ -164,7 +163,7 @@ public sealed class NamedPipePrivilegeBrokerTests
         .ToArray();
 
     Assert.Equal(
-        ["PipeName", "PlanFingerprint", "ResourceId", "RunId"],
+        ["PlanFingerprint", "ResourceId", "RunId"],
         properties);
   }
 
@@ -302,14 +301,71 @@ public sealed class NamedPipePrivilegeBrokerTests
     Assert.Equal(
         ApprovedResourceFingerprint.Create(resource, plan),
         request.PlanFingerprint);
-    Assert.Equal(string.Empty, request.PipeName);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_MixedPrivilegePlan_PreservesOrderedIntegritySegments()
+  {
+    var calls = new List<string>();
+    var provider = new RecordingProvider
+    {
+      Applied = plan => calls.Add($"direct:{string.Join(',', plan.Steps.Select(step => step.Id))}")
+    };
+    var broker = new RecordingPrivilegeBroker
+    {
+      Applied = request => calls.Add($"broker:{request.PlanFingerprint}")
+    };
+    var dispatcher = new PrivilegeAwareResourceApplyDispatcher(
+        new DirectResourceApplyDispatcher(),
+        broker);
+    var runId = Guid.NewGuid();
+    var resource = Resource(PrivilegeRequirement.Administrator);
+    var plan = Plan(resource, PrivilegeRequirement.CurrentUser) with
+    {
+      Steps =
+      [
+        Step("current-one", PrivilegeRequirement.CurrentUser),
+        Step("administrator", PrivilegeRequirement.Administrator),
+        Step("current-two", PrivilegeRequirement.CurrentUser)
+      ]
+    };
+    var administratorPlan = plan with { Steps = [plan.Steps[1]] };
+    broker.Result = SuccessfulResult(resource.Id, administratorPlan.Steps);
+
+    var result = await dispatcher.ApplyAsync(
+        runId,
+        provider,
+        resource,
+        plan,
+        null,
+        CancellationToken.None);
+
+    var administratorFingerprint = ApprovedResourceFingerprint.Create(
+        resource,
+        administratorPlan);
+    Assert.Equal(
+        [
+          "direct:current-one",
+          $"broker:{administratorFingerprint}",
+          "direct:current-two"
+        ],
+        calls);
+    Assert.Equal(
+        ["current-one", "administrator", "current-two"],
+        result.StepResults.Select(step => step.StepId));
+    Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
+    Assert.Equal(2, provider.ApplyCalls);
+    Assert.All(
+        provider.AppliedPlans,
+        applied => Assert.All(
+            applied.Steps,
+            step => Assert.Equal(PrivilegeRequirement.CurrentUser, step.PrivilegeRequirement)));
   }
 
   private static ElevatedResourceRequest Request(Guid runId, string resourceId) => new(
       runId,
       resourceId,
-      new string('A', 64),
-      string.Empty);
+      new string('A', 64));
 
   private static ResourceDefinition Resource(PrivilegeRequirement privilege) => new()
   {
@@ -340,6 +396,29 @@ public sealed class NamedPipePrivilegeBrokerTests
             RestartPolicy = RestartPolicy.NoRestart
           }
         ]
+      };
+
+  private static PlanStep Step(string id, PrivilegeRequirement privilege) => new()
+  {
+    Id = id,
+    Description = $"Apply {id}.",
+    Action = PlanAction.Configure,
+    PrivilegeRequirement = privilege,
+    RestartPolicy = RestartPolicy.NoRestart
+  };
+
+  private static ResourceApplyResult SuccessfulResult(
+      string resourceId,
+      IReadOnlyList<PlanStep> steps) => new()
+      {
+        ResourceId = resourceId,
+        Outcome = ApplyOutcome.Succeeded,
+        StepResults = steps.Select(step => new ProviderStepResult
+        {
+          StepId = step.Id,
+          Action = step.Action,
+          Progress = 1
+        }).ToArray()
       };
 
   private sealed class RecordingElevatedHostLauncher : IElevatedHostLauncher
@@ -409,6 +488,8 @@ public sealed class NamedPipePrivilegeBrokerTests
   private sealed class RecordingPrivilegeBroker : IPrivilegeBroker
   {
     public List<ElevatedResourceRequest> Requests { get; } = [];
+    public Action<ElevatedResourceRequest>? Applied { get; init; }
+    public ResourceApplyResult? Result { get; set; }
 
     public Task<ResourceApplyResult> ApplyAsync(
         ElevatedResourceRequest request,
@@ -416,7 +497,8 @@ public sealed class NamedPipePrivilegeBrokerTests
         CancellationToken cancellationToken)
     {
       Requests.Add(request);
-      return Task.FromResult(new ResourceApplyResult
+      Applied?.Invoke(request);
+      return Task.FromResult(Result ?? new ResourceApplyResult
       {
         ResourceId = request.ResourceId,
         Outcome = ApplyOutcome.Succeeded
@@ -430,6 +512,8 @@ public sealed class NamedPipePrivilegeBrokerTests
     public string ProviderName => "test";
     public ProviderCapabilities Capabilities { get; } = new();
     public int ApplyCalls { get; private set; }
+    public Action<ResourcePlan>? Applied { get; init; }
+    public List<ResourcePlan> AppliedPlans { get; } = [];
 
     public ValueTask<ResourceApplyResult> ApplyAsync(
         ResourceDefinition resource,
@@ -438,11 +522,9 @@ public sealed class NamedPipePrivilegeBrokerTests
         CancellationToken cancellationToken)
     {
       ApplyCalls++;
-      return ValueTask.FromResult(new ResourceApplyResult
-      {
-        ResourceId = resource.Id,
-        Outcome = ApplyOutcome.Succeeded
-      });
+      AppliedPlans.Add(plan);
+      Applied?.Invoke(plan);
+      return ValueTask.FromResult(SuccessfulResult(resource.Id, plan.Steps));
     }
 
     public ValueTask<ProviderValidationResult> ValidateAsync(

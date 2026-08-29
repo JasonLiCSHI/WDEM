@@ -26,8 +26,7 @@ public sealed class ElevatedResourceWorkerTests
         new ElevatedResourceRequest(
             run.RunId,
             "admin-resource",
-            Mutate(approvedFingerprint),
-            "pipe"),
+            Mutate(approvedFingerprint)),
         null,
         CancellationToken.None);
 
@@ -51,8 +50,7 @@ public sealed class ElevatedResourceWorkerTests
         new ElevatedResourceRequest(
             run.RunId,
             "admin-resource",
-            approvedFingerprint,
-            "pipe"),
+            approvedFingerprint),
         progress,
         CancellationToken.None);
 
@@ -118,8 +116,7 @@ public sealed class ElevatedResourceWorkerTests
         new ElevatedResourceRequest(
             run.RunId,
             original.Id,
-            fingerprint,
-            "pipe"),
+            fingerprint),
         null,
         CancellationToken.None);
 
@@ -164,14 +161,59 @@ public sealed class ElevatedResourceWorkerTests
         new ElevatedResourceRequest(
             currentUserRun.RunId,
             "admin-resource",
-            approvedFingerprint,
-            "pipe"),
+            approvedFingerprint),
         null,
         CancellationToken.None);
 
     Assert.Equal(ApplyOutcome.Failed, result.Outcome);
     Assert.Equal(WdemErrorCode.PermissionError, result.Error!.Code);
     Assert.Equal(0, provider.ApplyCalls);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_MixedApprovedPlan_ExecutesOnlyRequestedAdministratorSegment()
+  {
+    var provider = new RecordingProvider();
+    var approved = ApprovedRun(provider, out _);
+    var planned = approved.Plan!.Resources.Single();
+    var mixedPlan = planned.ResourcePlan with
+    {
+      Steps =
+      [
+        planned.ResourcePlan.Steps.Single() with
+        {
+          Id = "admin-resource:current-user",
+          PrivilegeRequirement = PrivilegeRequirement.CurrentUser
+        },
+        planned.ResourcePlan.Steps.Single()
+      ]
+    };
+    var mixedRun = approved with
+    {
+      Plan = approved.Plan with
+      {
+        Resources = [planned with { ResourcePlan = mixedPlan }]
+      }
+    };
+    var administratorPlan = mixedPlan with { Steps = [mixedPlan.Steps[1]] };
+    var worker = new ElevatedResourceWorker(
+        new StubRunStore(mixedRun),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+
+    var result = await worker.ApplyAsync(
+        new ElevatedResourceRequest(
+            mixedRun.RunId,
+            planned.Definition.Id,
+            ApprovedResourceFingerprint.Create(planned.Definition, administratorPlan)),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
+    var applied = Assert.IsType<ResourcePlan>(provider.LastPlan);
+    var step = Assert.Single(applied.Steps);
+    Assert.Equal("admin-resource:apply", step.Id);
+    Assert.Equal(PrivilegeRequirement.Administrator, step.PrivilegeRequirement);
   }
 
   [Fact]
@@ -198,8 +240,7 @@ public sealed class ElevatedResourceWorkerTests
         new ElevatedResourceRequest(
             approved.RunId,
             "admin-resource",
-            approvedFingerprint,
-            "pipe"),
+            approvedFingerprint),
         null,
         CancellationToken.None);
 
@@ -239,8 +280,7 @@ public sealed class ElevatedResourceWorkerTests
         new ElevatedResourceRequest(
             approved.RunId,
             "admin-resource",
-            approvedFingerprint,
-            "pipe"),
+            approvedFingerprint),
         null,
         CancellationToken.None);
 
@@ -304,8 +344,7 @@ public sealed class ElevatedResourceWorkerTests
         new ElevatedResourceRequest(
             approved.RunId,
             original.Id,
-            fingerprint,
-            "pipe"),
+            fingerprint),
         null,
         CancellationToken.None);
 
@@ -326,8 +365,7 @@ public sealed class ElevatedResourceWorkerTests
     var request = new ElevatedResourceRequest(
         run.RunId,
         "admin-resource",
-        approvedFingerprint,
-        "pipe");
+        approvedFingerprint);
 
     var first = await worker.ApplyAsync(request, null, CancellationToken.None);
     var replay = await worker.ApplyAsync(request, null, CancellationToken.None);
@@ -380,8 +418,7 @@ public sealed class ElevatedResourceWorkerTests
         new ElevatedResourceRequest(
             approvedRun.RunId,
             "admin-resource",
-            approvedFingerprint,
-            "pipe"),
+            approvedFingerprint),
         null,
         CancellationToken.None);
 
@@ -546,6 +583,7 @@ public sealed class ElevatedResourceWorkerTests
     public ProviderCapabilities Capabilities { get; } = new();
     public int ApplyCalls { get; private set; }
     public ResourceDefinition? LastResource { get; private set; }
+    public ResourcePlan? LastPlan { get; private set; }
 
     public ValueTask<ResourceApplyResult> ApplyAsync(
         ResourceDefinition resource,
@@ -555,6 +593,7 @@ public sealed class ElevatedResourceWorkerTests
     {
       ApplyCalls++;
       LastResource = resource;
+      LastPlan = plan;
       progress?.Report(new ProviderProgress("apply", 0.5, "password=hunter2"));
       return ValueTask.FromResult(new ResourceApplyResult
       {

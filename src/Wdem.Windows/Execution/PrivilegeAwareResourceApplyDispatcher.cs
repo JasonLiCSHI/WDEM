@@ -14,7 +14,7 @@ public sealed class PrivilegeAwareResourceApplyDispatcher(
   private readonly IPrivilegeBroker _privilegeBroker =
       privilegeBroker ?? throw new ArgumentNullException(nameof(privilegeBroker));
 
-  public Task<ResourceApplyResult> ApplyAsync(
+  public async Task<ResourceApplyResult> ApplyAsync(
       Guid runId,
       IResourceProvider provider,
       ResourceDefinition resource,
@@ -29,27 +29,89 @@ public sealed class PrivilegeAwareResourceApplyDispatcher(
             step.Action != PlanAction.None &&
             step.PrivilegeRequirement == PrivilegeRequirement.Administrator))
     {
-      return _direct.ApplyAsync(
+      return await _direct.ApplyAsync(
           runId,
           provider,
           resource,
           plan,
           progress,
-          cancellationToken);
+          cancellationToken).ConfigureAwait(false);
     }
 
-    return _privilegeBroker.ApplyAsync(
-        new ElevatedResourceRequest(
-            runId,
-            resource.Id,
-            ApprovedResourceFingerprint.Create(resource, plan),
-            string.Empty),
-        progress,
-        cancellationToken);
+    var segments = PrivilegePlanSegments.Split(plan);
+    if (segments.Count == 1)
+    {
+      return await ApplyAdministratorAsync(
+          runId,
+          resource,
+          plan,
+          progress,
+          cancellationToken).ConfigureAwait(false);
+    }
+
+    var stepResults = new List<ProviderStepResult>();
+    var diagnostics = new List<StructuredError>();
+    foreach (var segment in segments)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      if (!segment.RequiresApply)
+      {
+        continue;
+      }
+
+      var administrator = segment.Steps.Any(step =>
+          step.Action != PlanAction.None &&
+          step.PrivilegeRequirement == PrivilegeRequirement.Administrator);
+      var result = administrator
+          ? await ApplyAdministratorAsync(
+              runId,
+              resource,
+              segment,
+              progress,
+              cancellationToken).ConfigureAwait(false)
+          : await _direct.ApplyAsync(
+              runId,
+              provider,
+              resource,
+              segment,
+              progress,
+              cancellationToken).ConfigureAwait(false);
+      stepResults.AddRange(result.StepResults);
+      diagnostics.AddRange(result.Diagnostics);
+      if (result.Outcome != ApplyOutcome.Succeeded)
+      {
+        return result with
+        {
+          StepResults = stepResults,
+          Diagnostics = diagnostics
+        };
+      }
+    }
+
+    return new ResourceApplyResult
+    {
+      ResourceId = resource.Id,
+      Outcome = ApplyOutcome.Succeeded,
+      StepResults = stepResults,
+      Diagnostics = diagnostics
+    };
   }
 
   public Task CompleteRunAsync(Guid runId, CancellationToken cancellationToken) =>
       _privilegeBroker is IPrivilegeBrokerRunLifecycle lifecycle
           ? lifecycle.CompleteRunAsync(runId, cancellationToken)
           : Task.CompletedTask;
+
+  private Task<ResourceApplyResult> ApplyAdministratorAsync(
+      Guid runId,
+      ResourceDefinition resource,
+      ResourcePlan plan,
+      IProgress<ProviderProgress>? progress,
+      CancellationToken cancellationToken) => _privilegeBroker.ApplyAsync(
+          new ElevatedResourceRequest(
+              runId,
+              resource.Id,
+              ApprovedResourceFingerprint.Create(resource, plan)),
+          progress,
+          cancellationToken);
 }
