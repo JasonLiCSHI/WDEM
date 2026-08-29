@@ -5,9 +5,11 @@ using Wdem.Core.Execution;
 namespace Wdem.Windows.VisualStudio;
 
 internal sealed class VisualStudioConfigurationResolver(
+    string? applicationRoot = null,
     Func<CancellationToken, Task>? afterSnapshot = null)
 {
   private const int MaxConfigurationBytes = 1024 * 1024;
+  private readonly string _applicationRoot = Path.GetFullPath(applicationRoot ?? AppContext.BaseDirectory);
 
   public async Task<ResolvedVisualStudioOptions> ResolveAsync(
       VisualStudioResourceOptions options,
@@ -27,7 +29,17 @@ internal sealed class VisualStudioConfigurationResolver(
         return Failure(options, "The expected SHA-256 is invalid.");
       }
 
-      var fullPath = Path.GetFullPath(options.VsConfigPath);
+      var fullPath = Path.GetFullPath(Path.IsPathFullyQualified(options.VsConfigPath)
+          ? options.VsConfigPath
+          : Path.Combine(_applicationRoot, options.VsConfigPath));
+      if (!Path.IsPathFullyQualified(options.VsConfigPath))
+      {
+        var assetsRoot = Path.Combine(_applicationRoot, "profiles", "assets");
+        if (!Wdem.Windows.Configuration.ConfigurationSourceResolver.IsWithin(fullPath, assetsRoot))
+        {
+          return Failure(options, "The .vsconfig path escapes the application profiles/assets root.");
+        }
+      }
       byte[] snapshot;
       await using (var stream = new FileStream(
                        fullPath,

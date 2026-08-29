@@ -9,6 +9,7 @@ using Wdem.LegacySource.Services.Managers;
 using Wdem.LegacySource.Services.System;
 using Wdem.Windows.Processes;
 using Wdem.Windows.Providers;
+using Wdem.Windows.Configuration;
 using Wdem.Windows.Security;
 using Wdem.Windows.VisualStudio;
 
@@ -25,7 +26,10 @@ internal sealed record WindowsProviderComposition(
 
 internal static class WindowsProviderCompositionFactory
 {
-  public static WindowsProviderComposition Create(string? logFilePath)
+  public static WindowsProviderComposition Create(
+      string? logFilePath,
+      string? applicationRoot = null,
+      string? profileRoot = null)
   {
     var logger = new ConsoleLogger(logFilePath);
     var processRunner = new DefaultProcessRunner();
@@ -44,6 +48,12 @@ internal static class WindowsProviderCompositionFactory
     var trustedFileVerifier = new TrustedFileVerifier();
     var visualStudioDiscovery = new VsWhereVisualStudioDiscovery(processExecutor);
     var vsixManifestReader = new VsixManifestReader();
+    applicationRoot ??= AppContext.BaseDirectory;
+    profileRoot ??= Path.Combine(applicationRoot, "profiles");
+    var configurationSourceResolver = new ConfigurationSourceResolver(
+        applicationRoot,
+        profileRoot);
+    var configurationImporter = new ConfigurationImporter();
     var providers = new ResourceProviderRegistry(
     [
       new LegacyPackageManagerProviderAdapter("winget", winget, supportsSource: true),
@@ -54,7 +64,8 @@ internal static class WindowsProviderCompositionFactory
           visualStudioDiscovery,
           new VisualStudioInstallerClient(processExecutor, trustedFileVerifier),
           trustedFileVerifier,
-          complianceEvaluator),
+          complianceEvaluator,
+          applicationRoot: applicationRoot),
       new VisualStudioExtensionProvider(
           visualStudioDiscovery,
           vsixManifestReader,
@@ -65,6 +76,16 @@ internal static class WindowsProviderCompositionFactory
           visualStudioDiscovery,
           vsixManifestReader,
           winGetCommandClient,
+          complianceEvaluator),
+      new ReSharperSettingsProvider(
+          configurationSourceResolver,
+          configurationImporter,
+          complianceEvaluator),
+      new VisualStudioSettingsProvider(
+          configurationSourceResolver,
+          configurationImporter,
+          visualStudioDiscovery,
+          processExecutor,
           complianceEvaluator)
     ]);
 

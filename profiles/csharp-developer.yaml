@@ -1,0 +1,77 @@
+schemaVersion: "1.0"
+profile:
+  id: csharp-developer
+  version: 1.0.0
+  displayName: C# Developer
+  description: Standard C# and .NET development environment
+  requiredResources:
+    - id: visual-studio
+    - id: dotnet-sdk
+    - id: git
+  optionalResources:
+    - id: resharper
+      defaultSelected: false
+    - id: resharper-settings
+      defaultSelected: false
+    - id: company-vs-extension
+      defaultSelected: false
+    - id: visual-studio-settings
+      defaultSelected: false
+resources:
+  visual-studio:
+    type: visual-studio
+    provider: visual-studio
+    parameters:
+      productId: Microsoft.VisualStudio.Product.Community
+      instanceId: wdem-vs-community
+      edition: Community
+      channelId: VisualStudio.18.Release
+      workloads: Microsoft.VisualStudio.Workload.ManagedDesktop
+      components: Microsoft.VisualStudio.Component.CoreEditor,Microsoft.VisualStudio.Component.Roslyn.Compiler,Microsoft.Net.Component.4.8.1.TargetingPack
+      vsconfigPath: profiles/assets/csharp-developer.vsconfig
+      expectedSha256: 8026BB860A0B8A31979F7706601CD23D0F3265A42D39EAAD023AA701A1CC5894
+  dotnet-sdk:
+    type: dotnet-sdk
+    provider: winget
+  git:
+    type: git
+    provider: winget
+  resharper:
+    type: resharper
+    provider: winget
+    dependsOn:
+      - visual-studio
+    parameters:
+      instanceId: wdem-vs-community
+  resharper-settings:
+    type: resharper-settings
+    provider: file
+    dependsOn:
+      - resharper
+    parameters:
+      sourcePath: profiles/assets/csharp-developer.DotSettings
+      expectedSha256: 4B9EBCC4DD86B8DBB6F337E45160E1A4FD09DA04A04723A4E4ACC601CEBCAFFC
+      destinationPath: ReSharperPlatformVs18/GlobalSettingsStorage.DotSettings
+  company-vs-extension:
+    type: visual-studio-extension
+    provider: vsix
+    privilegeRequirement: Administrator
+    dependsOn:
+      - visual-studio
+    parameters:
+      extensionId: Company.VisualStudio.Extension
+      instanceId: wdem-vs-community
+      sourcePath: ${WDEM_COMPANY_VSIX_PATH}
+      expectedSha256: ${WDEM_COMPANY_VSIX_SHA256}
+  visual-studio-settings:
+    type: visual-studio-settings
+    provider: visual-studio-settings
+    dependsOn:
+      - visual-studio
+    parameters:
+      sourcePath: profiles/assets/csharp-developer.vssettings
+      expectedSha256: 1C15AC04C11C2E5FA6B2003D5AF145CC47332B9284EA1E391876FF46000627AB
+      instanceId: wdem-vs-community
+      edition: Community
+      channelId: VisualStudio.18.Release
+      settingsStorePath: Settings/csharp-developer.vssettings

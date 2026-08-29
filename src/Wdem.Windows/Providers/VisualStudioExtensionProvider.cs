@@ -864,6 +864,11 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
 
   private static bool IsValidSource(string? source)
   {
+    if (string.Equals(source, "${WDEM_COMPANY_VSIX_PATH}", StringComparison.Ordinal))
+    {
+      return true;
+    }
+
     if (string.IsNullOrWhiteSpace(source) || source.Any(char.IsControl))
     {
       return false;
@@ -880,7 +885,9 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
         string.Equals(Path.GetExtension(uri.AbsolutePath), ".vsix", StringComparison.OrdinalIgnoreCase);
   }
 
-  private static bool IsSha256(string? value) => value is { Length: 64 } && value.All(Uri.IsHexDigit);
+  private static bool IsSha256(string? value) =>
+      string.Equals(value, "${WDEM_COMPANY_VSIX_SHA256}", StringComparison.Ordinal) ||
+      value is { Length: 64 } && value.All(Uri.IsHexDigit);
 
   private static string? GetParameter(ResourceDefinition resource, string parameter) =>
       resource.Parameters.TryGetValue(parameter, out var value) ? value : null;

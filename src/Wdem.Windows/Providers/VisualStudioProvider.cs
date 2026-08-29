@@ -15,17 +15,19 @@ public sealed class VisualStudioProvider : IResourceProvider
   private readonly ITrustedFileVerifier _trustedFileVerifier;
   private readonly ISecureArtifactStager _secureArtifactStager;
   private readonly IComplianceEvaluator _complianceEvaluator;
-  private readonly VisualStudioConfigurationResolver _configurationResolver = new();
+  private readonly VisualStudioConfigurationResolver _configurationResolver;
 
   public VisualStudioProvider(
       IVisualStudioDiscovery discovery,
-      IComplianceEvaluator complianceEvaluator)
+      IComplianceEvaluator complianceEvaluator,
+      string? applicationRoot = null)
   {
     _discovery = discovery ?? throw new ArgumentNullException(nameof(discovery));
     _trustedFileVerifier = new TrustedFileVerifier();
     _secureArtifactStager = new SecureArtifactStager(verifier: _trustedFileVerifier);
     _complianceEvaluator = complianceEvaluator ??
         throw new ArgumentNullException(nameof(complianceEvaluator));
+    _configurationResolver = new VisualStudioConfigurationResolver(applicationRoot);
     Capabilities = CreateCapabilities(supportsInstallerParameters: false);
   }
 
@@ -34,7 +36,8 @@ public sealed class VisualStudioProvider : IResourceProvider
       IVisualStudioInstallerClient installer,
       ITrustedFileVerifier trustedFileVerifier,
       IComplianceEvaluator complianceEvaluator,
-      ISecureArtifactStager? secureArtifactStager = null)
+      ISecureArtifactStager? secureArtifactStager = null,
+      string? applicationRoot = null)
   {
     _discovery = discovery ?? throw new ArgumentNullException(nameof(discovery));
     _installer = installer ?? throw new ArgumentNullException(nameof(installer));
@@ -44,6 +47,7 @@ public sealed class VisualStudioProvider : IResourceProvider
         verifier: _trustedFileVerifier);
     _complianceEvaluator = complianceEvaluator ??
         throw new ArgumentNullException(nameof(complianceEvaluator));
+    _configurationResolver = new VisualStudioConfigurationResolver(applicationRoot);
     Capabilities = CreateCapabilities(supportsInstallerParameters: true);
   }
 

@@ -24,6 +24,11 @@ internal static class ProfileDocumentMapper
         Provider = resource.GetProperty("provider").GetString()!,
         VersionConstraint = GetOptionalString(resource, "versionConstraint"),
         PreferredVersion = GetOptionalString(resource, "preferredVersion"),
+        PrivilegeRequirement = GetOptionalEnum(
+            resource,
+            "privilegeRequirement",
+            PrivilegeRequirement.CurrentUser),
+        RestartPolicy = GetOptionalEnum(resource, "restartPolicy", RestartPolicy.NoRestart),
         Dependencies = GetStringArray(resource, "dependsOn"),
         Parameters = GetParameters(resource)
       });
@@ -91,4 +96,14 @@ internal static class ProfileDocumentMapper
 
   private static string? GetOptionalString(JsonElement element, string propertyName) =>
       element.TryGetProperty(propertyName, out var value) ? value.GetString() : null;
+
+  private static TEnum GetOptionalEnum<TEnum>(
+      JsonElement element,
+      string propertyName,
+      TEnum defaultValue)
+      where TEnum : struct, Enum =>
+      element.TryGetProperty(propertyName, out var value) &&
+      Enum.TryParse<TEnum>(value.GetString(), ignoreCase: false, out var parsed)
+          ? parsed
+          : defaultValue;
 }

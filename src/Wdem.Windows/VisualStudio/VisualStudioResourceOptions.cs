@@ -54,9 +54,11 @@ public sealed record VisualStudioResourceOptions
       parseErrors.Add("Parameter 'installPath' must be an absolute path.");
     }
 
-    if (vsConfigPath is not null && !Path.IsPathFullyQualified(vsConfigPath))
+    if (vsConfigPath is not null &&
+        !Path.IsPathFullyQualified(vsConfigPath) &&
+        !IsApplicationAssetPath(vsConfigPath))
     {
-      parseErrors.Add("Parameter 'vsconfigPath' must be an absolute path.");
+      parseErrors.Add("Parameter 'vsconfigPath' must be an absolute path or remain below 'profiles/assets'.");
     }
 
     var workloads = ParseList(resource, "workloads", parseErrors, required: true);
@@ -169,5 +171,19 @@ public sealed record VisualStudioResourceOptions
     }
 
     return segments.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+  }
+
+  private static bool IsApplicationAssetPath(string path)
+  {
+    var normalized = path.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+    var prefix = $"profiles{Path.DirectorySeparatorChar}assets{Path.DirectorySeparatorChar}";
+    if (!normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+    {
+      return false;
+    }
+
+    var assetsRoot = Path.GetFullPath(Path.Combine("profiles", "assets"));
+    var resolved = Path.GetFullPath(normalized);
+    return Wdem.Windows.Configuration.ConfigurationSourceResolver.IsWithin(resolved, assetsRoot);
   }
 }

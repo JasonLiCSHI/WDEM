@@ -45,10 +45,24 @@ public static partial class ProfileValueExpander
         {
           var variableName = match.Groups["name"].Value;
           value = environmentVariableReader(variableName);
-          if (value is null)
+          if (string.IsNullOrWhiteSpace(value))
           {
             errors.Add(Error(
                 $"Environment variable '{variableName}' is required by selected resource '{pair.Key}'.",
+                $"/resources/{EscapePointer(pair.Key)}/parameters/{EscapePointer(parameter.Key)}"));
+          }
+          else if (string.Equals(variableName, "WDEM_COMPANY_VSIX_SHA256", StringComparison.Ordinal) &&
+              (value.Length != 64 || !value.All(Uri.IsHexDigit)))
+          {
+            errors.Add(Error(
+                $"Environment variable '{variableName}' must contain exactly 64 hexadecimal characters.",
+                $"/resources/{EscapePointer(pair.Key)}/parameters/{EscapePointer(parameter.Key)}"));
+          }
+          else if (string.Equals(variableName, "WDEM_COMPANY_VSIX_PATH", StringComparison.Ordinal) &&
+              !IsSafeCompanyVsixSource(value))
+          {
+            errors.Add(Error(
+                $"Environment variable '{variableName}' must be an absolute local path or safe HTTPS URI.",
                 $"/resources/{EscapePointer(pair.Key)}/parameters/{EscapePointer(parameter.Key)}"));
           }
         }
@@ -101,6 +115,24 @@ public static partial class ProfileValueExpander
       WdemErrorCode.ProfileError,
       summary,
       $"Profile value expansion failed at '{pointer}': {summary}");
+
+  private static bool IsSafeCompanyVsixSource(string value)
+  {
+    if (value.Any(char.IsControl))
+    {
+      return false;
+    }
+
+    if (Path.IsPathFullyQualified(value))
+    {
+      return string.Equals(Path.GetExtension(value), ".vsix", StringComparison.OrdinalIgnoreCase);
+    }
+
+    return Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
+        string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) &&
+        string.IsNullOrEmpty(uri.UserInfo) &&
+        string.Equals(Path.GetExtension(uri.AbsolutePath), ".vsix", StringComparison.OrdinalIgnoreCase);
+  }
 
   internal static string EscapePointer(string segment) =>
       segment.Replace("~", "~0", StringComparison.Ordinal)

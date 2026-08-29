@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserSettings>
+  <ApplicationIdentity version="18.0" />
+  <ToolsOptions>
+    <ToolsOptionsCategory name="TextEditor" RegisteredName="Text Editor">
+      <ToolsOptionsSubCategory name="CSharp" RegisteredName="CSharp" PackageName="Text Management Package">
+        <PropertyValue name="TabSize">4</PropertyValue>
+        <PropertyValue name="IndentSize">4</PropertyValue>
+        <PropertyValue name="InsertTabs">false</PropertyValue>
+      </ToolsOptionsSubCategory>
+    </ToolsOptionsCategory>
+  </ToolsOptions>
+</UserSettings>

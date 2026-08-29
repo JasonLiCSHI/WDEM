@@ -51,8 +51,16 @@ public static class WdemWindowsFactory
     var migration = new LegacyStateMigrationAdapter(localApplicationData);
     await migration.MigrateAsync(cancellationToken).ConfigureAwait(false);
 
+    var fullProfilesDirectory = Path.GetFullPath(profilesDirectory);
+    var applicationRoot = Path.GetDirectoryName(fullProfilesDirectory)
+        ?? throw new ArgumentException(
+            "The profiles directory must have a parent directory.",
+            nameof(profilesDirectory));
+
     var providerComposition = WindowsProviderCompositionFactory.Create(
-        Path.Combine(paths.Root, "wdem.log"));
+        Path.Combine(paths.Root, "wdem.log"),
+        applicationRoot,
+        fullProfilesDirectory);
     var logger = providerComposition.Logger;
     var processRunner = providerComposition.LegacyProcessRunner;
     var processExecutor = providerComposition.ProcessExecutor;
@@ -75,7 +83,7 @@ public static class WdemWindowsFactory
     redactor ??= new LogRedactor();
     runEvents ??= new RunEventHub();
     var runStore = new JsonExecutionRunStore(paths, redactor);
-    var profiles = new DirectoryProfileCatalog(profilesDirectory, providerRegistry);
+    var profiles = new DirectoryProfileCatalog(fullProfilesDirectory, providerRegistry);
     var privilegeBroker = new NamedPipePrivilegeBroker(new ElevatedHostLauncher(
         Path.Combine(AppContext.BaseDirectory, "Wdem.ElevatedHost.exe"),
         localApplicationData));

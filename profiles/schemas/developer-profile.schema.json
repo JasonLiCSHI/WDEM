@@ -56,6 +56,16 @@
         "provider": { "type": "string", "minLength": 1, "pattern": "\\S" },
         "versionConstraint": { "type": "string", "minLength": 1 },
         "preferredVersion": { "type": "string", "minLength": 1 },
+        "privilegeRequirement": {
+          "type": "string",
+          "enum": ["CurrentUser", "Administrator"],
+          "default": "CurrentUser"
+        },
+        "restartPolicy": {
+          "type": "string",
+          "enum": ["NoRestart", "RestartRecommended", "RestartRequired"],
+          "default": "NoRestart"
+        },
         "dependsOn": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 },

@@ -79,6 +79,25 @@ public sealed class VisualStudioConfigurationResolverTests : IDisposable
     Assert.DoesNotContain("secret-oversized", result.Error.Detail, StringComparison.Ordinal);
   }
 
+  [Fact]
+  public async Task ResolveAsync_ApplicationAssetPathUsesConfiguredApplicationRoot()
+  {
+    var assets = Path.Combine(_root, "profiles", "assets");
+    Directory.CreateDirectory(assets);
+    var path = Path.Combine(assets, "developer.vsconfig");
+    await File.WriteAllTextAsync(path, Config("Microsoft.VisualStudio.Component.CoreEditor"));
+    var hash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(path)));
+    var resolver = new VisualStudioConfigurationResolver(applicationRoot: _root);
+
+    var result = await resolver.ResolveAsync(
+        Options(Path.Combine("profiles", "assets", "developer.vsconfig")),
+        hash,
+        CancellationToken.None);
+
+    Assert.Null(result.Error);
+    Assert.Equal(Path.GetFullPath(path), result.VerifiedPath);
+  }
+
   public void Dispose()
   {
     if (Directory.Exists(_root))

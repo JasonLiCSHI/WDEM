@@ -53,6 +53,10 @@ public sealed class WdemWindowsFactoryTests : IDisposable
     var visualStudio = Assert.IsType<VisualStudioProvider>(composition.Providers
         .GetRequired("visual-studio", "visual-studio"));
     Assert.True(visualStudio.Capabilities.SupportsInstallerParameters);
+    Assert.IsType<ReSharperSettingsProvider>(composition.Providers
+        .GetRequired("resharper-settings", "file"));
+    Assert.IsType<VisualStudioSettingsProvider>(composition.Providers
+        .GetRequired("visual-studio-settings", "visual-studio-settings"));
     Assert.True(File.Exists(Path.Combine(paths.Root, "migration-v1.json")));
   }
 
