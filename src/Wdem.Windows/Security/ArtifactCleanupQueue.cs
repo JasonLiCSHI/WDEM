@@ -248,10 +248,15 @@ internal sealed class ArtifactCleanupQueue
 
           if (IsPlanArtifactRoot(root))
           {
-            if (!VsixPlanArtifactStore.CanReclaimExpiredDirectory(
+            var planStaleBeforeUtc = DateTime.UtcNow - _minimumSweepAge;
+            var canReclaimExpired = VsixPlanArtifactStore.CanReclaimExpiredDirectory(
                     fullPath,
-                    DateTimeOffset.UtcNow) ||
-                !ArtifactLease.CanAcquireForCleanup(fullPath, DateTime.MaxValue))
+                    DateTimeOffset.UtcNow) &&
+                ArtifactLease.CanAcquireForCleanup(fullPath, DateTime.MaxValue);
+            if (!canReclaimExpired &&
+                !ArtifactLease.CanReclaimUninitializedPlanArtifact(
+                    fullPath,
+                    planStaleBeforeUtc))
             {
               continue;
             }
@@ -475,6 +480,59 @@ internal sealed class ArtifactLease : IDisposable
       return entries.Length == 1 &&
           string.Equals(entries[0], markerPath, StringComparison.OrdinalIgnoreCase) &&
           HasValidOwnershipMarker(markerPath, staleBeforeUtc);
+    }
+    catch (Exception exception) when (exception is IOException or
+        UnauthorizedAccessException or System.Security.SecurityException)
+    {
+      return false;
+    }
+  }
+
+  internal static bool CanReclaimUninitializedPlanArtifact(
+      string directoryPath,
+      DateTime staleBeforeUtc)
+  {
+    var name = Path.GetFileName(directoryPath);
+    if (name.Length != 32 || name.Any(character =>
+            character is not (>= '0' and <= '9') and
+                not (>= 'a' and <= 'f')))
+    {
+      return false;
+    }
+
+    try
+    {
+      if (File.GetAttributes(directoryPath).HasFlag(FileAttributes.ReparsePoint) ||
+          Directory.GetLastWriteTimeUtc(directoryPath) >= staleBeforeUtc)
+      {
+        return false;
+      }
+
+      var expectedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+      {
+        OwnershipMarkerFileName,
+        LeaseFileName,
+        "extension.vsix"
+      };
+      var entries = Directory.EnumerateFileSystemEntries(directoryPath).Take(4).ToArray();
+      if (entries.Length != expectedNames.Count ||
+          entries.Any(entry => !expectedNames.Remove(Path.GetFileName(entry))))
+      {
+        return false;
+      }
+
+      foreach (var entry in entries)
+      {
+        var attributes = File.GetAttributes(entry);
+        if (attributes.HasFlag(FileAttributes.Directory) ||
+            attributes.HasFlag(FileAttributes.ReparsePoint) ||
+            File.GetLastWriteTimeUtc(entry) >= staleBeforeUtc)
+        {
+          return false;
+        }
+      }
+
+      return CanAcquireForCleanup(directoryPath, staleBeforeUtc);
     }
     catch (Exception exception) when (exception is IOException or
         UnauthorizedAccessException or System.Security.SecurityException)

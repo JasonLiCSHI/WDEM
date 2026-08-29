@@ -397,6 +397,57 @@ public sealed class VisualStudioExtensionProviderTests
   }
 
   [Fact]
+  public async Task PlanAsync_ReplanningRevokesSupersededArtifactWhenCleanupIsBlocked()
+  {
+    var source = TempFile("vsix");
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new RotatingStager();
+    try
+    {
+      var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
+      var stagingStore = PlanArtifactStore(
+          stager,
+          verifier,
+          manifests,
+          deleteDirectory: static _ => { });
+      var provider = Provider(
+          manifests,
+          new ThrowingProcessExecutor(),
+          stager,
+          verifier,
+          planArtifactStore: stagingStore);
+      var stalePlan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+      var staleDirectory = Assert.Single(stager.Directories);
+      var currentPlan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+      var staleMarker = await File.ReadAllTextAsync(
+          Path.Combine(staleDirectory, ".wdem-vsix-owner"));
+      var process = new RecordingProcessExecutor(static () => { });
+      var freshProvider = Provider(
+          manifests,
+          process,
+          stager,
+          verifier,
+          planArtifactStore: PlanArtifactStore(stager, verifier, manifests));
+      var result = await freshProvider.ApplyAsync(
+          resource,
+          stalePlan,
+          null,
+          CancellationToken.None);
+
+      Assert.True(currentPlan.IsExecutable);
+      Assert.Contains("\"revoked\":true", staleMarker, StringComparison.Ordinal);
+      Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+      Assert.Empty(process.Requests);
+    }
+    finally
+    {
+      ArtifactCleanupQueue.Shared.RetryPending();
+      File.Delete(source);
+    }
+  }
+
+  [Fact]
   public async Task PlanAsync_AbandonedStagedArtifactExpiresDeterministically()
   {
     var source = TempFile("vsix");
@@ -635,7 +686,7 @@ public sealed class VisualStudioExtensionProviderTests
       var error = Assert.Single(plan.StructuredErrors);
       Assert.Equal(WdemErrorCode.ConfigurationError, error.Code);
       Assert.Equal(
-          "The VSIX ownership marker is 45905 bytes and exceeds the 16384-byte limit.",
+          "The VSIX ownership marker is 46031 bytes and exceeds the 16384-byte limit.",
           error.Detail);
       Assert.False(Directory.Exists(directory));
     }
@@ -682,6 +733,68 @@ public sealed class VisualStudioExtensionProviderTests
           request.FileName);
       Assert.Equal(["/quiet", "/admin", stager.VerifiedVsixPath], request.Arguments);
       Assert.DoesNotContain(request.Arguments, argument => argument.Contains("devenv", StringComparison.OrdinalIgnoreCase));
+    }
+    finally
+    {
+      File.Delete(source);
+    }
+  }
+
+  [Theory]
+  [InlineData("Microsoft.VisualStudio.Product.Enterprise", "17.0.0")]
+  [InlineData("Microsoft.VisualStudio.Product.Community", "17.1.0")]
+  public async Task ApplyAsync_RejectsSelectedInstanceReplacedAfterPlanning(
+      string productId,
+      string installationVersion)
+  {
+    var source = TempFile("vsix");
+    var manifests = SourceManifestReader();
+    await using var stager = new RotatingStager();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    var store = PlanArtifactStore(stager, verifier, manifests);
+    var process = new RecordingProcessExecutor(() => manifests.Add(
+        @"C:\VS\17.0_a\Common7\IDE\Extensions\Contoso\extension.vsixmanifest",
+        "Contoso.DeveloperTools",
+        "3.2.0",
+        "17.0_a"));
+    try
+    {
+      var resource = ExtensionResource(
+          "Contoso.DeveloperTools",
+          "3.2.x",
+          "17.0_a",
+          source);
+      var planningProvider = Provider(
+          manifests,
+          process,
+          stager,
+          trustedFileVerifier: verifier,
+          planArtifactStore: store);
+      var plan = await planningProvider.PlanAsync(
+          resource,
+          Missing(resource),
+          CancellationToken.None);
+      var replacement = Instance("17.0_a") with
+      {
+        ProductId = productId,
+        InstallationVersion = installationVersion
+      };
+      var applyingProvider = Provider(
+          manifests,
+          process,
+          stager,
+          trustedFileVerifier: verifier,
+          planArtifactStore: store,
+          discovery: new FakeVisualStudioDiscovery(replacement));
+
+      var result = await applyingProvider.ApplyAsync(
+          resource,
+          plan,
+          null,
+          CancellationToken.None);
+
+      Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+      Assert.Empty(process.Requests);
     }
     finally
     {
@@ -1251,13 +1364,19 @@ public sealed class VisualStudioExtensionProviderTests
     var verifier = new FakeTrustedFileVerifier(isTrusted: true);
     await using var stager = new ScriptedStager();
     var stagingStore = PlanArtifactStore(stager, verifier, manifests);
-    var claimingStore = PlanArtifactStore(stager, verifier, manifests);
+    var claimingStore = PlanArtifactStore(
+        stager,
+        verifier,
+        manifests,
+        deleteDirectory: static _ => { });
     var replayStore = PlanArtifactStore(stager, verifier, manifests);
     var expectedHash = new string('A', 64);
     var directory = Path.GetDirectoryName(stager.VerifiedVsixPath)!;
+    var terminalStatePath = Path.Combine(
+        Path.GetDirectoryName(directory)!,
+        $".{Path.GetFileName(directory)}.wdem-vsix-terminal");
     ClaimedVsixPlanArtifact? firstArtifact = null;
     ClaimedVsixPlanArtifact? replayedArtifact = null;
-    FileStream? blocker = null;
     try
     {
       var staged = await stagingStore.StageAsync(
@@ -1276,12 +1395,7 @@ public sealed class VisualStudioExtensionProviderTests
       var consumedMarker = await File.ReadAllTextAsync(
           Path.Combine(directory, ".wdem-vsix-owner"));
       Assert.Contains("\"consumed\":true", consumedMarker, StringComparison.Ordinal);
-      blocker = new FileStream(
-          Path.Combine(directory, "cleanup-blocker"),
-          FileMode.CreateNew,
-          FileAccess.ReadWrite,
-          FileShare.None);
-
+      ReplaceMarkerEvidence(directory, "\"consumed\":true", "\"consumed\":false");
       await firstArtifact.DisposeAsync();
       firstArtifact = null;
       Assert.True(Directory.Exists(directory));
@@ -1308,8 +1422,8 @@ public sealed class VisualStudioExtensionProviderTests
         await replayedArtifact.DisposeAsync();
       }
 
-      blocker?.Dispose();
       ArtifactCleanupQueue.Shared.RetryPending();
+      File.Delete(terminalStatePath);
     }
   }
 
@@ -1668,7 +1782,8 @@ public sealed class VisualStudioExtensionProviderTests
       TimeSpan? handoffLifetime = null,
       Action<string, string>? validateRestrictedDirectory = null,
       IVsixPlanArtifactStore? planArtifactStore = null,
-      Func<DateTimeOffset>? getUtcNow = null)
+      Func<DateTimeOffset>? getUtcNow = null,
+      IVisualStudioDiscovery? discovery = null)
   {
     var verifier = trustedFileVerifier ?? new FakeTrustedFileVerifier(isTrusted: true);
     var artifactStager = stager ?? new SecureArtifactStager(verifier: verifier);
@@ -1680,7 +1795,7 @@ public sealed class VisualStudioExtensionProviderTests
         handoffLifetime,
         getUtcNow);
     return new VisualStudioExtensionProvider(
-        new FakeVisualStudioDiscovery(Instance("17.0_a"), Instance("17.0_b")),
+        discovery ?? new FakeVisualStudioDiscovery(Instance("17.0_a"), Instance("17.0_b")),
         manifests,
         process,
         new ComplianceEvaluator(),
@@ -1696,7 +1811,8 @@ public sealed class VisualStudioExtensionProviderTests
       IVsixManifestReader manifests,
       Action<string, string>? validateRestrictedDirectory = null,
       TimeSpan? handoffLifetime = null,
-      Func<DateTimeOffset>? getUtcNow = null) => new(
+      Func<DateTimeOffset>? getUtcNow = null,
+      Action<string>? deleteDirectory = null) => new(
           stager,
           verifier,
           manifests,
@@ -1707,7 +1823,8 @@ public sealed class VisualStudioExtensionProviderTests
               Path.GetTempPath(),
               "Wdem",
               "PlanArtifacts"),
-          getUtcNow);
+          getUtcNow,
+          deleteDirectory: deleteDirectory);
 
   private static VisualStudioExtensionProvider RealReaderProvider(string localApplicationData)
   {

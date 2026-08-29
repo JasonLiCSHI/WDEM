@@ -12,7 +12,11 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
   private const int ErrorAlreadyExists = 183;
   private const uint ErrorSuccess = 0;
   private const uint ReadControl = 0x00020000;
+  private const uint GenericWrite = 0x40000000;
+  private const uint CreateNew = 1;
   private const uint OpenExisting = 3;
+  private const uint FileAttributeNormal = 0x00000080;
+  private const uint FileFlagWriteThrough = 0x80000000;
   private const uint FileFlagBackupSemantics = 0x02000000;
   private const uint FileFlagOpenReparsePoint = 0x00200000;
   private readonly string _rootPath;
@@ -245,6 +249,132 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
         creator,
         claimant,
         new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator));
+  }
+
+  internal static IDisposable OpenValidatedRestrictedDirectory(
+      string path,
+      string creatorSid)
+  {
+    if (!OperatingSystem.IsWindows())
+    {
+      throw new PlatformNotSupportedException(
+          "Restricted plan-artifact validation requires Windows access controls.");
+    }
+
+    ArgumentException.ThrowIfNullOrWhiteSpace(path);
+    var fullPath = Path.GetFullPath(path);
+    var planRoot = Path.GetDirectoryName(fullPath) ??
+        throw new SecurityException("The restricted plan-artifact directory is invalid.");
+    var productRoot = Path.GetDirectoryName(planRoot) ??
+        throw new SecurityException("The shared plan-artifact root is invalid.");
+    if (!string.Equals(fullPath, path, StringComparison.OrdinalIgnoreCase) ||
+        !Guid.TryParseExact(Path.GetFileName(fullPath), "N", out _) ||
+        !string.Equals(Path.GetFileName(planRoot), "PlanArtifacts", StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(Path.GetFileName(productRoot), "Wdem", StringComparison.OrdinalIgnoreCase))
+    {
+      throw new SecurityException("The restricted plan-artifact directory is outside the bounded root.");
+    }
+
+    var creator = new SecurityIdentifier(creatorSid);
+    using var identity = WindowsIdentity.GetCurrent();
+    var claimant = identity.User ??
+        throw new InvalidOperationException("The current Windows user SID is unavailable.");
+    var claimantIsAdministrator = new WindowsPrincipal(identity)
+        .IsInRole(WindowsBuiltInRole.Administrator);
+    SafeFileHandle? productHandle = null;
+    SafeFileHandle? rootHandle = null;
+    SafeFileHandle? leafHandle = null;
+    try
+    {
+      productHandle = OpenValidatedProductRoot(productRoot);
+      rootHandle = OpenValidatedIdentityNeutralRoot(planRoot);
+      leafHandle = OpenValidatedDirectory(
+          fullPath,
+          security => ValidateRestrictedSecurity(
+              security,
+              creator,
+              claimant,
+              claimantIsAdministrator),
+          "restricted plan-artifact directory");
+      var result = new ValidatedDirectoryHierarchy(productHandle, rootHandle, leafHandle);
+      productHandle = null;
+      rootHandle = null;
+      leafHandle = null;
+      return result;
+    }
+    finally
+    {
+      leafHandle?.Dispose();
+      rootHandle?.Dispose();
+      productHandle?.Dispose();
+    }
+  }
+
+  internal static void CreateAdministratorOnlyFile(
+      string path,
+      ReadOnlySpan<byte> contents)
+  {
+    if (!OperatingSystem.IsWindows())
+    {
+      throw new PlatformNotSupportedException(
+          "Protected plan-artifact state requires Windows access controls.");
+    }
+
+    ArgumentException.ThrowIfNullOrWhiteSpace(path);
+    var administrators = new SecurityIdentifier(
+        WellKnownSidType.BuiltinAdministratorsSid,
+        null);
+    var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+    var security = new FileSecurity();
+    security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+    security.SetOwner(administrators);
+    foreach (var identity in new[] { administrators, system })
+    {
+      security.AddAccessRule(new FileSystemAccessRule(
+          identity,
+          FileSystemRights.FullControl,
+          AccessControlType.Allow));
+    }
+
+    var descriptor = security.GetSecurityDescriptorBinaryForm();
+    var descriptorHandle = GCHandle.Alloc(descriptor, GCHandleType.Pinned);
+    SafeFileHandle? handle = null;
+    try
+    {
+      var attributes = new SecurityAttributes
+      {
+        Length = Marshal.SizeOf<SecurityAttributes>(),
+        SecurityDescriptor = descriptorHandle.AddrOfPinnedObject()
+      };
+      handle = NativeMethods.CreateFileWithSecurity(
+          Path.GetFullPath(path),
+          GenericWrite | ReadControl,
+          FileShare.Read,
+          ref attributes,
+          CreateNew,
+          FileAttributeNormal | FileFlagWriteThrough,
+          IntPtr.Zero);
+      if (handle.IsInvalid)
+      {
+        var error = Marshal.GetLastWin32Error();
+        handle.Dispose();
+        handle = null;
+        throw new Win32Exception(error, "The protected plan-artifact state could not be created.");
+      }
+
+      using (var stream = new FileStream(handle, FileAccess.Write, bufferSize: 1, isAsync: false))
+      {
+        handle = null;
+        stream.Write(contents);
+        stream.Flush(flushToDisk: true);
+        ValidateAdministratorOnlyFileSecurity(ReadSecurity(stream.SafeFileHandle));
+      }
+    }
+    finally
+    {
+      handle?.Dispose();
+      descriptorHandle.Free();
+    }
   }
 
   internal static DirectorySecurity CreateSecurity(
@@ -480,7 +610,7 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
       throw new SecurityException("The restricted plan-artifact directory has untrusted ownership.");
     }
 
-    var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier))
+    var rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier))
         .Cast<FileSystemAccessRule>()
         .ToArray();
     if (rules.Length != 3 ||
@@ -501,6 +631,51 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
           rule.InheritanceFlags ==
               (InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit) &&
           rule.PropagationFlags == PropagationFlags.None);
+
+  private static void ValidateAdministratorOnlyFileSecurity(DirectorySecurity security)
+  {
+    var administrators = new SecurityIdentifier(
+        WellKnownSidType.BuiltinAdministratorsSid,
+        null);
+    var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+    var rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier))
+        .Cast<FileSystemAccessRule>()
+        .ToArray();
+    if (!administrators.Equals(security.GetOwner(typeof(SecurityIdentifier))) ||
+        !security.AreAccessRulesProtected ||
+        rules.Length != 2 ||
+        !HasAdministratorOnlyFileRule(rules, administrators) ||
+        !HasAdministratorOnlyFileRule(rules, system))
+    {
+      throw new SecurityException("The protected plan-artifact state grants unexpected access.");
+    }
+  }
+
+  private static bool HasAdministratorOnlyFileRule(
+      IReadOnlyList<FileSystemAccessRule> rules,
+      SecurityIdentifier identity) => rules.Any(rule =>
+          identity.Equals(rule.IdentityReference) &&
+          rule.AccessControlType == AccessControlType.Allow &&
+          rule.FileSystemRights == FileSystemRights.FullControl &&
+          rule.InheritanceFlags == InheritanceFlags.None &&
+          rule.PropagationFlags == PropagationFlags.None);
+
+  private sealed class ValidatedDirectoryHierarchy(
+      SafeFileHandle productRoot,
+      SafeFileHandle planRoot,
+      SafeFileHandle leaf) : IDisposable
+  {
+    private SafeFileHandle? _productRoot = productRoot;
+    private SafeFileHandle? _planRoot = planRoot;
+    private SafeFileHandle? _leaf = leaf;
+
+    public void Dispose()
+    {
+      Interlocked.Exchange(ref _leaf, null)?.Dispose();
+      Interlocked.Exchange(ref _planRoot, null)?.Dispose();
+      Interlocked.Exchange(ref _productRoot, null)?.Dispose();
+    }
+  }
 
   [StructLayout(LayoutKind.Sequential)]
   private struct SecurityAttributes
@@ -537,6 +712,17 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
         uint desiredAccess,
         FileShare shareMode,
         IntPtr securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        IntPtr templateFile);
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode,
+        SetLastError = true)]
+    public static extern SafeFileHandle CreateFileWithSecurity(
+        string fileName,
+        uint desiredAccess,
+        FileShare shareMode,
+        ref SecurityAttributes securityAttributes,
         uint creationDisposition,
         uint flagsAndAttributes,
         IntPtr templateFile);

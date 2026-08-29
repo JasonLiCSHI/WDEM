@@ -157,6 +157,47 @@ public sealed class ArtifactCleanupQueueTests
     }
   }
 
+  [WindowsFact]
+  public void StartupSweep_PlanArtifactsReclaimsOnlyRecognizedStaleUninitializedLayouts()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-plan-uninitialized-{Guid.NewGuid():N}");
+    var root = Path.Combine(basePath, "Wdem", "PlanArtifacts");
+    Directory.CreateDirectory(root);
+    var stale = CreateUninitializedPlanArtifact(root, stale: true);
+    var active = CreateUninitializedPlanArtifact(root, stale: true);
+    var recent = CreateUninitializedPlanArtifact(root, stale: false);
+    var unknown = CreateUninitializedPlanArtifact(root, stale: true);
+    File.WriteAllText(Path.Combine(unknown, "unexpected"), "unknown");
+    Directory.SetLastWriteTimeUtc(unknown, DateTime.UtcNow - TimeSpan.FromHours(2));
+    var lease = new FileStream(
+        Path.Combine(active, ".wdem-lease"),
+        FileMode.Open,
+        FileAccess.ReadWrite,
+        FileShare.None);
+
+    try
+    {
+      _ = new ArtifactCleanupQueue(
+          maxAttempts: 1,
+          retryDelay: TimeSpan.FromSeconds(30),
+          maxDelayedRetryRounds: 1,
+          knownStagingRoots: [root]);
+
+      Assert.False(Directory.Exists(stale));
+      Assert.True(Directory.Exists(active));
+      Assert.True(Directory.Exists(recent));
+      Assert.True(Directory.Exists(unknown));
+    }
+    finally
+    {
+      lease.Dispose();
+      if (Directory.Exists(basePath))
+      {
+        Directory.Delete(basePath, recursive: true);
+      }
+    }
+  }
+
   [Fact]
   public void StartupSweep_DeletesOnlyStaleOwnedArtifactsWithoutAnActiveLease()
   {
@@ -516,16 +557,40 @@ public sealed class ArtifactCleanupQueueTests
       manifestVersion = "1.0.0",
       manifestPath = "source!/extension.vsixmanifest",
       visualStudioInstanceId = "17.0_a",
+      visualStudioProductId = "Microsoft.VisualStudio.Product.Community",
+      visualStudioInstallationVersion = "17.0.0",
       installationTargets = Array.Empty<object>(),
       creatorSid = creator.Value,
       ownershipDirectory = directory,
       ownershipToken = Convert.ToHexString(Guid.NewGuid().ToByteArray()),
       expiresAtUtc,
+      revoked = false,
       consumed = false
     };
     File.WriteAllBytes(
         Path.Combine(directory, ".wdem-vsix-owner"),
         JsonSerializer.SerializeToUtf8Bytes(marker));
+    return directory;
+  }
+
+  private static string CreateUninitializedPlanArtifact(string root, bool stale)
+  {
+    var directory = Path.Combine(root, Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(directory);
+    File.WriteAllText(Path.Combine(directory, ".wdem-artifact"), "wdem-artifact-v1\n");
+    File.WriteAllText(Path.Combine(directory, ".wdem-lease"), string.Empty);
+    File.WriteAllText(Path.Combine(directory, "extension.vsix"), "staged");
+    if (stale)
+    {
+      var staleTime = DateTime.UtcNow - TimeSpan.FromHours(2);
+      foreach (var path in Directory.EnumerateFiles(directory))
+      {
+        File.SetLastWriteTimeUtc(path, staleTime);
+      }
+
+      Directory.SetLastWriteTimeUtc(directory, staleTime);
+    }
+
     return directory;
   }
 

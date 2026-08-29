@@ -378,7 +378,7 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
           resource.Id,
           step.Id,
           GetParameter(resource, ExpectedSha256Parameter)!,
-          instance.Instance.InstanceId,
+          VsixPlanVisualStudioIdentity.FromInstance(instance.Instance),
           cancellationToken).ConfigureAwait(false);
       approvedArtifact = claim.Artifact;
       if (approvedArtifact is null)
@@ -545,7 +545,7 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
 
   private async Task<VsixPlanArtifactStageResult> StagePlanSourceAsync(
       ResourceDefinition resource,
-      string visualStudioInstanceId,
+      VsixPlanVisualStudioIdentity visualStudioIdentity,
       CancellationToken cancellationToken)
   {
     var source = GetParameter(resource, SourcePathParameter)!;
@@ -567,7 +567,7 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
             resource.Id,
             localPath,
             expectedSha256,
-            visualStudioInstanceId,
+            visualStudioIdentity,
             cancellationToken).ConfigureAwait(false);
       }
       catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
@@ -604,7 +604,7 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
           resource.Id,
           sourceStream,
           expectedSha256,
-          visualStudioInstanceId,
+          visualStudioIdentity,
           cancellationToken).ConfigureAwait(false);
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -647,7 +647,7 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
 
     var staged = await StagePlanSourceAsync(
         resource,
-        instance.Instance.InstanceId,
+        VsixPlanVisualStudioIdentity.FromInstance(instance.Instance),
         cancellationToken).ConfigureAwait(false);
     if (staged.Error is not null || staged.Manifest is null || staged.StepEvidence is null)
     {
@@ -666,7 +666,7 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
 
     await DiscardPreparedArtifactAsync(
         resource,
-        instance.Instance.InstanceId,
+        VsixPlanVisualStudioIdentity.FromInstance(instance.Instance),
         staged.StepEvidence,
         cancellationToken)
         .ConfigureAwait(false);
@@ -681,7 +681,7 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
 
   private async Task DiscardPreparedArtifactAsync(
       ResourceDefinition resource,
-      string instanceId,
+      VsixPlanVisualStudioIdentity visualStudioIdentity,
       string stepEvidence,
       CancellationToken cancellationToken)
   {
@@ -689,7 +689,7 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
         resource.Id,
         stepEvidence,
         GetParameter(resource, ExpectedSha256Parameter)!,
-        instanceId,
+        visualStudioIdentity,
         cancellationToken).ConfigureAwait(false);
     if (claim.Artifact is not null)
     {

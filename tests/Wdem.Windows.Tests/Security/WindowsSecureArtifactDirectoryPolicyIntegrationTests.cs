@@ -326,6 +326,34 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
             claimantIsAdministrator: false));
   }
 
+  [Theory]
+  [InlineData(FileSystemRights.FullControl)]
+  [InlineData(FileSystemRights.Delete)]
+  [InlineData(FileSystemRights.CreateFiles)]
+  [InlineData(FileSystemRights.ChangePermissions)]
+  [InlineData(FileSystemRights.TakeOwnership)]
+  public void ValidatePlanArtifactSecurity_RejectsInheritedDangerousAccessRule(
+      FileSystemRights rights)
+  {
+    var creator = TestSid(1001);
+    var security = AddInheritedRule(
+        WindowsPlanArtifactDirectoryPolicy.CreateSecurity(
+            creator,
+            Administrators,
+            LocalSystem),
+        new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+        rights,
+        AccessControlType.Allow);
+
+    Assert.True(security.AreAccessRulesProtected);
+    Assert.Throws<SecurityException>(() =>
+        WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedSecurity(
+            security,
+            creator,
+            creator,
+            claimantIsAdministrator: false));
+  }
+
   [WindowsAdministratorFact]
   public void CreateRestrictedStagingDirectory_CreatesProtectedAdministratorSystemAcl()
   {
@@ -376,6 +404,75 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
     {
       Directory.Delete(link);
       Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [WindowsAdministratorFact]
+  public void OpenValidatedRestrictedDirectory_HoldsHierarchyAgainstReplacement()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-pinned-root-{Guid.NewGuid():N}");
+    var productRoot = Path.Combine(basePath, "Wdem");
+    var planRoot = Path.Combine(productRoot, "PlanArtifacts");
+    WindowsPlanArtifactDirectoryPolicy.ProvisionIdentityNeutralRoot(planRoot);
+    var leaf = new WindowsPlanArtifactDirectoryPolicy(planRoot)
+        .CreateRestrictedStagingDirectory();
+
+    try
+    {
+      using var hierarchy = WindowsPlanArtifactDirectoryPolicy.OpenValidatedRestrictedDirectory(
+          leaf,
+          WindowsPlanArtifactDirectoryPolicy.GetCurrentUserSid());
+
+      Assert.Throws<IOException>(() => Directory.Move(
+          leaf,
+          Path.Combine(planRoot, $"replacement-{Guid.NewGuid():N}")));
+      Assert.Throws<IOException>(() => Directory.Move(
+          planRoot,
+          Path.Combine(productRoot, $"replacement-{Guid.NewGuid():N}")));
+      Assert.Throws<IOException>(() => Directory.Move(
+          productRoot,
+          Path.Combine(basePath, $"replacement-{Guid.NewGuid():N}")));
+    }
+    finally
+    {
+      Directory.Delete(basePath, recursive: true);
+    }
+  }
+
+  [WindowsAdministratorFact]
+  public void CreateAdministratorOnlyFile_ProtectsTerminalStateFromCreatorRollback()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-terminal-state-{Guid.NewGuid():N}");
+    var planRoot = Path.Combine(basePath, "Wdem", "PlanArtifacts");
+    WindowsPlanArtifactDirectoryPolicy.ProvisionIdentityNeutralRoot(planRoot);
+    var path = Path.Combine(planRoot, $".{Guid.NewGuid():N}.wdem-vsix-terminal");
+
+    try
+    {
+      WindowsPlanArtifactDirectoryPolicy.CreateAdministratorOnlyFile(
+          path,
+          "terminal-state"u8);
+      var security = new FileInfo(path).GetAccessControl(
+          AccessControlSections.Access | AccessControlSections.Owner);
+      var rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier))
+          .Cast<FileSystemAccessRule>()
+          .ToArray();
+
+      Assert.Equal(Administrators, security.GetOwner(typeof(SecurityIdentifier)));
+      Assert.True(security.AreAccessRulesProtected);
+      Assert.Equal(2, rules.Length);
+      Assert.Contains(rules, rule =>
+          Administrators.Equals(rule.IdentityReference) &&
+          rule.AccessControlType == AccessControlType.Allow &&
+          rule.FileSystemRights == FileSystemRights.FullControl);
+      Assert.Contains(rules, rule =>
+          LocalSystem.Equals(rule.IdentityReference) &&
+          rule.AccessControlType == AccessControlType.Allow &&
+          rule.FileSystemRights == FileSystemRights.FullControl);
+    }
+    finally
+    {
+      Directory.Delete(basePath, recursive: true);
     }
   }
 
