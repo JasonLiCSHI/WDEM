@@ -571,23 +571,38 @@ public sealed class VisualStudioProvider : IResourceProvider
         "Configuration", 0.65, "Applying Visual Studio workloads and components.", step.Id));
     progress?.Report(new ProviderProgress(
         "Verification", 0.85, "Verifying Visual Studio configuration.", step.Id));
-    var finalVerification = await VerifyAppliedConfigurationAsync(
-        resource,
-        options,
-        stagedConfiguration?.Sha256,
-        cancellationToken).ConfigureAwait(false);
+    VerificationResult finalVerification;
+    try
+    {
+      finalVerification = await VerifyAppliedConfigurationAsync(
+          resource,
+          options,
+          stagedConfiguration?.Sha256,
+          cancellationToken).ConfigureAwait(false);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      return ApplyCancellation(resource, step, command, 0.85);
+    }
     if (finalVerification.Compliance != ComplianceStatus.Satisfied)
     {
       var compliance = Evaluate(resource, finalVerification.DetectedState, options);
-      var error = compliance.Error ?? new StructuredError(
-          WdemErrorCode.VerificationError,
-          "Visual Studio verification failed.",
-          finalVerification.Message ?? "Visual Studio did not reach the requested state.")
-      {
-        ResourceId = resource.Id,
-        StepId = step.Id,
-        ProcessExitCode = command.Process.ExitCode
-      };
+      var error = compliance.Error is { } complianceError
+          ? complianceError with
+          {
+            ResourceId = resource.Id,
+            StepId = step.Id,
+            ProcessExitCode = command.Process.ExitCode
+          }
+          : new StructuredError(
+              WdemErrorCode.VerificationError,
+              "Visual Studio verification failed.",
+              finalVerification.Message ?? "Visual Studio did not reach the requested state.")
+          {
+            ResourceId = resource.Id,
+            StepId = step.Id,
+            ProcessExitCode = command.Process.ExitCode
+          };
       return ApplyFailure(
           resource,
           step,
@@ -880,12 +895,13 @@ public sealed class VisualStudioProvider : IResourceProvider
   private static ResourceApplyResult ApplyCancellation(
       ResourceDefinition resource,
       PlanStep step,
-      VisualStudioInstallerResult completedCommand)
+      VisualStudioInstallerResult completedCommand,
+      double progress = 0.5)
   {
     var error = new StructuredError(
         WdemErrorCode.CancellationError,
         "Visual Studio configuration was cancelled.",
-        "The Visual Studio update completed, but cancellation was requested before configuration could finish.")
+        "The Visual Studio installer completed, but cancellation was requested before verification could finish.")
     {
       ResourceId = resource.Id,
       StepId = step.Id,
@@ -904,7 +920,7 @@ public sealed class VisualStudioProvider : IResourceProvider
         {
           StepId = step.Id,
           Action = step.Action,
-          Progress = 0.5,
+          Progress = progress,
           ProcessExitCode = completedCommand.Process.ExitCode,
           Message = FormatEvidence(completedCommand.Evidence),
           Error = error

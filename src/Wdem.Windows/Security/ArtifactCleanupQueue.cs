@@ -126,13 +126,14 @@ internal sealed class ArtifactCleanupQueue
         $"[ArtifactCleanup] {(cleanup.IsDirectory ? "Directory" : "File")} cleanup deferred after {_maxAttempts} attempts: {failure!.GetType().Name}.");
     lock (_gate)
     {
+      if (scheduleOnFailure)
+      {
+        _enqueueVersion++;
+      }
+
       if (!_pending.Contains(cleanup))
       {
         _pending.Add(cleanup);
-        if (scheduleOnFailure)
-        {
-          _enqueueVersion++;
-        }
       }
     }
 
@@ -241,9 +242,9 @@ internal sealed class ArtifactCleanupQueue
             continue;
           }
 
-          if (!ArtifactLease.CanAcquireForCleanup(
-                  fullPath,
-                  DateTime.UtcNow - _minimumSweepAge))
+          var staleBeforeUtc = DateTime.UtcNow - _minimumSweepAge;
+          if (!ArtifactLease.CanAcquireForCleanup(fullPath, staleBeforeUtc) &&
+              !ArtifactLease.CanReclaimUninitialized(fullPath, staleBeforeUtc))
           {
             continue;
           }
@@ -360,6 +361,30 @@ internal sealed class ArtifactLease : IDisposable
           bufferSize: 1,
           FileOptions.None);
       return true;
+    }
+    catch (Exception exception) when (exception is IOException or
+        UnauthorizedAccessException or System.Security.SecurityException)
+    {
+      return false;
+    }
+  }
+
+  internal static bool CanReclaimUninitialized(
+      string directoryPath,
+      DateTime staleBeforeUtc)
+  {
+    var name = Path.GetFileName(directoryPath);
+    if (name.Length != 32 || name.Any(character =>
+            character is not (>= '0' and <= '9') and
+                not (>= 'a' and <= 'f')))
+    {
+      return false;
+    }
+
+    try
+    {
+      return Directory.GetLastWriteTimeUtc(directoryPath) < staleBeforeUtc &&
+          !Directory.EnumerateFileSystemEntries(directoryPath).Any();
     }
     catch (Exception exception) when (exception is IOException or
         UnauthorizedAccessException or System.Security.SecurityException)

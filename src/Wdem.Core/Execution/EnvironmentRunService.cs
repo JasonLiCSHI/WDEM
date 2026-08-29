@@ -15,6 +15,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
 {
   private static readonly StringComparer IdComparer = StringComparer.OrdinalIgnoreCase;
   private static readonly TimeSpan DefaultPersistenceTimeout = TimeSpan.FromSeconds(10);
+  private static readonly TimeSpan CancellationProgressDrainGrace =
+      TimeSpan.FromMilliseconds(200);
   private readonly IProfileCatalog _profiles;
   private readonly ResourceGraphBuilder _graphBuilder;
   private readonly IResourceProviderRegistry _providers;
@@ -507,9 +509,12 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       return await CompleteUnexecutableAsync(run, events, cancellationToken).ConfigureAwait(false);
     }
 
+    using var cancellationDeadline = new CancellationDrainDeadline(
+        _cancellationDrainTimeout,
+        cancellationToken);
     var transitions = new RunTransitions(_runStore, events, run, _persistenceTimeout);
     await transitions.SetRunningAsync(cancellationToken).ConfigureAwait(false);
-    var progressPumps = new RunProgressPumpCoordinator(_persistenceTimeout);
+    var progressPumps = new RunProgressPumpCoordinator();
     SchedulerResult scheduled;
     StructuredError? cleanupError = null;
     try
@@ -524,13 +529,15 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
               compliance[planned.Definition.Id],
               events,
               progressPumps,
+              cancellationDeadline,
               token),
           planned => _providers.GetRequired(
               planned.Definition.Type,
               planned.Definition.Provider).Capabilities,
           request.MaximumConcurrency,
           cancellationToken,
-          transitions.PersistSchedulerTransitionAsync).ConfigureAwait(false);
+          transitions.PersistSchedulerTransitionAsync,
+          cancellationDeadline).ConfigureAwait(false);
     }
     finally
     {
@@ -553,7 +560,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     }
     if (cancellationToken.IsCancellationRequested)
     {
-      await progressPumps.SealAsync().ConfigureAwait(false);
+      await progressPumps.SealAsync(cancellationDeadline.Remaining).ConfigureAwait(false);
     }
 
     var completedRun = transitions.Current with
@@ -584,6 +591,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       ComplianceResult complianceBefore,
       RunEventPublisher events,
       RunProgressPumpCoordinator progressPumps,
+      CancellationDrainDeadline cancellationDeadline,
       CancellationToken cancellationToken)
   {
     var id = definition.Id;
@@ -599,6 +607,26 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     var progressBuffer = new ProviderProgressBuffer(
         planned.ResourcePlan.Steps.Select(step => step.Id));
     using var progressPersistence = new CancellationTokenSource();
+    using var progressCancellationRegistration = cancellationToken.UnsafeRegister(
+        static state =>
+        {
+          var (persistence, deadline) =
+              ((CancellationTokenSource, CancellationDrainDeadline))state!;
+          deadline.Start();
+          var remaining = deadline.Remaining;
+          var grace = TimeSpan.FromTicks(Math.Min(
+              CancellationProgressDrainGrace.Ticks,
+              remaining.Ticks / 2));
+          if (grace <= TimeSpan.Zero)
+          {
+            persistence.Cancel();
+          }
+          else
+          {
+            persistence.CancelAfter(grace);
+          }
+        },
+        (progressPersistence, cancellationDeadline));
     var progressPump = PumpProgressAsync(
         progressBuffer,
         events,
@@ -628,7 +656,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           progressBuffer.StopAccepting();
           try
           {
-            await applyTask.WaitAsync(_cancellationDrainTimeout).ConfigureAwait(false);
+            await applyTask.WaitAsync(cancellationDeadline.Remaining).ConfigureAwait(false);
           }
           catch (TimeoutException)
           {
@@ -658,12 +686,23 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       else
       {
         progressBuffer.Complete();
+        progressPersistence.CancelAfter(_persistenceTimeout);
       }
 
-      progressPersistence.CancelAfter(_persistenceTimeout);
       try
       {
-        await progressPump.WaitAsync(_persistenceTimeout).ConfigureAwait(false);
+        var progressTimeout = cancellationToken.IsCancellationRequested
+            ? cancellationDeadline.Remaining
+            : _persistenceTimeout;
+        if (progressTimeout > TimeSpan.Zero)
+        {
+          await progressPump.WaitAsync(progressTimeout).ConfigureAwait(false);
+        }
+        else
+        {
+          progressPersistence.Cancel();
+          ObserveFault(progressPump);
+        }
       }
       catch (OperationCanceledException) when (
           progressPersistence.IsCancellationRequested)
@@ -686,29 +725,38 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       }
     }
 
-    using var evidencePersistence = cancellationToken.IsCancellationRequested
-        ? new CancellationTokenSource(_persistenceTimeout)
+    var cancelled = cancellationToken.IsCancellationRequested;
+    using var evidencePersistence = cancelled
+        ? new CancellationTokenSource(cancellationDeadline.Remaining)
         : null;
     var evidenceToken = evidencePersistence?.Token ?? cancellationToken;
-    foreach (var diagnostic in applied.Diagnostics)
+    try
     {
-      await events.PublishLogAsync(
-          id,
-          diagnostic.StepId,
-          diagnostic.Summary,
-          diagnostic,
-          evidenceToken).ConfigureAwait(false);
-    }
+      foreach (var diagnostic in applied.Diagnostics)
+      {
+        await events.PublishLogAsync(
+            id,
+            diagnostic.StepId,
+            diagnostic.Summary,
+            diagnostic,
+            evidenceToken).ConfigureAwait(false);
+      }
 
-    foreach (var step in applied.StepResults)
+      foreach (var step in applied.StepResults)
+      {
+        await events.PublishStepAsync(
+            id,
+            step.StepId,
+            step.Progress,
+            step.Message ?? step.StepId,
+            step.Error,
+            evidenceToken).ConfigureAwait(false);
+      }
+    }
+    catch (OperationCanceledException) when (
+        cancelled && evidencePersistence!.IsCancellationRequested)
     {
-      await events.PublishStepAsync(
-          id,
-          step.StepId,
-          step.Progress,
-          step.Message ?? step.StepId,
-          step.Error,
-          evidenceToken).ConfigureAwait(false);
+      // The structured result below remains the durable cancellation evidence.
     }
 
     var stepResults = ToStepResults(planned, applied, startedAt);
@@ -793,7 +841,30 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
-      throw;
+      var completedStep = stepResults.LastOrDefault();
+      return new ResourceResult
+      {
+        ResourceId = definition.Id,
+        State = ExecutionState.Completed,
+        Outcome = ExecutionOutcome.Cancelled,
+        FinalCompliance = planned.ResourcePlan.Compliance,
+        DetectedBefore = detectedBefore,
+        Progress = completedStep?.Progress ?? 0,
+        StartedAtUtc = startedAt,
+        EndedAtUtc = DateTimeOffset.UtcNow,
+        Error = new StructuredError(
+            WdemErrorCode.CancellationError,
+            "Final resource verification was cancelled.",
+            "Resource application completed, but cancellation was requested during final verification.")
+        {
+          ResourceId = definition.Id,
+          StepId = completedStep?.StepId,
+          ProcessExitCode = completedStep?.ProcessExitCode,
+          IsRetryable = true
+        },
+        RestartRequirement = applied.RestartRequirement ?? planned.RestartPolicy,
+        StepResults = stepResults
+      };
     }
     catch (Exception exception)
     {
@@ -1529,7 +1600,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     }
   }
 
-  private sealed class RunProgressPumpCoordinator(TimeSpan persistenceTimeout)
+  private sealed class RunProgressPumpCoordinator
   {
     private readonly object _gate = new();
     private readonly HashSet<ProgressPumpSession> _sessions = [];
@@ -1548,7 +1619,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       return new ProgressPumpRegistration(this, session);
     }
 
-    public async Task SealAsync()
+    public async Task SealAsync(TimeSpan timeout)
     {
       ProgressPumpSession[] sessions;
       lock (_gate)
@@ -1557,7 +1628,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       }
 
       await Task.WhenAll(sessions.Select(session =>
-          session.SealAsync(persistenceTimeout))).ConfigureAwait(false);
+          session.SealAsync(timeout))).ConfigureAwait(false);
     }
 
     private void Unregister(ProgressPumpSession session)
@@ -1608,6 +1679,12 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           persistence.Cancel();
         }
 
+        if (timeout <= TimeSpan.Zero)
+        {
+          ObserveFault(pump);
+          return;
+        }
+
         try
         {
           await pump.WaitAsync(timeout).ConfigureAwait(false);
@@ -1616,12 +1693,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         {
           // Sealing cancels in-flight persistence after the scheduler's drain window.
         }
-        catch (TimeoutException exception)
+        catch (TimeoutException)
         {
           ObserveFault(pump);
-          throw new TimeoutException(
-              "Timed out while sealing provider progress.",
-              exception);
         }
       }
 

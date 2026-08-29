@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Wdem.Windows.Security;
 using Xunit;
 
@@ -128,6 +129,71 @@ public sealed class ArtifactCleanupQueueTests
   }
 
   [Fact]
+  public void StartupSweep_ReclaimsOnlyStaleEmptyStrictlyNamedPremarkerDirectory()
+  {
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-cleanup-premarker-{Guid.NewGuid():N}");
+    var outsideRoot = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-cleanup-premarker-target-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    Directory.CreateDirectory(outsideRoot);
+    var staleEmpty = Path.Combine(root, Guid.NewGuid().ToString("N"));
+    var recentEmpty = Path.Combine(root, Guid.NewGuid().ToString("N"));
+    var staleNonempty = Path.Combine(root, Guid.NewGuid().ToString("N"));
+    var unowned = Path.Combine(root, "unowned-directory");
+    var nonmatching = Path.Combine(root, Guid.NewGuid().ToString("N").ToUpperInvariant());
+    var reparse = Path.Combine(root, Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(staleEmpty);
+    Directory.CreateDirectory(recentEmpty);
+    Directory.CreateDirectory(staleNonempty);
+    File.WriteAllText(Path.Combine(staleNonempty, "partial.bin"), "partial");
+    Directory.CreateDirectory(unowned);
+    Directory.CreateDirectory(nonmatching);
+    CreateJunction(reparse, outsideRoot);
+    var stale = DateTime.UtcNow - TimeSpan.FromHours(2);
+    Directory.SetLastWriteTimeUtc(staleEmpty, stale);
+    Directory.SetLastWriteTimeUtc(staleNonempty, stale);
+    Directory.SetLastWriteTimeUtc(unowned, stale);
+    Directory.SetLastWriteTimeUtc(nonmatching, stale);
+
+    try
+    {
+      _ = new ArtifactCleanupQueue(
+          maxAttempts: 1,
+          retryDelay: TimeSpan.FromSeconds(30),
+          maxDelayedRetryRounds: 1,
+          knownStagingRoots: [root]);
+
+      Assert.False(Directory.Exists(staleEmpty));
+      Assert.True(Directory.Exists(recentEmpty));
+      Assert.True(Directory.Exists(staleNonempty));
+      Assert.True(Directory.Exists(unowned));
+      Assert.True(Directory.Exists(nonmatching));
+      Assert.True(Directory.Exists(reparse));
+      Assert.True(Directory.Exists(outsideRoot));
+    }
+    finally
+    {
+      if (Directory.Exists(reparse))
+      {
+        Directory.Delete(reparse);
+      }
+
+      if (Directory.Exists(root))
+      {
+        Directory.Delete(root, recursive: true);
+      }
+
+      if (Directory.Exists(outsideRoot))
+      {
+        Directory.Delete(outsideRoot, recursive: true);
+      }
+    }
+  }
+
+  [Fact]
   public async Task DelayedRetry_ReschedulesCleanupEnqueuedDuringScheduledReset()
   {
     var fileSystem = new RecordingCleanupFileSystem
@@ -167,6 +233,45 @@ public sealed class ArtifactCleanupQueueTests
     Assert.Equal(0, cleanup.PendingCount);
   }
 
+  [Fact]
+  public async Task DelayedRetry_ReschedulesSamePathEnqueuedDuringScheduledReset()
+  {
+    const string path = @"C:\staging\same-artifact.exe";
+    var fileSystem = new RecordingCleanupFileSystem
+    {
+      FailuresRemaining = 3
+    };
+    var resetReached = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    ArtifactCleanupQueue? cleanup = null;
+    var hookCalls = 0;
+    cleanup = new ArtifactCleanupQueue(
+        fileSystem,
+        maxAttempts: 1,
+        retryDelay: TimeSpan.FromMilliseconds(25),
+        maxDelayedRetryRounds: 1,
+        beforeRetryScheduledReset: () =>
+        {
+          if (Interlocked.Increment(ref hookCalls) != 1)
+          {
+            return;
+          }
+
+          cleanup!.DeleteFile(path);
+          resetReached.SetResult();
+        });
+    cleanup.DeleteFile(path);
+
+    await resetReached.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+    while (cleanup.PendingCount != 0 && DateTime.UtcNow < deadline)
+    {
+      await Task.Delay(25);
+    }
+
+    Assert.Equal(0, cleanup.PendingCount);
+  }
+
   private static string CreateOwnedArtifactDirectory(string root, string name)
   {
     var directory = Path.Combine(root, name);
@@ -174,6 +279,26 @@ public sealed class ArtifactCleanupQueueTests
     File.WriteAllText(Path.Combine(directory, ".wdem-artifact"), "wdem-artifact-v1\n");
     File.WriteAllText(Path.Combine(directory, ".wdem-lease"), string.Empty);
     return directory;
+  }
+
+  private static void CreateJunction(string path, string target)
+  {
+    var startInfo = new ProcessStartInfo("cmd.exe")
+    {
+      RedirectStandardError = true,
+      RedirectStandardOutput = true,
+      UseShellExecute = false,
+      CreateNoWindow = true
+    };
+    startInfo.ArgumentList.Add("/d");
+    startInfo.ArgumentList.Add("/c");
+    startInfo.ArgumentList.Add("mklink");
+    startInfo.ArgumentList.Add("/J");
+    startInfo.ArgumentList.Add(path);
+    startInfo.ArgumentList.Add(target);
+    using var process = Process.Start(startInfo)!;
+    process.WaitForExit();
+    Assert.Equal(0, process.ExitCode);
   }
 
   private sealed class RecordingCleanupFileSystem : IArtifactCleanupFileSystem

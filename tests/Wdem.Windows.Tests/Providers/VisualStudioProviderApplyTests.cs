@@ -494,6 +494,94 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   }
 
   [Fact]
+  public async Task ApplyAsync_EnrichesSuppliedFinalComplianceErrorWithExecutionContext()
+  {
+    var suppliedError = new StructuredError(
+        WdemErrorCode.ConfigurationError,
+        "Supplied verification failure.",
+        "Keep this safe verification detail.")
+    {
+      SuggestedAction = "Keep this safe suggested action.",
+      IsRetryable = true
+    };
+    var evaluator = new FinalErrorComplianceEvaluator(suppliedError);
+    var discovery = new SequenceDiscovery([[Instance(
+        "17.0_a",
+        workloads: ["Microsoft.VisualStudio.Workload.ManagedDesktop"],
+        components: ["Microsoft.NetCore.Component.Runtime.10.0"])]]);
+    var installer = new RecordingInstallerClient
+    {
+      Result = new VisualStudioInstallerResult(
+          new ProcessExecutionResult(true, 3010, [], []),
+          RestartPolicy.RestartRecommended,
+          new Dictionary<string, string> { ["installerOperation"] = "modify" })
+    };
+    var provider = Provider(discovery, installer, complianceEvaluator: evaluator);
+    var resource = Resource();
+    var plan = await provider.PlanAsync(
+        resource, State(Instance("17.0_a")), CancellationToken.None);
+    var plannedStep = Assert.Single(plan.Steps);
+
+    var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    var error = result.Error!;
+    var step = Assert.Single(result.StepResults);
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(resource.Id, error.ResourceId);
+    Assert.Equal(plannedStep.Id, error.StepId);
+    Assert.Equal(3010, error.ProcessExitCode);
+    Assert.Equal(suppliedError.Code, error.Code);
+    Assert.Equal(suppliedError.Summary, error.Summary);
+    Assert.Equal(suppliedError.Detail, error.Detail);
+    Assert.Equal(suppliedError.SuggestedAction, error.SuggestedAction);
+    Assert.Equal(suppliedError.IsRetryable, error.IsRetryable);
+    Assert.Equal(plannedStep.Action, step.Action);
+    Assert.Equal(error, step.Error);
+  }
+
+  [Theory]
+  [InlineData(3010, RestartPolicy.RestartRecommended)]
+  [InlineData(1641, RestartPolicy.RestartRequired)]
+  public async Task ApplyAsync_CancelledDuringFinalVerificationPreservesInstallerEvidence(
+      int exitCode,
+      RestartPolicy restartRequirement)
+  {
+    using var cancellation = new CancellationTokenSource();
+    var discovery = new SequenceDiscovery([[Instance("17.0_a")]])
+    {
+      BeforeDiscover = cancellation.Cancel
+    };
+    var installer = new RecordingInstallerClient
+    {
+      Result = new VisualStudioInstallerResult(
+          new ProcessExecutionResult(true, exitCode, [], []),
+          restartRequirement,
+          new Dictionary<string, string>
+          {
+            ["installerOperation"] = "install",
+            ["restartRequirement"] = restartRequirement.ToString()
+          })
+    };
+    var provider = Provider(discovery, installer);
+    var resource = Resource();
+    var plan = await provider.PlanAsync(resource, MissingState(), CancellationToken.None);
+
+    var result = await provider.ApplyAsync(resource, plan, null, cancellation.Token);
+
+    var step = Assert.Single(result.StepResults);
+    Assert.Equal(ApplyOutcome.Cancelled, result.Outcome);
+    Assert.Equal(WdemErrorCode.CancellationError, result.Error!.Code);
+    Assert.Equal(restartRequirement, result.RestartRequirement);
+    Assert.Equal(exitCode, step.ProcessExitCode);
+    Assert.Contains(
+        $"restartRequirement={restartRequirement}",
+        step.Message,
+        StringComparison.Ordinal);
+    Assert.Equal(["install"], installer.Operations);
+    Assert.Equal(1, discovery.AttemptCount);
+  }
+
+  [Fact]
   public async Task ApplyAsync_InstallerFailureRetainsVerifiedArtifactEvidence()
   {
     var discovery = new SequenceDiscovery([[Instance("17.0_a")]]);
@@ -582,11 +670,12 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   private static VisualStudioProvider Provider(
       IVisualStudioDiscovery discovery,
       IVisualStudioInstallerClient installer,
-      ISecureArtifactStager? secureArtifactStager = null) => new(
+      ISecureArtifactStager? secureArtifactStager = null,
+      IComplianceEvaluator? complianceEvaluator = null) => new(
           discovery,
           installer,
           new TrustedFileVerifier(),
-          new ComplianceEvaluator(),
+          complianceEvaluator ?? new ComplianceEvaluator(),
           secureArtifactStager ?? new SecureArtifactStager(
               new RecordingSecureDirectoryPolicy()));
 
@@ -681,15 +770,19 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
       : IVisualStudioDiscovery
   {
     private int _index;
+    public int AttemptCount { get; private set; }
     public int CallCount { get; private set; }
     public IReadOnlyList<string> RequestedWorkloads { get; private set; } = [];
     public IReadOnlyList<string> RequestedComponents { get; private set; } = [];
+    public Action? BeforeDiscover { get; init; }
 
     public Task<IReadOnlyList<VisualStudioInstance>> DiscoverAsync(
         IReadOnlyList<string> requestedWorkloads,
         IReadOnlyList<string> requestedComponents,
         CancellationToken cancellationToken)
     {
+      AttemptCount++;
+      BeforeDiscover?.Invoke();
       cancellationToken.ThrowIfCancellationRequested();
       CallCount++;
       RequestedWorkloads = requestedWorkloads;
@@ -702,6 +795,26 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
       var result = sequences[Math.Min(_index, sequences.Count - 1)];
       _index++;
       return Task.FromResult(result);
+    }
+  }
+
+  private sealed class FinalErrorComplianceEvaluator(StructuredError finalError)
+      : IComplianceEvaluator
+  {
+    private readonly ComplianceEvaluator _inner = new();
+    private int _calls;
+
+    public ComplianceResult Evaluate(ResourceDefinition desired, DetectedState current)
+    {
+      if (Interlocked.Increment(ref _calls) == 1)
+      {
+        return _inner.Evaluate(desired, current);
+      }
+
+      return new ComplianceResult(
+          ComplianceStatus.ConfigurationMismatch,
+          finalError.Summary,
+          finalError);
     }
   }
 

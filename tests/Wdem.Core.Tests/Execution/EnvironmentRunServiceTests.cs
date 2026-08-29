@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Wdem.Core.Compliance;
 using Wdem.Core.Execution;
 using Wdem.Core.Graph;
@@ -94,6 +95,59 @@ public sealed class EnvironmentRunServiceTests
     Assert.True(step.ProcessSucceeded);
     Assert.Equal(restartRequirement, resource.RestartRequirement);
     Assert.Contains(restartRequirement, persisted!.RestartRequirements);
+  }
+
+  [Theory]
+  [InlineData(3010, RestartPolicy.RestartRecommended)]
+  [InlineData(1641, RestartPolicy.RestartRequired)]
+  public async Task ApplyAsync_CancelledDuringFinalVerifyPreservesCompletedStepEvidence(
+      int exitCode,
+      RestartPolicy restartRequirement)
+  {
+    using var cancellation = new CancellationTokenSource();
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyResult = new ResourceApplyResult
+      {
+        ResourceId = "git",
+        Outcome = ApplyOutcome.Succeeded,
+        RestartRequirement = restartRequirement,
+        StepResults =
+        [
+          new ProviderStepResult
+          {
+            StepId = "install",
+            Action = PlanAction.Install,
+            Progress = 1,
+            ProcessExitCode = exitCode,
+            Succeeded = true,
+            Message = $"restartRequirement={restartRequirement}"
+          }
+        ]
+      },
+      VerificationOperation = token =>
+      {
+        cancellation.Cancel();
+        return ValueTask.FromCanceled<VerificationResult>(token);
+      }
+    };
+    var (service, store) = CreateService(provider);
+
+    var run = await service.ApplyAsync(Request(), cancellation.Token);
+    var persisted = await store.GetAsync(run.RunId, CancellationToken.None);
+
+    var resource = run.ResourceResults["git"];
+    var step = Assert.Single(resource.StepResults);
+    Assert.Equal(ExecutionState.Completed, run.State);
+    Assert.Equal(ExecutionOutcome.Cancelled, run.Outcome);
+    Assert.Equal(ExecutionOutcome.Cancelled, resource.Outcome);
+    Assert.Equal(restartRequirement, resource.RestartRequirement);
+    Assert.Equal(exitCode, step.ProcessExitCode);
+    Assert.True(step.ProcessSucceeded);
+    Assert.Equal(resource, persisted!.ResourceResults["git"]);
+    Assert.Contains(restartRequirement, persisted.RestartRequirements);
+    Assert.Equal(1, provider.ApplyCalls);
+    Assert.Equal(1, provider.VerifyCalls);
   }
 
   [Fact]
@@ -805,6 +859,79 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task ApplyAsync_CancellationUsesOneDeadlineAndPreservesLateProviderEvidence()
+  {
+    var drainBudget = TimeSpan.FromMilliseconds(600);
+    using var cancellation = new CancellationTokenSource();
+    var store = new InMemoryRunStore
+    {
+      AppendLogOperation = async (_, entry, token) =>
+      {
+        if (entry.Message == "blocked progress")
+        {
+          await Task.Delay(TimeSpan.FromSeconds(5), token);
+        }
+      }
+    };
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ProgressEvents =
+      [
+        new ProviderProgress("install", 0.25, "blocked progress")
+      ],
+      ApplyOperation = async _ =>
+      {
+        cancellation.Cancel();
+        await Task.Delay(TimeSpan.FromMilliseconds(450));
+        return new ResourceApplyResult
+        {
+          ResourceId = "git",
+          Outcome = ApplyOutcome.Cancelled,
+          RestartRequirement = RestartPolicy.RestartRequired,
+          StepResults =
+          [
+            new ProviderStepResult
+            {
+              StepId = "install",
+              Action = PlanAction.Install,
+              Progress = 0.8,
+              ProcessExitCode = 1641,
+              Error = new StructuredError(
+                  WdemErrorCode.ProviderError,
+                  "Installer cancellation recorded.",
+                  "The installer initiated a restart before cancellation.")
+            }
+          ]
+        };
+      }
+    };
+    var (service, persistedStore) = CreateService(
+        provider,
+        store: store,
+        scheduler: new ResourceScheduler(drainBudget),
+        persistenceTimeout: TimeSpan.FromSeconds(5));
+    var stopwatch = Stopwatch.StartNew();
+
+    var run = await service.ApplyAsync(Request(), cancellation.Token);
+    var persisted = await persistedStore.GetAsync(run.RunId, CancellationToken.None);
+
+    stopwatch.Stop();
+    var resource = run.ResourceResults["git"];
+    var step = Assert.Single(resource.StepResults);
+    Assert.Equal(ExecutionOutcome.Cancelled, resource.Outcome);
+    Assert.Equal(RestartPolicy.RestartRequired, resource.RestartRequirement);
+    Assert.Equal(1641, step.ProcessExitCode);
+    Assert.Equal(
+        "The installer initiated a restart before cancellation.",
+        step.Error!.Detail);
+    Assert.Equal(resource, persisted!.ResourceResults["git"]);
+    Assert.Contains(RestartPolicy.RestartRequired, persisted.RestartRequirements);
+    Assert.True(
+        stopwatch.Elapsed < TimeSpan.FromMilliseconds(900),
+        $"Cancellation took {stopwatch.Elapsed} for a {drainBudget} drain budget.");
+  }
+
+  [Fact]
   public async Task Recovery_RedetectsAndReplansFromAnIncompleteSnapshot()
   {
     var provider = new ScriptedProvider(Satisfied("git", "2.52.1"));
@@ -1159,7 +1286,9 @@ public sealed class EnvironmentRunServiceTests
       InMemoryRunStore? store = null,
       IRunEventSink? eventSink = null,
       IExecutionPlanner? planner = null,
-      IResourceApplyDispatcher? dispatcher = null)
+      IResourceApplyDispatcher? dispatcher = null,
+      IResourceScheduler? scheduler = null,
+      TimeSpan? persistenceTimeout = null)
   {
     catalog ??= new FakeProfileCatalog(profile ?? Profile(), CanonicalProfilePath);
     var registry = new ResourceProviderRegistry([provider]);
@@ -1173,12 +1302,13 @@ public sealed class EnvironmentRunServiceTests
             registry,
             compliance,
             planner ?? new ExecutionPlanner(registry, compliance),
-            new ResourceScheduler(),
+            scheduler ?? new ResourceScheduler(),
             store,
             dispatcher ?? new DirectResourceApplyDispatcher(),
             timeProvider: null,
             eventSink,
-            new LogRedactor()),
+            new LogRedactor(),
+            persistenceTimeout),
         store);
   }
 

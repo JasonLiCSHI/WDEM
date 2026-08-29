@@ -29,7 +29,8 @@ public sealed class ResourceScheduler : IResourceScheduler
       Func<PlannedResource, ProviderCapabilities> capabilitiesFor,
       int maximumConcurrency,
       CancellationToken cancellationToken,
-      Func<ResourceResult, Task>? transitionAsync = null)
+      Func<ResourceResult, Task>? transitionAsync = null,
+      CancellationDrainDeadline? cancellationDeadline = null)
   {
     ArgumentNullException.ThrowIfNull(plan);
     ArgumentNullException.ThrowIfNull(executeAsync);
@@ -74,6 +75,11 @@ public sealed class ResourceScheduler : IResourceScheduler
 
       return Snapshot(results);
     }
+
+    using var ownedCancellationDeadline = cancellationDeadline is null
+        ? new CancellationDrainDeadline(_drainTimeout, cancellationToken)
+        : null;
+    cancellationDeadline ??= ownedCancellationDeadline!;
 
     var scheduling = CreateSchedulingMetadata(resources, capabilitiesFor);
     var globalSemaphore = new SemaphoreSlim(maximumConcurrency, maximumConcurrency);
@@ -190,7 +196,7 @@ public sealed class ResourceScheduler : IResourceScheduler
           var drained = await CancelAndDrainAsync(
               executionCancellation,
               runningTasks,
-              _drainTimeout).ConfigureAwait(false);
+              cancellationDeadline.Remaining).ConfigureAwait(false);
           if (!drained)
           {
             semaphoreDisposalDeferred = true;
@@ -248,7 +254,7 @@ public sealed class ResourceScheduler : IResourceScheduler
         var drained = await CancelAndDrainAsync(
             executionCancellation,
             runningTasks,
-            _drainTimeout).ConfigureAwait(false);
+            cancellationDeadline.Remaining).ConfigureAwait(false);
         if (!drained)
         {
           semaphoreDisposalDeferred = true;
