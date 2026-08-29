@@ -148,26 +148,28 @@ internal interface IVsixPlanArtifactStore
 internal sealed class ClaimedVsixPlanArtifact : IAsyncDisposable
 {
   private readonly string _directoryPath;
-  private FileStream? _readLock;
+  private readonly string _privateInstallPath;
   private ArtifactLease? _lease;
   private IDisposable? _validatedDirectory;
+  private Action<string>? _deleteFile;
   private Action<string>? _deleteDirectory;
 
   internal ClaimedVsixPlanArtifact(
       string directoryPath,
       string path,
       VsixManifest manifest,
-      FileStream readLock,
       ArtifactLease lease,
       IDisposable validatedDirectory,
+      Action<string> deleteFile,
       Action<string> deleteDirectory)
   {
     _directoryPath = directoryPath;
+    _privateInstallPath = path;
     Path = path;
     Manifest = manifest;
-    _readLock = readLock;
     _lease = lease;
     _validatedDirectory = validatedDirectory;
+    _deleteFile = deleteFile;
     _deleteDirectory = deleteDirectory;
   }
 
@@ -176,9 +178,9 @@ internal sealed class ClaimedVsixPlanArtifact : IAsyncDisposable
 
   public ValueTask DisposeAsync()
   {
-    Interlocked.Exchange(ref _readLock, null)?.Dispose();
     Interlocked.Exchange(ref _lease, null)?.Dispose();
     Interlocked.Exchange(ref _validatedDirectory, null)?.Dispose();
+    Interlocked.Exchange(ref _deleteFile, null)?.Invoke(_privateInstallPath);
     Interlocked.Exchange(ref _deleteDirectory, null)?.Invoke(_directoryPath);
     return ValueTask.CompletedTask;
   }
@@ -195,12 +197,14 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
   private readonly Action<string, string> _validateRestrictedDirectory;
   private readonly Func<string, string, IDisposable> _openValidatedDirectory;
   private readonly Action<string> _deleteDirectory;
+  private readonly Action<string> _deleteFile;
   private readonly bool _protectTerminalState;
   private readonly IVsixPlanArtifactRevocationStore _revocationStore;
   private readonly Func<string> _getCurrentUserSid;
   private readonly Func<DateTimeOffset> _getUtcNow;
   private readonly Func<Guid> _getBootIdentifier;
   private readonly Func<long> _getUptimeMilliseconds;
+  private readonly Func<TimeSpan, CancellationToken, Task> _delay;
   private readonly TimeSpan _handoffLifetime;
   private readonly string _planArtifactRoot;
   private readonly ConcurrentDictionary<string, HandoffRegistration> _handoffs =
@@ -239,10 +243,12 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       Func<DateTimeOffset>? getUtcNow = null,
       Func<string, string, IDisposable>? openValidatedDirectory = null,
       Action<string>? deleteDirectory = null,
+      Action<string>? deleteFile = null,
       bool protectTerminalState = false,
       IVsixPlanArtifactRevocationStore? revocationStore = null,
       Func<Guid>? getBootIdentifier = null,
-      Func<long>? getUptimeMilliseconds = null)
+      Func<long>? getUptimeMilliseconds = null,
+      Func<TimeSpan, CancellationToken, Task>? delay = null)
   {
     _stager = stager ?? throw new ArgumentNullException(nameof(stager));
     _verifier = verifier ?? throw new ArgumentNullException(nameof(verifier));
@@ -252,11 +258,13 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     _openValidatedDirectory = openValidatedDirectory ??
         (static (_, _) => NoopDirectoryValidationLease.Instance);
     _deleteDirectory = deleteDirectory ?? ArtifactCleanupQueue.Shared.DeleteDirectory;
+    _deleteFile = deleteFile ?? ArtifactCleanupQueue.Shared.DeleteFile;
     _protectTerminalState = protectTerminalState;
     _getCurrentUserSid = getCurrentUserSid ?? throw new ArgumentNullException(nameof(getCurrentUserSid));
     _getUtcNow = getUtcNow ?? (static () => DateTimeOffset.UtcNow);
     _getBootIdentifier = getBootIdentifier ?? WindowsVsixPlanArtifactClock.GetBootIdentifier;
     _getUptimeMilliseconds = getUptimeMilliseconds ?? (static () => Environment.TickCount64);
+    _delay = delay ?? (static (duration, token) => Task.Delay(duration, token));
     _handoffLifetime = handoffLifetime ?? TimeSpan.FromHours(24);
     _planArtifactRoot = GetPlanArtifactRoot(
         identityNeutralPlanArtifactRoot ??
@@ -371,9 +379,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
         return Failure(manifestResult.Error, "The staged VSIX manifest is invalid.");
       }
 
-      var ownerToken = Convert.ToHexString(Guid.NewGuid().ToByteArray());
       var activationProof = CreateActivationProof();
-      var activationCommitment = CreateActivationCommitment(activationProof);
       var expiresAtUtc = _getUtcNow().Add(_handoffLifetime);
       var bootIdentifier = _getBootIdentifier();
       var expiresAtUptimeMilliseconds = CreateExpirationUptimeDeadline();
@@ -391,17 +397,14 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
           manifestResult.Manifest.Targets.ToArray(),
           creatorSid,
           directory,
-          ownerToken,
+          OwnershipToken: string.Empty,
           expiresAtUtc,
+          bootIdentifier,
+          expiresAtUptimeMilliseconds,
           Revoked: false,
           Consumed: false);
-      _revocationStore.RecordIssued(
-          ownerToken,
-          Path.GetFileName(directory),
-          expiresAtUtc,
-          activationCommitment,
-          bootIdentifier,
-          expiresAtUptimeMilliseconds);
+      var ownerToken = CreateOwnershipToken(evidence, activationProof);
+      evidence = evidence with { OwnershipToken = ownerToken };
       WriteOwnershipMarker(evidence);
       staged.ReleaseForHandoff();
       try
@@ -410,6 +413,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
             resourceId,
             ownerToken,
             directory,
+            activationProof,
             expiresAtUtc,
             bootIdentifier,
             expiresAtUptimeMilliseconds);
@@ -468,6 +472,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     var directoryValidated = false;
     var protectedTerminal = false;
     var handedOff = false;
+    string? privateInstallPath = null;
     try
     {
       evidence = ReadRegisteredEvidence(resourceId, locator);
@@ -504,10 +509,29 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       lease = ArtifactLease.Acquire(evidence.OwnershipDirectory);
       ValidateOwnershipMarker(evidence, locator);
       directoryValidated = true;
+      PersistConsumedTerminalState(evidence);
+      protectedTerminal = true;
+      _revocationStore.RecordIssued(
+          evidence.OwnershipToken,
+          Path.GetFileName(evidence.OwnershipDirectory),
+          evidence.ExpiresAtUtc,
+          CreateActivationCommitment(locator.ActivationProof),
+          evidence.BootIdentifier,
+          evidence.ExpiresAtUptimeMilliseconds);
+      _revocationStore.Activate(
+          evidence.OwnershipToken,
+          Path.GetFileName(evidence.OwnershipDirectory));
+      var authorizedState = _revocationStore.GetState(
+          evidence.OwnershipToken,
+          Path.GetFileName(evidence.OwnershipDirectory));
+      if (!IsAuthorizedActivation(authorizedState, locator) || IsExpired(authorizedState))
+      {
+        throw new SecurityException("The elevated VSIX claim authorization is invalid.");
+      }
+
       _revocationStore.ClaimStarted(
           evidence.OwnershipToken,
           Path.GetFileName(evidence.OwnershipDirectory));
-      protectedTerminal = true;
       readLock = new FileStream(
           evidence.ArtifactPath,
           FileMode.Open,
@@ -541,20 +565,53 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
         return ClaimFailure(manifestResult.Error, "The approved VSIX manifest evidence no longer matches.");
       }
 
+      privateInstallPath = CreatePrivateInstallCopy(evidence, readLock);
+      var privateVerification = await _verifier.VerifySha256Async(
+          privateInstallPath,
+          evidence.Sha256,
+          cancellationToken).ConfigureAwait(false);
+      if (!privateVerification.IsTrusted || privateVerification.VerifiedPath is null ||
+          !string.Equals(
+              privateVerification.VerifiedPath,
+              privateInstallPath,
+              StringComparison.OrdinalIgnoreCase) ||
+          !string.Equals(
+              privateVerification.Sha256,
+              evidence.Sha256,
+              StringComparison.OrdinalIgnoreCase))
+      {
+        return ClaimFailure(
+            privateVerification.Error,
+            "The private VSIX install copy hash is invalid.");
+      }
+
+      var privateManifestResult = await _manifestReader.ReadSourceAsync(
+          privateInstallPath,
+          evidence.VisualStudioInstanceId,
+          cancellationToken).ConfigureAwait(false);
+      if (privateManifestResult.Manifest is null || privateManifestResult.Error is not null ||
+          !ManifestMatchesEvidence(privateManifestResult.Manifest, evidence))
+      {
+        return ClaimFailure(
+            privateManifestResult.Error,
+            "The private VSIX install copy manifest does not match the approved evidence.");
+      }
+
       _revocationStore.Consume(
           evidence.OwnershipToken,
           Path.GetFileName(evidence.OwnershipDirectory));
-      PersistConsumedTerminalState(evidence);
       evidence = PersistConsumedEvidence(evidence);
+      readLock.Dispose();
+      readLock = null;
       var artifact = new ClaimedVsixPlanArtifact(
           evidence.OwnershipDirectory,
-          evidence.ArtifactPath,
-          manifestResult.Manifest,
-          readLock,
+          privateInstallPath,
+          privateManifestResult.Manifest,
           lease,
           validatedDirectory,
+          _deleteFile,
           _deleteDirectory);
-      readLock = null;
+      privateInstallPath = null;
       lease = null;
       validatedDirectory = null;
       handedOff = true;
@@ -566,7 +623,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       throw;
     }
     catch (Exception exception) when (exception is ArgumentException or IOException or
-        UnauthorizedAccessException or InvalidDataException or JsonException or SecurityException)
+        UnauthorizedAccessException or InvalidDataException or FormatException or
+        JsonException or SecurityException)
     {
       return ClaimFailure(null, "The approved VSIX artifact could not be securely claimed.", exception);
     }
@@ -575,12 +633,49 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       readLock?.Dispose();
       lease?.Dispose();
       validatedDirectory?.Dispose();
+      if (privateInstallPath is not null)
+      {
+        _deleteFile(privateInstallPath);
+      }
       if (directoryValidated && protectedTerminal && !handedOff)
       {
         RemoveHandoff(resourceId, evidence!.OwnershipDirectory);
         _deleteDirectory(evidence!.OwnershipDirectory);
       }
     }
+  }
+
+  private string CreatePrivateInstallCopy(
+      VsixPlanArtifactEvidence evidence,
+      FileStream validatedSource)
+  {
+    var directoryName = Path.GetFileName(evidence.OwnershipDirectory);
+    var path = Path.Combine(
+        _planArtifactRoot,
+        $".{directoryName}.{Guid.NewGuid():N}.wdem-vsix-install");
+    if (!Guid.TryParseExact(directoryName, "N", out _) ||
+        !string.Equals(Path.GetDirectoryName(path), _planArtifactRoot, StringComparison.OrdinalIgnoreCase))
+    {
+      throw new SecurityException("The private VSIX install-copy path is invalid.");
+    }
+
+    validatedSource.Position = 0;
+    if (_protectTerminalState)
+    {
+      WindowsPlanArtifactDirectoryPolicy.CreateAdministratorOnlyCopy(path, validatedSource);
+      return path;
+    }
+
+    using var destination = new FileStream(
+        path,
+        FileMode.CreateNew,
+        FileAccess.Write,
+        FileShare.Read,
+        bufferSize: 81920,
+        FileOptions.WriteThrough);
+    validatedSource.CopyTo(destination);
+    destination.Flush(flushToDisk: true);
+    return path;
   }
 
   internal Task<VsixPlanArtifactClaimResult> ClaimAsync(
@@ -670,7 +765,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     }
     catch (Exception exception) when (exception is ArgumentException or IOException or
         UnauthorizedAccessException or InvalidDataException or InvalidOperationException or
-        JsonException or NotSupportedException or SecurityException)
+        FormatException or JsonException or NotSupportedException or SecurityException)
     {
       return false;
     }
@@ -680,6 +775,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       string resourceId,
       string registrationToken,
       string directory,
+      string activationProof,
       DateTimeOffset expiresAtUtc,
       Guid bootIdentifier,
       long expiresAtUptimeMilliseconds)
@@ -687,6 +783,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     var registration = new HandoffRegistration(
         registrationToken,
         directory,
+        activationProof,
         expiresAtUtc,
         bootIdentifier,
         expiresAtUptimeMilliseconds,
@@ -695,7 +792,11 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     {
       _handoffs.AddOrUpdate(resourceId, registration, (_, existing) =>
       {
-        RevokeDurable(resourceId, existing.RegistrationToken, existing.Directory);
+        RevokeDurable(
+            resourceId,
+            existing.RegistrationToken,
+            existing.Directory,
+            existing.ActivationProof);
         _deleteDirectory(existing.Directory);
         existing.Cancellation.Cancel();
         return registration;
@@ -704,33 +805,6 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     catch
     {
       registration.Cancellation.Dispose();
-      throw;
-    }
-
-    try
-    {
-      _revocationStore.Activate(registrationToken, Path.GetFileName(directory));
-    }
-    catch
-    {
-      try
-      {
-        _revocationStore.Revoke(registrationToken, Path.GetFileName(directory));
-        if (_handoffs.TryRemove(
-                new KeyValuePair<string, HandoffRegistration>(resourceId, registration)))
-        {
-          registration.Cancellation.Cancel();
-          registration.Cancellation.Dispose();
-          _deleteDirectory(directory);
-        }
-      }
-      catch (Exception cleanupException) when (cleanupException is ArgumentException or IOException or
-          UnauthorizedAccessException or InvalidDataException or InvalidOperationException or
-          JsonException or NotSupportedException or SecurityException)
-      {
-        // Pending issuance is already unclaimable. Retain the leaf if terminal cleanup also fails.
-      }
-
       throw;
     }
 
@@ -766,18 +840,21 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       return false;
     }
 
-    ArtifactLease? lease = null;
-    IDisposable? validatedDirectory = null;
-    string? directory = null;
+    if (!TryPersistAbandonedTerminalState(locator))
+    {
+      return false;
+    }
+
+    string? directory = Path.Combine(_planArtifactRoot, locator.DirectoryName);
     try
     {
       var registration = ReadRegisteredEvidence(resourceId, locator);
       directory = registration.OwnershipDirectory;
-      validatedDirectory = _openValidatedDirectory(
+      using var validatedDirectory = _openValidatedDirectory(
           registration.OwnershipDirectory,
           registration.CreatorSid);
       _validateRestrictedDirectory(registration.OwnershipDirectory, registration.CreatorSid);
-      lease = ArtifactLease.Acquire(registration.OwnershipDirectory);
+      using var lease = ArtifactLease.Acquire(registration.OwnershipDirectory);
       _validateRestrictedDirectory(registration.OwnershipDirectory, registration.CreatorSid);
       var sealedRegistration = ReadOwnershipMarker(registration.OwnershipDirectory);
       if (!EvidenceMatches(sealedRegistration, registration))
@@ -785,59 +862,82 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
         throw new SecurityException("The approved VSIX registration changed during cleanup.");
       }
 
-      var directoryName = Path.GetFileName(sealedRegistration.OwnershipDirectory);
-      _revocationStore.Revoke(sealedRegistration.OwnershipToken, directoryName);
-
       _ = PersistRevokedEvidence(registration);
     }
     catch (Exception exception) when (exception is ArgumentException or IOException or
         UnauthorizedAccessException or InvalidDataException or InvalidOperationException or
         JsonException or NotSupportedException or SecurityException)
     {
-      return false;
-    }
-    finally
-    {
-      lease?.Dispose();
-      validatedDirectory?.Dispose();
+      // The terminal directory already makes the locator permanently unclaimable.
     }
 
-    _deleteDirectory(directory!);
+    _deleteDirectory(directory);
     return true;
   }
 
   private void RevokeDurable(
       string resourceId,
       string registrationToken,
-      string directory)
+      string directory,
+      string activationProof)
   {
     var locator = new VsixPlanArtifactLocator(
         registrationToken,
-        Path.GetFileName(directory));
-    var registration = ReadRegisteredEvidence(resourceId, locator);
-    if (!string.Equals(
-            registration.OwnershipDirectory,
-            directory,
-            StringComparison.OrdinalIgnoreCase))
+        Path.GetFileName(directory),
+        activationProof);
+    if (!TryPersistAbandonedTerminalState(locator))
     {
-      throw new SecurityException("The approved VSIX registration directory changed.");
+      return;
     }
 
-    using var validatedDirectory = _openValidatedDirectory(
-        registration.OwnershipDirectory,
-        registration.CreatorSid);
-    _validateRestrictedDirectory(registration.OwnershipDirectory, registration.CreatorSid);
-    using var lease = ArtifactLease.Acquire(registration.OwnershipDirectory);
-    var sealedRegistration = ReadOwnershipMarker(registration.OwnershipDirectory);
-    if (!EvidenceMatches(sealedRegistration, registration) || sealedRegistration.Consumed)
+    try
     {
-      throw new SecurityException("The approved VSIX registration changed during revocation.");
+      var registration = ReadRegisteredEvidence(resourceId, locator);
+      if (!string.Equals(
+              registration.OwnershipDirectory,
+              directory,
+              StringComparison.OrdinalIgnoreCase))
+      {
+        return;
+      }
+
+      using var validatedDirectory = _openValidatedDirectory(
+          registration.OwnershipDirectory,
+          registration.CreatorSid);
+      _validateRestrictedDirectory(registration.OwnershipDirectory, registration.CreatorSid);
+      using var lease = ArtifactLease.Acquire(registration.OwnershipDirectory);
+      var sealedRegistration = ReadOwnershipMarker(registration.OwnershipDirectory);
+      if (EvidenceMatches(sealedRegistration, registration) && !sealedRegistration.Consumed)
+      {
+        _ = PersistRevokedEvidence(sealedRegistration);
+      }
     }
+    catch (Exception exception) when (exception is ArgumentException or IOException or
+        UnauthorizedAccessException or InvalidDataException or InvalidOperationException or
+        JsonException or NotSupportedException or SecurityException)
+    {
+      // The terminal directory is authoritative; creator-leaf cleanup is best effort.
+    }
+  }
 
-    var directoryName = Path.GetFileName(sealedRegistration.OwnershipDirectory);
-    _revocationStore.Revoke(sealedRegistration.OwnershipToken, directoryName);
+  private bool TryPersistAbandonedTerminalState(VsixPlanArtifactLocator locator)
+  {
+    var path = GetTerminalStatePath(locator);
+    try
+    {
+      if (File.Exists(path))
+      {
+        return false;
+      }
 
-    _ = PersistRevokedEvidence(sealedRegistration);
+      Directory.CreateDirectory(path);
+      return Directory.Exists(path);
+    }
+    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+        NotSupportedException or SecurityException)
+    {
+      return false;
+    }
   }
 
   private async Task ExpireHandoffAsync(string resourceId, HandoffRegistration registration)
@@ -850,11 +950,15 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
         var remaining = GetRemainingLifetime(registration);
         if (remaining > TimeSpan.Zero)
         {
-          await Task.Delay(remaining, registration.Cancellation.Token).ConfigureAwait(false);
+          await _delay(remaining, registration.Cancellation.Token).ConfigureAwait(false);
           continue;
         }
 
-        RevokeDurable(resourceId, registration.RegistrationToken, registration.Directory);
+        RevokeDurable(
+            resourceId,
+            registration.RegistrationToken,
+            registration.Directory,
+            registration.ActivationProof);
         if (_handoffs.TryRemove(
                 new KeyValuePair<string, HandoffRegistration>(resourceId, registration)))
         {
@@ -1023,13 +1127,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       VsixPlanArtifactEvidence evidence,
       VsixPlanArtifactLocator locator)
   {
-    var path = GetTerminalStatePath(evidence);
-    var state = _revocationStore.GetState(
-        evidence.OwnershipToken,
-        Path.GetFileName(evidence.OwnershipDirectory));
-    if (File.Exists(path) || Directory.Exists(path) ||
-        !IsAuthorizedActivation(state, locator) ||
-        IsExpired(state))
+    var path = GetTerminalStatePath(locator);
+    if (File.Exists(path) || Directory.Exists(path))
     {
       throw new SecurityException("The approved VSIX artifact has a terminal claim state.");
     }
@@ -1037,7 +1136,9 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
 
   private void PersistConsumedTerminalState(VsixPlanArtifactEvidence evidence)
   {
-    var path = GetTerminalStatePath(evidence);
+    var path = GetTerminalStatePath(new VsixPlanArtifactLocator(
+        evidence.OwnershipToken,
+        Path.GetFileName(evidence.OwnershipDirectory)));
     var bytes = Encoding.UTF8.GetBytes(
         $"wdem-vsix-terminal-v1\n{evidence.OwnershipToken}\nconsumed\n");
     if (_protectTerminalState)
@@ -1057,15 +1158,14 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     stream.Flush(flushToDisk: true);
   }
 
-  private string GetTerminalStatePath(VsixPlanArtifactEvidence evidence)
+  private string GetTerminalStatePath(VsixPlanArtifactLocator locator)
   {
-    var directoryName = Path.GetFileName(evidence.OwnershipDirectory);
-    var path = Path.Combine(_planArtifactRoot, $".{directoryName}.wdem-vsix-terminal");
-    if (!string.Equals(
-            Path.GetDirectoryName(evidence.OwnershipDirectory),
-            _planArtifactRoot,
-            StringComparison.OrdinalIgnoreCase) ||
-        !Guid.TryParseExact(directoryName, "N", out _) ||
+    var path = Path.Combine(
+        _planArtifactRoot,
+        $".{locator.DirectoryName}.{locator.RegistrationToken}.wdem-vsix-terminal");
+    if (!Guid.TryParseExact(locator.DirectoryName, "N", out _) ||
+        locator.RegistrationToken.Length != 32 ||
+        !locator.RegistrationToken.All(Uri.IsHexDigit) ||
         !string.Equals(Path.GetDirectoryName(path), _planArtifactRoot, StringComparison.OrdinalIgnoreCase))
     {
       throw new SecurityException("The approved VSIX terminal-state path is invalid.");
@@ -1080,12 +1180,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
   {
     var registration = ReadOwnershipMarker(evidence.OwnershipDirectory);
     ValidateRegistration(registration, evidence.ResourceId, locator);
-    var state = _revocationStore.GetState(
-        evidence.OwnershipToken,
-        Path.GetFileName(evidence.OwnershipDirectory));
-    if (!EvidenceMatches(registration, evidence) ||
-        !IsAuthorizedActivation(state, locator) ||
-        IsExpired(state))
+    if (!EvidenceMatches(registration, evidence) || IsExpired(evidence))
     {
       throw new SecurityException("The approved VSIX ownership registration is invalid or expired.");
     }
@@ -1137,6 +1232,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     }
 
     ValidateEvidencePaths(registration);
+    ValidateOwnershipToken(registration, locator);
   }
 
   private static void ValidateEvidencePaths(VsixPlanArtifactEvidence evidence)
@@ -1161,6 +1257,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
         string.IsNullOrWhiteSpace(evidence.OwnershipToken) ||
         evidence.OwnershipToken.Length != 32 || !evidence.OwnershipToken.All(Uri.IsHexDigit) ||
         evidence.ExpiresAtUtc == default ||
+        evidence.BootIdentifier == Guid.Empty ||
+        evidence.ExpiresAtUptimeMilliseconds < 0 ||
         !Path.IsPathFullyQualified(evidence.ArtifactPath) ||
         !Path.IsPathFullyQualified(evidence.OwnershipDirectory))
     {
@@ -1220,6 +1318,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
           StringComparison.OrdinalIgnoreCase) &&
       string.Equals(left.OwnershipToken, right.OwnershipToken, StringComparison.Ordinal) &&
       left.ExpiresAtUtc == right.ExpiresAtUtc &&
+      left.BootIdentifier == right.BootIdentifier &&
+      left.ExpiresAtUptimeMilliseconds == right.ExpiresAtUptimeMilliseconds &&
       left.Revoked == right.Revoked &&
       left.Consumed == right.Consumed;
 
@@ -1237,6 +1337,47 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
 
   private static string CreateActivationCommitment(string activationProof) =>
       Convert.ToHexString(SHA256.HashData(DecodeActivationProof(activationProof)));
+
+  private static string CreateOwnershipToken(
+      VsixPlanArtifactEvidence evidence,
+      string activationProof)
+  {
+    var payload = JsonSerializer.SerializeToUtf8Bytes(
+        new VsixPlanArtifactCommitment(
+            evidence.SchemaVersion,
+            evidence.ResourceId,
+            evidence.ArtifactPath,
+            evidence.Sha256,
+            evidence.ManifestId,
+            evidence.ManifestVersion,
+            evidence.ManifestPath,
+            evidence.VisualStudioInstanceId,
+            evidence.VisualStudioProductId,
+            evidence.VisualStudioInstallationVersion,
+            evidence.InstallationTargets,
+            evidence.CreatorSid,
+            evidence.OwnershipDirectory,
+            evidence.ExpiresAtUtc,
+            evidence.BootIdentifier,
+            evidence.ExpiresAtUptimeMilliseconds),
+        JsonOptions);
+    var hash = HMACSHA256.HashData(DecodeActivationProof(activationProof), payload);
+    return Convert.ToHexString(hash.AsSpan(0, 16));
+  }
+
+  private static void ValidateOwnershipToken(
+      VsixPlanArtifactEvidence evidence,
+      VsixPlanArtifactLocator locator)
+  {
+    // This binds marker integrity and replay state to the locator. Authorization comes from
+    // ElevatedResourceWorker's protected-plan and ApprovedResourceFingerprint validation.
+    var expected = Convert.FromHexString(evidence.OwnershipToken);
+    var actual = Convert.FromHexString(CreateOwnershipToken(evidence, locator.ActivationProof));
+    if (!CryptographicOperations.FixedTimeEquals(expected, actual))
+    {
+      throw new SecurityException("The approved VSIX ownership evidence is not bound to the plan.");
+    }
+  }
 
   private static byte[] DecodeActivationProof(string activationProof) =>
       Convert.FromBase64String(
@@ -1260,7 +1401,14 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       state.IsExpired(
           _getUtcNow(),
           _getBootIdentifier(),
-          _getUptimeMilliseconds());
+      _getUptimeMilliseconds());
+
+  private bool IsExpired(VsixPlanArtifactEvidence evidence) =>
+      evidence.BootIdentifier != _getBootIdentifier() ||
+      _getUptimeMilliseconds() is var uptime &&
+      (uptime < 0 ||
+       uptime >= evidence.ExpiresAtUptimeMilliseconds ||
+       _getUtcNow() >= evidence.ExpiresAtUtc);
 
   private static VsixPlanVisualStudioIdentity LegacyIdentity(string instanceId) =>
       new(instanceId, "unknown", "unknown");
@@ -1419,8 +1567,28 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       string OwnershipDirectory,
       string OwnershipToken,
       DateTimeOffset ExpiresAtUtc,
+      Guid BootIdentifier,
+      long ExpiresAtUptimeMilliseconds,
       bool Revoked,
       bool Consumed);
+
+  private sealed record VsixPlanArtifactCommitment(
+      int SchemaVersion,
+      string ResourceId,
+      string ArtifactPath,
+      string Sha256,
+      string ManifestId,
+      string ManifestVersion,
+      string ManifestPath,
+      string VisualStudioInstanceId,
+      string VisualStudioProductId,
+      string VisualStudioInstallationVersion,
+      IReadOnlyList<VsixInstallationTarget> InstallationTargets,
+      string CreatorSid,
+      string OwnershipDirectory,
+      DateTimeOffset ExpiresAtUtc,
+      Guid BootIdentifier,
+      long ExpiresAtUptimeMilliseconds);
 
   private sealed record VsixPlanArtifactLocator(
       string RegistrationToken,
@@ -1430,6 +1598,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
   private sealed record HandoffRegistration(
       string RegistrationToken,
       string Directory,
+      string ActivationProof,
       DateTimeOffset ExpiresAtUtc,
       Guid BootIdentifier,
       long ExpiresAtUptimeMilliseconds,

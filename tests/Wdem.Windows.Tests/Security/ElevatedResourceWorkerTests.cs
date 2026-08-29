@@ -477,6 +477,112 @@ public sealed class ElevatedResourceWorkerTests
     Assert.Equal(0, provider.ApplyCalls);
   }
 
+  [Theory]
+  [InlineData(1)]
+  [InlineData(2)]
+  [InlineData(3)]
+  public async Task ApplyAsync_ApprovedVsixLocatorFieldWasReplaced_RefusesBeforeProvider(
+      int fieldIndex)
+  {
+    var provider = new RecordingProvider();
+    var run = ApprovedRun(provider, out _);
+    var planned = run.Plan!.Resources.Single();
+    var locator = "vsix-v2:00112233445566778899AABBCCDDEEFF:" +
+        "00112233445566778899aabbccddeeff:" + new string('A', 43);
+    var approvedPlan = planned.ResourcePlan with
+    {
+      Steps = [planned.ResourcePlan.Steps.Single() with { Id = locator }]
+    };
+    var fingerprint = ApprovedResourceFingerprint.Create(planned.Definition, approvedPlan);
+    var fields = locator.Split(':');
+    fields[fieldIndex] = (fields[fieldIndex][0] == 'A' ? 'B' : 'A') + fields[fieldIndex][1..];
+    var tamperedPlan = approvedPlan with
+    {
+      Steps = [approvedPlan.Steps.Single() with { Id = string.Join(':', fields) }]
+    };
+    var tamperedRun = run with
+    {
+      Plan = run.Plan with
+      {
+        Resources = [planned with { ResourcePlan = tamperedPlan }]
+      }
+    };
+    var worker = new ElevatedResourceWorker(
+        new StubRunStore(tamperedRun),
+        new StubApprovedResourceStore(new ApprovedResource(
+            planned.Definition,
+            approvedPlan,
+            fingerprint)),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+
+    var result = await worker.ApplyAsync(
+        new ElevatedResourceRequest(run.RunId, planned.Definition.Id, fingerprint),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(WdemErrorCode.PermissionError, result.Error!.Code);
+    Assert.Equal(0, provider.ApplyCalls);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_NewVsixLocatorRequiresNewProtectedApproval()
+  {
+    var provider = new RecordingProvider();
+    var run = ApprovedRun(provider, out _);
+    var planned = run.Plan!.Resources.Single();
+    var oldPlan = planned.ResourcePlan with
+    {
+      Steps = [planned.ResourcePlan.Steps.Single() with { Id = "vsix-v2:old-approved-locator" }]
+    };
+    var newPlan = oldPlan with
+    {
+      Steps = [oldPlan.Steps.Single() with { Id = "vsix-v2:new-approved-locator" }]
+    };
+    var oldFingerprint = ApprovedResourceFingerprint.Create(planned.Definition, oldPlan);
+    var newFingerprint = ApprovedResourceFingerprint.Create(planned.Definition, newPlan);
+    var newRun = run with
+    {
+      Plan = run.Plan with
+      {
+        Resources = [planned with { ResourcePlan = newPlan }]
+      }
+    };
+    var staleApprovalWorker = new ElevatedResourceWorker(
+        new StubRunStore(newRun),
+        new StubApprovedResourceStore(new ApprovedResource(
+            planned.Definition,
+            oldPlan,
+            oldFingerprint)),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+
+    var refused = await staleApprovalWorker.ApplyAsync(
+        new ElevatedResourceRequest(run.RunId, planned.Definition.Id, newFingerprint),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, refused.Outcome);
+    Assert.Equal(0, provider.ApplyCalls);
+
+    var renewedApprovalWorker = new ElevatedResourceWorker(
+        new StubRunStore(newRun),
+        new StubApprovedResourceStore(new ApprovedResource(
+            planned.Definition,
+            newPlan,
+            newFingerprint)),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+    var applied = await renewedApprovalWorker.ApplyAsync(
+        new ElevatedResourceRequest(run.RunId, planned.Definition.Id, newFingerprint),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, applied.Outcome);
+    Assert.Equal(1, provider.ApplyCalls);
+  }
+
   private static ExecutionRun ApprovedRun(
       RecordingProvider provider,
       out string fingerprint)

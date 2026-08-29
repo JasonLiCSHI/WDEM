@@ -82,27 +82,18 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
   }
 
   [WindowsFact]
-  public void ValidateRevocationLedgerSecurity_AllowsUsersOnlyMonotonicAppendRights()
+  public void ValidateRevocationLedgerSecurity_GrantsNoAuthorityToOrdinaryUsers()
   {
     var security = WindowsPlanArtifactDirectoryPolicy.CreateRevocationLedgerSecurity();
 
     WindowsPlanArtifactDirectoryPolicy.ValidateRevocationLedgerSecurity(security);
 
     var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
-    var usersRule = Assert.Single(security.GetAccessRules(
+    Assert.DoesNotContain(security.GetAccessRules(
             includeExplicit: true,
             includeInherited: false,
             typeof(SecurityIdentifier))
         .Cast<FileSystemAccessRule>(), rule => users.Equals(rule.IdentityReference));
-    Assert.Equal(
-        FileSystemRights.AppendData |
-            FileSystemRights.ReadPermissions |
-            FileSystemRights.Synchronize,
-        usersRule.FileSystemRights);
-    Assert.False(usersRule.FileSystemRights.HasFlag(FileSystemRights.WriteData));
-    Assert.False(usersRule.FileSystemRights.HasFlag(FileSystemRights.Delete));
-    Assert.False(usersRule.FileSystemRights.HasFlag(FileSystemRights.ChangePermissions));
-    Assert.False(usersRule.FileSystemRights.HasFlag(FileSystemRights.TakeOwnership));
   }
 
   [WindowsFact]

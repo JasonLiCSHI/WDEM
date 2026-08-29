@@ -61,9 +61,6 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
         throw new SecurityException("The shared plan-artifact product root is invalid.");
     using var productHandle = OpenValidatedProductRoot(productPath);
     using var rootHandle = OpenValidatedIdentityNeutralRoot(_rootPath);
-    using var revocationHandle = OpenValidatedRevocationLedger(
-        _rootPath,
-        FileAppendData | ReadControl | Synchronize);
     var stagingPath = Path.Combine(_rootPath, Guid.NewGuid().ToString("N"));
     CreateRestrictedDirectory(
         stagingPath,
@@ -541,6 +538,14 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
       string path,
       ReadOnlySpan<byte> contents)
   {
+    using var source = new MemoryStream(contents.ToArray(), writable: false);
+    CreateAdministratorOnlyCopy(path, source);
+  }
+
+  internal static void CreateAdministratorOnlyCopy(
+      string path,
+      Stream source)
+  {
     if (!OperatingSystem.IsWindows())
     {
       throw new PlatformNotSupportedException(
@@ -548,6 +553,7 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
     }
 
     ArgumentException.ThrowIfNullOrWhiteSpace(path);
+    ArgumentNullException.ThrowIfNull(source);
     var administrators = new SecurityIdentifier(
         WellKnownSidType.BuiltinAdministratorsSid,
         null);
@@ -592,7 +598,7 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
       using (var stream = new FileStream(handle, FileAccess.Write, bufferSize: 1, isAsync: false))
       {
         handle = null;
-        stream.Write(contents);
+        source.CopyTo(stream);
         stream.Flush(flushToDisk: true);
         ValidateAdministratorOnlyFileSecurity(ReadSecurity(stream.SafeFileHandle));
       }
@@ -610,7 +616,6 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
         WellKnownSidType.BuiltinAdministratorsSid,
         null);
     var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
-    var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
     var security = new FileSecurity();
     security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
     security.SetOwner(administrators);
@@ -622,12 +627,6 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
           AccessControlType.Allow));
     }
 
-    security.AddAccessRule(new FileSystemAccessRule(
-        users,
-        FileSystemRights.AppendData |
-            FileSystemRights.ReadPermissions |
-            FileSystemRights.Synchronize,
-        AccessControlType.Allow));
     return security;
   }
 
@@ -911,24 +910,14 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
         WellKnownSidType.BuiltinAdministratorsSid,
         null);
     var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
-    var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
     var rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier))
         .Cast<FileSystemAccessRule>()
         .ToArray();
-    var usersRights = FileSystemRights.AppendData |
-        FileSystemRights.ReadPermissions |
-        FileSystemRights.Synchronize;
     if (!administrators.Equals(security.GetOwner(typeof(SecurityIdentifier))) ||
         !security.AreAccessRulesProtected ||
-        rules.Length != 3 ||
+        rules.Length != 2 ||
         !HasAdministratorOnlyFileRule(rules, administrators) ||
-        !HasAdministratorOnlyFileRule(rules, system) ||
-        !rules.Any(rule =>
-            users.Equals(rule.IdentityReference) &&
-            rule.AccessControlType == AccessControlType.Allow &&
-            rule.FileSystemRights == usersRights &&
-            rule.InheritanceFlags == InheritanceFlags.None &&
-            rule.PropagationFlags == PropagationFlags.None))
+        !HasAdministratorOnlyFileRule(rules, system))
     {
       throw new SecurityException("The VSIX revocation ledger grants unexpected access.");
     }
