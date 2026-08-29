@@ -274,10 +274,21 @@ public sealed class SecureArtifactStager : ISecureArtifactStager
 
       return Failure($"The artifact exceeds the {exception.MaxBytes} byte staging limit.");
     }
+    catch (SecurityException exception)
+    {
+      readLock?.Dispose();
+      artifactLease?.Dispose();
+      if (directoryPath is not null)
+      {
+        SecureStagedArtifact.TryDeleteDirectory(directoryPath);
+      }
+
+      return Failure(exception.Message);
+    }
     catch (Exception exception) when (exception is IOException or
         Win32Exception or
         UnauthorizedAccessException or InvalidOperationException or
-        PlatformNotSupportedException or SecurityException)
+        PlatformNotSupportedException)
     {
       readLock?.Dispose();
       artifactLease?.Dispose();

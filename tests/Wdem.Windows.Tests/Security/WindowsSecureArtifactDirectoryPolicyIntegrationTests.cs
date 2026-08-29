@@ -9,19 +9,163 @@ namespace Wdem.Windows.Tests.Security;
 public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
 {
   [WindowsFact]
-  public void CreatePlanArtifactDirectory_AllowsCurrentUserAndTrustedElevatedIdentities()
+  public void CreatePlanArtifactDirectory_RejectsUserOwnedUnprotectedSharedRoot()
   {
-    var path = new WindowsPlanArtifactDirectoryPolicy().CreateRestrictedStagingDirectory();
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-shared-root-{Guid.NewGuid():N}");
+    var root = Path.Combine(basePath, "Wdem", "PlanArtifacts");
+    Directory.CreateDirectory(root);
 
     try
     {
-      WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedDirectory(path);
-      File.WriteAllText(Path.Combine(path, "probe"), "writable");
-      Assert.True(File.Exists(Path.Combine(path, "probe")));
+      var policy = new WindowsPlanArtifactDirectoryPolicy(root);
+
+      Assert.Throws<SecurityException>(() => policy.CreateRestrictedStagingDirectory());
+      Assert.Empty(Directory.EnumerateFileSystemEntries(root));
     }
     finally
     {
-      Directory.Delete(path, recursive: true);
+      Directory.Delete(basePath, recursive: true);
+    }
+  }
+
+  [WindowsFact]
+  public void CreatePlanArtifactDirectory_MissingSharedRootFailsClosed()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-missing-root-{Guid.NewGuid():N}");
+    var root = Path.Combine(basePath, "Wdem", "PlanArtifacts");
+
+    try
+    {
+      var policy = new WindowsPlanArtifactDirectoryPolicy(root);
+
+      var error = Assert.Throws<SecurityException>(
+          () => policy.CreateRestrictedStagingDirectory());
+
+      Assert.Contains("missing", error.Message, StringComparison.OrdinalIgnoreCase);
+      Assert.False(Directory.Exists(basePath));
+    }
+    finally
+    {
+      if (Directory.Exists(basePath))
+      {
+        Directory.Delete(basePath, recursive: true);
+      }
+    }
+  }
+
+  [WindowsFact]
+  public void ValidateIdentityNeutralRootSecurity_AllowsOnlyMinimalUsersCreationRights()
+  {
+    var security = WindowsPlanArtifactDirectoryPolicy.CreateIdentityNeutralRootSecurity(
+        Administrators);
+
+    WindowsPlanArtifactDirectoryPolicy.ValidateIdentityNeutralRootSecurity(security);
+
+    var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+    var usersRule = Assert.Single(security.GetAccessRules(
+            includeExplicit: true,
+            includeInherited: false,
+            typeof(SecurityIdentifier))
+        .Cast<FileSystemAccessRule>(), rule => users.Equals(rule.IdentityReference));
+    Assert.Equal(
+        FileSystemRights.ReadAndExecute |
+            FileSystemRights.CreateDirectories |
+            FileSystemRights.Synchronize,
+        usersRule.FileSystemRights);
+    Assert.Equal(InheritanceFlags.None, usersRule.InheritanceFlags);
+    Assert.False(usersRule.FileSystemRights.HasFlag(FileSystemRights.Delete));
+    Assert.False(usersRule.FileSystemRights.HasFlag(FileSystemRights.ChangePermissions));
+    Assert.False(usersRule.FileSystemRights.HasFlag(FileSystemRights.TakeOwnership));
+  }
+
+  [WindowsFact]
+  public void ValidateIdentityNeutralRootSecurity_RejectsUntrustedOwner()
+  {
+    var security = WindowsPlanArtifactDirectoryPolicy.CreateIdentityNeutralRootSecurity(
+        Administrators);
+    security.SetOwner(TestSid(1001));
+
+    Assert.Throws<SecurityException>(() =>
+        WindowsPlanArtifactDirectoryPolicy.ValidateIdentityNeutralRootSecurity(security));
+  }
+
+  [WindowsFact]
+  public void ValidateIdentityNeutralRootSecurity_RejectsUsersDeleteRights()
+  {
+    var security = WindowsPlanArtifactDirectoryPolicy.CreateIdentityNeutralRootSecurity(
+        Administrators);
+    security.AddAccessRule(new FileSystemAccessRule(
+        new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+        FileSystemRights.Delete,
+        AccessControlType.Allow));
+
+    Assert.Throws<SecurityException>(() =>
+        WindowsPlanArtifactDirectoryPolicy.ValidateIdentityNeutralRootSecurity(security));
+  }
+
+  [WindowsFact]
+  public void ValidateProductRootSecurity_DoesNotAllowUsersToReplacePlanArtifactRoot()
+  {
+    var security = WindowsPlanArtifactDirectoryPolicy.CreateProductRootSecurity(Administrators);
+
+    WindowsPlanArtifactDirectoryPolicy.ValidateProductRootSecurity(security);
+
+    var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+    var usersRule = Assert.Single(security.GetAccessRules(
+            includeExplicit: true,
+            includeInherited: false,
+            typeof(SecurityIdentifier))
+        .Cast<FileSystemAccessRule>(), rule => users.Equals(rule.IdentityReference));
+    Assert.Equal(
+        FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize,
+        usersRule.FileSystemRights);
+    Assert.False(usersRule.FileSystemRights.HasFlag(FileSystemRights.CreateDirectories));
+    Assert.False(usersRule.FileSystemRights.HasFlag(FileSystemRights.DeleteSubdirectoriesAndFiles));
+  }
+
+  [WindowsAdministratorFact]
+  public void ProvisionIdentityNeutralRoot_CreatesTrustedRootThatCanStageProtectedLeaf()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-provision-root-{Guid.NewGuid():N}");
+    var root = Path.Combine(basePath, "Wdem", "PlanArtifacts");
+    Directory.CreateDirectory(basePath);
+
+    try
+    {
+      WindowsPlanArtifactDirectoryPolicy.ProvisionIdentityNeutralRoot(root);
+
+      var leaf = new WindowsPlanArtifactDirectoryPolicy(root)
+          .CreateRestrictedStagingDirectory();
+
+      Assert.StartsWith(root, leaf, StringComparison.OrdinalIgnoreCase);
+      WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedDirectory(leaf);
+    }
+    finally
+    {
+      Directory.Delete(basePath, recursive: true);
+    }
+  }
+
+  [WindowsAdministratorFact]
+  public void CreatePlanArtifactDirectory_RejectsSharedRootReparsePoint()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-shared-link-{Guid.NewGuid():N}");
+    var target = Path.Combine(basePath, "target");
+    var product = Path.Combine(basePath, "Wdem");
+    var link = Path.Combine(product, "PlanArtifacts");
+    Directory.CreateDirectory(target);
+    Directory.CreateDirectory(product);
+    Directory.CreateSymbolicLink(link, target);
+
+    try
+    {
+      Assert.Throws<SecurityException>(() =>
+          new WindowsPlanArtifactDirectoryPolicy(link).CreateRestrictedStagingDirectory());
+    }
+    finally
+    {
+      Directory.Delete(link);
+      Directory.Delete(basePath, recursive: true);
     }
   }
 

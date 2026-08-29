@@ -584,6 +584,68 @@ public sealed class VisualStudioExtensionProviderTests
   }
 
   [Fact]
+  public async Task PlanAsync_OversizedDurableMarkerFailsAndCleansStagedArtifact()
+  {
+    var source = TempFile("vsix");
+    var targets = Enumerable.Range(0, 300)
+        .Select(index => new VsixInstallationTarget(
+            index == 0
+                ? "Microsoft.VisualStudio.Community"
+                : $"Contoso.VisualStudio.Target.{index:D3}.{new string('X', 80)}",
+            "[17.0,18.0)"))
+        .ToArray();
+    var manifests = new FakeVsixManifestReader
+    {
+      SourceManifest = new VsixManifest(
+          "Contoso.DeveloperTools",
+          "3.2.0",
+          "source!/extension.vsixmanifest",
+          "17.0_a",
+          targets)
+    };
+    await using var stager = new RotatingStager();
+    try
+    {
+      var resource = ExtensionResource(
+          "Contoso.DeveloperTools",
+          "3.2.x",
+          "17.0_a",
+          source);
+      var provider = Provider(
+          manifests,
+          new ThrowingProcessExecutor(),
+          stager,
+          getUtcNow: static () => new DateTimeOffset(
+              2026,
+              8,
+              29,
+              15,
+              31,
+              11,
+              TimeSpan.Zero).AddTicks(6_493_749));
+
+      var plan = await provider.PlanAsync(
+          resource,
+          Missing(resource),
+          CancellationToken.None);
+      var directory = Assert.Single(stager.Directories);
+
+      Assert.False(plan.IsExecutable);
+      Assert.Empty(plan.Steps);
+      var error = Assert.Single(plan.StructuredErrors);
+      Assert.Equal(WdemErrorCode.ConfigurationError, error.Code);
+      Assert.Equal(
+          "The VSIX ownership marker is 45905 bytes and exceeds the 16384-byte limit.",
+          error.Detail);
+      Assert.False(Directory.Exists(directory));
+    }
+    finally
+    {
+      File.Delete(source);
+    }
+  }
+
+  [Fact]
   public async Task ApplyAsync_UsesSelectedInstallerAndOnlyTokenizedArguments()
   {
     var source = TempFile("vsix");
@@ -728,9 +790,14 @@ public sealed class VisualStudioExtensionProviderTests
   }
 
   [WindowsFact]
-  public async Task PlanAndApply_DefaultStoreHandsOffFromCurrentUserToApprovedApply()
+  public async Task PlanAndApply_StoreHandsOffFromCurrentUserToApprovedApply()
   {
     var source = TempFile("vsix");
+    var sharedRoot = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-handoff-{Guid.NewGuid():N}",
+        "Wdem",
+        "PlanArtifacts");
     string hash;
     await using (var sourceStream = File.OpenRead(source))
     {
@@ -749,6 +816,17 @@ public sealed class VisualStudioExtensionProviderTests
         "Contoso.DeveloperTools",
         "3.2.0",
         "17.0_a"));
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    var stager = new SecureArtifactStager(
+        new TestPlanArtifactDirectoryPolicy(sharedRoot),
+        verifier);
+    var store = new VsixPlanArtifactStore(
+        stager,
+        verifier,
+        manifests,
+        WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedDirectory,
+        WindowsPlanArtifactDirectoryPolicy.GetCurrentUserSid,
+        identityNeutralPlanArtifactRoot: sharedRoot);
     try
     {
       var resource = ExtensionResource(
@@ -757,11 +835,12 @@ public sealed class VisualStudioExtensionProviderTests
           "17.0_a",
           source,
           hash);
-      var provider = new VisualStudioExtensionProvider(
-          new FakeVisualStudioDiscovery(Instance("17.0_a")),
+      var provider = Provider(
           manifests,
           process,
-          new ComplianceEvaluator());
+          stager,
+          trustedFileVerifier: verifier,
+          planArtifactStore: store);
 
       var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
       var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
@@ -772,6 +851,11 @@ public sealed class VisualStudioExtensionProviderTests
     finally
     {
       File.Delete(source);
+      var basePath = Directory.GetParent(Directory.GetParent(sharedRoot)!.FullName)!.FullName;
+      if (Directory.Exists(basePath))
+      {
+        Directory.Delete(basePath, recursive: true);
+      }
     }
   }
 
@@ -1241,7 +1325,7 @@ public sealed class VisualStudioExtensionProviderTests
     var manifests = SourceManifestReader();
     var verifier = new FakeTrustedFileVerifier(isTrusted: true);
     var stager = new SecureArtifactStager(
-        new WindowsPlanArtifactDirectoryPolicy(sharedRoot),
+        new TestPlanArtifactDirectoryPolicy(sharedRoot),
         verifier);
     var stagingStore = new VsixPlanArtifactStore(
         stager,
@@ -1300,7 +1384,7 @@ public sealed class VisualStudioExtensionProviderTests
     var manifests = SourceManifestReader();
     var verifier = new FakeTrustedFileVerifier(isTrusted: true);
     var stager = new SecureArtifactStager(
-        new WindowsPlanArtifactDirectoryPolicy(sharedRoot),
+        new TestPlanArtifactDirectoryPolicy(sharedRoot),
         verifier);
     var stagingStore = new VsixPlanArtifactStore(
         stager,
@@ -1358,7 +1442,7 @@ public sealed class VisualStudioExtensionProviderTests
     var manifests = SourceManifestReader();
     var verifier = new FakeTrustedFileVerifier(isTrusted: true);
     var stager = new SecureArtifactStager(
-        new WindowsPlanArtifactDirectoryPolicy(sharedRoot),
+        new TestPlanArtifactDirectoryPolicy(sharedRoot),
         verifier);
     var stagingStore = new VsixPlanArtifactStore(
         stager,
@@ -1583,7 +1667,8 @@ public sealed class VisualStudioExtensionProviderTests
       HttpClient? httpClient = null,
       TimeSpan? handoffLifetime = null,
       Action<string, string>? validateRestrictedDirectory = null,
-      IVsixPlanArtifactStore? planArtifactStore = null)
+      IVsixPlanArtifactStore? planArtifactStore = null,
+      Func<DateTimeOffset>? getUtcNow = null)
   {
     var verifier = trustedFileVerifier ?? new FakeTrustedFileVerifier(isTrusted: true);
     var artifactStager = stager ?? new SecureArtifactStager(verifier: verifier);
@@ -1592,7 +1677,8 @@ public sealed class VisualStudioExtensionProviderTests
         verifier,
         manifests,
         validateRestrictedDirectory,
-        handoffLifetime);
+        handoffLifetime,
+        getUtcNow);
     return new VisualStudioExtensionProvider(
         new FakeVisualStudioDiscovery(Instance("17.0_a"), Instance("17.0_b")),
         manifests,
@@ -1609,7 +1695,8 @@ public sealed class VisualStudioExtensionProviderTests
       ITrustedFileVerifier verifier,
       IVsixManifestReader manifests,
       Action<string, string>? validateRestrictedDirectory = null,
-      TimeSpan? handoffLifetime = null) => new(
+      TimeSpan? handoffLifetime = null,
+      Func<DateTimeOffset>? getUtcNow = null) => new(
           stager,
           verifier,
           manifests,
@@ -1619,7 +1706,8 @@ public sealed class VisualStudioExtensionProviderTests
           identityNeutralPlanArtifactRoot: Path.Combine(
               Path.GetTempPath(),
               "Wdem",
-              "PlanArtifacts"));
+              "PlanArtifacts"),
+          getUtcNow);
 
   private static VisualStudioExtensionProvider RealReaderProvider(string localApplicationData)
   {
@@ -1771,6 +1859,23 @@ public sealed class VisualStudioExtensionProviderTests
             SourceManifest is null
                 ? new StructuredError(WdemErrorCode.ConfigurationError, "Invalid.", "Invalid.")
                 : null));
+  }
+
+  private sealed class TestPlanArtifactDirectoryPolicy(string rootPath)
+      : ISecureArtifactDirectoryPolicy
+  {
+    public string CreateRestrictedStagingDirectory()
+    {
+      var path = Path.Combine(rootPath, Guid.NewGuid().ToString("N"));
+      Directory.CreateDirectory(path);
+      using var identity = WindowsIdentity.GetCurrent();
+      new DirectoryInfo(path).SetAccessControl(
+          WindowsPlanArtifactDirectoryPolicy.CreateSecurity(
+              identity.User!,
+              new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+              new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null)));
+      return path;
+    }
   }
 
   private sealed class ScriptedStager : ISecureArtifactStager, IAsyncDisposable

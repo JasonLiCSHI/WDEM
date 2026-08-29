@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Security;
 using System.Security.Cryptography;
 using Wdem.Core.Execution;
 using Wdem.Core.Processes;
@@ -505,6 +506,32 @@ public sealed class VisualStudioInstallerClientTests
     }
   }
 
+  [Fact]
+  public async Task SecureStaging_UnprovisionedSharedRootReturnsActionableStructuredError()
+  {
+    var sourcePath = Path.GetTempFileName();
+    try
+    {
+      var sourceBytes = "trusted artifact"u8.ToArray();
+      await File.WriteAllBytesAsync(sourcePath, sourceBytes);
+      var stager = new SecureArtifactStager(new UnprovisionedDirectoryPolicy());
+
+      var result = await stager.StageVerifiedAsync(
+          sourcePath,
+          Convert.ToHexString(SHA256.HashData(sourceBytes)),
+          SecureArtifactKind.VisualStudioExtension,
+          CancellationToken.None);
+
+      Assert.Null(result.Artifact);
+      Assert.Equal(WdemErrorCode.ConfigurationError, result.Error!.Code);
+      Assert.Contains("elevated provisioning", result.Error.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+    finally
+    {
+      File.Delete(sourcePath);
+    }
+  }
+
   [Theory]
   [InlineData(SecureArtifactKind.VisualStudioConfiguration, 1024L * 1024, false)]
   [InlineData(SecureArtifactKind.Executable, 64L * 1024 * 1024, false)]
@@ -762,6 +789,12 @@ public sealed class VisualStudioInstallerClientTests
   private sealed class NativeFailureSecureDirectoryPolicy : ISecureArtifactDirectoryPolicy
   {
     public string CreateRestrictedStagingDirectory() => throw new Win32Exception(5);
+  }
+
+  private sealed class UnprovisionedDirectoryPolicy : ISecureArtifactDirectoryPolicy
+  {
+    public string CreateRestrictedStagingDirectory() => throw new SecurityException(
+        "The shared plan-artifact root requires elevated provisioning.");
   }
 
   private sealed class FailingArtifactStager(StructuredError error) : ISecureArtifactStager

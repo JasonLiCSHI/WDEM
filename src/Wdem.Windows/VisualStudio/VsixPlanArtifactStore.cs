@@ -87,6 +87,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
   private readonly IVsixManifestReader _manifestReader;
   private readonly Action<string, string> _validateRestrictedDirectory;
   private readonly Func<string> _getCurrentUserSid;
+  private readonly Func<DateTimeOffset> _getUtcNow;
   private readonly TimeSpan _handoffLifetime;
   private readonly string _planArtifactRoot;
   private readonly ConcurrentDictionary<string, HandoffRegistration> _handoffs =
@@ -119,7 +120,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       Action<string, string> validateRestrictedDirectory,
       Func<string> getCurrentUserSid,
       TimeSpan? handoffLifetime = null,
-      string? identityNeutralPlanArtifactRoot = null)
+      string? identityNeutralPlanArtifactRoot = null,
+      Func<DateTimeOffset>? getUtcNow = null)
   {
     _stager = stager ?? throw new ArgumentNullException(nameof(stager));
     _verifier = verifier ?? throw new ArgumentNullException(nameof(verifier));
@@ -127,6 +129,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     _validateRestrictedDirectory = validateRestrictedDirectory ??
         throw new ArgumentNullException(nameof(validateRestrictedDirectory));
     _getCurrentUserSid = getCurrentUserSid ?? throw new ArgumentNullException(nameof(getCurrentUserSid));
+    _getUtcNow = getUtcNow ?? (static () => DateTimeOffset.UtcNow);
     _handoffLifetime = handoffLifetime ?? TimeSpan.FromHours(24);
     _planArtifactRoot = GetPlanArtifactRoot(
         identityNeutralPlanArtifactRoot ??
@@ -215,7 +218,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       }
 
       var ownerToken = Convert.ToHexString(Guid.NewGuid().ToByteArray());
-      var expiresAtUtc = DateTimeOffset.UtcNow.Add(_handoffLifetime);
+      var expiresAtUtc = _getUtcNow().Add(_handoffLifetime);
       var evidence = new VsixPlanArtifactEvidence(
           1,
           resourceId,
@@ -241,6 +244,10 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
       throw;
+    }
+    catch (OwnershipMarkerSizeException exception)
+    {
+      return Failure(null, exception.Message, exception);
     }
     catch (Exception exception) when (exception is ArgumentException or IOException or
         UnauthorizedAccessException or InvalidDataException or InvalidOperationException or
@@ -558,15 +565,38 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
   private static void WriteOwnershipMarker(VsixPlanArtifactEvidence registration)
   {
     var bytes = JsonSerializer.SerializeToUtf8Bytes(registration, JsonOptions);
-    using var stream = new FileStream(
-        Path.Combine(registration.OwnershipDirectory, OwnerFileName),
-        FileMode.CreateNew,
-        FileAccess.Write,
-        FileShare.None,
-        bufferSize: 1,
-        FileOptions.WriteThrough);
-    stream.Write(bytes);
-    stream.Flush(flushToDisk: true);
+    if (bytes.Length > MaxOwnershipMarkerBytes)
+    {
+      throw new OwnershipMarkerSizeException(bytes.Length, MaxOwnershipMarkerBytes);
+    }
+
+    var markerPath = Path.Combine(registration.OwnershipDirectory, OwnerFileName);
+    var temporaryPath = Path.Combine(
+        registration.OwnershipDirectory,
+        $".{OwnerFileName}.{Guid.NewGuid():N}.tmp");
+    try
+    {
+      using (var stream = new FileStream(
+                 temporaryPath,
+                 FileMode.CreateNew,
+                 FileAccess.Write,
+                 FileShare.None,
+                 bufferSize: 1,
+                 FileOptions.WriteThrough))
+      {
+        stream.Write(bytes);
+        stream.Flush(flushToDisk: true);
+      }
+
+      File.Move(temporaryPath, markerPath, overwrite: false);
+    }
+    finally
+    {
+      if (File.Exists(temporaryPath))
+      {
+        File.Delete(temporaryPath);
+      }
+    }
   }
 
   private static VsixPlanArtifactEvidence PersistConsumedEvidence(
@@ -896,4 +926,9 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       string RegistrationToken,
       string Directory,
       CancellationTokenSource Cancellation);
+
+  private sealed class OwnershipMarkerSizeException(int actualBytes, int maximumBytes)
+      : IOException(
+          $"The VSIX ownership marker is {actualBytes} bytes and exceeds the " +
+          $"{maximumBytes}-byte limit.");
 }
