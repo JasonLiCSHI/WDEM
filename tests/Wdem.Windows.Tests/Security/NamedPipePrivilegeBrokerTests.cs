@@ -223,6 +223,35 @@ public sealed class NamedPipePrivilegeBrokerTests
   }
 
   [Fact]
+  public async Task DisposeAsync_ActiveApplyWaitsForCancellationWithoutDisposedSemaphoreRace()
+  {
+    var launcher = new RecordingElevatedHostLauncher();
+    launcher.Session.WaitForCancellation = true;
+    var broker = new NamedPipePrivilegeBroker(launcher);
+    using var cancellation = new CancellationTokenSource();
+    var runId = Guid.NewGuid();
+    var apply = broker.ApplyAsync(
+        Request(runId, "visual-studio"),
+        null,
+        cancellation.Token);
+    await launcher.Session.RequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    var disposing = broker.DisposeAsync().AsTask();
+    await launcher.Session.Terminated.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    var disposedBeforeApplyCompleted = disposing.IsCompleted;
+    cancellation.Cancel();
+    var exception = await Record.ExceptionAsync(() => apply);
+    await disposing.WaitAsync(TimeSpan.FromSeconds(5));
+
+    Assert.False(disposedBeforeApplyCompleted);
+    Assert.IsAssignableFrom<OperationCanceledException>(exception);
+    await Assert.ThrowsAsync<ObjectDisposedException>(() => broker.ApplyAsync(
+        Request(Guid.NewGuid(), "vsix"),
+        null,
+        CancellationToken.None));
+  }
+
+  [Fact]
   public async Task ApplyAsync_CurrentUserPlan_BypassesBroker()
   {
     var provider = new RecordingProvider();
@@ -344,6 +373,8 @@ public sealed class NamedPipePrivilegeBrokerTests
     public int TerminateCalls { get; private set; }
     public TaskCompletionSource RequestStarted { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource Terminated { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
 
     public async Task<ResourceApplyResult> ApplyAsync(
         ElevatedResourceRequest request,
@@ -368,6 +399,7 @@ public sealed class NamedPipePrivilegeBrokerTests
     public Task TerminateAsync(CancellationToken cancellationToken)
     {
       TerminateCalls++;
+      Terminated.TrySetResult();
       return Task.CompletedTask;
     }
 

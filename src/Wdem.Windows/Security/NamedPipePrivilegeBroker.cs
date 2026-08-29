@@ -10,10 +10,14 @@ public sealed class NamedPipePrivilegeBroker :
     IAsyncDisposable
 {
   private readonly IElevatedHostLauncher _launcher;
+  private readonly object _lifecycleGate = new();
   private readonly SemaphoreSlim _sessionsGate = new(1, 1);
   private readonly Dictionary<Guid, HostSession> _sessions = [];
   private readonly Dictionary<Guid, LaunchFailure> _terminalLaunchFailures = [];
-  private bool _disposed;
+  private TaskCompletionSource? _operationsDrained;
+  private Task? _disposeTask;
+  private int _activeOperations;
+  private bool _disposeStarted;
 
   public NamedPipePrivilegeBroker(IElevatedHostLauncher launcher)
   {
@@ -27,6 +31,7 @@ public sealed class NamedPipePrivilegeBroker :
   {
     ArgumentNullException.ThrowIfNull(request);
     Validate(request);
+    using var operation = EnterOperation();
 
     HostSession session;
     try
@@ -83,39 +88,95 @@ public sealed class NamedPipePrivilegeBroker :
 
   public async ValueTask DisposeAsync()
   {
-    if (_disposed)
+    Task disposeTask;
+    TaskCompletionSource? completion = null;
+    lock (_lifecycleGate)
     {
-      return;
+      if (_disposeTask is not null)
+      {
+        disposeTask = _disposeTask;
+      }
+      else
+      {
+        _disposeStarted = true;
+        completion = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _disposeTask = completion.Task;
+        disposeTask = completion.Task;
+      }
     }
 
-    _disposed = true;
-    Guid[] runIds;
+    if (completion is not null)
+    {
+      _ = DisposeCoreAndSignalAsync(completion);
+    }
+
+    await disposeTask.ConfigureAwait(false);
+  }
+
+  private async Task DisposeCoreAndSignalAsync(TaskCompletionSource completion)
+  {
+    try
+    {
+      await DisposeCoreAsync().ConfigureAwait(false);
+      completion.TrySetResult();
+    }
+    catch (Exception exception)
+    {
+      completion.TrySetException(exception);
+    }
+  }
+
+  private async Task DisposeCoreAsync()
+  {
+    HostSession[] sessions;
     await _sessionsGate.WaitAsync().ConfigureAwait(false);
     try
     {
-      runIds = _sessions.Keys.ToArray();
+      sessions = _sessions.Values.ToArray();
+      _sessions.Clear();
+      _terminalLaunchFailures.Clear();
     }
     finally
     {
       _sessionsGate.Release();
     }
 
-    foreach (var runId in runIds)
+    Exception? cleanupFailure = null;
+    foreach (var session in sessions)
     {
-      await CompleteRunAsync(runId, CancellationToken.None).ConfigureAwait(false);
+      try
+      {
+        await session.Session.TerminateAsync(CancellationToken.None).ConfigureAwait(false);
+        await session.Session.DisposeAsync().ConfigureAwait(false);
+      }
+      catch (Exception exception)
+      {
+        cleanupFailure ??= exception;
+      }
+    }
+
+    await WaitForOperationsAsync().ConfigureAwait(false);
+    foreach (var session in sessions)
+    {
+      session.RequestGate.Dispose();
     }
 
     _sessionsGate.Dispose();
+    if (cleanupFailure is not null)
+    {
+      throw cleanupFailure;
+    }
   }
 
   private async Task<HostSession> GetOrStartAsync(
       Guid runId,
       CancellationToken cancellationToken)
   {
-    ObjectDisposedException.ThrowIf(_disposed, this);
     await _sessionsGate.WaitAsync(cancellationToken).ConfigureAwait(false);
     try
     {
+      ThrowIfDisposing();
       if (_sessions.TryGetValue(runId, out var existing))
       {
         return existing;
@@ -153,6 +214,55 @@ public sealed class NamedPipePrivilegeBroker :
 
   private Task TerminateRunAsync(Guid runId, CancellationToken cancellationToken) =>
       CompleteRunAsync(runId, cancellationToken);
+
+  private OperationLease EnterOperation()
+  {
+    lock (_lifecycleGate)
+    {
+      ObjectDisposedException.ThrowIf(_disposeStarted, this);
+      _activeOperations++;
+      return new OperationLease(this);
+    }
+  }
+
+  private void ExitOperation()
+  {
+    TaskCompletionSource? drained = null;
+    lock (_lifecycleGate)
+    {
+      _activeOperations--;
+      if (_activeOperations == 0)
+      {
+        drained = _operationsDrained;
+        _operationsDrained = null;
+      }
+    }
+
+    drained?.TrySetResult();
+  }
+
+  private Task WaitForOperationsAsync()
+  {
+    lock (_lifecycleGate)
+    {
+      if (_activeOperations == 0)
+      {
+        return Task.CompletedTask;
+      }
+
+      _operationsDrained ??= new TaskCompletionSource(
+          TaskCreationOptions.RunContinuationsAsynchronously);
+      return _operationsDrained.Task;
+    }
+  }
+
+  private void ThrowIfDisposing()
+  {
+    lock (_lifecycleGate)
+    {
+      ObjectDisposedException.ThrowIf(_disposeStarted, this);
+    }
+  }
 
   private static void Validate(ElevatedResourceRequest request)
   {
@@ -193,6 +303,13 @@ public sealed class NamedPipePrivilegeBroker :
       string PipeName,
       IElevatedHostSession Session,
       SemaphoreSlim RequestGate);
+
+  private sealed class OperationLease(NamedPipePrivilegeBroker owner) : IDisposable
+  {
+    private NamedPipePrivilegeBroker? _owner = owner;
+
+    public void Dispose() => Interlocked.Exchange(ref _owner, null)?.ExitOperation();
+  }
 
   private sealed record LaunchFailure(
       ApplyOutcome Outcome,

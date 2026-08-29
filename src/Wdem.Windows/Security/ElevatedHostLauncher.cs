@@ -108,7 +108,8 @@ public sealed class ElevatedHostLauncher : IElevatedHostLauncher
     private readonly ElevatedHostProcessJob _job;
     private readonly StreamReader _reader;
     private readonly StreamWriter _writer;
-    private bool _terminated;
+    private int _terminated;
+    private int _disposed;
 
     public NamedPipeElevatedHostSession(
         NamedPipeServerStream pipe,
@@ -135,7 +136,7 @@ public sealed class ElevatedHostLauncher : IElevatedHostLauncher
         IProgress<ProviderProgress>? progress,
         CancellationToken cancellationToken)
     {
-      ObjectDisposedException.ThrowIf(_terminated, this);
+      ObjectDisposedException.ThrowIf(Volatile.Read(ref _terminated) != 0, this);
       var json = JsonSerializer.Serialize(request, JsonOptions);
       await _writer.WriteLineAsync(json.AsMemory(), cancellationToken).ConfigureAwait(false);
       while (true)
@@ -171,24 +172,35 @@ public sealed class ElevatedHostLauncher : IElevatedHostLauncher
 
     public Task TerminateAsync(CancellationToken cancellationToken)
     {
-      if (_terminated)
+      if (Interlocked.Exchange(ref _terminated, 1) != 0)
       {
         return Task.CompletedTask;
       }
 
-      _terminated = true;
-      _pipe.Dispose();
       _job.Terminate();
       return Task.CompletedTask;
     }
 
     public async ValueTask DisposeAsync()
     {
+      if (Interlocked.Exchange(ref _disposed, 1) != 0)
+      {
+        return;
+      }
+
       await TerminateAsync(CancellationToken.None).ConfigureAwait(false);
       _reader.Dispose();
-      await _writer.DisposeAsync().ConfigureAwait(false);
-      _job.Dispose();
+      try
+      {
+        await _writer.DisposeAsync().ConfigureAwait(false);
+      }
+      catch (Exception exception) when (exception is IOException or ObjectDisposedException)
+      {
+        // The terminated peer may close the pipe before the leave-open writer flushes.
+      }
+
       _pipe.Dispose();
+      _job.Dispose();
     }
   }
 }

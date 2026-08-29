@@ -253,6 +253,60 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task ElevatedWorker_LockedApprovalSidecarRefusesThenNextRequestSucceeds()
+  {
+    var paths = new WdemDataPaths(_directory);
+    var run = ElevatedRunWithSecret("retry-secret");
+    var creator = new JsonExecutionRunStore(
+        paths,
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    await CreateWithApprovedResourceAsync(creator, run);
+    var hostStore = new JsonExecutionRunStore(
+        paths,
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var provider = new OriginalValueRecordingProvider();
+    var planned = run.Plan!.Resources.Single();
+    var worker = new ElevatedResourceWorker(
+        hostStore,
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+    var request = new ElevatedResourceRequest(
+        run.RunId,
+        planned.Definition.Id,
+        ApprovedResourceFingerprint.Create(
+            planned.Definition,
+            planned.ResourcePlan),
+        "pipe");
+    ResourceApplyResult refused;
+
+    await using (var sidecarLock = new FileStream(
+                     creator.ApprovedResourcesPath(run.RunId),
+                     FileMode.Open,
+                     FileAccess.Read,
+                     FileShare.None))
+    {
+      refused = await worker.ApplyAsync(request, null, CancellationToken.None);
+    }
+
+    Assert.Equal(ApplyOutcome.Failed, refused.Outcome);
+    Assert.Equal(WdemErrorCode.PermissionError, refused.Error!.Code);
+    Assert.True(refused.Error.IsRetryable);
+    Assert.Equal(0, provider.ApplyCalls);
+    var diagnostic = Assert.Single(hostStore.Diagnostics);
+    Assert.Equal(WdemErrorCode.PermissionError, diagnostic.Code);
+    Assert.True(diagnostic.IsRetryable);
+    Assert.IsType<IOException>(diagnostic.UnderlyingException);
+
+    var succeeded = await worker.ApplyAsync(request, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, succeeded.Outcome);
+    Assert.Equal(1, provider.ApplyCalls);
+    Assert.Equal("retry-secret", provider.AppliedResource!.Parameters["password"]);
+  }
+
+  [Fact]
   public void CurrentUserApprovedResourceProtector_RoundTripsWithBoundEntropy()
   {
     var protector = new CurrentUserApprovedResourceProtector();
@@ -1848,6 +1902,7 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     public string ResourceType => "package";
     public string ProviderName => "winget";
     public ProviderCapabilities Capabilities { get; } = new();
+    public int ApplyCalls { get; private set; }
     public ResourceDefinition? AppliedResource { get; private set; }
 
     public ValueTask<ResourceApplyResult> ApplyAsync(
@@ -1856,6 +1911,7 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
         IProgress<ProviderProgress>? progress,
         CancellationToken cancellationToken)
     {
+      ApplyCalls++;
       AppliedResource = resource;
       return ValueTask.FromResult(new ResourceApplyResult
       {

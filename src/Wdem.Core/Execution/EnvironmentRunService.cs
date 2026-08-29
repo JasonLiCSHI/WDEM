@@ -509,6 +509,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     await transitions.SetRunningAsync(cancellationToken).ConfigureAwait(false);
     var progressPumps = new RunProgressPumpCoordinator(_persistenceTimeout);
     SchedulerResult scheduled;
+    StructuredError? cleanupError = null;
     try
     {
       scheduled = await _scheduler.ExecuteAsync(
@@ -531,8 +532,32 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     }
     finally
     {
-      await _dispatcher.CompleteRunAsync(run.RunId, CancellationToken.None)
-          .ConfigureAwait(false);
+      try
+      {
+        await _dispatcher.CompleteRunAsync(run.RunId, CancellationToken.None)
+            .ConfigureAwait(false);
+      }
+      catch (Exception exception)
+      {
+        cleanupError = new StructuredError(
+            WdemErrorCode.PermissionError,
+            "Elevated host cleanup failed.",
+            "The execution completed, but its elevated host could not be cleaned up normally.")
+        {
+          UnderlyingException = exception,
+          IsRetryable = false
+        };
+      }
+    }
+    if (cleanupError is not null)
+    {
+      await events.PublishLogAsync(
+          null,
+          null,
+          cleanupError.Summary,
+          cleanupError,
+          CancellationToken.None,
+          ProviderLogLevel.Warning).ConfigureAwait(false);
     }
     if (cancellationToken.IsCancellationRequested)
     {

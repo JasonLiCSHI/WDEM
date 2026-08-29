@@ -407,6 +407,24 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
 
       return approved;
     }
+    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+    {
+      var error = new StructuredError(
+          WdemErrorCode.PermissionError,
+          "Approved resource snapshot is temporarily unavailable.",
+          $"Run '{runId:D}' resource '{resourceId}' could not be authorized because its protected snapshot could not be opened.")
+      {
+        ResourceId = resourceId,
+        IsRetryable = true,
+        UnderlyingException = exception
+      };
+      lock (_diagnosticsGate)
+      {
+        _diagnostics.Add(error);
+      }
+
+      throw new ApprovedResourceAccessException(error, exception);
+    }
     catch (Exception exception) when (
         exception is CryptographicException
             or JsonException

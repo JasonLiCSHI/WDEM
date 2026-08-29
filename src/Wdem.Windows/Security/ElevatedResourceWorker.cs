@@ -87,10 +87,27 @@ public sealed class ElevatedResourceWorker
       return Refused(request.ResourceId, "The resource has no approved administrator action.");
     }
 
-    var approved = await _approvedResources.GetApprovedResourceAsync(
-        request.RunId,
-        request.ResourceId,
-        cancellationToken).ConfigureAwait(false);
+    ApprovedResource? approved;
+    try
+    {
+      approved = await _approvedResources.GetApprovedResourceAsync(
+          request.RunId,
+          request.ResourceId,
+          cancellationToken).ConfigureAwait(false);
+    }
+    catch (ApprovedResourceAccessException exception)
+    {
+      return new ResourceApplyResult
+      {
+        ResourceId = request.ResourceId,
+        Outcome = ApplyOutcome.Failed,
+        Error = _redactor.Redact(exception.Error with
+        {
+          ResourceId = request.ResourceId
+        })
+      };
+    }
+
     if (approved is null ||
         !FixedEquals(request.PlanFingerprint, approved.Fingerprint) ||
         !FixedEquals(
