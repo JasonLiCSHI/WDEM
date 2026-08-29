@@ -16,6 +16,7 @@ using Wdem.LegacySource.Services.System;
 using Wdem.Windows.Persistence;
 using Wdem.Windows.Processes;
 using Wdem.Windows.Providers;
+using Wdem.Windows.VisualStudio;
 
 namespace Wdem.Windows.Composition;
 
@@ -71,7 +72,10 @@ public static class WdemWindowsFactory
       new LegacyPackageManagerProviderAdapter("winget", winget, supportsSource: true),
       new WinGetPackageProvider(winGetCommandClient, complianceEvaluator),
       new GitProvider(processExecutor, winGetCommandClient, complianceEvaluator),
-      new DotNetSdkProvider(processExecutor, winGetCommandClient, complianceEvaluator)
+      new DotNetSdkProvider(processExecutor, winGetCommandClient, complianceEvaluator),
+      new VisualStudioProvider(
+          new VsWhereVisualStudioDiscovery(processExecutor),
+          complianceEvaluator)
     ]);
 
     var pluginManager = new PluginManager(
