@@ -455,11 +455,6 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       await events.PublishResourceAsync(result, cancellationToken).ConfigureAwait(false);
     }
 
-    if (!plan.IsExecutable)
-    {
-      return await CompleteUnexecutableAsync(run, events, cancellationToken).ConfigureAwait(false);
-    }
-
     if (mode == RunMode.Inspect)
     {
       var completed = run with
@@ -469,6 +464,11 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         EndedAtUtc = DateTimeOffset.UtcNow
       };
       return await PersistTerminalAsync(completed, events).ConfigureAwait(false);
+    }
+
+    if (!plan.IsExecutable)
+    {
+      return await CompleteUnexecutableAsync(run, events, cancellationToken).ConfigureAwait(false);
     }
 
     var transitions = new RunTransitions(_runStore, events, run);
@@ -1371,7 +1371,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
                 runEvent.ResourceId,
                 runEvent.StepId,
                 runEvent.Message,
-                runEvent.Error),
+                runEvent.Error,
+                runEvent.Kind,
+                runEvent.Progress),
             cancellationToken).ConfigureAwait(false);
         await sink.PublishAsync(runEvent, cancellationToken).ConfigureAwait(false);
       }

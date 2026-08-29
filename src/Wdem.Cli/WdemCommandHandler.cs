@@ -88,7 +88,8 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
       CancellationToken cancellationToken) => ExecuteRunAsync(
           () => _environmentRuns.RecoverAsync(runId, cancellationToken),
           json,
-          cancellationToken);
+          cancellationToken,
+          replayPersistedEventsWhenSilent: true);
 
   public async Task<int> ListRunsAsync(
       bool json,
@@ -144,13 +145,25 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
   private async Task<int> ExecuteRunAsync(
       Func<Task<ExecutionRun>> operation,
       bool json,
-      CancellationToken cancellationToken)
+      CancellationToken cancellationToken,
+      bool replayPersistedEventsWhenSilent = false)
   {
     try
     {
+      var observedEventCount = 0;
       using var subscription = _eventSink.SubscribeRequired(
-          (runEvent, _) => WriteEventAsync(runEvent, json));
+          async (runEvent, _) =>
+          {
+            await WriteEventAsync(runEvent, json).ConfigureAwait(false);
+            Interlocked.Increment(ref observedEventCount);
+          });
       var run = await operation().ConfigureAwait(false);
+      if (replayPersistedEventsWhenSilent && Volatile.Read(ref observedEventCount) == 0)
+      {
+        await ReplayPersistedEventsAsync(run.RunId, json, cancellationToken)
+            .ConfigureAwait(false);
+      }
+
       return ExitCode(run);
     }
     catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
@@ -162,6 +175,52 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
     {
       await WriteExceptionAsync(exception, json, cancelled: false).ConfigureAwait(false);
       return 1;
+    }
+  }
+
+  private async Task ReplayPersistedEventsAsync(
+      Guid runId,
+      bool json,
+      CancellationToken cancellationToken)
+  {
+    const int pageSize = 256;
+    var afterSequence = 0L;
+    while (true)
+    {
+      var page = await _runStore.ReadLogPageAsync(
+          runId,
+          afterSequence,
+          pageSize,
+          cancellationToken).ConfigureAwait(false);
+      if (page.Count == 0)
+      {
+        return;
+      }
+
+      foreach (var entry in page)
+      {
+        if (entry.Sequence <= afterSequence)
+        {
+          throw new InvalidDataException("Persisted run events are not in sequence order.");
+        }
+
+        await WriteEventAsync(new RunEvent(
+            runId,
+            entry.Sequence,
+            entry.TimestampUtc,
+            entry.Kind ?? RunEventKind.Log,
+            entry.ResourceId,
+            entry.StepId,
+            entry.Progress,
+            entry.Message,
+            entry.Error), json).ConfigureAwait(false);
+        afterSequence = entry.Sequence;
+      }
+
+      if (page.Count < pageSize)
+      {
+        return;
+      }
     }
   }
 
@@ -233,9 +292,12 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
     }
 
     var planErrors = run.Plan?.Errors ?? [];
-    if (planErrors.Any(error =>
-            error.Code is WdemErrorCode.ProfileError or WdemErrorCode.DependencyError) ||
-        run.Plan is { IsExecutable: false } && planErrors.Count == 0)
+    if (planErrors.Count > 0)
+    {
+      return DiagnosticsExitCode(planErrors);
+    }
+
+    if (run.Plan is { IsExecutable: false })
     {
       return 2;
     }

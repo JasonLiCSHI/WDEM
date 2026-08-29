@@ -10,4 +10,6 @@ public sealed record RunLogEntry(
     string? ResourceId,
     string? StepId,
     string Message,
-    StructuredError? Error = null);
+    StructuredError? Error = null,
+    RunEventKind? Kind = null,
+    double? Progress = null);
