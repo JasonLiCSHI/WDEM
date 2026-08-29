@@ -24,6 +24,8 @@ public sealed record WdemWindowsComposition(
     IProfileCatalog Profiles,
     IResourceProviderRegistry Providers,
     IExecutionRunStore RunStore,
+    LogRedactor Redactor,
+    IRunEventSink RunEvents,
     IProcessExecutor ProcessExecutor,
     IProcessRunner LegacyProcessRunner,
     WingetService Winget,
@@ -37,7 +39,9 @@ public static class WdemWindowsFactory
   public static async Task<WdemWindowsComposition> CreateAsync(
       string profilesDirectory,
       WdemDataPaths? paths = null,
-      CancellationToken cancellationToken = default)
+      CancellationToken cancellationToken = default,
+      LogRedactor? redactor = null,
+      IRunEventSink? runEvents = null)
   {
     ArgumentException.ThrowIfNullOrWhiteSpace(profilesDirectory);
     paths ??= new WdemDataPaths();
@@ -81,7 +85,9 @@ public static class WdemWindowsFactory
         logger,
         Path.Combine(paths.Root, ".wdem-state.json"),
         migrateLegacy: false);
-    var runStore = new JsonExecutionRunStore(paths, new LogRedactor());
+    redactor ??= new LogRedactor();
+    runEvents ??= new RunEventHub();
+    var runStore = new JsonExecutionRunStore(paths, redactor);
     var profiles = new DirectoryProfileCatalog(profilesDirectory, providerRegistry);
     var environmentRuns = new EnvironmentRunService(
         profiles,
@@ -91,13 +97,17 @@ public static class WdemWindowsFactory
         new ExecutionPlanner(providerRegistry, complianceEvaluator),
         new ResourceScheduler(),
         runStore,
-        new DirectResourceApplyDispatcher());
+        new DirectResourceApplyDispatcher(),
+        eventSink: runEvents,
+        redactor: redactor);
 
     return new WdemWindowsComposition(
         environmentRuns,
         profiles,
         providerRegistry,
         runStore,
+        redactor,
+        runEvents,
         processExecutor,
         processRunner,
         winget,

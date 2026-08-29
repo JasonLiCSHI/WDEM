@@ -13,19 +13,22 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
   private readonly TextWriter _output;
   private readonly TextWriter _error;
   private readonly LogRedactor _redactor;
+  private readonly IRunEventSink _eventSink;
 
   public WdemCommandHandler(
       IEnvironmentRunService environmentRuns,
       IExecutionRunStore runStore,
       TextWriter? output = null,
       TextWriter? error = null,
-      LogRedactor? redactor = null)
+      LogRedactor? redactor = null,
+      IRunEventSink? eventSink = null)
   {
     _environmentRuns = environmentRuns ?? throw new ArgumentNullException(nameof(environmentRuns));
     _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
     _output = output ?? Console.Out;
     _error = error ?? Console.Error;
     _redactor = redactor ?? new LogRedactor();
+    _eventSink = eventSink ?? new RunEventHub();
   }
 
   public static async Task<WdemCommandHandler> CreateAsync(
@@ -33,17 +36,25 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
       WdemDataPaths? paths = null,
       TextWriter? output = null,
       TextWriter? error = null,
-      CancellationToken cancellationToken = default)
+      CancellationToken cancellationToken = default,
+      LogRedactor? redactor = null,
+      IRunEventSink? eventSink = null)
   {
+    redactor ??= new LogRedactor();
+    eventSink ??= new RunEventHub();
     var composition = await WdemWindowsFactory.CreateAsync(
         profilesDirectory,
         paths,
-        cancellationToken).ConfigureAwait(false);
+        cancellationToken,
+        redactor,
+        eventSink).ConfigureAwait(false);
     return new WdemCommandHandler(
         composition.EnvironmentRuns,
         composition.RunStore,
         output,
-        error);
+        error,
+        composition.Redactor,
+        composition.RunEvents);
   }
 
   public async Task<int> InspectAsync(
@@ -51,14 +62,16 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
       bool json,
       CancellationToken cancellationToken) => await ExecuteRunAsync(
           () => _environmentRuns.InspectAsync(request, cancellationToken),
-          json).ConfigureAwait(false);
+          json,
+          cancellationToken).ConfigureAwait(false);
 
   public Task<int> ApplyAsync(
       RunRequest request,
       bool json,
       CancellationToken cancellationToken) => ExecuteRunAsync(
           () => _environmentRuns.ApplyAsync(request, cancellationToken),
-          json);
+          json,
+          cancellationToken);
 
   public Task<int> RetryAsync(
       Guid runId,
@@ -66,14 +79,16 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
       bool json,
       CancellationToken cancellationToken) => ExecuteRunAsync(
           () => _environmentRuns.RetryAsync(runId, resourceIds, cancellationToken),
-          json);
+          json,
+          cancellationToken);
 
   public Task<int> ResumeAsync(
       Guid runId,
       bool json,
       CancellationToken cancellationToken) => ExecuteRunAsync(
           () => _environmentRuns.RecoverAsync(runId, cancellationToken),
-          json);
+          json,
+          cancellationToken);
 
   public async Task<int> ListRunsAsync(
       bool json,
@@ -96,9 +111,25 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
             null), json).ConfigureAwait(false);
       }
 
-      return 0;
+      var diagnostics = _runStore.Diagnostics;
+      for (var index = 0; index < diagnostics.Count; index++)
+      {
+        var diagnostic = diagnostics[index];
+        await WriteEventAsync(new RunEvent(
+            Guid.Empty,
+            index + 1,
+            DateTimeOffset.UtcNow,
+            RunEventKind.Log,
+            diagnostic.ResourceId,
+            diagnostic.StepId,
+            null,
+            diagnostic.Summary,
+            diagnostic), json).ConfigureAwait(false);
+      }
+
+      return DiagnosticsExitCode(diagnostics);
     }
-    catch (OperationCanceledException exception)
+    catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
     {
       await WriteExceptionAsync(exception, json, cancelled: true).ConfigureAwait(false);
       return 130;
@@ -112,15 +143,17 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
 
   private async Task<int> ExecuteRunAsync(
       Func<Task<ExecutionRun>> operation,
-      bool json)
+      bool json,
+      CancellationToken cancellationToken)
   {
     try
     {
+      using var subscription = _eventSink.Subscribe(
+          (runEvent, _) => WriteEventAsync(runEvent, json));
       var run = await operation().ConfigureAwait(false);
-      await WriteRunEventsAsync(run, json).ConfigureAwait(false);
       return ExitCode(run);
     }
-    catch (OperationCanceledException exception)
+    catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
     {
       await WriteExceptionAsync(exception, json, cancelled: true).ConfigureAwait(false);
       return 130;
@@ -132,52 +165,6 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
     }
   }
 
-  private async Task WriteRunEventsAsync(ExecutionRun run, bool json)
-  {
-    long sequence = 0;
-    foreach (var diagnostic in run.Plan?.Errors ?? [])
-    {
-      await WriteEventAsync(new RunEvent(
-          run.RunId,
-          ++sequence,
-          run.EndedAtUtc ?? run.StartedAtUtc,
-          RunEventKind.Log,
-          diagnostic.ResourceId,
-          diagnostic.StepId,
-          null,
-          diagnostic.Summary,
-          diagnostic), json).ConfigureAwait(false);
-    }
-
-    foreach (var result in run.ResourceResults.Values.OrderBy(
-        result => result.ResourceId,
-        StringComparer.OrdinalIgnoreCase))
-    {
-      var runEvent = new RunEvent(
-          run.RunId,
-          ++sequence,
-          result.EndedAtUtc ?? result.StartedAtUtc ?? run.StartedAtUtc,
-          RunEventKind.ResourceStateChanged,
-          result.ResourceId,
-          null,
-          result.Progress,
-          result.Message ?? result.Error?.Summary ?? result.Outcome?.ToString() ?? result.State.ToString(),
-          result.Error);
-      await WriteEventAsync(runEvent, json).ConfigureAwait(false);
-    }
-
-    await WriteEventAsync(new RunEvent(
-        run.RunId,
-        ++sequence,
-        run.EndedAtUtc ?? DateTimeOffset.UtcNow,
-        RunEventKind.Completed,
-        null,
-        null,
-        1,
-        run.Outcome?.ToString() ?? run.State.ToString(),
-        null), json).ConfigureAwait(false);
-  }
-
   private Task WriteEventAsync(
       RunEvent runEvent,
       bool json,
@@ -185,7 +172,7 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
   {
     var redacted = _redactor.Redact(runEvent);
     return (writer ?? _output).WriteLineAsync(json
-        ? JsonSerializer.Serialize(redacted)
+        ? JsonSerializer.Serialize(redacted, WdemJson.Options)
         : FormatEvent(redacted));
   }
 
@@ -204,12 +191,13 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
       bool json,
       bool cancelled,
       TextWriter writer,
-      LogRedactor? redactor = null)
+      LogRedactor? redactor = null,
+      WdemErrorCode? errorCode = null)
   {
     ArgumentNullException.ThrowIfNull(exception);
     ArgumentNullException.ThrowIfNull(writer);
     var error = new StructuredError(
-        cancelled ? WdemErrorCode.CancellationError : WdemErrorCode.ProviderError,
+        errorCode ?? (cancelled ? WdemErrorCode.CancellationError : WdemErrorCode.ProviderError),
         cancelled ? "Operation cancelled." : "Unexpected host error.",
         exception.Message)
     {
@@ -227,14 +215,14 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
         exception.Message,
         error));
     return writer.WriteLineAsync(json
-        ? JsonSerializer.Serialize(runEvent)
+        ? JsonSerializer.Serialize(runEvent, WdemJson.Options)
         : FormatEvent(runEvent));
   }
 
   private static string FormatEvent(RunEvent runEvent)
   {
     var resource = runEvent.ResourceId is null ? string.Empty : $" [{runEvent.ResourceId}]";
-    return $"{runEvent.TimestampUtc:O} {runEvent.Kind}{resource}: {runEvent.Message}";
+    return $"{runEvent.TimestampUtc:O} {runEvent.RunId:D} {runEvent.Kind}{resource}: {runEvent.Message}";
   }
 
   private static int ExitCode(ExecutionRun run)
@@ -244,9 +232,10 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
       return 130;
     }
 
-    if (run.Plan is { IsExecutable: false } ||
-        run.Plan?.Errors.Any(error =>
-            error.Code is WdemErrorCode.ProfileError or WdemErrorCode.DependencyError) == true)
+    var planErrors = run.Plan?.Errors ?? [];
+    if (planErrors.Any(error =>
+            error.Code is WdemErrorCode.ProfileError or WdemErrorCode.DependencyError) ||
+        run.Plan is { IsExecutable: false } && planErrors.Count == 0)
     {
       return 2;
     }
@@ -260,5 +249,18 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
     }
 
     return run.Outcome == ExecutionOutcome.Succeeded ? 0 : 3;
+  }
+
+  private static int DiagnosticsExitCode(IReadOnlyList<StructuredError> diagnostics)
+  {
+    if (diagnostics.Count == 0)
+    {
+      return 0;
+    }
+
+    return diagnostics.Any(diagnostic =>
+        diagnostic.Code is not WdemErrorCode.ProfileError and not WdemErrorCode.DependencyError)
+        ? 3
+        : 2;
   }
 }

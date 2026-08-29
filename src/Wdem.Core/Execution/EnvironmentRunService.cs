@@ -1,5 +1,6 @@
 using System.Collections.Frozen;
 using System.Runtime.InteropServices;
+using System.Threading.Channels;
 using Wdem.Core.Compliance;
 using Wdem.Core.Graph;
 using Wdem.Core.Planning;
@@ -23,6 +24,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
   private readonly IExecutionRunStore _runStore;
   private readonly IResourceApplyDispatcher _dispatcher;
   private readonly TimeProvider _timeProvider;
+  private readonly IRunEventSink _eventSink;
+  private readonly LogRedactor _redactor;
 
   public EnvironmentRunService(
       IProfileCatalog profiles,
@@ -33,7 +36,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       IResourceScheduler scheduler,
       IExecutionRunStore runStore,
       IResourceApplyDispatcher dispatcher,
-      TimeProvider? timeProvider = null)
+      TimeProvider? timeProvider = null,
+      IRunEventSink? eventSink = null,
+      LogRedactor? redactor = null)
   {
     _profiles = profiles ?? throw new ArgumentNullException(nameof(profiles));
     _graphBuilder = graphBuilder ?? throw new ArgumentNullException(nameof(graphBuilder));
@@ -45,6 +50,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
     _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
     _timeProvider = timeProvider ?? TimeProvider.System;
+    _eventSink = eventSink ?? new RunEventHub();
+    _redactor = redactor ?? new LogRedactor();
   }
 
   public Task<ExecutionRun> InspectAsync(
@@ -371,6 +378,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
 
     var sourcePath = CanonicalizeOrPreservePath(loaded.SourcePath);
     var profile = loaded.Profile;
+    _redactor.RegisterSensitiveParameters(profile.Resources.Values.SelectMany(
+        resource => resource.Parameters));
     var graphResult = _graphBuilder.TryBuild(
         profile,
         new ProfileSelection(request.SelectedOptionalResourceIds));
@@ -427,6 +436,20 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     }
 
     await _runStore.CreateAsync(run, cancellationToken).ConfigureAwait(false);
+    var events = new RunEventPublisher(
+        _runStore,
+        _eventSink,
+        _redactor,
+        _timeProvider,
+        run.RunId);
+    await events.PublishRunStateAsync(run, cancellationToken).ConfigureAwait(false);
+    await events.PublishPlanDiagnosticsAsync(run.Plan, cancellationToken).ConfigureAwait(false);
+    foreach (var result in run.ResourceResults.Values.OrderBy(
+        result => result.ResourceId,
+        IdComparer))
+    {
+      await events.PublishResourceAsync(result, cancellationToken).ConfigureAwait(false);
+    }
 
     if (mode == RunMode.Inspect)
     {
@@ -436,15 +459,15 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         Outcome = ExecutionOutcome.Succeeded,
         EndedAtUtc = DateTimeOffset.UtcNow
       };
-      return await PersistTerminalAsync(completed).ConfigureAwait(false);
+      return await PersistTerminalAsync(completed, events).ConfigureAwait(false);
     }
 
     if (!plan.IsExecutable)
     {
-      return await CompleteUnexecutableAsync(run, cancellationToken).ConfigureAwait(false);
+      return await CompleteUnexecutableAsync(run, events, cancellationToken).ConfigureAwait(false);
     }
 
-    var transitions = new RunTransitions(_runStore, run);
+    var transitions = new RunTransitions(_runStore, events, run);
     await transitions.SetRunningAsync(cancellationToken).ConfigureAwait(false);
     var scheduled = await _scheduler.ExecuteAsync(
         plan,
@@ -453,6 +476,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
             planned,
             detected[planned.Definition.Id],
             compliance[planned.Definition.Id],
+            events,
             token),
         planned => _providers.GetRequired(
             planned.Definition.Type,
@@ -478,7 +502,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           .Select(result => $"Resource '{result.ResourceId}' requires a restart.")
           .ToArray()
     };
-    return await PersistTerminalAsync(completedRun).ConfigureAwait(false);
+    return await PersistTerminalAsync(completedRun, events).ConfigureAwait(false);
   }
 
   private async Task<ResourceResult> ExecuteResourceAsync(
@@ -486,6 +510,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       PlannedResource planned,
       DetectedState detectedBefore,
       ComplianceResult complianceBefore,
+      RunEventPublisher events,
       CancellationToken cancellationToken)
   {
     var id = definition.Id;
@@ -498,13 +523,30 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     var startedAt = DateTimeOffset.UtcNow;
     var provider = _providers.GetRequired(definition.Type, definition.Provider);
     ResourceApplyResult applied;
+    var progressChannel = Channel.CreateUnbounded<ProviderProgress>(new UnboundedChannelOptions
+    {
+      SingleReader = true,
+      SingleWriter = false,
+      AllowSynchronousContinuations = false
+    });
+    var progressPump = PumpProgressAsync(
+        progressChannel.Reader,
+        events,
+        id,
+        cancellationToken);
     try
     {
       applied = await _dispatcher.ApplyAsync(
           provider,
           definition,
           planned.ResourcePlan,
-          progress: null,
+          new InlineProgress<ProviderProgress>(progressEvent =>
+          {
+            if (!progressChannel.Writer.TryWrite(progressEvent))
+            {
+              throw new InvalidOperationException("Provider progress could not be queued.");
+            }
+          }),
           cancellationToken).ConfigureAwait(false);
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -514,6 +556,32 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     catch (Exception exception)
     {
       return FailedApply(id, detectedBefore, planned, startedAt, exception);
+    }
+    finally
+    {
+      progressChannel.Writer.TryComplete();
+      await progressPump.ConfigureAwait(false);
+    }
+
+    foreach (var diagnostic in applied.Diagnostics)
+    {
+      await events.PublishLogAsync(
+          id,
+          diagnostic.StepId,
+          diagnostic.Summary,
+          diagnostic,
+          cancellationToken).ConfigureAwait(false);
+    }
+
+    foreach (var step in applied.StepResults)
+    {
+      await events.PublishStepAsync(
+          id,
+          step.StepId,
+          step.Progress,
+          step.Message ?? step.StepId,
+          step.Error,
+          cancellationToken).ConfigureAwait(false);
     }
 
     var stepResults = ToStepResults(planned, applied, startedAt);
@@ -699,6 +767,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
 
   private async Task<ExecutionRun> CompleteUnexecutableAsync(
       ExecutionRun run,
+      RunEventPublisher events,
       CancellationToken cancellationToken)
   {
     var endedAt = DateTimeOffset.UtcNow;
@@ -730,13 +799,17 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       EndedAtUtc = endedAt,
       ResourceResults = results
     };
-    return await PersistTerminalAsync(completed).ConfigureAwait(false);
+    return await PersistTerminalAsync(completed, events).ConfigureAwait(false);
   }
 
-  private async Task<ExecutionRun> PersistTerminalAsync(ExecutionRun run)
+  private async Task<ExecutionRun> PersistTerminalAsync(
+      ExecutionRun run,
+      RunEventPublisher events)
   {
     using var timeout = new CancellationTokenSource(PersistenceTimeout);
-    return await _runStore.SaveAsync(run, timeout.Token).ConfigureAwait(false);
+    var saved = await _runStore.SaveAsync(run, timeout.Token).ConfigureAwait(false);
+    await events.PublishCompletedAsync(saved, timeout.Token).ConfigureAwait(false);
+    return saved;
   }
 
   private async Task<ExecutionRun> PersistPreparationFailureAsync(
@@ -768,6 +841,15 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       ResourceResults = new Dictionary<string, ResourceResult>(IdComparer)
     };
     await _runStore.CreateAsync(run, cancellationToken).ConfigureAwait(false);
+    var events = new RunEventPublisher(
+        _runStore,
+        _eventSink,
+        _redactor,
+        _timeProvider,
+        run.RunId);
+    await events.PublishRunStateAsync(run, cancellationToken).ConfigureAwait(false);
+    await events.PublishPlanDiagnosticsAsync(run.Plan, cancellationToken).ConfigureAwait(false);
+    await events.PublishCompletedAsync(run, cancellationToken).ConfigureAwait(false);
     return run;
   }
 
@@ -1115,10 +1197,196 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       Environment.MachineName,
       Environment.UserName);
 
-  private sealed class RunTransitions(IExecutionRunStore store, ExecutionRun initial)
+  private static async Task PumpProgressAsync(
+      ChannelReader<ProviderProgress> reader,
+      RunEventPublisher events,
+      string resourceId,
+      CancellationToken cancellationToken)
+  {
+    await foreach (var progress in reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+    {
+      await events.PublishStepAsync(
+          resourceId,
+          progress.StepId,
+          progress.Percent,
+          progress.Message,
+          null,
+          cancellationToken).ConfigureAwait(false);
+      await events.PublishLogAsync(
+          resourceId,
+          progress.StepId,
+          progress.Message,
+          null,
+          cancellationToken,
+          progress.LogLevel).ConfigureAwait(false);
+    }
+  }
+
+  private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
+  {
+    public void Report(T value) => report(value);
+  }
+
+  private sealed class RunEventPublisher(
+      IExecutionRunStore store,
+      IRunEventSink sink,
+      LogRedactor redactor,
+      TimeProvider timeProvider,
+      Guid runId)
+  {
+    private readonly SemaphoreSlim _gate = new(1, 1);
+    private long _sequence;
+
+    public Task PublishRunStateAsync(
+        ExecutionRun run,
+        CancellationToken cancellationToken) => PublishAsync(
+            RunEventKind.RunStateChanged,
+            null,
+            null,
+            null,
+            $"{run.Mode} {run.State}",
+            null,
+            ProviderLogLevel.Info,
+            cancellationToken);
+
+    public async Task PublishPlanDiagnosticsAsync(
+        ExecutionPlan? plan,
+        CancellationToken cancellationToken)
+    {
+      foreach (var diagnostic in plan?.Errors ?? [])
+      {
+        await PublishLogAsync(
+            diagnostic.ResourceId,
+            diagnostic.StepId,
+            diagnostic.Summary,
+            diagnostic,
+            cancellationToken,
+            ProviderLogLevel.Error).ConfigureAwait(false);
+      }
+    }
+
+    public Task PublishResourceAsync(
+        ResourceResult result,
+        CancellationToken cancellationToken) => PublishAsync(
+            RunEventKind.ResourceStateChanged,
+            result.ResourceId,
+            null,
+            result.Progress,
+            result.Message ?? result.Error?.Summary ?? result.Outcome?.ToString() ??
+                result.State.ToString(),
+            result.Error,
+            result.Error is null ? ProviderLogLevel.Info : ProviderLogLevel.Error,
+            cancellationToken);
+
+    public Task PublishStepAsync(
+        string resourceId,
+        string? stepId,
+        double progress,
+        string message,
+        StructuredError? error,
+        CancellationToken cancellationToken) => PublishAsync(
+            RunEventKind.StepProgress,
+            resourceId,
+            stepId,
+            progress,
+            message,
+            error,
+            error is null ? ProviderLogLevel.Info : ProviderLogLevel.Error,
+            cancellationToken);
+
+    public Task PublishLogAsync(
+        string? resourceId,
+        string? stepId,
+        string message,
+        StructuredError? error,
+        CancellationToken cancellationToken,
+        ProviderLogLevel level = ProviderLogLevel.Info) => PublishAsync(
+            RunEventKind.Log,
+            resourceId,
+            stepId,
+            null,
+            message,
+            error,
+            level,
+            cancellationToken);
+
+    public Task PublishCompletedAsync(
+        ExecutionRun run,
+        CancellationToken cancellationToken) => PublishAsync(
+            RunEventKind.Completed,
+            null,
+            null,
+            1,
+            run.Outcome?.ToString() ?? run.State.ToString(),
+            null,
+            run.Outcome == ExecutionOutcome.Succeeded
+                ? ProviderLogLevel.Info
+                : ProviderLogLevel.Error,
+            cancellationToken);
+
+    private async Task PublishAsync(
+        RunEventKind kind,
+        string? resourceId,
+        string? stepId,
+        double? progress,
+        string message,
+        StructuredError? error,
+        ProviderLogLevel level,
+        CancellationToken cancellationToken)
+    {
+      await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+      try
+      {
+        var runEvent = redactor.Redact(new RunEvent(
+            runId,
+            checked(++_sequence),
+            timeProvider.GetUtcNow(),
+            kind,
+            resourceId,
+            stepId,
+            progress,
+            message,
+            error));
+        await store.AppendLogAsync(
+            runId,
+            new RunLogEntry(
+                runEvent.Sequence,
+                runEvent.TimestampUtc,
+                level,
+                runEvent.ResourceId,
+                runEvent.StepId,
+                runEvent.Message,
+                runEvent.Error),
+            cancellationToken).ConfigureAwait(false);
+        await sink.PublishAsync(runEvent, cancellationToken).ConfigureAwait(false);
+      }
+      finally
+      {
+        _gate.Release();
+      }
+    }
+  }
+
+  private sealed class RunTransitions(
+      IExecutionRunStore store,
+      RunEventPublisher events,
+      ExecutionRun initial)
   {
     private readonly SemaphoreSlim _gate = new(1, 1);
     private ExecutionRun _current = initial;
+
+    public RunTransitions(IExecutionRunStore store, ExecutionRun initial)
+        : this(
+            store,
+            new RunEventPublisher(
+                store,
+                new RunEventHub(),
+                new LogRedactor(),
+                TimeProvider.System,
+                initial.RunId),
+            initial)
+    {
+    }
 
     public ExecutionRun Current => _current;
 
@@ -1129,6 +1397,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       {
         var next = _current with { State = ExecutionState.Running };
         _current = await store.SaveAsync(next, cancellationToken).ConfigureAwait(false);
+        await events.PublishRunStateAsync(_current, cancellationToken).ConfigureAwait(false);
       }
       finally
       {
@@ -1154,6 +1423,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         };
         var next = _current with { ResourceResults = results };
         _current = await store.SaveAsync(next, cancellationToken).ConfigureAwait(false);
+        await events.PublishResourceAsync(
+            _current.ResourceResults[result.ResourceId],
+            cancellationToken).ConfigureAwait(false);
       }
       finally
       {

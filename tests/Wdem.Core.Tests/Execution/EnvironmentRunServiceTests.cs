@@ -14,6 +14,81 @@ namespace Wdem.Core.Tests.Execution;
 public sealed class EnvironmentRunServiceTests
 {
   [Fact]
+  public async Task ApplyAsync_PublishesPersistedRunEventsInSequenceWithoutDroppingDetails()
+  {
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ProgressEvents =
+      [
+        new ProviderProgress("install", 0.4, "installing", "install"),
+        new ProviderProgress("install", 0.8, "provider-log hunter2", "install")
+      ],
+      ApplyResult = new ResourceApplyResult
+      {
+        ResourceId = "git",
+        Outcome = ApplyOutcome.Succeeded,
+        StepResults =
+        [
+          new ProviderStepResult
+          {
+            StepId = "install",
+            Action = PlanAction.Install,
+            Progress = 1,
+            Message = "step-complete"
+          }
+        ],
+        Diagnostics =
+        [
+          new StructuredError(
+              WdemErrorCode.ProviderError,
+              "provider diagnostic hunter2",
+              "provider diagnostic detail hunter2")
+          {
+            UnderlyingException = new InvalidOperationException("hunter2")
+          }
+        ]
+      }
+    };
+    var sink = new RunEventHub();
+    var events = new List<RunEvent>();
+    var profile = Profile();
+    profile = profile with
+    {
+      Resources = profile.Resources.ToDictionary(
+          pair => pair.Key,
+          pair => pair.Value with
+          {
+            Parameters = new Dictionary<string, string?> { ["access_token"] = "hunter2" }
+          },
+          StringComparer.OrdinalIgnoreCase)
+    };
+    var (service, store) = CreateService(provider, profile, eventSink: sink);
+    using var subscription = sink.Subscribe(async (runEvent, cancellationToken) =>
+    {
+      Assert.NotNull(await store.GetAsync(runEvent.RunId, cancellationToken));
+      events.Add(runEvent);
+    });
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    Assert.NotEmpty(events);
+    Assert.All(events, runEvent => Assert.Equal(run.RunId, runEvent.RunId));
+    Assert.Equal(
+        Enumerable.Range(1, events.Count).Select(value => (long)value),
+        events.Select(runEvent => runEvent.Sequence));
+    Assert.Contains(events, runEvent => runEvent.Kind == RunEventKind.RunStateChanged);
+    Assert.Contains(events, runEvent => runEvent.Kind == RunEventKind.ResourceStateChanged);
+    Assert.Contains(events, runEvent => runEvent.Kind == RunEventKind.StepProgress);
+    Assert.Contains(events, runEvent =>
+        runEvent.Kind == RunEventKind.Log && runEvent.Message == "provider-log ***");
+    Assert.DoesNotContain(events, runEvent => runEvent.Message.Contains("hunter2", StringComparison.Ordinal));
+    Assert.DoesNotContain(events, runEvent =>
+        runEvent.Error?.Detail.Contains("hunter2", StringComparison.Ordinal) == true ||
+        runEvent.Error?.UnderlyingExceptionMessage?.Contains("hunter2", StringComparison.Ordinal) == true);
+    Assert.Equal(RunEventKind.Completed, events[^1].Kind);
+  }
+
+  [Fact]
   public async Task InspectAsync_DetectsAndPlansButNeverCallsApply()
   {
     var provider = new ScriptedProvider(Missing("git"));
@@ -739,7 +814,8 @@ public sealed class EnvironmentRunServiceTests
       ScriptedProvider provider,
       DeveloperProfile? profile = null,
       IProfileCatalog? catalog = null,
-      InMemoryRunStore? store = null)
+      InMemoryRunStore? store = null,
+      IRunEventSink? eventSink = null)
   {
     catalog ??= new FakeProfileCatalog(profile ?? Profile(), CanonicalProfilePath);
     var registry = new ResourceProviderRegistry([provider]);
@@ -754,7 +830,8 @@ public sealed class EnvironmentRunServiceTests
             new ExecutionPlanner(registry, compliance),
             new ResourceScheduler(),
             store,
-            new DirectResourceApplyDispatcher()),
+            new DirectResourceApplyDispatcher(),
+            eventSink: eventSink),
         store);
   }
 
@@ -1010,6 +1087,7 @@ public sealed class EnvironmentRunServiceTests
     public int VerifyCalls { get; private set; }
     public Func<ResourceDefinition, DetectedState>? DetectState { get; init; }
     public Func<CancellationToken, ValueTask<ResourceApplyResult>>? ApplyOperation { get; init; }
+    public IReadOnlyList<ProviderProgress> ProgressEvents { get; init; } = [];
     public List<string> DetectedResourceIds { get; } = [];
     public ResourceApplyResult ApplyResult { get; init; } = new()
     {
@@ -1095,6 +1173,11 @@ public sealed class EnvironmentRunServiceTests
         CancellationToken cancellationToken)
     {
       ApplyCalls++;
+      foreach (var progressEvent in ProgressEvents)
+      {
+        progress?.Report(progressEvent);
+      }
+
       return ApplyOperation?.Invoke(cancellationToken) ?? ValueTask.FromResult(ApplyResult);
     }
 

@@ -30,6 +30,90 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
       Path.GetTempPath(), $"wdem-recovery-concurrency-{Guid.NewGuid():N}");
 
   [Fact]
+  public async Task ApplyAsync_PersistsEveryRedactedEventBeforePublishingIt()
+  {
+    var redactor = new LogRedactor();
+    var store = CreateStore(redactor: redactor);
+    var events = new List<RunEvent>();
+    var sink = new RunEventHub();
+    var provider = new GatedProvider
+    {
+      WaitForRelease = false,
+      ProgressEvents =
+      [
+        new ProviderProgress("install", 0.5, "provider-log hunter2", "install")
+      ],
+      StepResults =
+      [
+        new ProviderStepResult
+        {
+          StepId = "install",
+          Action = PlanAction.Install,
+          Progress = 1,
+          Message = "step-complete hunter2"
+        }
+      ],
+      Diagnostics =
+      [
+        new StructuredError(
+            WdemErrorCode.ProviderError,
+            "provider diagnostic hunter2",
+            "provider detail hunter2")
+        {
+          UnderlyingException = new InvalidOperationException("hunter2")
+        }
+      ]
+    };
+    var profile = Profile() with
+    {
+      Resources = Profile().Resources.ToDictionary(
+          pair => pair.Key,
+          pair => pair.Value with
+          {
+            Parameters = new Dictionary<string, string?>
+            {
+              ["access_token"] = "hunter2"
+            }
+          },
+          StringComparer.OrdinalIgnoreCase)
+    };
+    var service = CreateService(
+        provider,
+        store,
+        eventSink: sink,
+        redactor: redactor,
+        profile: profile);
+    using var subscription = sink.Subscribe(async (runEvent, cancellationToken) =>
+    {
+      var persisted = await store.ReadLogPageAsync(
+          runEvent.RunId,
+          runEvent.Sequence - 1,
+          1,
+          cancellationToken);
+      var entry = Assert.Single(persisted);
+      Assert.Equal(runEvent.Sequence, entry.Sequence);
+      Assert.Equal(runEvent.Message, entry.Message);
+      events.Add(runEvent);
+    });
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    var log = await store.ReadLogPageAsync(run.RunId, 0, 1000, CancellationToken.None);
+    Assert.Equal(Enumerable.Range(1, events.Count).Select(value => (long)value),
+        events.Select(runEvent => runEvent.Sequence));
+    Assert.Equal(events.Select(runEvent => runEvent.Sequence), log.Select(entry => entry.Sequence));
+    Assert.Equal(events.Select(runEvent => runEvent.Message), log.Select(entry => entry.Message));
+    Assert.Contains(events, runEvent => runEvent.Kind == RunEventKind.StepProgress);
+    Assert.Contains(events, runEvent => runEvent.Kind == RunEventKind.Log);
+    Assert.Equal(RunEventKind.Completed, events[^1].Kind);
+    Assert.DoesNotContain(events, runEvent => ContainsSecret(runEvent.Message, runEvent.Error));
+    Assert.DoesNotContain("hunter2", await File.ReadAllTextAsync(store.LogPath(run.RunId)),
+        StringComparison.Ordinal);
+    Assert.DoesNotContain("hunter2", await File.ReadAllTextAsync(store.SnapshotPath(run.RunId)),
+        StringComparison.Ordinal);
+  }
+
+  [Fact]
   public async Task RecoverAsync_ConcurrentJsonStoresOnlyOneExecutesReplacement()
   {
     var provider = new GatedProvider();
@@ -496,20 +580,25 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     }
   }
 
-  private JsonExecutionRunStore CreateStore(TimeProvider? timeProvider = null) => new(
+  private JsonExecutionRunStore CreateStore(
+      TimeProvider? timeProvider = null,
+      LogRedactor? redactor = null) => new(
       new WdemDataPaths(_directory),
-      new LogRedactor(),
+      redactor ?? new LogRedactor(),
       timeProvider);
 
   private static EnvironmentRunService CreateService(
       IResourceProvider provider,
       IExecutionRunStore store,
-      TimeProvider? timeProvider = null)
+      TimeProvider? timeProvider = null,
+      IRunEventSink? eventSink = null,
+      LogRedactor? redactor = null,
+      DeveloperProfile? profile = null)
   {
     var registry = new ResourceProviderRegistry([provider]);
     var compliance = new ComplianceEvaluator();
     return new EnvironmentRunService(
-        new FixedProfileCatalog(Profile()),
+        new FixedProfileCatalog(profile ?? Profile()),
         new ResourceGraphBuilder(),
         registry,
         compliance,
@@ -517,8 +606,16 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
         new ResourceScheduler(),
         store,
         new DirectResourceApplyDispatcher(),
-        timeProvider ?? TimeProvider.System);
+        timeProvider ?? TimeProvider.System,
+        eventSink,
+        redactor);
   }
+
+  private static bool ContainsSecret(string message, StructuredError? error) =>
+      message.Contains("hunter2", StringComparison.Ordinal)
+      || error?.Summary.Contains("hunter2", StringComparison.Ordinal) == true
+      || error?.Detail.Contains("hunter2", StringComparison.Ordinal) == true
+      || error?.UnderlyingExceptionMessage?.Contains("hunter2", StringComparison.Ordinal) == true;
 
   private static async Task<RecoveryAttempt> AttemptRecoveryAsync(
       IEnvironmentRunService service,
@@ -770,6 +867,9 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     public int ApplyCalls => Volatile.Read(ref _applyCalls);
     public ApplyOutcome Outcome { get; init; } = ApplyOutcome.Succeeded;
     public bool WaitForRelease { get; init; } = true;
+    public IReadOnlyList<ProviderProgress> ProgressEvents { get; init; } = [];
+    public IReadOnlyList<ProviderStepResult> StepResults { get; init; } = [];
+    public IReadOnlyList<StructuredError> Diagnostics { get; init; } = [];
     public TaskCompletionSource FirstApplyEntered { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource SecondApplyEntered { get; } = new(
@@ -825,10 +925,17 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
         await ReleaseApply.Task.WaitAsync(cancellationToken);
       }
 
+      foreach (var providerProgress in ProgressEvents)
+      {
+        progress?.Report(providerProgress);
+      }
+
       return new ResourceApplyResult
       {
         ResourceId = resource.Id,
         Outcome = Outcome,
+        StepResults = StepResults,
+        Diagnostics = Diagnostics,
         Error = Outcome == ApplyOutcome.Failed
             ? new StructuredError(
                 WdemErrorCode.ProviderError,

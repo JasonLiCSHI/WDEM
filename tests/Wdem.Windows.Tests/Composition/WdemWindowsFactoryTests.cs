@@ -1,5 +1,6 @@
 using Wdem.Core.Execution;
 using Wdem.Core.Providers;
+using Wdem.Core.Runs;
 using Wdem.LegacySource.Services.Managers;
 using Wdem.LegacySource.Services.Plugins;
 using Wdem.LegacySource.Services.System;
@@ -43,6 +44,8 @@ public sealed class WdemWindowsFactoryTests : IDisposable
     Assert.IsType<PluginRunner>(composition.LegacyPluginRunner);
     Assert.IsType<StateService>(composition.LegacyState);
     Assert.IsType<JsonExecutionRunStore>(composition.RunStore);
+    Assert.IsType<LogRedactor>(composition.Redactor);
+    Assert.IsType<RunEventHub>(composition.RunEvents);
     Assert.Equal("winget", composition.Providers.GetRequired("package", "winget").ProviderName);
     Assert.True(File.Exists(Path.Combine(paths.Root, "migration-v1.json")));
   }

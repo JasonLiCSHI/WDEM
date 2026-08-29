@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Wdem.Cli;
 using Wdem.Core.Execution;
 using Wdem.Core.Planning;
@@ -9,6 +10,99 @@ namespace Wdem.Windows.Tests.Cli;
 
 public sealed class WdemCliBuilderTests
 {
+  private static readonly JsonSerializerOptions JsonOptions = new()
+  {
+    PropertyNameCaseInsensitive = true,
+    Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
+  };
+
+  [Fact]
+  public async Task Host_ParseErrorWritesJsonEventWithoutCreatingComposition()
+  {
+    var factoryCalled = false;
+    var output = new StringWriter();
+    var error = new StringWriter();
+
+    var exitCode = await WdemCliHost.RunAsync(
+        ["apply", "--profile", "developer.yaml", "--max-concurrency", "password=parse-secret", "--json"],
+        _ =>
+        {
+          factoryCalled = true;
+          throw new InvalidOperationException("composition should not be created");
+        },
+        output,
+        error,
+        CancellationToken.None);
+
+    Assert.Equal(1, exitCode);
+    Assert.False(factoryCalled);
+    Assert.Empty(output.ToString());
+    Assert.DoesNotContain("parse-secret", error.ToString());
+    var runEvent = Assert.Single(DeserializeEvents(error));
+    Assert.Equal(WdemErrorCode.ProfileError, runEvent.Error?.Code);
+  }
+
+  [Fact]
+  public async Task Host_HelpDoesNotCreateCompositionOrExposeInitializationFailure()
+  {
+    var factoryCalled = false;
+    var output = new StringWriter();
+    var error = new StringWriter();
+
+    var exitCode = await WdemCliHost.RunAsync(
+        ["--help"],
+        _ =>
+        {
+          factoryCalled = true;
+          throw new InvalidOperationException("initialization failure");
+        },
+        output,
+        error);
+
+    Assert.Equal(0, exitCode);
+    Assert.False(factoryCalled);
+    Assert.Contains("Usage", output.ToString(), StringComparison.OrdinalIgnoreCase);
+    Assert.Empty(error.ToString());
+  }
+
+  [Fact]
+  public async Task Host_EmptyProfileWritesJsonEventWithoutCreatingComposition()
+  {
+    var factoryCalled = false;
+    var error = new StringWriter();
+
+    var exitCode = await WdemCliHost.RunAsync(
+        ["inspect", "--profile", "", "--json"],
+        _ =>
+        {
+          factoryCalled = true;
+          throw new InvalidOperationException("composition should not be created");
+        },
+        new StringWriter(),
+        error);
+
+    Assert.Equal(1, exitCode);
+    Assert.False(factoryCalled);
+    Assert.Single(DeserializeEvents(error));
+  }
+
+  [Fact]
+  public async Task Host_InitializationFailureWritesRedactedJsonEventAfterSuccessfulParse()
+  {
+    var error = new StringWriter();
+
+    var exitCode = await WdemCliHost.RunAsync(
+        ["inspect", "--profile", "developer.yaml", "--json"],
+        _ => throw new InvalidOperationException("token=initialization-secret"),
+        new StringWriter(),
+        error);
+
+    Assert.Equal(1, exitCode);
+    Assert.DoesNotContain("initialization-secret", error.ToString());
+    var runEvent = Assert.Single(DeserializeEvents(error));
+    Assert.Equal(WdemErrorCode.ProviderError, runEvent.Error?.Code);
+  }
+
   [Fact]
   public async Task Inspect_BindsProfileSelectionsAndJson()
   {
@@ -59,6 +153,23 @@ public sealed class WdemCliBuilderTests
   }
 
   [Fact]
+  public async Task Apply_SelectAcceptsMultipleValuesPerTokenAndRepeatedOptions()
+  {
+    var handler = new CapturingHandler();
+
+    var exitCode = await WdemCliBuilder.Build(handler).Parse(
+    [
+      "apply", "--profile", "developer.yaml",
+      "--select", "git", "dotnet-sdk",
+      "--select", "node"
+    ]).InvokeAsync();
+
+    Assert.Equal(0, exitCode);
+    Assert.True(handler.Request!.SelectedOptionalResourceIds.SetEquals(
+        ["git", "dotnet-sdk", "node"]));
+  }
+
+  [Fact]
   public async Task Retry_BindsRunMultipleResourcesAndJson()
   {
     var runId = Guid.Parse("7530dd5c-70bd-47a6-a353-e612ceb6c32c");
@@ -81,6 +192,23 @@ public sealed class WdemCliBuilderTests
     Assert.Contains("git", handler.ResourceIds);
     Assert.Contains("dotnet-sdk", handler.ResourceIds);
     Assert.True(handler.Json);
+  }
+
+  [Fact]
+  public async Task Retry_ResourceAcceptsMultipleValuesPerTokenAndRepeatedOptions()
+  {
+    var runId = Guid.Parse("7530dd5c-70bd-47a6-a353-e612ceb6c32c");
+    var handler = new CapturingHandler();
+
+    var exitCode = await WdemCliBuilder.Build(handler).Parse(
+    [
+      "retry", "--run", runId.ToString("D"),
+      "--resource", "git", "dotnet-sdk",
+      "--resource", "node"
+    ]).InvokeAsync();
+
+    Assert.Equal(0, exitCode);
+    Assert.True(handler.ResourceIds!.SetEquals(["git", "dotnet-sdk", "node"]));
   }
 
   [Fact]
@@ -184,17 +312,14 @@ public sealed class WdemCliBuilderTests
     Assert.False(handler.Json);
   }
 
-  [Theory]
-  [InlineData("run")]
-  [InlineData("generate")]
-  [InlineData("state")]
-  [InlineData("completion")]
-  [InlineData("config")]
-  public void RetiredRootCommands_AreNotExposed(string command)
+  [Fact]
+  public void Root_ExposesOnlySupportedCommands()
   {
-    var result = WdemCliBuilder.Build(new CapturingHandler()).Parse([command]);
+    var root = WdemCliBuilder.Build(new CapturingHandler());
 
-    Assert.NotEmpty(result.Errors);
+    Assert.Equal(
+        ["inspect", "apply", "retry", "resume", "runs"],
+        root.Subcommands.Select(command => command.Name));
   }
 
   [Fact]
@@ -210,7 +335,36 @@ public sealed class WdemCliBuilderTests
           Progress = 1,
           Message = "Git is ready."
         });
-    var service = new StubEnvironmentRunService { Result = run };
+    var sink = new RunEventHub();
+    RunEvent[] published =
+    [
+      new RunEvent(
+          run.RunId,
+          41,
+          DateTimeOffset.Parse("2026-08-29T00:00:41Z"),
+          RunEventKind.StepProgress,
+          "git",
+          "install",
+          0.5,
+          "Installing Git.",
+          null),
+      new RunEvent(
+          run.RunId,
+          42,
+          DateTimeOffset.Parse("2026-08-29T00:00:42Z"),
+          RunEventKind.Completed,
+          null,
+          null,
+          1,
+          "Succeeded",
+          null)
+    ];
+    var service = new StubEnvironmentRunService
+    {
+      Result = run,
+      EventSink = sink,
+      Events = published
+    };
     var output = new StringWriter();
     var request = new RunRequest(
         Path.GetFullPath("developer.yaml"),
@@ -219,26 +373,37 @@ public sealed class WdemCliBuilderTests
         service,
         new StubExecutionRunStore(),
         output,
-        new StringWriter());
+        new StringWriter(),
+        eventSink: sink);
 
     var exitCode = await handler.InspectAsync(request, json: true, CancellationToken.None);
 
     Assert.Equal(0, exitCode);
     Assert.Same(request, service.InspectRequest);
-    var events = output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
-        .Select(line => JsonSerializer.Deserialize<RunEvent>(line))
+    var lines = output.ToString().Split(
+        Environment.NewLine,
+        StringSplitOptions.RemoveEmptyEntries);
+    using var firstJson = JsonDocument.Parse(lines[0]);
+    Assert.True(firstJson.RootElement.TryGetProperty("runId", out _));
+    Assert.True(firstJson.RootElement.TryGetProperty("timestampUtc", out _));
+    Assert.Equal("stepProgress", firstJson.RootElement.GetProperty("kind").GetString());
+    Assert.False(firstJson.RootElement.TryGetProperty("RunId", out _));
+    var events = lines
+        .Select(line => JsonSerializer.Deserialize<RunEvent>(line, JsonOptions))
         .ToArray();
     Assert.Collection(
         events,
         runEvent =>
         {
           Assert.NotNull(runEvent);
-          Assert.Equal(RunEventKind.ResourceStateChanged, runEvent.Kind);
+          Assert.Equal(41, runEvent.Sequence);
+          Assert.Equal(RunEventKind.StepProgress, runEvent.Kind);
           Assert.Equal("git", runEvent.ResourceId);
         },
         runEvent =>
         {
           Assert.NotNull(runEvent);
+          Assert.Equal(42, runEvent.Sequence);
           Assert.Equal(RunEventKind.Completed, runEvent.Kind);
         });
   }
@@ -299,11 +464,30 @@ public sealed class WdemCliBuilderTests
       }
     };
     var output = new StringWriter();
+    var sink = new RunEventHub();
     var handler = new WdemCommandHandler(
-        new StubEnvironmentRunService { Result = run },
+        new StubEnvironmentRunService
+        {
+          Result = run,
+          EventSink = sink,
+          Events =
+          [
+            new RunEvent(
+                run.RunId,
+                1,
+                run.EndedAtUtc!.Value,
+                RunEventKind.Log,
+                error.ResourceId,
+                error.StepId,
+                null,
+                error.Summary,
+                error)
+          ]
+        },
         new StubExecutionRunStore(),
         output,
-        new StringWriter());
+        new StringWriter(),
+        eventSink: sink);
 
     var exitCode = await handler.ApplyAsync(
         new RunRequest(Path.GetFullPath("developer.yaml"), new HashSet<string>()),
@@ -352,6 +536,8 @@ public sealed class WdemCliBuilderTests
   [Fact]
   public async Task CommandHandler_CancelledRunOrOperationReturns130()
   {
+    using var cancellation = new CancellationTokenSource();
+    cancellation.Cancel();
     var cancelled = CompletedRun(ExecutionOutcome.Cancelled);
     var service = new StubEnvironmentRunService
     {
@@ -361,7 +547,24 @@ public sealed class WdemCliBuilderTests
     var handler = Handler(service);
 
     Assert.Equal(130, await InvokeApplyAsync(cancelled));
-    Assert.Equal(130, await handler.ApplyAsync(Request(), false, CancellationToken.None));
+    Assert.Equal(130, await handler.ApplyAsync(Request(), false, cancellation.Token));
+  }
+
+  [Fact]
+  public async Task CommandHandler_UnrelatedOperationCanceledExceptionReturnsOne()
+  {
+    var service = new StubEnvironmentRunService
+    {
+      Result = CompletedRun(ExecutionOutcome.Succeeded),
+      Failure = new OperationCanceledException("provider aborted without caller cancellation")
+    };
+
+    var exitCode = await Handler(service).ApplyAsync(
+        Request(),
+        false,
+        CancellationToken.None);
+
+    Assert.Equal(1, exitCode);
   }
 
   [Theory]
@@ -369,6 +572,8 @@ public sealed class WdemCliBuilderTests
   [InlineData(true)]
   public async Task CommandHandler_CancelledOperationWritesRedactedEvent(bool json)
   {
+    using var cancellation = new CancellationTokenSource();
+    cancellation.Cancel();
     var error = new StringWriter();
     var service = new StubEnvironmentRunService
     {
@@ -381,7 +586,7 @@ public sealed class WdemCliBuilderTests
         new StringWriter(),
         error);
 
-    var exitCode = await handler.ApplyAsync(Request(), json, CancellationToken.None);
+    var exitCode = await handler.ApplyAsync(Request(), json, cancellation.Token);
 
     Assert.Equal(130, exitCode);
     Assert.DoesNotContain("cancel-secret", error.ToString());
@@ -464,6 +669,36 @@ public sealed class WdemCliBuilderTests
   }
 
   [Theory]
+  [InlineData(WdemErrorCode.DetectionError)]
+  [InlineData(WdemErrorCode.ProviderError)]
+  public async Task CommandHandler_NonExecutableExecutionDiagnosticReturnsThree(
+      WdemErrorCode errorCode)
+  {
+    var run = CompletedRun(ExecutionOutcome.Failed) with
+    {
+      Plan = new ExecutionPlan
+      {
+        PlanId = Guid.Parse("9b32c69b-e693-4fb0-b895-9ab0528f1c33"),
+        Fingerprint = "non-executable-provider-plan",
+        ProfileId = "developer",
+        ProfileVersion = "1.0.0",
+        Layers = [],
+        Resources = [],
+        IsExecutable = false,
+        Errors =
+        [
+          new StructuredError(
+              errorCode,
+              "Execution preparation failed.",
+              "The provider could not prepare the resource.")
+        ]
+      }
+    };
+
+    Assert.Equal(3, await InvokeApplyAsync(run));
+  }
+
+  [Theory]
   [InlineData(false)]
   [InlineData(true)]
   public async Task CommandHandler_RunEventOutputRedactsMessagesAndNestedErrors(bool json)
@@ -485,11 +720,31 @@ public sealed class WdemCliBuilderTests
             LogLocation = "token=nested-error-secret"
           }
         });
+    var result = Assert.Single(run.ResourceResults.Values);
+    var sink = new RunEventHub();
     var handler = new WdemCommandHandler(
-        new StubEnvironmentRunService { Result = run },
+        new StubEnvironmentRunService
+        {
+          Result = run,
+          EventSink = sink,
+          Events =
+          [
+            new RunEvent(
+                run.RunId,
+                1,
+                run.EndedAtUtc!.Value,
+                RunEventKind.ResourceStateChanged,
+                result.ResourceId,
+                null,
+                result.Progress,
+                result.Message!,
+                result.Error)
+          ]
+        },
         new StubExecutionRunStore(),
         output,
-        new StringWriter());
+        new StringWriter(),
+        eventSink: sink);
 
     var exitCode = await handler.ApplyAsync(Request(), json, CancellationToken.None);
 
@@ -529,9 +784,64 @@ public sealed class WdemCliBuilderTests
     Assert.Equal(RunEventKind.RunStateChanged, runEvent.Kind);
   }
 
+  [Theory]
+  [InlineData(WdemErrorCode.ProfileError, 2)]
+  [InlineData(WdemErrorCode.DependencyError, 2)]
+  [InlineData(WdemErrorCode.ProviderError, 3)]
+  public async Task CommandHandler_RunsListEmitsRedactedStoreDiagnosticsAndClassifiesExit(
+      WdemErrorCode errorCode,
+      int expectedExitCode)
+  {
+    var output = new StringWriter();
+    var store = new StubExecutionRunStore
+    {
+      StoreDiagnostics =
+      [
+        new StructuredError(
+            errorCode,
+            "password=list-diagnostic-secret",
+            "token=list-diagnostic-detail")
+      ]
+    };
+    var handler = new WdemCommandHandler(
+        new StubEnvironmentRunService
+        {
+          Result = CompletedRun(ExecutionOutcome.Succeeded)
+        },
+        store,
+        output,
+        new StringWriter());
+
+    var exitCode = await handler.ListRunsAsync(true, CancellationToken.None);
+
+    Assert.Equal(expectedExitCode, exitCode);
+    Assert.DoesNotContain("list-diagnostic-secret", output.ToString());
+    Assert.DoesNotContain("list-diagnostic-detail", output.ToString());
+    var diagnosticEvent = Assert.Single(DeserializeEvents(output));
+    Assert.Equal(RunEventKind.Log, diagnosticEvent.Kind);
+    Assert.Equal(errorCode, diagnosticEvent.Error?.Code);
+  }
+
+  [Fact]
+  public async Task CommandHandler_HumanRunOutputIncludesCopyableRunId()
+  {
+    var output = new StringWriter();
+    var run = CompletedRun(ExecutionOutcome.Succeeded);
+    var handler = new WdemCommandHandler(
+        new StubEnvironmentRunService { Result = run },
+        new StubExecutionRunStore { Runs = [run] },
+        output,
+        new StringWriter());
+
+    var exitCode = await handler.ListRunsAsync(false, CancellationToken.None);
+
+    Assert.Equal(0, exitCode);
+    Assert.Contains(run.RunId.ToString("D"), output.ToString(), StringComparison.Ordinal);
+  }
+
   private static RunEvent[] DeserializeEvents(StringWriter writer) =>
       writer.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
-          .Select(line => JsonSerializer.Deserialize<RunEvent>(line))
+          .Select(line => JsonSerializer.Deserialize<RunEvent>(line, JsonOptions))
           .OfType<RunEvent>()
           .ToArray();
 
@@ -639,6 +949,8 @@ public sealed class WdemCliBuilderTests
   {
     public required ExecutionRun Result { get; init; }
     public Exception? Failure { get; init; }
+    public IRunEventSink? EventSink { get; init; }
+    public IReadOnlyList<RunEvent> Events { get; init; } = [];
     public RunRequest? InspectRequest { get; private set; }
     public RunRequest? ApplyRequest { get; private set; }
     public Guid? RetryRunId { get; private set; }
@@ -686,14 +998,26 @@ public sealed class WdemCliBuilderTests
     public Task AbandonAsync(Guid priorRunId, CancellationToken cancellationToken) =>
         Task.CompletedTask;
 
-    private Task<ExecutionRun> GetResult() => Failure is null
-        ? Task.FromResult(Result)
-        : Task.FromException<ExecutionRun>(Failure);
+    private async Task<ExecutionRun> GetResult()
+    {
+      if (Failure is not null)
+      {
+        throw Failure;
+      }
+
+      foreach (var runEvent in Events)
+      {
+        await EventSink!.PublishAsync(runEvent, CancellationToken.None);
+      }
+
+      return Result;
+    }
   }
 
   private sealed class StubExecutionRunStore : IExecutionRunStore
   {
-    public IReadOnlyList<StructuredError> Diagnostics => [];
+    public IReadOnlyList<StructuredError> Diagnostics => StoreDiagnostics;
+    public IReadOnlyList<StructuredError> StoreDiagnostics { get; init; } = [];
     public IReadOnlyList<ExecutionRun> Runs { get; init; } = [];
     public bool ListCalled { get; private set; }
 

@@ -32,20 +32,24 @@ public interface IWdemCommandHandler
 
 public static class WdemCliBuilder
 {
-  public static RootCommand Build(IWdemCommandHandler handler)
+  public static RootCommand Build(
+      IWdemCommandHandler handler,
+      Func<Exception, bool, CancellationToken, Task<int>>? exceptionHandler = null)
   {
     ArgumentNullException.ThrowIfNull(handler);
 
     var root = new RootCommand("Manage a Windows developer environment from a WDEM profile.");
-    root.Subcommands.Add(BuildInspect(handler));
-    root.Subcommands.Add(BuildApply(handler));
-    root.Subcommands.Add(BuildRetry(handler));
-    root.Subcommands.Add(BuildResume(handler));
-    root.Subcommands.Add(BuildRuns(handler));
+    root.Subcommands.Add(BuildInspect(handler, exceptionHandler));
+    root.Subcommands.Add(BuildApply(handler, exceptionHandler));
+    root.Subcommands.Add(BuildRetry(handler, exceptionHandler));
+    root.Subcommands.Add(BuildResume(handler, exceptionHandler));
+    root.Subcommands.Add(BuildRuns(handler, exceptionHandler));
     return root;
   }
 
-  private static Command BuildInspect(IWdemCommandHandler handler)
+  private static Command BuildInspect(
+      IWdemCommandHandler handler,
+      Func<Exception, bool, CancellationToken, Task<int>>? exceptionHandler)
   {
     var profile = RequiredOption<string>("--profile", "Path to a developer profile.");
     var select = MultipleOption("--select", "Optional resource id to include.");
@@ -54,14 +58,20 @@ public static class WdemCliBuilder
     command.Options.Add(profile);
     command.Options.Add(select);
     command.Options.Add(json);
-    command.SetAction((parseResult, cancellationToken) => handler.InspectAsync(
-        CreateRunRequest(parseResult.GetValue(profile)!, parseResult.GetValue(select)),
+    command.SetAction((parseResult, cancellationToken) => InvokeAsync(
+        () => handler.InspectAsync(
+            CreateRunRequest(parseResult.GetValue(profile)!, parseResult.GetValue(select)),
+            parseResult.GetValue(json),
+            cancellationToken),
         parseResult.GetValue(json),
+        exceptionHandler,
         cancellationToken));
     return command;
   }
 
-  private static Command BuildApply(IWdemCommandHandler handler)
+  private static Command BuildApply(
+      IWdemCommandHandler handler,
+      Func<Exception, bool, CancellationToken, Task<int>>? exceptionHandler)
   {
     var profile = RequiredOption<string>("--profile", "Path to a developer profile.");
     var select = MultipleOption("--select", "Optional resource id to include.");
@@ -84,17 +94,23 @@ public static class WdemCliBuilder
     command.Options.Add(select);
     command.Options.Add(maximumConcurrency);
     command.Options.Add(json);
-    command.SetAction((parseResult, cancellationToken) => handler.ApplyAsync(
-        CreateRunRequest(
-            parseResult.GetValue(profile)!,
-            parseResult.GetValue(select),
-            parseResult.GetValue(maximumConcurrency)),
+    command.SetAction((parseResult, cancellationToken) => InvokeAsync(
+        () => handler.ApplyAsync(
+            CreateRunRequest(
+                parseResult.GetValue(profile)!,
+                parseResult.GetValue(select),
+                parseResult.GetValue(maximumConcurrency)),
+            parseResult.GetValue(json),
+            cancellationToken),
         parseResult.GetValue(json),
+        exceptionHandler,
         cancellationToken));
     return command;
   }
 
-  private static Command BuildRetry(IWdemCommandHandler handler)
+  private static Command BuildRetry(
+      IWdemCommandHandler handler,
+      Func<Exception, bool, CancellationToken, Task<int>>? exceptionHandler)
   {
     var run = RequiredOption<Guid>("--run", "Run id to retry.");
     var resource = MultipleOption("--resource", "Failed or blocked resource id to retry.");
@@ -105,35 +121,51 @@ public static class WdemCliBuilder
     command.Options.Add(run);
     command.Options.Add(resource);
     command.Options.Add(json);
-    command.SetAction((parseResult, cancellationToken) => handler.RetryAsync(
-        parseResult.GetValue(run),
-        ResourceIds(parseResult.GetValue(resource)),
+    command.SetAction((parseResult, cancellationToken) => InvokeAsync(
+        () => handler.RetryAsync(
+            parseResult.GetValue(run),
+            ResourceIds(parseResult.GetValue(resource)),
+            parseResult.GetValue(json),
+            cancellationToken),
         parseResult.GetValue(json),
+        exceptionHandler,
         cancellationToken));
     return command;
   }
 
-  private static Command BuildResume(IWdemCommandHandler handler)
+  private static Command BuildResume(
+      IWdemCommandHandler handler,
+      Func<Exception, bool, CancellationToken, Task<int>>? exceptionHandler)
   {
     var run = RequiredOption<Guid>("--run", "Run id to resume.");
     var json = JsonOption();
     var command = new Command("resume", "Resume an interrupted run.");
     command.Options.Add(run);
     command.Options.Add(json);
-    command.SetAction((parseResult, cancellationToken) => handler.ResumeAsync(
-        parseResult.GetValue(run),
+    command.SetAction((parseResult, cancellationToken) => InvokeAsync(
+        () => handler.ResumeAsync(
+            parseResult.GetValue(run),
+            parseResult.GetValue(json),
+            cancellationToken),
         parseResult.GetValue(json),
+        exceptionHandler,
         cancellationToken));
     return command;
   }
 
-  private static Command BuildRuns(IWdemCommandHandler handler)
+  private static Command BuildRuns(
+      IWdemCommandHandler handler,
+      Func<Exception, bool, CancellationToken, Task<int>>? exceptionHandler)
   {
     var json = JsonOption();
     var list = new Command("list", "List persisted environment runs.");
     list.Options.Add(json);
-    list.SetAction((parseResult, cancellationToken) => handler.ListRunsAsync(
+    list.SetAction((parseResult, cancellationToken) => InvokeAsync(
+        () => handler.ListRunsAsync(
+            parseResult.GetValue(json),
+            cancellationToken),
         parseResult.GetValue(json),
+        exceptionHandler,
         cancellationToken));
 
     var runs = new Command("runs", "Inspect persisted environment runs.");
@@ -144,10 +176,30 @@ public static class WdemCliBuilder
   private static RunRequest CreateRunRequest(
       string profilePath,
       IEnumerable<string>? selectedResourceIds,
-      int maximumConcurrency = 4) => new(
-          Path.GetFullPath(profilePath),
-          ResourceIds(selectedResourceIds),
-          maximumConcurrency);
+      int maximumConcurrency = 4)
+  {
+    ArgumentException.ThrowIfNullOrWhiteSpace(profilePath);
+    return new RunRequest(
+        Path.GetFullPath(profilePath),
+        ResourceIds(selectedResourceIds),
+        maximumConcurrency);
+  }
+
+  private static async Task<int> InvokeAsync(
+      Func<Task<int>> action,
+      bool json,
+      Func<Exception, bool, CancellationToken, Task<int>>? exceptionHandler,
+      CancellationToken cancellationToken)
+  {
+    try
+    {
+      return await action().ConfigureAwait(false);
+    }
+    catch (Exception exception) when (exceptionHandler is not null)
+    {
+      return await exceptionHandler(exception, json, cancellationToken).ConfigureAwait(false);
+    }
+  }
 
   private static IReadOnlySet<string> ResourceIds(IEnumerable<string>? values) =>
       (values ?? []).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -161,7 +213,8 @@ public static class WdemCliBuilder
   private static Option<string[]> MultipleOption(string name, string description) => new(name)
   {
     Description = description,
-    Arity = ArgumentArity.OneOrMore
+    Arity = ArgumentArity.OneOrMore,
+    AllowMultipleArgumentsPerToken = true
   };
 
   private static Option<bool> JsonOption() => new("--json")

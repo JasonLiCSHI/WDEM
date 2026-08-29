@@ -34,6 +34,16 @@ public sealed partial class LogRedactor
     }
   }
 
+  public void RegisterSensitiveParameters(
+      IEnumerable<KeyValuePair<string, string?>> parameters)
+  {
+    ArgumentNullException.ThrowIfNull(parameters);
+    RegisterSensitiveValues(parameters
+        .Where(parameter => SensitiveTextRedactor.IsSensitiveKey(parameter.Key))
+        .Select(parameter => parameter.Value)
+        .OfType<string>());
+  }
+
   public string Redact(string value)
   {
     ArgumentNullException.ThrowIfNull(value);

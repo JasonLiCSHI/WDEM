@@ -1,27 +1,22 @@
 using Wdem.Cli;
+using Wdem.Core.Runs;
 
-try
-{
-  var profilesDirectory = Path.GetFullPath(
-      Path.Combine(Directory.GetCurrentDirectory(), "profiles"));
-  var handler = await WdemCommandHandler.CreateAsync(profilesDirectory);
-  return await WdemCliBuilder.Build(handler).Parse(args).InvokeAsync();
-}
-catch (OperationCanceledException exception)
-{
-  await WdemCommandHandler.WriteExceptionEventAsync(
-      exception,
-      args.Contains("--json", StringComparer.Ordinal),
-      cancelled: true,
-      Console.Error);
-  return 130;
-}
-catch (Exception exception)
-{
-  await WdemCommandHandler.WriteExceptionEventAsync(
-      exception,
-      args.Contains("--json", StringComparer.Ordinal),
-      cancelled: false,
-      Console.Error);
-  return 1;
-}
+var redactor = new LogRedactor();
+var runEvents = new RunEventHub();
+return await WdemCliHost.RunAsync(
+    args,
+    async cancellationToken =>
+    {
+      var profilesDirectory = Path.GetFullPath(
+          Path.Combine(Directory.GetCurrentDirectory(), "profiles"));
+      return await WdemCommandHandler.CreateAsync(
+          profilesDirectory,
+          output: Console.Out,
+          error: Console.Error,
+          cancellationToken: cancellationToken,
+          redactor: redactor,
+          eventSink: runEvents);
+    },
+    Console.Out,
+    Console.Error,
+    redactor: redactor);
