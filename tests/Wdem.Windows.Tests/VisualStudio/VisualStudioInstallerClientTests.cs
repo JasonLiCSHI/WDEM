@@ -91,22 +91,34 @@ public sealed class VisualStudioInstallerClientTests
   }
 
   [Fact]
-  public async Task InstallAsync_UnverifiedExecutableIsRejectedBeforeExecution()
+  public async Task InstallAsync_UnverifiedCallerOwnedExecutableIsRejectedWithoutDeletion()
   {
+    var executablePath = Path.Combine(
+        Path.GetTempPath(),
+        $"caller-owned-{Guid.NewGuid():N}.exe");
+    await File.WriteAllTextAsync(executablePath, "caller owned");
     var process = new RecordingProcessExecutor();
     var client = new VisualStudioInstallerClient(process);
 
-    await Assert.ThrowsAsync<InvalidOperationException>(() => client.InstallAsync(
-        @"C:\untrusted\payload.exe",
-        "Microsoft.VisualStudio.Product.Community",
-        null,
-        @"C:\VS",
-        [],
-        [],
-        null,
-        CancellationToken.None));
+    try
+    {
+      await Assert.ThrowsAsync<InvalidOperationException>(() => client.InstallAsync(
+          executablePath,
+          "Microsoft.VisualStudio.Product.Community",
+          null,
+          @"C:\VS",
+          [],
+          [],
+          null,
+          CancellationToken.None));
 
-    Assert.Empty(process.Requests);
+      Assert.True(File.Exists(executablePath));
+      Assert.Empty(process.Requests);
+    }
+    finally
+    {
+      File.Delete(executablePath);
+    }
   }
 
   [Theory]
@@ -162,6 +174,120 @@ public sealed class VisualStudioInstallerClientTests
     Assert.Equal(request.FileName, result.Evidence["installerPath"]);
     Assert.Equal(hash, result.Evidence["installerSha256"]);
     Assert.False(File.Exists(request.FileName));
+  }
+
+  [Fact]
+  public async Task AcquiredBootstrapper_SuccessDeletesSourceAndCannotBeReused()
+  {
+    var bytes = "trusted bootstrapper"u8.ToArray();
+    var hash = Convert.ToHexString(SHA256.HashData(bytes));
+    var process = new RecordingProcessExecutor();
+    var client = new VisualStudioInstallerClient(
+        process,
+        httpClient: new HttpClient(new ContentHandler(bytes)),
+        secureArtifactStager: new SecureArtifactStager(
+            new RecordingSecureDirectoryPolicy()));
+    var acquired = await client.AcquireBootstrapperAsync(
+        new Uri("https://example.test/vs.exe"), hash, CancellationToken.None);
+
+    try
+    {
+      await client.InstallAsync(
+          acquired.VerifiedPath!,
+          "Microsoft.VisualStudio.Product.Community",
+          null,
+          @"C:\VS", [], [], null, CancellationToken.None);
+
+      Assert.False(File.Exists(acquired.VerifiedPath));
+      await Assert.ThrowsAsync<InvalidOperationException>(() => client.InstallAsync(
+          acquired.VerifiedPath!,
+          "Microsoft.VisualStudio.Product.Community",
+          null,
+          @"C:\VS", [], [], null, CancellationToken.None));
+      Assert.Single(process.Requests);
+    }
+    finally
+    {
+      File.Delete(acquired.VerifiedPath!);
+    }
+  }
+
+  [Fact]
+  public async Task AcquiredBootstrapper_ExecutionFailureDeletesSourceWithoutMaskingFailure()
+  {
+    var bytes = "trusted bootstrapper"u8.ToArray();
+    var hash = Convert.ToHexString(SHA256.HashData(bytes));
+    var primaryFailure = new InvalidOperationException("process failed");
+    var process = new RecordingProcessExecutor { Failure = primaryFailure };
+    var client = new VisualStudioInstallerClient(
+        process,
+        httpClient: new HttpClient(new ContentHandler(bytes)),
+        secureArtifactStager: new SecureArtifactStager(
+            new RecordingSecureDirectoryPolicy()));
+    var acquired = await client.AcquireBootstrapperAsync(
+        new Uri("https://example.test/vs.exe"), hash, CancellationToken.None);
+
+    try
+    {
+      var thrown = await Assert.ThrowsAsync<InvalidOperationException>(() => client.InstallAsync(
+          acquired.VerifiedPath!,
+          "Microsoft.VisualStudio.Product.Community",
+          null,
+          @"C:\VS", [], [], null, CancellationToken.None));
+
+      Assert.Same(primaryFailure, thrown);
+      Assert.False(File.Exists(acquired.VerifiedPath));
+      await Assert.ThrowsAsync<InvalidOperationException>(() => client.InstallAsync(
+          acquired.VerifiedPath!,
+          "Microsoft.VisualStudio.Product.Community",
+          null,
+          @"C:\VS", [], [], null, CancellationToken.None));
+      Assert.Single(process.Requests);
+    }
+    finally
+    {
+      File.Delete(acquired.VerifiedPath!);
+    }
+  }
+
+  [Fact]
+  public async Task AcquiredBootstrapper_CleanupFailureDoesNotMaskExecutionFailure()
+  {
+    var bytes = "trusted bootstrapper"u8.ToArray();
+    var hash = Convert.ToHexString(SHA256.HashData(bytes));
+    var primaryFailure = new InvalidOperationException("process failed");
+    var process = new RecordingProcessExecutor { Failure = primaryFailure };
+    var client = new VisualStudioInstallerClient(
+        process,
+        httpClient: new HttpClient(new ContentHandler(bytes)),
+        secureArtifactStager: new SecureArtifactStager(
+            new RecordingSecureDirectoryPolicy()));
+    var acquired = await client.AcquireBootstrapperAsync(
+        new Uri("https://example.test/vs.exe"), hash, CancellationToken.None);
+    File.SetAttributes(acquired.VerifiedPath!, FileAttributes.ReadOnly);
+
+    try
+    {
+      var thrown = await Assert.ThrowsAsync<InvalidOperationException>(() => client.InstallAsync(
+          acquired.VerifiedPath!,
+          "Microsoft.VisualStudio.Product.Community",
+          null,
+          @"C:\VS", [], [], null, CancellationToken.None));
+
+      Assert.Same(primaryFailure, thrown);
+      Assert.True(File.Exists(acquired.VerifiedPath));
+      await Assert.ThrowsAsync<InvalidOperationException>(() => client.InstallAsync(
+          acquired.VerifiedPath!,
+          "Microsoft.VisualStudio.Product.Community",
+          null,
+          @"C:\VS", [], [], null, CancellationToken.None));
+      Assert.Single(process.Requests);
+    }
+    finally
+    {
+      File.SetAttributes(acquired.VerifiedPath!, FileAttributes.Normal);
+      File.Delete(acquired.VerifiedPath!);
+    }
   }
 
   [Fact]
@@ -325,6 +451,7 @@ public sealed class VisualStudioInstallerClientTests
     public List<ProcessExecutionRequest> Requests { get; } = [];
     public ProcessExecutionResult Result { get; init; } =
         new(true, 0, [], []);
+    public Exception? Failure { get; init; }
     public Action<ProcessExecutionRequest>? BeforeExecute { get; init; }
 
     public Task<ProcessExecutionResult> ExecuteAsync(
@@ -335,6 +462,11 @@ public sealed class VisualStudioInstallerClientTests
       cancellationToken.ThrowIfCancellationRequested();
       Requests.Add(request);
       BeforeExecute?.Invoke(request);
+      if (Failure is not null)
+      {
+        throw Failure;
+      }
+
       return Task.FromResult(Result);
     }
   }

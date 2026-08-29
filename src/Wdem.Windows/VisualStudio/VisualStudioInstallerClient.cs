@@ -106,7 +106,7 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
           cancellationToken).ConfigureAwait(false);
       if (!verification.IsTrusted)
       {
-        File.Delete(localPath);
+        TryDelete(localPath);
       }
       else
       {
@@ -222,20 +222,28 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
     string? installerSha256 = null;
     if (!string.Equals(fullPath, SetupExecutablePath, StringComparison.OrdinalIgnoreCase))
     {
-      if (!_verifiedBootstrappers.TryGetValue(fullPath, out var expectedSha256))
+      if (!_verifiedBootstrappers.TryRemove(fullPath, out var expectedSha256))
       {
         throw new InvalidOperationException(
             "The Visual Studio installer executable has not been verified.");
       }
 
-      var staged = await _secureArtifactStager.StageVerifiedAsync(
-          fullPath,
-          expectedSha256,
-          SecureArtifactKind.Executable,
-          cancellationToken).ConfigureAwait(false);
+      SecureArtifactStageResult staged;
+      try
+      {
+        staged = await _secureArtifactStager.StageVerifiedAsync(
+            fullPath,
+            expectedSha256,
+            SecureArtifactKind.Executable,
+            cancellationToken).ConfigureAwait(false);
+      }
+      finally
+      {
+        TryDelete(fullPath);
+      }
+
       if (staged.Artifact is null)
       {
-        _verifiedBootstrappers.TryRemove(fullPath, out _);
         throw new InvalidOperationException(
             "The Visual Studio installer executable could not be staged as a verified artifact.");
       }
