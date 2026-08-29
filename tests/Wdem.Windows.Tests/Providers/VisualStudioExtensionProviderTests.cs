@@ -777,6 +777,7 @@ public sealed class VisualStudioExtensionProviderTests
       var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
       var provider = Provider(manifests, process, stager);
       var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+      var directory = Path.GetDirectoryName(stager.VerifiedVsixPath)!;
       var step = Assert.Single(plan.Steps);
       var replacement = step.Id[^1] == 'A' ? 'B' : 'A';
       var tampered = plan with
@@ -788,6 +789,88 @@ public sealed class VisualStudioExtensionProviderTests
 
       Assert.Equal(ApplyOutcome.Failed, result.Outcome);
       Assert.Empty(process.Requests);
+      Assert.False(Directory.Exists(directory));
+    }
+    finally
+    {
+      File.Delete(source);
+    }
+  }
+
+  [Fact]
+  public async Task ApplyAsync_TamperedOtherResourceEvidenceDoesNotAbandonRegisteredArtifact()
+  {
+    var source = TempFile("vsix");
+    var manifests = SourceManifestReader();
+    await using var stager = new RotatingStager();
+    try
+    {
+      var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
+      var otherResource = resource with { Id = "other-extension" };
+      var provider = Provider(manifests, new ThrowingProcessExecutor(), stager);
+      var plan = await provider.PlanAsync(
+          otherResource,
+          Missing(otherResource),
+          CancellationToken.None);
+      var directory = Assert.Single(stager.Directories);
+      var step = Assert.Single(plan.Steps);
+      var replacement = step.Id[^1] == 'A' ? 'B' : 'A';
+      var tampered = plan with
+      {
+        Steps = [step with { Id = step.Id[..^1] + replacement }]
+      };
+
+      var result = await provider.ApplyAsync(
+          resource,
+          tampered,
+          null,
+          CancellationToken.None);
+
+      Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+      Assert.True(Directory.Exists(directory));
+    }
+    finally
+    {
+      File.Delete(source);
+    }
+  }
+
+  [Fact]
+  public async Task ApplyAsync_MalformedCreatorSidReturnsStructuredFailureAndCleansRegisteredArtifact()
+  {
+    var source = TempFile("vsix");
+    var manifests = SourceManifestReader();
+    await using var stager = new RotatingStager();
+    try
+    {
+      var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
+      var provider = Provider(
+          manifests,
+          new ThrowingProcessExecutor(),
+          stager,
+          validateRestrictedDirectory: (path, creatorSid) =>
+          {
+            _ = path;
+            _ = new System.Security.Principal.SecurityIdentifier(creatorSid);
+          });
+      var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+      var directory = Assert.Single(stager.Directories);
+      var step = Assert.Single(plan.Steps);
+      var malformedStepId = ReplaceEncodedEvidence(
+          step.Id,
+          "\"creatorSid\":\"S-1-0-0\"",
+          "\"creatorSid\":\"not-a-sid\"");
+
+      var result = await provider.ApplyAsync(
+          resource,
+          plan with { Steps = [step with { Id = malformedStepId }] },
+          null,
+          CancellationToken.None);
+
+      Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+      Assert.Equal(WdemErrorCode.ConfigurationError, result.Error?.Code);
+      Assert.IsType<ArgumentException>(result.Error?.UnderlyingException);
+      Assert.False(Directory.Exists(directory));
     }
     finally
     {
@@ -1000,7 +1083,8 @@ public sealed class VisualStudioExtensionProviderTests
       ISecureArtifactStager? stager = null,
       ITrustedFileVerifier? trustedFileVerifier = null,
       HttpClient? httpClient = null,
-      TimeSpan? handoffLifetime = null)
+      TimeSpan? handoffLifetime = null,
+      Action<string, string>? validateRestrictedDirectory = null)
   {
     var verifier = trustedFileVerifier ?? new FakeTrustedFileVerifier(isTrusted: true);
     var artifactStager = stager ?? new SecureArtifactStager(verifier: verifier);
@@ -1008,7 +1092,7 @@ public sealed class VisualStudioExtensionProviderTests
         artifactStager,
         verifier,
         manifests,
-        validateRestrictedDirectory: (_, _) => { },
+        validateRestrictedDirectory: validateRestrictedDirectory ?? ((_, _) => { }),
         getCurrentUserSid: static () => "S-1-0-0",
         handoffLifetime: handoffLifetime);
     return new VisualStudioExtensionProvider(
@@ -1044,6 +1128,28 @@ public sealed class VisualStudioExtensionProviderTests
           "Extensions",
           directory,
           fileName);
+
+  private static string ReplaceEncodedEvidence(
+      string stepId,
+      string expected,
+      string replacement)
+  {
+    const string evidencePrefix = "vsix-v1:";
+    var evidenceIndex = stepId.IndexOf(evidencePrefix, StringComparison.Ordinal);
+    Assert.True(evidenceIndex >= 0);
+    var encodedIndex = stepId.IndexOf(':', evidenceIndex + evidencePrefix.Length) + 1;
+    Assert.True(encodedIndex > evidenceIndex + evidencePrefix.Length);
+    var encoded = stepId[encodedIndex..].Replace('-', '+').Replace('_', '/');
+    encoded += new string('=', (4 - encoded.Length % 4) % 4);
+    var json = Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
+    Assert.Contains(expected, json, StringComparison.Ordinal);
+    json = json.Replace(expected, replacement, StringComparison.Ordinal);
+    var tampered = Convert.ToBase64String(Encoding.UTF8.GetBytes(json))
+        .TrimEnd('=')
+        .Replace('+', '-')
+        .Replace('/', '_');
+    return stepId[..encodedIndex] + tampered;
+  }
 
   private static string InstalledManifest(string version) =>
       "<PackageManifest xmlns=\"http://schemas.microsoft.com/developer/vsx-schema/2011\">" +

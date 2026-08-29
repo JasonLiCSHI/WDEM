@@ -918,7 +918,7 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
     }
 
     return plan.Steps
-        .Where(step => VsixPlanArtifactStore.HasValidStepEvidence(resource.Id, step.Id))
+        .Where(step => VsixPlanArtifactStore.IsPlanArtifactStep(resource.Id, step.Id))
         .Select(step => new PlanArtifactReference(resource.Id, step.Id))
         .Distinct()
         .ToArray();

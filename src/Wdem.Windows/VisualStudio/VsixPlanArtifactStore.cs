@@ -191,7 +191,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       var encoded = EncodeEvidence(evidence);
       staged.ReleaseForHandoff();
       handedOff = true;
-      RegisterHandoff(resourceId, directory);
+      RegisterHandoff(resourceId, ownerToken, directory);
       return new VsixPlanArtifactStageResult(encoded, manifestResult.Manifest, null);
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -323,6 +323,11 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       CancellationToken cancellationToken)
   {
     cancellationToken.ThrowIfCancellationRequested();
+    if (TryAbandonRegistered(resourceId, stepId))
+    {
+      return Task.CompletedTask;
+    }
+
     if (!TryDecodeEvidence(resourceId, stepId, out var evidence))
     {
       return Task.CompletedTask;
@@ -339,8 +344,9 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
           evidence.OwnershipToken);
       RemoveHandoff(resourceId, evidence.OwnershipDirectory);
     }
-    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
-        InvalidDataException or SecurityException)
+    catch (Exception exception) when (exception is ArgumentException or IOException or
+        UnauthorizedAccessException or InvalidDataException or InvalidOperationException or
+        SecurityException)
     {
       return Task.CompletedTask;
     }
@@ -356,9 +362,15 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
   internal static bool HasValidStepEvidence(string resourceId, string stepId) =>
       TryDecodeEvidence(resourceId, stepId, out _);
 
-  private void RegisterHandoff(string resourceId, string directory)
+  internal static bool IsPlanArtifactStep(string resourceId, string stepId) =>
+      TryGetRegistrationToken(resourceId, stepId, out _);
+
+  private void RegisterHandoff(string resourceId, string registrationToken, string directory)
   {
-    var registration = new HandoffRegistration(directory, new CancellationTokenSource());
+    var registration = new HandoffRegistration(
+        registrationToken,
+        directory,
+        new CancellationTokenSource());
     _handoffs.AddOrUpdate(resourceId, registration, (_, existing) =>
     {
       existing.Cancellation.Cancel();
@@ -367,6 +379,25 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     });
 
     _ = ExpireHandoffAsync(resourceId, registration);
+  }
+
+  private bool TryAbandonRegistered(string resourceId, string stepId)
+  {
+    if (!TryGetRegistrationToken(resourceId, stepId, out var registrationToken) ||
+        !_handoffs.TryGetValue(resourceId, out var registration) ||
+        !string.Equals(
+            registrationToken,
+            registration.RegistrationToken,
+            StringComparison.Ordinal) ||
+        !_handoffs.TryRemove(
+            new KeyValuePair<string, HandoffRegistration>(resourceId, registration)))
+    {
+      return false;
+    }
+
+    registration.Cancellation.Cancel();
+    ArtifactCleanupQueue.Shared.DeleteDirectory(registration.Directory);
+    return true;
   }
 
   private async Task ExpireHandoffAsync(string resourceId, HandoffRegistration registration)
@@ -493,10 +524,32 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
   private static string EncodeEvidence(VsixPlanArtifactEvidence evidence)
   {
     var bytes = JsonSerializer.SerializeToUtf8Bytes(evidence, JsonOptions);
-    return EvidencePrefix + Convert.ToBase64String(bytes)
+    return EvidencePrefix + evidence.OwnershipToken + ":" + Convert.ToBase64String(bytes)
         .TrimEnd('=')
         .Replace('+', '-')
         .Replace('/', '_');
+  }
+
+  private static bool TryGetRegistrationToken(
+      string resourceId,
+      string stepId,
+      out string registrationToken)
+  {
+    registrationToken = string.Empty;
+    var prefix = $"{resourceId}:install:{EvidencePrefix}";
+    if (!stepId.StartsWith(prefix, StringComparison.Ordinal))
+    {
+      return false;
+    }
+
+    var separator = stepId.IndexOf(':', prefix.Length);
+    if (separator != prefix.Length + 32 || separator == stepId.Length - 1)
+    {
+      return false;
+    }
+
+    registrationToken = stepId[prefix.Length..separator];
+    return registrationToken.All(Uri.IsHexDigit);
   }
 
   private static bool TryDecodeEvidence(
@@ -506,14 +559,14 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
   {
     evidence = null;
     var prefix = $"{resourceId}:install:{EvidencePrefix}";
-    if (!stepId.StartsWith(prefix, StringComparison.Ordinal))
+    if (!TryGetRegistrationToken(resourceId, stepId, out _))
     {
       return false;
     }
 
     try
     {
-      var encoded = stepId[prefix.Length..];
+      var encoded = stepId[(stepId.IndexOf(':', prefix.Length) + 1)..];
       if (encoded.Length == 0 || encoded.Any(character =>
               !char.IsAsciiLetterOrDigit(character) && character is not '-' and not '_'))
       {
@@ -593,6 +646,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       string OwnershipToken);
 
   private sealed record HandoffRegistration(
+      string RegistrationToken,
       string Directory,
       CancellationTokenSource Cancellation);
 }
