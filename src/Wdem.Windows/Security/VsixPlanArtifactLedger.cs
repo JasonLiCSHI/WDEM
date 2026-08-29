@@ -72,6 +72,7 @@ internal readonly record struct VsixPlanArtifactLedgerState(
       DateTimeOffset utcNow,
       Guid bootIdentifier,
       long uptimeMilliseconds) =>
+      uptimeMilliseconds < 0 ||
       ExpiresAtUtc <= utcNow ||
       BootIdentifier != bootIdentifier ||
       ExpiresAtUptimeMilliseconds <= uptimeMilliseconds;

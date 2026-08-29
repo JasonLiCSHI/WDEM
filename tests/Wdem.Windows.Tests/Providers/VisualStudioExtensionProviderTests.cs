@@ -902,6 +902,135 @@ public sealed class VisualStudioExtensionProviderTests
   }
 
   [Fact]
+  public async Task PlanArtifactStore_NegativeUptimeCannotReplayAfterWallClockRollback()
+  {
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new ScriptedStager();
+    var revocationPath = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-test-revocations-{Guid.NewGuid():N}");
+    var revocationStore = new TestPlanArtifactRevocationStore(revocationPath);
+    ClaimedVsixPlanArtifact? replayedArtifact = null;
+    try
+    {
+      var bootIdentifier = Guid.Parse("00112233-4455-6677-8899-AABBCCDDEEFF");
+      var staged = await PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              handoffLifetime: TimeSpan.FromHours(1),
+              deleteDirectory: static _ => { },
+              revocationStore: revocationStore,
+              getBootIdentifier: () => bootIdentifier,
+              getUptimeMilliseconds: () => 10_000)
+          .StageAsync(
+              "extension",
+              stager.StagedPath,
+              new string('A', 64),
+              "17.0_a",
+              CancellationToken.None);
+
+      var replay = await PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              getUtcNow: () => DateTimeOffset.UtcNow.AddDays(-1),
+              deleteDirectory: static _ => { },
+              revocationStore: revocationStore,
+              getBootIdentifier: () => bootIdentifier,
+              getUptimeMilliseconds: () => -1)
+          .ClaimAsync(
+              "extension",
+              staged.StepEvidence!,
+              new string('A', 64),
+              "17.0_a",
+              CancellationToken.None);
+      replayedArtifact = replay.Artifact;
+
+      Assert.Null(replay.Artifact);
+      Assert.NotNull(replay.Error);
+    }
+    finally
+    {
+      if (replayedArtifact is not null)
+      {
+        await replayedArtifact.DisposeAsync();
+      }
+
+      File.Delete(revocationPath);
+    }
+  }
+
+  [Fact]
+  public async Task PlanArtifactStore_DeadlineOverflowFailsClosedDuringStage()
+  {
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new ScriptedStager();
+    var store = PlanArtifactStore(
+        stager,
+        verifier,
+        manifests,
+        handoffLifetime: TimeSpan.FromMilliseconds(1),
+        getUptimeMilliseconds: () => long.MaxValue);
+
+    var staged = await store.StageAsync(
+        "extension",
+        stager.StagedPath,
+        new string('A', 64),
+        "17.0_a",
+        CancellationToken.None);
+
+    Assert.Null(staged.StepEvidence);
+    Assert.NotNull(staged.Error);
+  }
+
+  [Fact]
+  public async Task PlanArtifactStore_TimerRevokesWhenUptimeBecomesNegative()
+  {
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new ScriptedStager();
+    var revocationPath = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-test-revocations-{Guid.NewGuid():N}");
+    var revocationAttempted = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var uptimeReadCount = 0;
+    try
+    {
+      var revocationStore = new TestPlanArtifactRevocationStore(revocationPath)
+      {
+        BeforeRevoke = () => revocationAttempted.TrySetResult()
+      };
+      var store = PlanArtifactStore(
+          stager,
+          verifier,
+          manifests,
+          handoffLifetime: TimeSpan.FromHours(1),
+          deleteDirectory: static _ => { },
+          revocationStore: revocationStore,
+          getUptimeMilliseconds: () =>
+              Interlocked.Increment(ref uptimeReadCount) == 1 ? 10_000 : -1);
+
+      var staged = await store.StageAsync(
+          "extension",
+          stager.StagedPath,
+          new string('A', 64),
+          "17.0_a",
+          CancellationToken.None);
+
+      Assert.NotNull(staged.StepEvidence);
+      await revocationAttempted.Task.WaitAsync(TimeSpan.FromMilliseconds(500));
+    }
+    finally
+    {
+      File.Delete(revocationPath);
+    }
+  }
+
+  [Fact]
   public async Task PlanArtifactStore_ActiveLocatorCannotReplayAfterSystemBootChanges()
   {
     var manifests = SourceManifestReader();

@@ -376,8 +376,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       var activationCommitment = CreateActivationCommitment(activationProof);
       var expiresAtUtc = _getUtcNow().Add(_handoffLifetime);
       var bootIdentifier = _getBootIdentifier();
-      var expiresAtUptimeMilliseconds = checked(
-          _getUptimeMilliseconds() + (long)Math.Ceiling(_handoffLifetime.TotalMilliseconds));
+      var expiresAtUptimeMilliseconds = CreateExpirationUptimeDeadline();
       var evidence = new VsixPlanArtifactEvidence(
           1,
           resourceId,
@@ -893,8 +892,14 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       return TimeSpan.Zero;
     }
 
+    var uptimeMilliseconds = _getUptimeMilliseconds();
+    if (uptimeMilliseconds < 0)
+    {
+      return TimeSpan.Zero;
+    }
+
     var remainingUptimeMilliseconds =
-        registration.ExpiresAtUptimeMilliseconds - _getUptimeMilliseconds();
+        registration.ExpiresAtUptimeMilliseconds - uptimeMilliseconds;
     var remainingUtc = registration.ExpiresAtUtc - _getUtcNow();
     if (remainingUptimeMilliseconds <= 0 || remainingUtc <= TimeSpan.Zero)
     {
@@ -903,6 +908,25 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
 
     return TimeSpan.FromMilliseconds(
         Math.Min(remainingUptimeMilliseconds, remainingUtc.TotalMilliseconds));
+  }
+
+  private long CreateExpirationUptimeDeadline()
+  {
+    var uptimeMilliseconds = _getUptimeMilliseconds();
+    if (uptimeMilliseconds < 0)
+    {
+      throw new SecurityException("The Windows uptime clock is invalid.");
+    }
+
+    try
+    {
+      return checked(
+          uptimeMilliseconds + (long)Math.Ceiling(_handoffLifetime.TotalMilliseconds));
+    }
+    catch (OverflowException exception)
+    {
+      throw new SecurityException("The VSIX uptime deadline is invalid.", exception);
+    }
   }
 
   private void RemoveHandoff(string resourceId, string directory)
