@@ -93,6 +93,12 @@ public sealed class ElevatedApprovalIntegrationTests : IDisposable
     Assert.DoesNotContain(Secret, broker.PublicSnapshot, StringComparison.Ordinal);
     Assert.Contains("\"password\": \"***\"", broker.PublicSnapshot, StringComparison.Ordinal);
     Assert.DoesNotContain(Secret, broker.ProtectedSnapshot, StringComparison.Ordinal);
+    var resourceResult = Assert.Single(run.ResourceResults).Value;
+    var stepResult = Assert.Single(resourceResult.StepResults);
+    Assert.Equal(3010, stepResult.ProcessExitCode);
+    Assert.True(stepResult.ProcessSucceeded);
+    Assert.Equal(ExecutionOutcome.Succeeded, stepResult.Outcome);
+    Assert.Equal(RestartPolicy.RestartRecommended, resourceResult.RestartRequirement);
   }
 
   [Fact]
@@ -344,13 +350,16 @@ public sealed class ElevatedApprovalIntegrationTests : IDisposable
       {
         ResourceId = resource.Id,
         Outcome = ApplyOutcome.Succeeded,
+        RestartRequirement = RestartPolicy.RestartRecommended,
         StepResults =
         [
           new ProviderStepResult
           {
             StepId = plan.Steps.Single().Id,
             Action = plan.Steps.Single().Action,
-            Progress = 1
+            Progress = 1,
+            ProcessExitCode = 3010,
+            Succeeded = true
           }
         ]
       });

@@ -251,13 +251,12 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   }
 
   [Theory]
-  [InlineData("17.9.0", false, "update,modify")]
-  [InlineData("18.3.2", false, "modify")]
-  [InlineData("18.3.2", true, "")]
-  public async Task ApplyAsync_StaleInstallPlanRediscoverUsesCurrentInstanceRemediation(
+  [InlineData("17.9.0", false)]
+  [InlineData("18.3.2", false)]
+  [InlineData("18.3.2", true)]
+  public async Task ApplyAsync_StaleInstallPlanFailsBeforeExecutingUnapprovedOperation(
       string version,
-      bool alreadyConfigured,
-      string expectedOperations)
+      bool alreadyConfigured)
   {
     var appeared = Instance(
         "17.0_a",
@@ -268,11 +267,7 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
             ? ["Microsoft.NetCore.Component.Runtime.10.0"]
             : [],
         version: version);
-    var converged = Instance(
-        "17.0_a",
-        workloads: ["Microsoft.VisualStudio.Workload.ManagedDesktop"],
-        components: ["Microsoft.NetCore.Component.Runtime.10.0"]);
-    var discovery = new SequenceDiscovery([[appeared], [converged]]);
+    var discovery = new SequenceDiscovery([[appeared]]);
     var installer = new RecordingInstallerClient();
     var provider = Provider(discovery, installer);
     var resource = Resource();
@@ -287,14 +282,13 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
         null,
         CancellationToken.None);
 
-    var expected = string.IsNullOrEmpty(expectedOperations)
-        ? []
-        : expectedOperations.Split(',');
     Assert.Equal(PlanAction.Install, Assert.Single(staleInstallPlan.Steps).Action);
-    Assert.Equal(expected, installer.Operations);
-    Assert.DoesNotContain("install", installer.Operations);
-    Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
-    Assert.Equal(2, discovery.AttemptCount);
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(WdemErrorCode.DetectionError, result.Error!.Code);
+    Assert.Equal("Visual Studio state changed after planning.", result.Error.Summary);
+    Assert.Contains("detect and plan again", result.Error.Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.Empty(installer.Operations);
+    Assert.Equal(1, discovery.AttemptCount);
   }
 
   [Fact]

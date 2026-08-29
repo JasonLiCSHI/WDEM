@@ -262,6 +262,7 @@ public sealed class ElevatedResourceWorker
         Action = step.Action,
         Progress = step.Progress,
         ProcessExitCode = step.ProcessExitCode,
+        Succeeded = step.Succeeded,
         Message = step.Message is null ? null : _redactor.Redact(step.Message),
         Error = step.Error is null ? null : _redactor.Redact(step.Error)
       }).ToArray(),

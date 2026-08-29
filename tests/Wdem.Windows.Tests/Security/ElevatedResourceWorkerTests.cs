@@ -92,6 +92,33 @@ public sealed class ElevatedResourceWorkerTests
   }
 
   [Fact]
+  public async Task ApplyAsync_SuccessfulRestartExitPreservesExplicitSuccessThroughRedaction()
+  {
+    var provider = new RecordingProvider
+    {
+      ProcessExitCode = 3010,
+      StepSucceeded = true,
+      RestartRequirement = RestartPolicy.RestartRecommended
+    };
+    var run = ApprovedRun(provider, out var approvedFingerprint);
+    var worker = new ElevatedResourceWorker(
+        new StubRunStore(run),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+
+    var result = await worker.ApplyAsync(
+        new ElevatedResourceRequest(run.RunId, "admin-resource", approvedFingerprint),
+        null,
+        CancellationToken.None);
+
+    var step = Assert.Single(result.StepResults);
+    Assert.Equal(3010, step.ProcessExitCode);
+    Assert.True(step.Succeeded);
+    Assert.DoesNotContain("hunter2", step.Message, StringComparison.Ordinal);
+    Assert.Equal(RestartPolicy.RestartRecommended, result.RestartRequirement);
+  }
+
+  [Fact]
   public async Task ApplyAsync_SealedSnapshot_PassesOriginalResourceValuesToProvider()
   {
     var provider = new RecordingProvider();
@@ -609,6 +636,8 @@ public sealed class ElevatedResourceWorkerTests
     public ResourcePlan? LastPlan { get; private set; }
     public ApplyOutcome Outcome { get; init; } = ApplyOutcome.Succeeded;
     public RestartPolicy? RestartRequirement { get; init; }
+    public int ProcessExitCode { get; init; } = 23;
+    public bool? StepSucceeded { get; init; }
 
     public ValueTask<ResourceApplyResult> ApplyAsync(
         ResourceDefinition resource,
@@ -632,7 +661,8 @@ public sealed class ElevatedResourceWorkerTests
             StepId = plan.Steps.Single().Id,
             Action = PlanAction.Configure,
             Progress = 1,
-            ProcessExitCode = 23,
+            ProcessExitCode = ProcessExitCode,
+            Succeeded = StepSucceeded,
             Message = "token=hunter2"
           }
         ],

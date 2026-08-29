@@ -441,16 +441,15 @@ public sealed class VisualStudioProvider : IResourceProvider
 
       if (applyInstance is not null)
       {
-        var currentState = VisualStudioStateMapper.Create(
-            resource.Id,
-            applyInstance,
-            options.VsConfigPath,
-            stagedConfiguration?.Sha256);
-        applyAction = !MatchesVersion(applyInstance, resource.VersionConstraint)
-            ? PlanAction.Upgrade
-            : Evaluate(resource, currentState, options).Status == ComplianceStatus.Satisfied
-                ? PlanAction.None
-                : PlanAction.Configure;
+        var error = new StructuredError(
+            WdemErrorCode.DetectionError,
+            "Visual Studio state changed after planning.",
+            $"Visual Studio instance '{applyInstance.InstanceId}' now matches the planned installation. Run detect and plan again before applying changes.")
+        {
+          ResourceId = resource.Id,
+          StepId = step.Id
+        };
+        return ApplyFailure(resource, step, error, null, 0.05);
       }
     }
 
