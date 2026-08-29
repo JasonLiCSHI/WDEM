@@ -1,7 +1,9 @@
 # Troubleshooting WDEM development
 
-WDEM does not yet ship a public executable. For development failures, first
-run the supported solution validation:
+`Wdem.Cli.exe` is the sole supported profile-driven CLI, and `Wdem.Desktop` is
+the WinUI host. Task 22 will provide a self-contained ZIP for end-user
+distribution. For development failures, first run the supported solution
+validation:
 
 ```powershell
 dotnet restore Wdem.sln -p:EnableWindowsTargeting=true

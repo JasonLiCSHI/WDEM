@@ -21,6 +21,24 @@ public sealed class RepositoryIdentityTests
     }
 
     [Fact]
+    public void ProductGuidesDescribeCurrentSupportedHostsAndDistribution()
+    {
+        var guides = new[]
+        {
+            Path.Combine(RepositoryRoot, "docs", "getting-started.md"),
+            Path.Combine(RepositoryRoot, "docs", "troubleshooting.md")
+        };
+
+        foreach (var guidePath in guides)
+        {
+            var guide = NormalizeWhitespace(File.ReadAllText(guidePath));
+            Assert.Contains("`Wdem.Cli.exe` is the sole supported profile-driven CLI", guide);
+            Assert.Contains("`Wdem.Desktop` is the WinUI host", guide);
+            Assert.Contains("Task 22 will provide a self-contained ZIP", guide);
+        }
+    }
+
+    [Fact]
     public void ProvenanceDocumentsDefineTheStandaloneRepositoryBoundary()
     {
         var notices = NormalizeWhitespace(File.ReadAllText(Path.Combine(RepositoryRoot, "THIRD-PARTY-NOTICES.md")));

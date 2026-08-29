@@ -1,8 +1,8 @@
 # Getting started with WDEM development
 
-WDEM currently supplies the `Wdem.Core` and `Wdem.LegacySource` libraries and
-their automated tests. It does **not** currently ship `Wdem.Cli`,
-`Wdem.Desktop`, or a downloadable product executable.
+`Wdem.Cli.exe` is the sole supported profile-driven CLI, and `Wdem.Desktop` is
+the WinUI host. Task 22 will provide a self-contained ZIP for end-user
+distribution.
 
 ## Prerequisites
 
