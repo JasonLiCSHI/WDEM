@@ -6,6 +6,7 @@ namespace Wdem.Core.Execution;
 public sealed class DirectResourceApplyDispatcher : IResourceApplyDispatcher
 {
   public async Task<ResourceApplyResult> ApplyAsync(
+      Guid runId,
       IResourceProvider provider,
       ResourceDefinition resource,
       ResourcePlan plan,

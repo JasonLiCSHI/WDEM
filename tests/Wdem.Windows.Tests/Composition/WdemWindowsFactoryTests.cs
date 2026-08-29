@@ -7,6 +7,7 @@ using Wdem.LegacySource.Services.System;
 using Wdem.Windows.Composition;
 using Wdem.Windows.Persistence;
 using Wdem.Windows.Processes;
+using Wdem.Windows.Security;
 using Xunit;
 
 namespace Wdem.Windows.Tests.Composition;
@@ -46,6 +47,7 @@ public sealed class WdemWindowsFactoryTests : IDisposable
     Assert.IsType<JsonExecutionRunStore>(composition.RunStore);
     Assert.IsType<LogRedactor>(composition.Redactor);
     Assert.IsType<RunEventHub>(composition.RunEvents);
+    Assert.IsType<NamedPipePrivilegeBroker>(composition.PrivilegeBroker);
     Assert.Equal("winget", composition.Providers.GetRequired("package", "winget").ProviderName);
     Assert.True(File.Exists(Path.Combine(paths.Root, "migration-v1.json")));
   }

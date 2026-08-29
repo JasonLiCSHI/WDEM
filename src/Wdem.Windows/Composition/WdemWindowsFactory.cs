@@ -13,9 +13,11 @@ using Wdem.LegacySource.Services.Logging;
 using Wdem.LegacySource.Services.Managers;
 using Wdem.LegacySource.Services.Plugins;
 using Wdem.LegacySource.Services.System;
+using Wdem.Windows.Execution;
 using Wdem.Windows.Persistence;
 using Wdem.Windows.Processes;
 using Wdem.Windows.Providers;
+using Wdem.Windows.Security;
 using Wdem.Windows.VisualStudio;
 
 namespace Wdem.Windows.Composition;
@@ -25,6 +27,7 @@ public sealed record WdemWindowsComposition(
     IProfileCatalog Profiles,
     IResourceProviderRegistry Providers,
     IExecutionRunStore RunStore,
+    IPrivilegeBroker PrivilegeBroker,
     LogRedactor Redactor,
     IRunEventSink RunEvents,
     IProcessExecutor ProcessExecutor,
@@ -93,6 +96,10 @@ public static class WdemWindowsFactory
     runEvents ??= new RunEventHub();
     var runStore = new JsonExecutionRunStore(paths, redactor);
     var profiles = new DirectoryProfileCatalog(profilesDirectory, providerRegistry);
+    var privilegeBroker = new NamedPipePrivilegeBroker(new ElevatedHostLauncher(
+        Path.Combine(AppContext.BaseDirectory, "Wdem.ElevatedHost.exe"),
+        profilesDirectory,
+        localApplicationData));
     var environmentRuns = new EnvironmentRunService(
         profiles,
         new ResourceGraphBuilder(),
@@ -101,7 +108,9 @@ public static class WdemWindowsFactory
         new ExecutionPlanner(providerRegistry, complianceEvaluator),
         new ResourceScheduler(),
         runStore,
-        new DirectResourceApplyDispatcher(),
+        new PrivilegeAwareResourceApplyDispatcher(
+            new DirectResourceApplyDispatcher(),
+            privilegeBroker),
         timeProvider: null,
         runEvents,
         redactor);
@@ -111,6 +120,7 @@ public static class WdemWindowsFactory
         profiles,
         providerRegistry,
         runStore,
+        privilegeBroker,
         redactor,
         runEvents,
         processExecutor,

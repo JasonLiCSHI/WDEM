@@ -504,22 +504,32 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     var transitions = new RunTransitions(_runStore, events, run, _persistenceTimeout);
     await transitions.SetRunningAsync(cancellationToken).ConfigureAwait(false);
     var progressPumps = new RunProgressPumpCoordinator(_persistenceTimeout);
-    var scheduled = await _scheduler.ExecuteAsync(
-        plan,
-        (planned, token) => ExecuteResourceAsync(
-            graph.Nodes[planned.Definition.Id].Definition,
-            planned,
-            detected[planned.Definition.Id],
-            compliance[planned.Definition.Id],
-            events,
-            progressPumps,
-            token),
-        planned => _providers.GetRequired(
-            planned.Definition.Type,
-            planned.Definition.Provider).Capabilities,
-        request.MaximumConcurrency,
-        cancellationToken,
-        transitions.PersistSchedulerTransitionAsync).ConfigureAwait(false);
+    SchedulerResult scheduled;
+    try
+    {
+      scheduled = await _scheduler.ExecuteAsync(
+          plan,
+          (planned, token) => ExecuteResourceAsync(
+              run.RunId,
+              graph.Nodes[planned.Definition.Id].Definition,
+              planned,
+              detected[planned.Definition.Id],
+              compliance[planned.Definition.Id],
+              events,
+              progressPumps,
+              token),
+          planned => _providers.GetRequired(
+              planned.Definition.Type,
+              planned.Definition.Provider).Capabilities,
+          request.MaximumConcurrency,
+          cancellationToken,
+          transitions.PersistSchedulerTransitionAsync).ConfigureAwait(false);
+    }
+    finally
+    {
+      await _dispatcher.CompleteRunAsync(run.RunId, CancellationToken.None)
+          .ConfigureAwait(false);
+    }
     if (cancellationToken.IsCancellationRequested)
     {
       await progressPumps.SealAsync().ConfigureAwait(false);
@@ -546,6 +556,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
   }
 
   private async Task<ResourceResult> ExecuteResourceAsync(
+      Guid runId,
       ResourceDefinition definition,
       PlannedResource planned,
       DetectedState detectedBefore,
@@ -580,6 +591,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     {
       cancellationToken.ThrowIfCancellationRequested();
       var applyTask = _dispatcher.ApplyAsync(
+          runId,
           provider,
           definition,
           planned.ResourcePlan,
