@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
 
@@ -13,17 +14,75 @@ internal enum VsixPlanArtifactLedgerStatus
   Revoked
 }
 
+internal static class WindowsVsixPlanArtifactClock
+{
+  private const int SystemBootEnvironmentInformation = 90;
+
+  internal static Guid GetBootIdentifier()
+  {
+    if (!OperatingSystem.IsWindows())
+    {
+      throw new PlatformNotSupportedException("VSIX boot identity requires Windows.");
+    }
+
+    var status = NativeMethods.NtQuerySystemInformation(
+        SystemBootEnvironmentInformation,
+        out var information,
+        (uint)Marshal.SizeOf<SystemBootEnvironment>(),
+        out _);
+    if (status < 0 || information.BootIdentifier == Guid.Empty)
+    {
+      throw new SecurityException(
+          $"The Windows boot identity is unavailable (NTSTATUS 0x{status:X8}).");
+    }
+
+    return information.BootIdentifier;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct SystemBootEnvironment
+  {
+    public Guid BootIdentifier;
+    public int FirmwareType;
+    public ulong BootFlags;
+  }
+
+  private static class NativeMethods
+  {
+    [DllImport("ntdll.dll")]
+    internal static extern int NtQuerySystemInformation(
+        int systemInformationClass,
+        out SystemBootEnvironment systemInformation,
+        uint systemInformationLength,
+        out uint returnLength);
+  }
+}
+
 internal readonly record struct VsixPlanArtifactLedgerState(
     DateTimeOffset ExpiresAtUtc,
+    string ActivationCommitment,
+    Guid BootIdentifier,
+    long ExpiresAtUptimeMilliseconds,
     VsixPlanArtifactLedgerStatus Status)
 {
   internal bool IsTerminal => Status is VsixPlanArtifactLedgerStatus.ClaimStarted or
       VsixPlanArtifactLedgerStatus.Consumed or VsixPlanArtifactLedgerStatus.Revoked;
+
+  internal bool IsExpired(
+      DateTimeOffset utcNow,
+      Guid bootIdentifier,
+      long uptimeMilliseconds) =>
+      ExpiresAtUtc <= utcNow ||
+      BootIdentifier != bootIdentifier ||
+      ExpiresAtUptimeMilliseconds <= uptimeMilliseconds;
 }
 
 internal static class VsixPlanArtifactLedger
 {
   private const int ExpiryDigits = 19;
+  private const int CommitmentDigits = 64;
+  private const int BootIdentifierDigits = 32;
+  private const int UptimeDigits = 19;
   private const int ReadBufferBytes = 4096;
   private const string IssuedPrefix = "wdem-vsix-issued-v1:";
   private const string ActivatedPrefix = "wdem-vsix-activated-v1:";
@@ -34,7 +93,10 @@ internal static class VsixPlanArtifactLedger
   internal static byte[] CreateIssuedRecord(
       string ownershipToken,
       string directoryName,
-      DateTimeOffset expiresAtUtc)
+      DateTimeOffset expiresAtUtc,
+      string activationCommitment,
+      Guid bootIdentifier,
+      long expiresAtUptimeMilliseconds)
   {
     var identity = CreateIdentity(ownershipToken, directoryName);
     if (expiresAtUtc == default)
@@ -42,8 +104,23 @@ internal static class VsixPlanArtifactLedger
       throw new SecurityException("The VSIX issuance expiry is invalid.");
     }
 
+    if (activationCommitment.Length != CommitmentDigits ||
+        !activationCommitment.All(Uri.IsHexDigit))
+    {
+      throw new ArgumentException(
+          "The activation commitment must contain exactly 64 hexadecimal characters.",
+          nameof(activationCommitment));
+    }
+
+    if (bootIdentifier == Guid.Empty || expiresAtUptimeMilliseconds <= 0)
+    {
+      throw new SecurityException("The VSIX issuance monotonic deadline is invalid.");
+    }
+
     return Encoding.ASCII.GetBytes(
-        $"{IssuedPrefix}{identity}:{expiresAtUtc.UtcTicks.ToString("D19", CultureInfo.InvariantCulture)}\n");
+        $"{IssuedPrefix}{identity}:{expiresAtUtc.UtcTicks.ToString("D19", CultureInfo.InvariantCulture)}:" +
+        $"{activationCommitment.ToUpperInvariant()}:{bootIdentifier:N}:" +
+        $"{expiresAtUptimeMilliseconds.ToString("D19", CultureInfo.InvariantCulture)}\n");
   }
 
   internal static byte[] CreateActivatedRecord(string ownershipToken, string directoryName) =>
@@ -90,7 +167,8 @@ internal static class VsixPlanArtifactLedger
     var revoked = Encoding.ASCII.GetBytes($"{RevokedPrefix}{identity}");
     var maximumRecordLength = new[]
     {
-      issuedPrefix.Length + ExpiryDigits + 1,
+      issuedPrefix.Length + ExpiryDigits + 1 + CommitmentDigits + 1 +
+          BootIdentifierDigits + 1 + UptimeDigits + 1,
       activated.Length + 1,
       claimStarted.Length + 1,
       consumed.Length + 1,
@@ -98,6 +176,9 @@ internal static class VsixPlanArtifactLedger
     }.Max();
     var buffer = new byte[ReadBufferBytes + maximumRecordLength - 1];
     DateTimeOffset? expiry = null;
+    string? activationCommitment = null;
+    Guid? bootIdentifier = null;
+    long? expiresAtUptimeMilliseconds = null;
     var activatedSeen = false;
     var claimStartedSeen = false;
     var consumedSeen = false;
@@ -113,16 +194,46 @@ internal static class VsixPlanArtifactLedger
         var remaining = buffer.AsSpan(offset, available - offset);
         if (remaining.StartsWith(issuedPrefix))
         {
-          var recordLength = issuedPrefix.Length + ExpiryDigits + 1;
+          var recordLength = issuedPrefix.Length + ExpiryDigits + 1 + CommitmentDigits + 1 +
+              BootIdentifierDigits + 1 + UptimeDigits + 1;
           if (remaining.Length >= recordLength)
           {
             var ticks = ParseTicks(remaining.Slice(issuedPrefix.Length, ExpiryDigits));
-            if (ticks is not null && remaining[recordLength - 1] == (byte)'\n')
+            var separatorOffset = issuedPrefix.Length + ExpiryDigits;
+            var commitmentOffset = separatorOffset + 1;
+            var commitmentBytes = remaining.Slice(commitmentOffset, CommitmentDigits);
+            var bootSeparatorOffset = commitmentOffset + CommitmentDigits;
+            var bootOffset = bootSeparatorOffset + 1;
+            var bootBytes = remaining.Slice(bootOffset, BootIdentifierDigits);
+            var uptimeSeparatorOffset = bootOffset + BootIdentifierDigits;
+            var uptimeOffset = uptimeSeparatorOffset + 1;
+            var uptimeBytes = remaining.Slice(uptimeOffset, UptimeDigits);
+            if (ticks is not null &&
+                remaining[separatorOffset] == (byte)':' &&
+                IsHex(commitmentBytes) &&
+                remaining[bootSeparatorOffset] == (byte)':' &&
+                IsHex(bootBytes) &&
+                remaining[uptimeSeparatorOffset] == (byte)':' &&
+                ParsePositiveInt64(uptimeBytes) is { } candidateUptime &&
+                remaining[recordLength - 1] == (byte)'\n')
             {
               var candidate = new DateTimeOffset(ticks.Value, TimeSpan.Zero);
+              var candidateCommitment = Encoding.ASCII.GetString(commitmentBytes).ToUpperInvariant();
+              var candidateBoot = Guid.ParseExact(Encoding.ASCII.GetString(bootBytes), "N");
               invalid |= activatedSeen && expiry is null;
               invalid |= expiry is not null && expiry != candidate;
+              invalid |= activationCommitment is not null &&
+                  !string.Equals(
+                      activationCommitment,
+                      candidateCommitment,
+                      StringComparison.Ordinal);
+              invalid |= bootIdentifier is not null && bootIdentifier != candidateBoot;
+              invalid |= expiresAtUptimeMilliseconds is not null &&
+                  expiresAtUptimeMilliseconds != candidateUptime;
               expiry ??= candidate;
+              activationCommitment ??= candidateCommitment;
+              bootIdentifier ??= candidateBoot;
+              expiresAtUptimeMilliseconds ??= candidateUptime;
             }
           }
         }
@@ -142,7 +253,8 @@ internal static class VsixPlanArtifactLedger
       buffer.AsSpan(available - carry, carry).CopyTo(buffer);
     }
 
-    if (expiry is null || invalid)
+    if (expiry is null || activationCommitment is null || bootIdentifier is null ||
+        expiresAtUptimeMilliseconds is null || invalid)
     {
       throw new SecurityException("The VSIX issuance state is missing, conflicting, or invalid.");
     }
@@ -156,7 +268,49 @@ internal static class VsixPlanArtifactLedger
                 : activatedSeen
                     ? VsixPlanArtifactLedgerStatus.Active
                     : VsixPlanArtifactLedgerStatus.Pending;
-    return new VsixPlanArtifactLedgerState(expiry.Value, status);
+    return new VsixPlanArtifactLedgerState(
+        expiry.Value,
+        activationCommitment,
+        bootIdentifier.Value,
+        expiresAtUptimeMilliseconds.Value,
+        status);
+  }
+
+  private static long? ParsePositiveInt64(ReadOnlySpan<byte> value)
+  {
+    long result = 0;
+    foreach (var current in value)
+    {
+      if (current < (byte)'0' || current > (byte)'9')
+      {
+        return null;
+      }
+
+      var digit = current - (byte)'0';
+      if (result > (long.MaxValue - digit) / 10)
+      {
+        return null;
+      }
+
+      result = (result * 10) + digit;
+    }
+
+    return result > 0 ? result : null;
+  }
+
+  private static bool IsHex(ReadOnlySpan<byte> value)
+  {
+    foreach (var current in value)
+    {
+      if (!((current >= (byte)'0' && current <= (byte)'9') ||
+            (current >= (byte)'A' && current <= (byte)'F') ||
+            (current >= (byte)'a' && current <= (byte)'f')))
+      {
+        return false;
+      }
+    }
+
+    return true;
   }
 
   private static bool IsCompleteFixedRecord(

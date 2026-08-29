@@ -204,20 +204,69 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
   {
     const string ownershipToken = "00112233445566778899AABBCCDDEEFF";
     const string directoryName = "00112233445566778899aabbccddeeff";
-    var contents = Encoding.ASCII.GetBytes(
+    var expiry = new DateTimeOffset(2025, 1, 1, 0, 0, 0, TimeSpan.Zero);
+    var bootIdentifier = Guid.Parse("00112233-4455-6677-8899-AABBCCDDEEFF");
+    var invalid = Encoding.ASCII.GetBytes(
         "attacker-controlled-garbage" +
-        "wdem-vsix-issued-v1:00112233445566778899AABBCCDDEEFF:" +
-        "00112233445566778899aabbccddeeff:9999999999999999999\n" +
-        "wdem-vsix-issued-v1:00112233445566778899AABBCCDDEEFF:" +
-        "00112233445566778899aabbccddeeff:0638712864000000000\n");
+        $"wdem-vsix-issued-v1:{ownershipToken}:{directoryName}:" +
+        $"{expiry.UtcTicks:D19}:{new string('A', 64)}:{bootIdentifier:N}:" +
+        "9999999999999999999\n");
+    var valid = VsixPlanArtifactLedger.CreateIssuedRecord(
+        ownershipToken,
+        directoryName,
+        expiry,
+        new string('A', 64),
+        bootIdentifier,
+        123456);
+    var contents = invalid.Concat(valid).ToArray();
     using var ledger = new MemoryStream(contents, writable: false);
 
-    var expiry = VsixPlanArtifactLedger.GetIssuedExpiry(
+    var actual = VsixPlanArtifactLedger.GetIssuedExpiry(
         ledger,
         ownershipToken,
         directoryName);
 
-    Assert.Equal(new DateTimeOffset(2025, 1, 1, 0, 0, 0, TimeSpan.Zero), expiry);
+    Assert.Equal(expiry, actual);
+  }
+
+  [Theory]
+  [InlineData("commitment")]
+  [InlineData("boot")]
+  [InlineData("uptime")]
+  public void RevocationLedger_RejectsConflictingProtectedIssuanceFields(string field)
+  {
+    const string ownershipToken = "00112233445566778899AABBCCDDEEFF";
+    const string directoryName = "00112233445566778899aabbccddeeff";
+    var expiry = new DateTimeOffset(2026, 8, 30, 0, 0, 0, TimeSpan.Zero);
+    var commitment = new string('A', 64);
+    var bootIdentifier = Guid.Parse("00112233-4455-6677-8899-AABBCCDDEEFF");
+    const long uptime = 123456;
+    var first = VsixPlanArtifactLedger.CreateIssuedRecord(
+        ownershipToken,
+        directoryName,
+        expiry,
+        commitment,
+        bootIdentifier,
+        uptime);
+    var second = VsixPlanArtifactLedger.CreateIssuedRecord(
+        ownershipToken,
+        directoryName,
+        expiry,
+        field == "commitment" ? new string('B', 64) : commitment,
+        field == "boot"
+            ? Guid.Parse("11223344-5566-7788-99AA-BBCCDDEEFF00")
+            : bootIdentifier,
+        field == "uptime" ? uptime + 1 : uptime);
+    using var ledger = new MemoryStream(first.Concat(second).ToArray(), writable: false);
+
+    Assert.Throws<System.Security.SecurityException>(() =>
+        VsixPlanArtifactLedger.ReadState(ledger, ownershipToken, directoryName));
+  }
+
+  [WindowsFact]
+  public void VsixPlanArtifactClock_ReturnsKernelBootIdentifier()
+  {
+    Assert.NotEqual(Guid.Empty, WindowsVsixPlanArtifactClock.GetBootIdentifier());
   }
 
   [Fact]
@@ -229,7 +278,10 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
     var issued = VsixPlanArtifactLedger.CreateIssuedRecord(
         ownershipToken,
         directoryName,
-        expiry);
+        expiry,
+        new string('A', 64),
+        Guid.Parse("00112233-4455-6677-8899-AABBCCDDEEFF"),
+        123456);
     var activated = VsixPlanArtifactLedger.CreateActivatedRecord(
         ownershipToken,
         directoryName);
@@ -269,9 +321,12 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
     const string directoryName = "00112233445566778899aabbccddeeff";
     var contents = VsixPlanArtifactLedger.CreateActivatedRecord(ownershipToken, directoryName)
         .Concat(VsixPlanArtifactLedger.CreateIssuedRecord(
-          ownershipToken,
-          directoryName,
-          new DateTimeOffset(2026, 8, 30, 0, 0, 0, TimeSpan.Zero)))
+            ownershipToken,
+            directoryName,
+            new DateTimeOffset(2026, 8, 30, 0, 0, 0, TimeSpan.Zero),
+            new string('A', 64),
+            Guid.Parse("00112233-4455-6677-8899-AABBCCDDEEFF"),
+            123456))
         .ToArray();
     using var stream = new MemoryStream(contents, writable: false);
 

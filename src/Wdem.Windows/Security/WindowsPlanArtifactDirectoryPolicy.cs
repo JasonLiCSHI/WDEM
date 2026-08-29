@@ -148,12 +148,18 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
       string rootPath,
       string ownershipToken,
       string directoryName,
-      DateTimeOffset expiresAtUtc)
+      DateTimeOffset expiresAtUtc,
+      string activationCommitment,
+      Guid bootIdentifier,
+      long expiresAtUptimeMilliseconds)
   {
     var record = VsixPlanArtifactLedger.CreateIssuedRecord(
         ownershipToken,
         directoryName,
-        expiresAtUtc);
+        expiresAtUtc,
+        activationCommitment,
+        bootIdentifier,
+        expiresAtUptimeMilliseconds);
     var fullRootPath = ValidateRevocationRootPath(rootPath);
     var productPath = Path.GetDirectoryName(fullRootPath)!;
     using var productHandle = OpenValidatedProductRoot(productPath);
@@ -251,13 +257,19 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
       SafeFileHandle ledgerHandle,
       string ownershipToken,
       string directoryName,
-      DateTimeOffset expiresAtUtc) =>
+      DateTimeOffset expiresAtUtc,
+      string activationCommitment,
+      Guid bootIdentifier,
+      long expiresAtUptimeMilliseconds) =>
       WriteRevocationRecord(
           ledgerHandle,
           VsixPlanArtifactLedger.CreateIssuedRecord(
               ownershipToken,
               directoryName,
-              expiresAtUtc));
+              expiresAtUtc,
+              activationCommitment,
+              bootIdentifier,
+              expiresAtUptimeMilliseconds));
 
   internal static void WriteActivationRecord(
       SafeFileHandle ledgerHandle,

@@ -178,7 +178,13 @@ public sealed class ArtifactCleanupQueueTests
     var ownershipToken = marker.RootElement.GetProperty("ownershipToken").GetString()!;
     var directoryName = Path.GetFileName(directory);
     var revocations = new TestPlanArtifactRevocationStore();
-    revocations.RecordIssued(ownershipToken, directoryName, issuedExpiry);
+    revocations.RecordIssued(
+        ownershipToken,
+        directoryName,
+        issuedExpiry,
+        new string('A', 64),
+        WindowsVsixPlanArtifactClock.GetBootIdentifier(),
+        long.MaxValue);
     var extended = File.ReadAllText(Path.Combine(directory, ".wdem-vsix-owner"))
         .Replace(
             $"\"expiresAtUtc\":\"{issuedExpiry:O}\"",
@@ -220,7 +226,13 @@ public sealed class ArtifactCleanupQueueTests
     var ownershipToken = marker.RootElement.GetProperty("ownershipToken").GetString()!;
     var directoryName = Path.GetFileName(directory);
     var revocations = new TestPlanArtifactRevocationStore { RevokeFailure = new IOException() };
-    revocations.RecordIssued(ownershipToken, directoryName, issuedExpiry);
+    revocations.RecordIssued(
+        ownershipToken,
+        directoryName,
+        issuedExpiry,
+        new string('A', 64),
+        WindowsVsixPlanArtifactClock.GetBootIdentifier(),
+        long.MaxValue);
 
     try
     {
@@ -689,7 +701,10 @@ public sealed class ArtifactCleanupQueueTests
     revocations.RecordIssued(
         marker.RootElement.GetProperty("ownershipToken").GetString()!,
         Path.GetFileName(directory),
-        marker.RootElement.GetProperty("expiresAtUtc").GetDateTimeOffset());
+        marker.RootElement.GetProperty("expiresAtUtc").GetDateTimeOffset(),
+        new string('A', 64),
+        WindowsVsixPlanArtifactClock.GetBootIdentifier(),
+        long.MaxValue);
   }
 
   private static void CreateJunction(string path, string target)
@@ -742,7 +757,8 @@ public sealed class ArtifactCleanupQueueTests
 
   private sealed class TestPlanArtifactRevocationStore : IVsixPlanArtifactRevocationStore
   {
-    private readonly Dictionary<(string Token, string Directory), DateTimeOffset> _issuances = [];
+    private readonly Dictionary<(string Token, string Directory), VsixPlanArtifactLedgerState>
+        _issuances = [];
     private readonly HashSet<(string Token, string Directory)> _revocations = [];
 
     public Exception? RevokeFailure { get; init; }
@@ -750,12 +766,22 @@ public sealed class ArtifactCleanupQueueTests
     public void RecordIssued(
         string ownershipToken,
         string directoryName,
-        DateTimeOffset expiresAtUtc) =>
-        _issuances.Add((ownershipToken, directoryName), expiresAtUtc);
+        DateTimeOffset expiresAtUtc,
+        string activationCommitment,
+        Guid bootIdentifier,
+        long expiresAtUptimeMilliseconds) =>
+        _issuances.Add(
+            (ownershipToken, directoryName),
+            new VsixPlanArtifactLedgerState(
+                expiresAtUtc,
+                activationCommitment,
+                bootIdentifier,
+                expiresAtUptimeMilliseconds,
+                VsixPlanArtifactLedgerStatus.Pending));
 
     public DateTimeOffset GetIssuedExpiry(string ownershipToken, string directoryName) =>
-        _issuances.TryGetValue((ownershipToken, directoryName), out var expiry)
-            ? expiry
+        _issuances.TryGetValue((ownershipToken, directoryName), out var state)
+            ? state.ExpiresAtUtc
             : throw new System.Security.SecurityException("The issuance record is missing.");
 
     public void Activate(string ownershipToken, string directoryName)
@@ -770,12 +796,20 @@ public sealed class ArtifactCleanupQueueTests
     {
     }
 
-    public VsixPlanArtifactLedgerState GetState(string ownershipToken, string directoryName) =>
-        new(
-            GetIssuedExpiry(ownershipToken, directoryName),
-            IsRevoked(ownershipToken, directoryName)
-                ? VsixPlanArtifactLedgerStatus.Revoked
-                : VsixPlanArtifactLedgerStatus.Active);
+    public VsixPlanArtifactLedgerState GetState(string ownershipToken, string directoryName)
+    {
+      if (!_issuances.TryGetValue((ownershipToken, directoryName), out var state))
+      {
+        throw new System.Security.SecurityException("The issuance record is missing.");
+      }
+
+      return state with
+      {
+        Status = IsRevoked(ownershipToken, directoryName)
+            ? VsixPlanArtifactLedgerStatus.Revoked
+            : VsixPlanArtifactLedgerStatus.Active
+      };
+    }
 
     public void Revoke(string ownershipToken, string directoryName)
     {
