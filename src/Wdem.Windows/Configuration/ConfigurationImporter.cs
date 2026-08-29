@@ -21,6 +21,18 @@ internal sealed record ConfigurationStagingResult(
 
 public sealed class ConfigurationImporter
 {
+  private readonly Action<string>? _afterDestinationMove;
+
+  public ConfigurationImporter()
+  {
+  }
+
+  internal ConfigurationImporter(Action<string> afterDestinationMove)
+  {
+    ArgumentNullException.ThrowIfNull(afterDestinationMove);
+    _afterDestinationMove = afterDestinationMove;
+  }
+
   public async Task<ConfigurationImportResult> CopyAtomicallyAsync(
       ResolvedConfigurationSource source,
       string destinationPath,
@@ -112,6 +124,8 @@ public sealed class ConfigurationImporter
   {
     ArgumentNullException.ThrowIfNull(snapshot);
     cancellationToken.ThrowIfCancellationRequested();
+    string? backupPath = null;
+    var destinationCommitted = false;
     try
     {
       var validationError = ValidateDestination(
@@ -142,9 +156,38 @@ public sealed class ConfigurationImporter
         return Failure("The configuration staging snapshot changed before commit.");
       }
 
+      if (File.Exists(fullDestination))
+      {
+        backupPath = Path.Combine(
+            directory,
+            $".{Path.GetFileName(fullDestination)}.{Guid.NewGuid():N}.backup");
+        File.Copy(fullDestination, backupPath, overwrite: false);
+      }
+
       cancellationToken.ThrowIfCancellationRequested();
       File.Move(fullStagingPath, fullDestination, overwrite: true);
-      return new ConfigurationImportResult(true, fullDestination, snapshot.Sha256, null);
+      destinationCommitted = true;
+      _afterDestinationMove?.Invoke(fullDestination);
+
+      var finalHash = await HashFileAsync(fullDestination, CancellationToken.None).ConfigureAwait(false);
+      if (!string.Equals(finalHash, snapshot.Sha256, StringComparison.OrdinalIgnoreCase))
+      {
+        var restoreError = RestoreDestination(fullDestination, backupPath);
+        destinationCommitted = false;
+        if (restoreError is not null)
+        {
+          backupPath = null;
+        }
+
+        return Failure(
+            restoreError is null
+                ? "The final destination does not match the verified source SHA-256."
+                : "The final destination hash verification failed and the prior destination could not be restored.",
+            restoreError);
+      }
+
+      destinationCommitted = false;
+      return new ConfigurationImportResult(true, fullDestination, finalHash, null);
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
@@ -153,7 +196,48 @@ public sealed class ConfigurationImporter
     catch (Exception exception) when (exception is ArgumentException or IOException or
         NotSupportedException or UnauthorizedAccessException or SecurityException)
     {
-      return Failure("The configuration staging snapshot could not be atomically committed.", exception);
+      Exception failure = exception;
+      if (destinationCommitted)
+      {
+        var restoreError = RestoreDestination(Path.GetFullPath(destinationPath), backupPath);
+        destinationCommitted = false;
+        if (restoreError is not null)
+        {
+          backupPath = null;
+          failure = new AggregateException(exception, restoreError);
+        }
+      }
+
+      return Failure("The configuration staging snapshot could not be atomically committed.", failure);
+    }
+    finally
+    {
+      if (backupPath is not null)
+      {
+        DeleteStagingSnapshot(backupPath);
+      }
+    }
+  }
+
+  private static Exception? RestoreDestination(string destinationPath, string? backupPath)
+  {
+    try
+    {
+      if (backupPath is not null && File.Exists(backupPath))
+      {
+        File.Move(backupPath, destinationPath, overwrite: true);
+      }
+      else
+      {
+        File.Delete(destinationPath);
+      }
+
+      return null;
+    }
+    catch (Exception exception) when (exception is ArgumentException or IOException or
+        NotSupportedException or UnauthorizedAccessException or SecurityException)
+    {
+      return exception;
     }
   }
 

@@ -58,10 +58,37 @@ public sealed class ReSharperProviderTests
     var resource = ReSharperResource(["visual-studio"]);
 
     var state = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, state, CancellationToken.None);
 
     Assert.Equal(DetectionOutcome.Succeeded, state.Outcome);
     Assert.False(state.Exists);
     Assert.Null(state.StructuredError);
+    Assert.False(plan.IsExecutable);
+    Assert.Contains(plan.StructuredErrors, error => error.Code == WdemErrorCode.DependencyError);
+  }
+
+  [Fact]
+  public async Task DetectAsync_ExplicitInstanceWithIncompatibleSelectorReturnsConfigurationError()
+  {
+    var provider = Provider(
+        new FakeManifestReader(),
+        new ThrowingProcessExecutor(),
+        new MutableVisualStudioDiscovery(
+            Instance("17.0_a") with { Edition = "Professional" }));
+
+    var resource = ReSharperResource(["visual-studio"]) with
+    {
+      Parameters = new Dictionary<string, string?>
+      {
+        ["instanceId"] = "17.0_a",
+        ["edition"] = "Community"
+      }
+    };
+
+    var state = await provider.DetectAsync(resource, CancellationToken.None);
+
+    Assert.Equal(DetectionOutcome.Failed, state.Outcome);
+    Assert.Equal(WdemErrorCode.ConfigurationError, state.StructuredError?.Code);
   }
 
   [Fact]

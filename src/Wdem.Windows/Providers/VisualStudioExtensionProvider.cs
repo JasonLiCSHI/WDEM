@@ -556,6 +556,17 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
         return new InstanceSelection(selection.Instance, null);
       }
 
+      if (selection.IsIncompatible)
+      {
+        return new InstanceSelection(null, new StructuredError(
+            WdemErrorCode.ConfigurationError,
+            "The selected Visual Studio instance is incompatible.",
+            "The instance does not match the configured product, edition, or channel.")
+        {
+          ResourceId = resource.Id
+        });
+      }
+
       return !selection.IsAmbiguous
           ? new InstanceSelection(null, null)
           : new InstanceSelection(null, new StructuredError(

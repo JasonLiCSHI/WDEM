@@ -162,6 +162,15 @@ public sealed class ReSharperProvider : IResourceProvider
     {
       var instances = await _discovery.DiscoverAsync([], [], cancellationToken).ConfigureAwait(false);
       var selection = SelectInstance(resource, instances);
+      if (selection.IsIncompatible)
+      {
+        return Failure(resource, Error(
+            resource,
+            WdemErrorCode.ConfigurationError,
+            "The selected Visual Studio instance is incompatible.",
+            "The instance does not match the configured product, edition, or channel."));
+      }
+
       if (selection.IsAmbiguous)
       {
         return Failure(resource, Error(
@@ -514,6 +523,15 @@ public sealed class ReSharperProvider : IResourceProvider
       if (selection.Instance is not null)
       {
         return new InstanceSelection(selection.Instance, null);
+      }
+
+      if (selection.IsIncompatible)
+      {
+        return new InstanceSelection(null, Error(
+            resource,
+            WdemErrorCode.ConfigurationError,
+            "The selected Visual Studio instance is incompatible.",
+            "The instance does not match the configured product, edition, or channel."));
       }
 
       return !selection.IsAmbiguous

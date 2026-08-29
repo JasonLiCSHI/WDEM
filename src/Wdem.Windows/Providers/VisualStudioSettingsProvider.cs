@@ -427,6 +427,14 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
               Get(resource, ProductIdParameter),
               Get(resource, EditionParameter),
               Get(resource, ChannelIdParameter)));
+      if (selected.IsIncompatible)
+      {
+        return new InstanceSelection(null, ReSharperSettingsProvider.Error(
+            resource,
+            WdemErrorCode.ConfigurationError,
+            "The selected Visual Studio instance does not match the configured product, edition, or channel."));
+      }
+
       if (selected.IsAmbiguous)
       {
         return new InstanceSelection(null, ReSharperSettingsProvider.Error(
