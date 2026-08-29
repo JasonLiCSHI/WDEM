@@ -866,6 +866,125 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
     }
   }
 
+  [WindowsAdministratorFact]
+  public void CreateOrValidateAdministratorOnlyFile_RejectsUserOwnedExistingSentinel()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-terminal-owner-{Guid.NewGuid():N}");
+    var planRoot = Path.Combine(basePath, "Wdem", "PlanArtifacts");
+    WindowsPlanArtifactDirectoryPolicy.ProvisionIdentityNeutralRoot(planRoot);
+    var path = Path.Combine(planRoot, $".{Guid.NewGuid():N}.wdem-vsix-terminal");
+    var contents = "terminal-state"u8.ToArray();
+    File.WriteAllBytes(path, contents);
+
+    try
+    {
+      Assert.Throws<SecurityException>(() =>
+          WindowsPlanArtifactDirectoryPolicy.CreateOrValidateAdministratorOnlyFile(
+              path,
+              contents));
+    }
+    finally
+    {
+      File.Delete(path);
+      Directory.Delete(basePath, recursive: true);
+    }
+  }
+
+  [WindowsAdministratorFact]
+  public void CreateOrValidateAdministratorOnlyFile_AcceptsExactProtectedSentinel()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-terminal-existing-{Guid.NewGuid():N}");
+    var planRoot = Path.Combine(basePath, "Wdem", "PlanArtifacts");
+    WindowsPlanArtifactDirectoryPolicy.ProvisionIdentityNeutralRoot(planRoot);
+    var path = Path.Combine(planRoot, $".{Guid.NewGuid():N}.wdem-vsix-terminal");
+    var contents = "terminal-state"u8.ToArray();
+
+    try
+    {
+      WindowsPlanArtifactDirectoryPolicy.CreateAdministratorOnlyFile(path, contents);
+
+      WindowsPlanArtifactDirectoryPolicy.CreateOrValidateAdministratorOnlyFile(path, contents);
+    }
+    finally
+    {
+      File.Delete(path);
+      Directory.Delete(basePath, recursive: true);
+    }
+  }
+
+  [WindowsAdministratorFact]
+  public void CreateOrValidateAdministratorOnlyFile_RejectsWrongContent()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-terminal-content-{Guid.NewGuid():N}");
+    var planRoot = Path.Combine(basePath, "Wdem", "PlanArtifacts");
+    WindowsPlanArtifactDirectoryPolicy.ProvisionIdentityNeutralRoot(planRoot);
+    var path = Path.Combine(planRoot, $".{Guid.NewGuid():N}.wdem-vsix-terminal");
+
+    try
+    {
+      WindowsPlanArtifactDirectoryPolicy.CreateAdministratorOnlyFile(path, "wrong-state"u8);
+
+      Assert.Throws<SecurityException>(() =>
+          WindowsPlanArtifactDirectoryPolicy.CreateOrValidateAdministratorOnlyFile(
+              path,
+              "terminal-state"u8));
+    }
+    finally
+    {
+      File.Delete(path);
+      Directory.Delete(basePath, recursive: true);
+    }
+  }
+
+  [WindowsAdministratorFact]
+  public void CreateOrValidateAdministratorOnlyFile_RejectsDirectoryPreoccupation()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-terminal-directory-{Guid.NewGuid():N}");
+    var planRoot = Path.Combine(basePath, "Wdem", "PlanArtifacts");
+    WindowsPlanArtifactDirectoryPolicy.ProvisionIdentityNeutralRoot(planRoot);
+    var path = Path.Combine(planRoot, $".{Guid.NewGuid():N}.wdem-vsix-terminal");
+    Directory.CreateDirectory(path);
+
+    try
+    {
+      Assert.Throws<SecurityException>(() =>
+          WindowsPlanArtifactDirectoryPolicy.CreateOrValidateAdministratorOnlyFile(
+              path,
+              "terminal-state"u8));
+    }
+    finally
+    {
+      Directory.Delete(path);
+      Directory.Delete(basePath, recursive: true);
+    }
+  }
+
+  [WindowsAdministratorFact]
+  public void CreateOrValidateAdministratorOnlyFile_RejectsRedirectedSentinel()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-terminal-link-{Guid.NewGuid():N}");
+    var planRoot = Path.Combine(basePath, "Wdem", "PlanArtifacts");
+    WindowsPlanArtifactDirectoryPolicy.ProvisionIdentityNeutralRoot(planRoot);
+    var target = Path.Combine(basePath, "target");
+    var path = Path.Combine(planRoot, $".{Guid.NewGuid():N}.wdem-vsix-terminal");
+    File.WriteAllText(target, "terminal-state");
+    File.CreateSymbolicLink(path, target);
+
+    try
+    {
+      Assert.Throws<SecurityException>(() =>
+          WindowsPlanArtifactDirectoryPolicy.CreateOrValidateAdministratorOnlyFile(
+              path,
+              "terminal-state"u8));
+    }
+    finally
+    {
+      File.Delete(path);
+      File.Delete(target);
+      Directory.Delete(basePath, recursive: true);
+    }
+  }
+
   private static bool HasFullControl(
       FileSystemAccessRule rule,
       SecurityIdentifier identity) => identity.Equals(rule.IdentityReference) &&

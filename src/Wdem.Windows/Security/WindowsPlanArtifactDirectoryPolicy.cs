@@ -542,6 +542,88 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
     CreateAdministratorOnlyCopy(path, source);
   }
 
+  internal static void CreateOrValidateAdministratorOnlyFile(
+      string path,
+      ReadOnlySpan<byte> contents)
+  {
+    try
+    {
+      CreateAdministratorOnlyFile(path, contents);
+    }
+    catch (Win32Exception)
+    {
+      ValidateAdministratorOnlyFile(path, contents);
+    }
+  }
+
+  internal static void ValidateAdministratorOnlyFile(
+      string path,
+      ReadOnlySpan<byte> expectedContents)
+  {
+    var handle = NativeMethods.CreateFile(
+        Path.GetFullPath(path),
+        GenericRead | ReadControl,
+        FileShare.Read,
+        IntPtr.Zero,
+        OpenExisting,
+        FileAttributeNormal | FileFlagOpenReparsePoint,
+        IntPtr.Zero);
+    if (handle.IsInvalid)
+    {
+      var error = Marshal.GetLastWin32Error();
+      handle.Dispose();
+      throw new SecurityException(
+          "The protected plan-artifact state could not be securely opened.",
+          new Win32Exception(error));
+    }
+
+    try
+    {
+      if (!NativeMethods.GetFileInformationByHandleEx(
+              handle,
+              FileInfoByHandleClass.FileAttributeTagInfo,
+              out var attributes,
+              (uint)Marshal.SizeOf<FileAttributeTagInfo>()))
+      {
+        throw new Win32Exception(
+            Marshal.GetLastWin32Error(),
+            "The protected plan-artifact state attributes could not be read.");
+      }
+
+      if (attributes.FileAttributes.HasFlag(FileAttributes.Directory) ||
+          attributes.FileAttributes.HasFlag(FileAttributes.ReparsePoint))
+      {
+        throw new SecurityException("The protected plan-artifact state is redirected.");
+      }
+
+      ValidateAdministratorOnlyFileSecurity(ReadSecurity(handle));
+      using var stream = new FileStream(handle, FileAccess.Read, bufferSize: 1, isAsync: false);
+      handle = null!;
+      var actual = new byte[expectedContents.Length + 1];
+      var length = 0;
+      while (length < actual.Length)
+      {
+        var read = stream.Read(actual, length, actual.Length - length);
+        if (read == 0)
+        {
+          break;
+        }
+
+        length += read;
+      }
+
+      if (length != expectedContents.Length ||
+          !actual.AsSpan(0, length).SequenceEqual(expectedContents))
+      {
+        throw new SecurityException("The protected plan-artifact state content is invalid.");
+      }
+    }
+    finally
+    {
+      handle?.Dispose();
+    }
+  }
+
   internal static void CreateAdministratorOnlyCopy(
       string path,
       Stream source)

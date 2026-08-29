@@ -332,6 +332,36 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
     ClaimedVsixPlanArtifact? approvedArtifact = null;
     try
     {
+      foreach (var artifact in artifactsToAbandon)
+      {
+        try
+        {
+          await _planArtifactStore.BeginClaimAsync(
+              artifact.ResourceId,
+              artifact.StepId,
+              CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or
+            UnauthorizedAccessException or InvalidDataException or InvalidOperationException or
+            FormatException or System.Text.Json.JsonException or
+            System.Security.SecurityException)
+        {
+          var failedStep = plan.Steps.First(candidate => string.Equals(
+              candidate.Id,
+              artifact.StepId,
+              StringComparison.Ordinal));
+          return ProviderLifecycleSupport.Failure(
+              resource,
+              failedStep,
+              ConfigurationError(
+                  resource,
+                  "The approved VSIX artifact could not be securely claimed.",
+                  exception),
+              null,
+              0);
+        }
+      }
+
       cancellationToken.ThrowIfCancellationRequested();
       var validation = await ValidateAsync(resource, cancellationToken).ConfigureAwait(false);
       var invalidResource = ProviderLifecycleSupport.RejectInvalidResource(resource, validation);
@@ -683,7 +713,7 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
       string stepEvidence,
       CancellationToken cancellationToken)
   {
-    await _planArtifactStore.AbandonAsync(
+    await _planArtifactStore.DiscardAsync(
         resource.Id,
         stepEvidence,
         cancellationToken).ConfigureAwait(false);

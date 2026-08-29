@@ -121,7 +121,7 @@ public sealed class ArtifactCleanupQueueTests
   }
 
   [WindowsFact]
-  public void StartupSweep_PlanArtifactsUsesSealedExpiryAndCreatesTerminalState()
+  public void StartupSweep_RetainsExpiredPublishedArtifactWithoutRevocationAuthority()
   {
     var basePath = Path.Combine(Path.GetTempPath(), $"wdem-plan-sweep-{Guid.NewGuid():N}");
     var root = Path.Combine(basePath, "Wdem", "PlanArtifacts");
@@ -145,9 +145,10 @@ public sealed class ArtifactCleanupQueueTests
           knownStagingRoots: [root]);
 
       Assert.True(Directory.Exists(future));
-      Assert.False(Directory.Exists(expired));
+      Assert.True(Directory.Exists(expired));
       Assert.True(Directory.Exists(invalid));
-      Assert.True(Directory.Exists(terminal));
+      Assert.False(File.Exists(terminal));
+      Assert.False(Directory.Exists(terminal));
     }
     finally
     {
@@ -197,7 +198,7 @@ public sealed class ArtifactCleanupQueueTests
   }
 
   [WindowsFact]
-  public void StartupSweep_ReclaimsExpiredArtifactsWithExistingTerminalFilesOrDirectories()
+  public void StartupSweep_RetainsExpiredArtifactsWithUntrustedTerminalFilesOrDirectories()
   {
     var basePath = Path.Combine(Path.GetTempPath(), $"wdem-plan-revoke-fail-{Guid.NewGuid():N}");
     var root = Path.Combine(basePath, "Wdem", "PlanArtifacts");
@@ -223,8 +224,8 @@ public sealed class ArtifactCleanupQueueTests
           maxDelayedRetryRounds: 1,
           knownStagingRoots: [root]);
 
-      Assert.False(Directory.Exists(terminalFileArtifact));
-      Assert.False(Directory.Exists(terminalDirectoryArtifact));
+      Assert.True(Directory.Exists(terminalFileArtifact));
+      Assert.True(Directory.Exists(terminalDirectoryArtifact));
       Assert.True(File.Exists(terminalFile));
       Assert.True(Directory.Exists(terminalDirectory));
     }

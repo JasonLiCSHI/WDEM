@@ -397,6 +397,11 @@ public sealed class VisualStudioExtensionProviderTests
     var stager = new SecureArtifactStager(
         new TestPlanArtifactDirectoryPolicy(sharedRoot),
         verifier);
+    var revocationStore = new TestPlanArtifactRevocationStore(
+        Path.Combine(basePath, "trusted-revocations"))
+    {
+      RevokeFailure = new UnauthorizedAccessException("append denied")
+    };
     var store = new VsixPlanArtifactStore(
         stager,
         verifier,
@@ -405,8 +410,7 @@ public sealed class VisualStudioExtensionProviderTests
         WindowsPlanArtifactDirectoryPolicy.GetCurrentUserSid,
         identityNeutralPlanArtifactRoot: sharedRoot,
         protectTerminalState: true,
-        revocationStore: new TestPlanArtifactRevocationStore(
-            Path.Combine(basePath, "trusted-revocations")));
+        revocationStore: revocationStore);
 
     try
     {
@@ -429,8 +433,7 @@ public sealed class VisualStudioExtensionProviderTests
       var error = Assert.Single(plan.StructuredErrors);
       Assert.Equal(WdemErrorCode.ConfigurationError, error.Code);
       Assert.Equal("VSIX source is incompatible.", error.Summary);
-      var terminal = Assert.Single(Directory.EnumerateDirectories(sharedRoot));
-      Assert.EndsWith(".wdem-vsix-terminal", terminal, StringComparison.Ordinal);
+      Assert.Empty(Directory.EnumerateFileSystemEntries(sharedRoot));
     }
     finally
     {
@@ -813,7 +816,7 @@ public sealed class VisualStudioExtensionProviderTests
 
       releaseDelay.TrySetResult();
       await cleanupAttempted.Task.WaitAsync(TimeSpan.FromSeconds(1));
-      Assert.True(Directory.Exists(TerminalStatePath(directory, locator)));
+      Assert.True(File.Exists(TerminalStatePath(directory, locator)));
 
       var replay = await PlanArtifactStore(
               stager,
@@ -1044,7 +1047,7 @@ public sealed class VisualStudioExtensionProviderTests
 
       Assert.NotNull(staged.StepEvidence);
       await cleanupAttempted.Task.WaitAsync(TimeSpan.FromSeconds(1));
-      Assert.True(Directory.Exists(TerminalStatePath(
+      Assert.True(File.Exists(TerminalStatePath(
           Path.GetDirectoryName(stager.VerifiedVsixPath)!,
           staged.StepEvidence!)));
     }
@@ -1183,7 +1186,7 @@ public sealed class VisualStudioExtensionProviderTests
 
       Assert.Null(replay.Artifact);
       Assert.NotNull(replay.Error);
-      Assert.True(Directory.Exists(TerminalStatePath(
+      Assert.True(File.Exists(TerminalStatePath(
           directory,
           Assert.Single(plan.Steps).Id)));
     }
@@ -1226,6 +1229,92 @@ public sealed class VisualStudioExtensionProviderTests
     }
     finally
     {
+      File.Delete(source);
+    }
+  }
+
+  [Fact]
+  public async Task ApplyAsync_InvalidResourceDeniedRevokeSurfacesFailureAndCannotReplayApprovedArtifact()
+  {
+    var source = TempFile("vsix");
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new RotatingStager();
+    var revocationPath = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-test-revocations-{Guid.NewGuid():N}");
+    var revocationStore = new TestPlanArtifactRevocationStore(revocationPath);
+    ClaimedVsixPlanArtifact? replayedArtifact = null;
+    try
+    {
+      var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
+      var store = PlanArtifactStore(
+          stager,
+          verifier,
+          manifests,
+          deleteDirectory: static _ => { },
+          revocationStore: revocationStore);
+      var provider = Provider(
+          manifests,
+          new ThrowingProcessExecutor(),
+          stager,
+          verifier,
+          planArtifactStore: store);
+      var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+      var step = Assert.Single(plan.Steps);
+      var invalidParameters = resource.Parameters.ToDictionary(pair => pair.Key, pair => pair.Value);
+      invalidParameters["expectedSha256"] = "invalid";
+      var invalidResource = resource with { Parameters = invalidParameters };
+      revocationStore.RevokeFailure = new UnauthorizedAccessException("append denied");
+
+      await Assert.ThrowsAsync<System.Security.SecurityException>(() =>
+          provider.ApplyAsync(
+              invalidResource,
+              plan,
+              null,
+              CancellationToken.None).AsTask());
+
+      var locator = step.Id.Split(':');
+      var directory = Assert.Single(stager.Directories);
+      Assert.Equal(
+          VsixPlanArtifactLedgerStatus.ClaimStarted,
+          revocationStore.GetState(locator[1], Path.GetFileName(directory)).Status);
+
+      var sameWorkerReplay = await store.ClaimAsync(
+          resource.Id,
+          step.Id,
+          resource.Parameters["expectedSha256"]!,
+          "17.0_a",
+          CancellationToken.None);
+      Assert.Null(sameWorkerReplay.Artifact);
+      Assert.NotNull(sameWorkerReplay.Error);
+
+      revocationStore.RevokeFailure = null;
+      var replay = await PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              deleteDirectory: static _ => { },
+              revocationStore: revocationStore)
+          .ClaimAsync(
+              resource.Id,
+              step.Id,
+              resource.Parameters["expectedSha256"]!,
+              "17.0_a",
+              CancellationToken.None);
+      replayedArtifact = replay.Artifact;
+
+      Assert.Null(replay.Artifact);
+      Assert.NotNull(replay.Error);
+    }
+    finally
+    {
+      if (replayedArtifact is not null)
+      {
+        await replayedArtifact.DisposeAsync();
+      }
+
+      File.Delete(revocationPath);
       File.Delete(source);
     }
   }
@@ -2419,7 +2508,7 @@ public sealed class VisualStudioExtensionProviderTests
   }
 
   [Fact]
-  public async Task PlanArtifactStore_AbandonTerminatesWithoutLedgerAuthority()
+  public async Task PlanArtifactStore_AbandonPersistsTerminalFileWhenLedgerStateReadIsUnavailable()
   {
     var manifests = SourceManifestReader();
     var verifier = new FakeTrustedFileVerifier(isTrusted: true);
@@ -2453,7 +2542,7 @@ public sealed class VisualStudioExtensionProviderTests
               revocationStore: revocationStore)
           .AbandonAsync("extension", staged.StepEvidence!, CancellationToken.None);
 
-      Assert.True(Directory.Exists(TerminalStatePath(directory, staged.StepEvidence!)));
+      Assert.True(File.Exists(TerminalStatePath(directory, staged.StepEvidence!)));
       Assert.True(deleted);
     }
     finally
@@ -2463,7 +2552,188 @@ public sealed class VisualStudioExtensionProviderTests
   }
 
   [Fact]
-  public async Task PlanArtifactStore_SupersessionTerminatesWithoutLedgerAuthority()
+  public async Task PlanArtifactStore_PreoccupiedTerminalCannotBeDeletedToReplayAbandonedLocator()
+  {
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new ScriptedStager();
+    var revocationPath = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-test-revocations-{Guid.NewGuid():N}");
+    var revocationStore = new TestPlanArtifactRevocationStore(revocationPath);
+    var expectedHash = new string('A', 64);
+    ClaimedVsixPlanArtifact? replayedArtifact = null;
+    string? terminalStatePath = null;
+    try
+    {
+      var staged = await PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              revocationStore: revocationStore)
+          .StageAsync(
+              "extension",
+              stager.StagedPath,
+              expectedHash,
+              "17.0_a",
+              CancellationToken.None);
+      var directory = Path.GetDirectoryName(stager.VerifiedVsixPath)!;
+      terminalStatePath = TerminalStatePath(directory, staged.StepEvidence!);
+      Directory.CreateDirectory(terminalStatePath);
+
+      await PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              deleteDirectory: static _ => { },
+              revocationStore: revocationStore)
+          .AbandonAsync("extension", staged.StepEvidence!, CancellationToken.None);
+
+      Directory.Delete(terminalStatePath);
+      ReplaceMarkerEvidence(directory, "\"revoked\":true", "\"revoked\":false");
+      var replay = await PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              revocationStore: revocationStore)
+          .ClaimAsync(
+              "extension",
+              staged.StepEvidence!,
+              expectedHash,
+              "17.0_a",
+              CancellationToken.None);
+      replayedArtifact = replay.Artifact;
+
+      Assert.Null(replay.Artifact);
+      Assert.NotNull(replay.Error);
+      Assert.True(revocationStore.IsRevoked(
+          staged.StepEvidence!.Split(':')[1],
+          Path.GetFileName(directory)));
+    }
+    finally
+    {
+      if (replayedArtifact is not null)
+      {
+        await replayedArtifact.DisposeAsync();
+      }
+
+      DeleteTerminalState(terminalStatePath);
+      File.Delete(revocationPath);
+    }
+  }
+
+  [Fact]
+  public async Task PlanArtifactStore_PreoccupiedTerminalFailedClaimCannotReplayAfterDeletion()
+  {
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new ScriptedStager();
+    var revocationPath = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-test-revocations-{Guid.NewGuid():N}");
+    var expectedHash = new string('A', 64);
+    string? terminalStatePath = null;
+    ClaimedVsixPlanArtifact? replayedArtifact = null;
+    try
+    {
+      var staged = await PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              revocationStore: new TestPlanArtifactRevocationStore(revocationPath))
+          .StageAsync(
+              "extension",
+              stager.StagedPath,
+              expectedHash,
+              "17.0_a",
+              CancellationToken.None);
+      var directory = Path.GetDirectoryName(stager.VerifiedVsixPath)!;
+      terminalStatePath = TerminalStatePath(directory, staged.StepEvidence!);
+      Directory.CreateDirectory(terminalStatePath);
+
+      var first = await PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              revocationStore: new TestPlanArtifactRevocationStore(revocationPath))
+          .ClaimAsync(
+              "extension",
+              staged.StepEvidence!,
+              expectedHash,
+              "17.0_a",
+              CancellationToken.None);
+      Directory.Delete(terminalStatePath);
+      var replay = await PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              revocationStore: new TestPlanArtifactRevocationStore(revocationPath))
+          .ClaimAsync(
+              "extension",
+              staged.StepEvidence!,
+              expectedHash,
+              "17.0_a",
+              CancellationToken.None);
+      replayedArtifact = replay.Artifact;
+
+      Assert.Null(first.Artifact);
+      Assert.NotNull(first.Error);
+      Assert.Null(replay.Artifact);
+      Assert.NotNull(replay.Error);
+    }
+    finally
+    {
+      if (replayedArtifact is not null)
+      {
+        await replayedArtifact.DisposeAsync();
+      }
+
+      DeleteTerminalState(terminalStatePath);
+      File.Delete(revocationPath);
+    }
+  }
+
+  [Fact]
+  public async Task PlanArtifactStore_ApprovedAbandonDoesNotReportSuccessWhenLedgerAppendIsDenied()
+  {
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new ScriptedStager();
+    var revocationPath = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-test-revocations-{Guid.NewGuid():N}");
+    var revocationStore = new TestPlanArtifactRevocationStore(revocationPath);
+    try
+    {
+      var staged = await PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              revocationStore: revocationStore)
+          .StageAsync(
+              "extension",
+              stager.StagedPath,
+              new string('A', 64),
+              "17.0_a",
+              CancellationToken.None);
+      revocationStore.RevokeFailure = new UnauthorizedAccessException("append denied");
+
+      await Assert.ThrowsAsync<System.Security.SecurityException>(() =>
+          PlanArtifactStore(
+                  stager,
+                  verifier,
+                  manifests,
+                  revocationStore: revocationStore)
+              .AbandonAsync("extension", staged.StepEvidence!, CancellationToken.None));
+    }
+    finally
+    {
+      File.Delete(revocationPath);
+    }
+  }
+
+  [Fact]
+  public async Task PlanArtifactStore_SupersessionPersistsTerminalFileWhenLedgerStateReadIsUnavailable()
   {
     var manifests = SourceManifestReader();
     var verifier = new FakeTrustedFileVerifier(isTrusted: true);
@@ -2498,7 +2768,7 @@ public sealed class VisualStudioExtensionProviderTests
           CancellationToken.None);
 
       Assert.NotNull(second.StepEvidence);
-      Assert.True(Directory.Exists(TerminalStatePath(firstDirectory, first.StepEvidence!)));
+      Assert.True(File.Exists(TerminalStatePath(firstDirectory, first.StepEvidence!)));
     }
     finally
     {
@@ -3385,6 +3655,8 @@ public sealed class VisualStudioExtensionProviderTests
 
   private sealed class ThrowingIssuanceRevocationStore : IVsixPlanArtifactRevocationStore
   {
+    private bool _revoked;
+
     public void RecordIssued(
         string ownershipToken,
         string directoryName,
@@ -3413,9 +3685,10 @@ public sealed class VisualStudioExtensionProviderTests
 
     public void Revoke(string ownershipToken, string directoryName)
     {
+      _revoked = true;
     }
 
-    public bool IsRevoked(string ownershipToken, string directoryName) => false;
+    public bool IsRevoked(string ownershipToken, string directoryName) => _revoked;
   }
 
   private sealed class ScriptedStager : ISecureArtifactStager, IAsyncDisposable
