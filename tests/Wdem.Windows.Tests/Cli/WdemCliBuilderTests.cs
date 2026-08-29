@@ -428,6 +428,78 @@ public sealed class WdemCliBuilderTests
   }
 
   [Fact]
+  public async Task CommandHandler_WritesTargetEventBeforeRunOperationCompletes()
+  {
+    var run = CompletedRun(ExecutionOutcome.Succeeded);
+    var sink = new RunEventHub();
+    var published = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var service = new LiveOutputEnvironmentRunService(run, sink, published, release.Task);
+    var output = new StringWriter();
+    var handler = new WdemCommandHandler(
+        service,
+        new StubExecutionRunStore(),
+        output,
+        new StringWriter(),
+        new LogRedactor(),
+        sink);
+
+    var execution = handler.ApplyAsync(Request(), json: true, CancellationToken.None);
+    await published.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    try
+    {
+      var observed = Assert.Single(DeserializeEvents(output));
+      Assert.Equal(run.RunId, observed.RunId);
+      Assert.False(execution.IsCompleted);
+    }
+    finally
+    {
+      release.SetResult();
+      Assert.Equal(0, await execution.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+  }
+
+  [Theory]
+  [InlineData("retry")]
+  [InlineData("resume")]
+  public async Task CommandHandler_RetryAndResumeWriteOnlyTargetRunEvents(string command)
+  {
+    var run = CompletedRun(ExecutionOutcome.Succeeded);
+    var unrelated = run with { RunId = Guid.NewGuid() };
+    var sink = new RunEventHub();
+    var service = new StubEnvironmentRunService
+    {
+      Result = run,
+      EventSink = sink,
+      Events = [Event(unrelated, "unrelated"), Event(run, "target")]
+    };
+    var output = new StringWriter();
+    var handler = new WdemCommandHandler(
+        service,
+        new StubExecutionRunStore(),
+        output,
+        new StringWriter(),
+        new LogRedactor(),
+        sink);
+
+    var exitCode = command == "retry"
+        ? await handler.RetryAsync(
+            Guid.NewGuid(),
+            new HashSet<string>(["git"], StringComparer.OrdinalIgnoreCase),
+            json: true,
+            CancellationToken.None)
+        : await handler.ResumeAsync(Guid.NewGuid(), json: true, CancellationToken.None);
+
+    Assert.Equal(0, exitCode);
+    var observed = Assert.Single(DeserializeEvents(output));
+    Assert.Equal(run.RunId, observed.RunId);
+    Assert.Equal("target", observed.Message);
+  }
+
+  [Fact]
   public async Task CommandHandler_RequiredOutputFailureReturnsUnexpectedHostExit()
   {
     var run = CompletedRun(ExecutionOutcome.Succeeded);
@@ -853,6 +925,26 @@ public sealed class WdemCliBuilderTests
     Assert.Equal(3, await InvokeApplyAsync(run));
   }
 
+  [Fact]
+  public async Task CommandHandler_NonExecutablePlanWithoutDiagnosticsReturnsThree()
+  {
+    var run = CompletedRun(ExecutionOutcome.Failed) with
+    {
+      Plan = new ExecutionPlan
+      {
+        PlanId = Guid.Parse("e157547e-e81c-4fa3-9fd4-eb217c75a2a8"),
+        Fingerprint = "non-executable-plan",
+        ProfileId = "developer",
+        ProfileVersion = "1.0.0",
+        Layers = [],
+        Resources = [],
+        IsExecutable = false
+      }
+    };
+
+    Assert.Equal(3, await InvokeApplyAsync(run));
+  }
+
   [Theory]
   [InlineData(false)]
   [InlineData(true)]
@@ -1180,6 +1272,7 @@ public sealed class WdemCliBuilderTests
         throw Failure;
       }
 
+      EventSink?.BindCurrentScopeToRun(Result.RunId);
       foreach (var runEvent in Events)
       {
         await EventSink!.PublishAsync(runEvent, CancellationToken.None);
@@ -1206,7 +1299,47 @@ public sealed class WdemCliBuilderTests
     {
       ready.Signal();
       await start.WaitAsync(cancellationToken);
+      eventSink.BindCurrentScopeToRun(result.RunId);
       await eventSink.PublishAsync(runEvent, cancellationToken);
+      return result;
+    }
+
+    public Task<ExecutionRun> RetryAsync(
+        Guid priorRunId,
+        IReadOnlySet<string> resourceIds,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+
+    public Task<IReadOnlyList<RecoveryCandidate>> FindRecoveryCandidatesAsync(
+        CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<RecoveryCandidate>>([]);
+
+    public Task<ExecutionRun> RecoverAsync(
+        Guid priorRunId,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+
+    public Task AbandonAsync(
+        Guid priorRunId,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+  }
+
+  private sealed class LiveOutputEnvironmentRunService(
+      ExecutionRun result,
+      IRunEventSink eventSink,
+      TaskCompletionSource published,
+      Task release) : IEnvironmentRunService
+  {
+    public Task<ExecutionRun> InspectAsync(
+        RunRequest request,
+        CancellationToken cancellationToken) => ApplyAsync(request, cancellationToken);
+
+    public async Task<ExecutionRun> ApplyAsync(
+        RunRequest request,
+        CancellationToken cancellationToken)
+    {
+      eventSink.BindCurrentScopeToRun(result.RunId);
+      await eventSink.PublishAsync(Event(result, "live"), cancellationToken);
+      published.SetResult();
+      await release.WaitAsync(cancellationToken);
       return result;
     }
 

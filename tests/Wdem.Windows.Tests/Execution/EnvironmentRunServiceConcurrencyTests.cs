@@ -83,7 +83,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
         eventSink: sink,
         redactor: redactor,
         profile: profile);
-    using var subscription = sink.Subscribe(async (runEvent, cancellationToken) =>
+    using var subscription = sink.SubscribeRequired(async (runEvent, cancellationToken) =>
     {
       var persisted = await store.ReadLogPageAsync(
           runEvent.RunId,

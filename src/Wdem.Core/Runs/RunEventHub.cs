@@ -2,11 +2,12 @@ namespace Wdem.Core.Runs;
 
 public sealed class RunEventHub : IRunEventSink, IDisposable
 {
+  private const int MaximumConcurrentOptionalDeliveries = 32;
   private readonly object _subscribersGate = new();
   private readonly Dictionary<long, Subscription> _subscriptions = [];
   private readonly Dictionary<Guid, RunGate> _runGates = [];
   private readonly AsyncLocal<Guid?> _operationScope = new();
-  private readonly AsyncLocal<int> _deliveryDepth = new();
+  private readonly AsyncLocal<long?> _deliveringSubscription = new();
   private long _nextSubscriptionId;
   private bool _disposed;
 
@@ -34,6 +35,25 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
     }
   }
 
+  public void BindCurrentScopeToRun(Guid runId)
+  {
+    var scopeId = _operationScope.Value;
+    if (scopeId is null)
+    {
+      return;
+    }
+
+    lock (_subscribersGate)
+    {
+      ObjectDisposedException.ThrowIf(_disposed, this);
+      foreach (var subscription in _subscriptions.Values.Where(
+          subscription => subscription.ScopeId == scopeId))
+      {
+        subscription.TargetRunId = runId;
+      }
+    }
+  }
+
   private IDisposable Subscribe(
       Func<RunEvent, CancellationToken, Task> observer,
       bool required,
@@ -50,7 +70,7 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
           observer,
           required,
           scopeId,
-          _deliveryDepth);
+          _deliveringSubscription);
       _subscriptions.Add(id, subscription);
       return subscription;
     }
@@ -68,12 +88,14 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
       acquired = true;
       Subscription[] subscribers;
       var scopeId = _operationScope.Value;
+      var recursivelyInvokedSubscription = _deliveringSubscription.Value;
       lock (_subscribersGate)
       {
         ObjectDisposedException.ThrowIf(_disposed, this);
         subscribers = _subscriptions.Values
             .Where(subscription => subscription.ScopeId is null ||
-                subscription.ScopeId == scopeId)
+                (subscription.ScopeId == scopeId &&
+                    subscription.TargetRunId == runEvent.RunId))
             .ToArray();
       }
 
@@ -83,7 +105,14 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
         var delivery = subscriber.Enqueue(runEvent, cancellationToken);
         if (subscriber.Required)
         {
-          requiredDeliveries.Add(delivery);
+          if (subscriber.Id == recursivelyInvokedSubscription)
+          {
+            ObserveFault(delivery);
+          }
+          else
+          {
+            requiredDeliveries.Add(delivery);
+          }
         }
         else
         {
@@ -101,17 +130,22 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
       ReleaseRunGate(runEvent.RunId, runGate);
     }
 
-    if (_deliveryDepth.Value > 0)
+    try
     {
-      foreach (var delivery in requiredDeliveries)
-      {
-        ObserveFault(delivery);
-      }
-
-      return;
+      await Task.WhenAll(requiredDeliveries).ConfigureAwait(false);
     }
-
-    await Task.WhenAll(requiredDeliveries).ConfigureAwait(false);
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      throw;
+    }
+    catch (RequiredRunEventDeliveryException)
+    {
+      throw;
+    }
+    catch (Exception exception)
+    {
+      throw new RequiredRunEventDeliveryException(exception);
+    }
   }
 
   public void Dispose()
@@ -187,7 +221,7 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
       Func<RunEvent, CancellationToken, Task> observer,
       bool required,
       Guid? scopeId,
-      AsyncLocal<int> deliveryDepth) : IDisposable
+      AsyncLocal<long?> deliveringSubscription) : IDisposable
   {
     private readonly object _queueGate = new();
     private readonly Dictionary<Guid, Task> _tails = [];
@@ -195,7 +229,9 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
     private Func<RunEvent, CancellationToken, Task>? _observer = observer;
 
     public bool Required { get; } = required;
+    public long Id { get; } = id;
     public Guid? ScopeId { get; } = scopeId;
+    public Guid? TargetRunId { get; set; }
 
     public Task Enqueue(RunEvent runEvent, CancellationToken cancellationToken)
     {
@@ -210,16 +246,36 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
           TaskCreationOptions.RunContinuationsAsynchronously);
       lock (_queueGate)
       {
+        if (!Required &&
+            (_tails.ContainsKey(runEvent.RunId) ||
+                _tails.Count >= MaximumConcurrentOptionalDeliveries))
+        {
+          return Task.CompletedTask;
+        }
+
         previous = _tails.GetValueOrDefault(runEvent.RunId, Task.CompletedTask);
         _tails[runEvent.RunId] = completion.Task;
       }
 
-      _ = DeliverAsync(
-          previous,
-          completion,
-          currentObserver,
-          runEvent,
-          cancellationToken);
+      if (Required)
+      {
+        _ = DeliverAsync(
+            previous,
+            completion,
+            currentObserver,
+            runEvent,
+            cancellationToken);
+      }
+      else
+      {
+        _ = Task.Run(() => DeliverAsync(
+            previous,
+            completion,
+            currentObserver,
+            runEvent,
+            cancellationToken));
+      }
+
       return completion.Task;
     }
 
@@ -227,7 +283,7 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
     {
       var currentOwner = Interlocked.Exchange(ref _owner, null);
       Interlocked.Exchange(ref _observer, null);
-      currentOwner?.Unsubscribe(id);
+      currentOwner?.Unsubscribe(Id);
     }
 
     public void Detach()
@@ -254,15 +310,15 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
           // A prior delivery reports its own failure and must not poison this queue.
         }
 
-        var previousDepth = deliveryDepth.Value;
-        deliveryDepth.Value = checked(previousDepth + 1);
+        var previousSubscription = deliveringSubscription.Value;
+        deliveringSubscription.Value = Id;
         try
         {
           await currentObserver(runEvent, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
-          deliveryDepth.Value = previousDepth;
+          deliveringSubscription.Value = previousSubscription;
         }
 
         completion.TrySetResult();

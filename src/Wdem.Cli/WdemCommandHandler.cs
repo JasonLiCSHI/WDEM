@@ -364,7 +364,7 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
 
     if (run.Plan is { IsExecutable: false })
     {
-      return 2;
+      return 3;
     }
 
     if (run.State != ExecutionState.Completed ||

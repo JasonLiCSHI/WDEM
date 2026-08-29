@@ -71,6 +71,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         RunMode.Inspect,
         resourceFilter: null,
         retriedFromRunId: null,
+        recoveredFromRunId: null,
         cancellationToken);
   }
 
@@ -84,6 +85,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         RunMode.Apply,
         resourceFilter: null,
         retriedFromRunId: null,
+        recoveredFromRunId: null,
         cancellationToken);
   }
 
@@ -115,6 +117,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
             RunMode.Apply,
             requested,
             prior.RunId,
+            recoveredFromRunId: null,
             cancellationToken)
         .ConfigureAwait(false);
   }
@@ -237,6 +240,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
               RunMode.Apply,
               remaining,
               claimed.RunId,
+              recoveredFromRunId: claimed.RunId,
               cancellationToken).ConfigureAwait(false);
     }
     catch (Exception executionException)
@@ -366,6 +370,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       RunMode mode,
       IReadOnlySet<string>? resourceFilter,
       Guid? retriedFromRunId,
+      Guid? recoveredFromRunId,
       CancellationToken cancellationToken)
   {
     ValidateRequest(request);
@@ -396,6 +401,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           loaded,
           diagnostics,
           retriedFromRunId,
+          recoveredFromRunId,
           cancellationToken)
           .ConfigureAwait(false);
     }
@@ -413,6 +419,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           loaded with { SourcePath = sourcePath },
           graphResult.Errors,
           retriedFromRunId,
+          recoveredFromRunId,
           cancellationToken).ConfigureAwait(false);
     }
 
@@ -442,11 +449,13 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       StartedAtUtc = DateTimeOffset.UtcNow,
       State = ExecutionState.Ready,
       RetriedFromRunId = retriedFromRunId,
+      RecoveredFromRunId = recoveredFromRunId,
       Machine = CurrentMachine(),
       Graph = graph,
       Plan = plan,
       ResourceResults = initialResults
     };
+    _eventSink.BindCurrentScopeToRun(run.RunId);
     await using var operation = mode == RunMode.Apply
         ? await _runStore.TryAcquireRecoveryOperationAsync(run.RunId, cancellationToken)
             .ConfigureAwait(false)
@@ -475,8 +484,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
 
     if (mode == RunMode.Inspect)
     {
-      var outcome = plan.Errors.Any(error =>
-          error.Code is WdemErrorCode.DetectionError or WdemErrorCode.ProviderError)
+      var outcome = plan.Errors.Count > 0 || !plan.IsExecutable
           ? ExecutionOutcome.Failed
           : ExecutionOutcome.Succeeded;
       var completed = run with
@@ -858,6 +866,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       ProfileLoadResult loaded,
       IReadOnlyList<StructuredError> diagnostics,
       Guid? retriedFromRunId,
+      Guid? recoveredFromRunId,
       CancellationToken cancellationToken)
   {
     var now = DateTimeOffset.UtcNow;
@@ -876,10 +885,12 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       State = ExecutionState.Completed,
       Outcome = ExecutionOutcome.Failed,
       RetriedFromRunId = retriedFromRunId,
+      RecoveredFromRunId = recoveredFromRunId,
       Machine = CurrentMachine(),
       Plan = ExecutionPlanner.CreatePlan(profileId, profileVersion, [], [], diagnostics),
       ResourceResults = new Dictionary<string, ResourceResult>(IdComparer)
     };
+    _eventSink.BindCurrentScopeToRun(run.RunId);
     await _runStore.CreateAsync(run, cancellationToken).ConfigureAwait(false);
     var events = new RunEventPublisher(
         _runStore,
@@ -1057,7 +1068,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
   {
     var runs = await _runStore.ListAsync(cancellationToken).ConfigureAwait(false);
     return runs
-        .Where(run => run.RetriedFromRunId == priorRunId &&
+        .Where(run => run.RecoveredFromRunId == priorRunId &&
             run.Mode == RunMode.Apply &&
             run.State == ExecutionState.Completed &&
             run.Outcome == ExecutionOutcome.Succeeded)

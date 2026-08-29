@@ -63,7 +63,7 @@ public sealed class EnvironmentRunServiceTests
           StringComparer.OrdinalIgnoreCase)
     };
     var (service, store) = CreateService(provider, profile, eventSink: sink);
-    using var subscription = sink.Subscribe(async (runEvent, cancellationToken) =>
+    using var subscription = sink.SubscribeRequired(async (runEvent, cancellationToken) =>
     {
       Assert.NotNull(await store.GetAsync(runEvent.RunId, cancellationToken));
       events.Add(runEvent);
@@ -101,6 +101,30 @@ public sealed class EnvironmentRunServiceTests
     Assert.Equal(0, provider.ApplyCalls);
     Assert.Equal(ComplianceStatus.Missing, run.ResourceResults["git"].FinalCompliance);
     Assert.NotNull(run.Plan);
+  }
+
+  [Fact]
+  public async Task InspectAsync_AnyAcceptedPlanErrorFailsRunAndSkipsResource()
+  {
+    var provider = new ScriptedProvider(Missing("git"));
+    var registry = new ResourceProviderRegistry([provider]);
+    var compliance = new ComplianceEvaluator();
+    var error = new StructuredError(
+        WdemErrorCode.ConfigurationError,
+        "Configuration cannot be applied.",
+        "The accepted plan contains an invalid setting.");
+    var planner = new TransformingPlanner(
+        new ExecutionPlanner(registry, compliance),
+        plan => plan with { Errors = [error] });
+    var (service, _) = CreateService(provider, planner: planner);
+
+    var run = await service.InspectAsync(Request(), CancellationToken.None);
+
+    Assert.Equal(ExecutionState.Completed, run.State);
+    Assert.Equal(ExecutionOutcome.Failed, run.Outcome);
+    Assert.Equal(ExecutionOutcome.Skipped, run.ResourceResults["git"].Outcome);
+    Assert.Equal(error, Assert.Single(run.Plan!.Errors));
+    Assert.Equal(0, provider.ApplyCalls);
   }
 
   [Fact]
@@ -570,6 +594,37 @@ public sealed class EnvironmentRunServiceTests
     Assert.DoesNotContain(candidates, candidate => candidate.RunId == interrupted.RunId);
   }
 
+  [Fact]
+  public async Task RecoverAsync_DoesNotReuseEarlierPartialOrdinaryRetry()
+  {
+    var provider = new ScriptedProvider(Satisfied("git", "2.52.1"))
+    {
+      DetectState = resource => Satisfied(resource.Id, "2.52.1")
+    };
+    var (service, store) = CreateService(provider, Profile(includeBrokenResource: true));
+    var prior = FailedRun("git", "broken") with
+    {
+      State = ExecutionState.Running,
+      Outcome = null,
+      EndedAtUtc = null
+    };
+    await store.CreateAsync(prior, CancellationToken.None);
+    var ordinaryRetry = await service.RetryAsync(
+        prior.RunId,
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "git" },
+        CancellationToken.None);
+
+    var recovery = await service.RecoverAsync(prior.RunId, CancellationToken.None);
+    var resumedAgain = await service.RecoverAsync(prior.RunId, CancellationToken.None);
+
+    Assert.Equal(["broken", "git"], recovery.ResourceResults.Keys.Order());
+    Assert.NotEqual(ordinaryRetry.RunId, recovery.RunId);
+    Assert.Null(ordinaryRetry.RecoveredFromRunId);
+    Assert.Equal(prior.RunId, recovery.RetriedFromRunId);
+    Assert.Equal(prior.RunId, recovery.RecoveredFromRunId);
+    Assert.Equal(recovery.RunId, resumedAgain.RunId);
+  }
+
   [Theory]
   [InlineData(ApplyOutcome.Failed)]
   [InlineData(ApplyOutcome.Cancelled)]
@@ -817,7 +872,8 @@ public sealed class EnvironmentRunServiceTests
       DeveloperProfile? profile = null,
       IProfileCatalog? catalog = null,
       InMemoryRunStore? store = null,
-      IRunEventSink? eventSink = null)
+      IRunEventSink? eventSink = null,
+      IExecutionPlanner? planner = null)
   {
     catalog ??= new FakeProfileCatalog(profile ?? Profile(), CanonicalProfilePath);
     var registry = new ResourceProviderRegistry([provider]);
@@ -830,7 +886,7 @@ public sealed class EnvironmentRunServiceTests
             new ResourceGraphBuilder(),
             registry,
             compliance,
-            new ExecutionPlanner(registry, compliance),
+            planner ?? new ExecutionPlanner(registry, compliance),
             new ResourceScheduler(),
             store,
             new DirectResourceApplyDispatcher(),
@@ -1193,6 +1249,23 @@ public sealed class EnvironmentRunServiceTests
       VerifyCalls++;
       return ValueTask.FromResult(VerificationResult);
     }
+  }
+
+  private sealed class TransformingPlanner(
+      IExecutionPlanner inner,
+      Func<ExecutionPlan, ExecutionPlan> transform) : IExecutionPlanner
+  {
+    public async Task<ExecutionPlan> CreateAsync(
+        ResourceGraph graph,
+        IReadOnlyDictionary<string, DetectedState> detectedStates,
+        string profileId,
+        string profileVersion,
+        CancellationToken cancellationToken) => transform(await inner.CreateAsync(
+            graph,
+            detectedStates,
+            profileId,
+            profileVersion,
+            cancellationToken));
   }
 
   private sealed class InMemoryRunStore : IExecutionRunStore

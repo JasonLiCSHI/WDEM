@@ -287,7 +287,11 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)),
         CancellationToken.None);
     replacement = await store.SaveAsync(
-        replacement with { RetriedFromRunId = prior.RunId },
+        replacement with
+        {
+          RetriedFromRunId = prior.RunId,
+          RecoveredFromRunId = prior.RunId
+        },
         CancellationToken.None);
     var historyBefore = await store.ReadLogPageAsync(
         replacement.RunId,
@@ -359,7 +363,7 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
   }
 
   [Fact]
-  public async Task ResumeAsync_UnrelatedPublishedEventDoesNotSuppressPersistedReplay()
+  public async Task ResumeAsync_DoesNotWriteUnrelatedEventFromSameOperationScope()
   {
     var redactor = new LogRedactor();
     var sink = new RunEventHub();
@@ -394,7 +398,7 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
         .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
         .Select(line => JsonSerializer.Deserialize<RunEvent>(line, JsonOptions)!)
         .ToArray();
-    Assert.Contains(events, runEvent => runEvent.RunId == unrelatedRunId);
+    Assert.DoesNotContain(events, runEvent => runEvent.RunId == unrelatedRunId);
     Assert.Contains(events, runEvent =>
         runEvent.RunId == run.RunId && runEvent.Message == "persisted resume event");
   }
@@ -539,6 +543,71 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
     Assert.Equal(ExecutionOutcome.Failed, run.Outcome);
     Assert.Equal(ExecutionOutcome.Failed, run.ResourceResults["git"].Outcome);
     Assert.NotEqual(WdemErrorCode.CancellationError, run.ResourceResults["git"].Error?.Code);
+  }
+
+  [Theory]
+  [InlineData("progress", RunEventKind.StepProgress)]
+  [InlineData("diagnostic", RunEventKind.Log)]
+  [InlineData("step", RunEventKind.StepProgress)]
+  public async Task ApplyAsync_RequiredOutputFailureDuringProviderPublicationIsHostFailure(
+      string publication,
+      RunEventKind failingKind)
+  {
+    var provider = new PublicationProvider(publication);
+    var profile = Profile() with
+    {
+      RequiredResources =
+      [
+        new ProfileResourceReference { Id = "git" },
+        new ProfileResourceReference { Id = "dependent" }
+      ],
+      Resources = new Dictionary<string, ResourceDefinition>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = Profile().Resources["git"] with { Provider = provider.ProviderName },
+        ["dependent"] = Profile().Resources["git"] with
+        {
+          Id = "dependent",
+          Provider = provider.ProviderName,
+          Dependencies = ["git"]
+        }
+      }
+    };
+    var registry = new ResourceProviderRegistry([provider]);
+    var compliance = new ComplianceEvaluator();
+    var redactor = new LogRedactor();
+    var sink = new RunEventHub();
+    var store = new JsonExecutionRunStore(new WdemDataPaths(_directory), redactor);
+    var service = new EnvironmentRunService(
+        new FixedProfileCatalog(profile),
+        new ResourceGraphBuilder(),
+        registry,
+        compliance,
+        new ExecutionPlanner(registry, compliance),
+        new ResourceScheduler(),
+        store,
+        new DirectResourceApplyDispatcher(),
+        timeProvider: null,
+        sink,
+        redactor);
+    var handler = new WdemCommandHandler(
+        service,
+        store,
+        new ThrowOnRunEventKindTextWriter(failingKind),
+        new StringWriter(),
+        redactor,
+        sink);
+
+    var exitCode = await handler.ApplyAsync(
+        new RunRequest(
+            Path.GetFullPath("developer.yaml"),
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)),
+        json: true,
+        CancellationToken.None);
+
+    var run = Assert.Single(await store.ListAsync(CancellationToken.None));
+    Assert.Equal(1, exitCode);
+    Assert.DoesNotContain(run.ResourceResults.Values, result =>
+        result.State == ExecutionState.Blocked || result.Outcome == ExecutionOutcome.Failed);
   }
 
   public void Dispose()
@@ -773,6 +842,115 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
             Exists = true
           }
         });
+  }
+
+  private sealed class PublicationProvider(string publication) : IResourceProvider
+  {
+    public string ResourceType => "package";
+    public string ProviderName => "publication";
+    public ProviderCapabilities Capabilities { get; } = new();
+
+    public ValueTask<ProviderValidationResult> ValidateAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) =>
+        ValueTask.FromResult(ProviderValidationResult.Valid);
+
+    public ValueTask<DetectedState> DetectAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) => ValueTask.FromResult(new DetectedState
+        {
+          ResourceId = resource.Id,
+          Outcome = DetectionOutcome.Succeeded,
+          Exists = false
+        });
+
+    public ValueTask<ResourcePlan> PlanAsync(
+        ResourceDefinition resource,
+        DetectedState currentState,
+        CancellationToken cancellationToken) => ValueTask.FromResult(new ResourcePlan
+        {
+          ResourceId = resource.Id,
+          ResourceType = resource.Type,
+          ProviderName = resource.Provider,
+          DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(resource),
+          Compliance = ComplianceStatus.Missing,
+          IsExecutable = true,
+          Steps =
+          [
+            new PlanStep
+            {
+              Id = "install",
+              Description = "Install resource",
+              Action = PlanAction.Install,
+              PrivilegeRequirement = PrivilegeRequirement.CurrentUser,
+              RestartPolicy = RestartPolicy.NoRestart
+            }
+          ]
+        });
+
+    public ValueTask<ResourceApplyResult> ApplyAsync(
+        ResourceDefinition resource,
+        ResourcePlan plan,
+        IProgress<ProviderProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+      if (publication == "progress")
+      {
+        progress?.Report(new ProviderProgress("install", 0.5, "installing", "install"));
+      }
+
+      return ValueTask.FromResult(new ResourceApplyResult
+      {
+        ResourceId = resource.Id,
+        Outcome = ApplyOutcome.Succeeded,
+        Diagnostics = publication == "diagnostic"
+            ? [new StructuredError(WdemErrorCode.ProviderError, "diagnostic", "detail")]
+            : [],
+        StepResults = publication == "step"
+            ?
+            [
+              new ProviderStepResult
+              {
+                StepId = "install",
+                Action = PlanAction.Install,
+                Progress = 1,
+                Message = "installed"
+              }
+            ]
+            : []
+      });
+    }
+
+    public ValueTask<VerificationResult> VerifyAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) => ValueTask.FromResult(new VerificationResult
+        {
+          ResourceId = resource.Id,
+          Compliance = ComplianceStatus.Satisfied,
+          DetectedState = new DetectedState
+          {
+            ResourceId = resource.Id,
+            Outcome = DetectionOutcome.Succeeded,
+            Exists = true
+          }
+        });
+  }
+
+  private sealed class ThrowOnRunEventKindTextWriter(RunEventKind kind) : StringWriter
+  {
+    private readonly string _kind = $"\"kind\":\"{JsonNamingPolicy.CamelCase.ConvertName(kind.ToString())}\"";
+
+    public override Task WriteLineAsync(string? value) =>
+        value?.Contains(_kind, StringComparison.Ordinal) == true
+            ? Task.FromException(new IOException($"{kind} output failed"))
+            : base.WriteLineAsync(value);
+
+    public override Task WriteLineAsync(
+        ReadOnlyMemory<char> buffer,
+        CancellationToken cancellationToken = default) =>
+        buffer.Span.Contains(_kind, StringComparison.Ordinal)
+            ? Task.FromException(new IOException($"{kind} output failed"))
+            : base.WriteLineAsync(buffer, cancellationToken);
   }
 
   private sealed class ThrowOnCompletedEventTextWriter : StringWriter

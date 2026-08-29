@@ -202,6 +202,50 @@ public sealed class ResourceSchedulerTests
   }
 
   [Fact]
+  public async Task ExecuteAsync_CallerCancellationReturnsWhenRunningDelegateIgnoresToken()
+  {
+    var scheduler = new ResourceScheduler(TimeSpan.FromMilliseconds(50));
+    using var cancellation = new CancellationTokenSource();
+    var started = NewGate();
+    var release = new TaskCompletionSource<ResourceResult>(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var transitions = new List<ResourceResult>();
+    var execution = scheduler.ExecuteAsync(
+        IndependentPlan("a"),
+        async (_, _) =>
+        {
+          started.TrySetResult();
+          return await release.Task;
+        },
+        _ => new ProviderCapabilities(),
+        maximumConcurrency: 1,
+        cancellation.Token,
+        transition =>
+        {
+          transitions.Add(transition);
+          return Task.CompletedTask;
+        });
+    await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    try
+    {
+      await cancellation.CancelAsync();
+      var result = await execution.WaitAsync(TimeSpan.FromSeconds(1));
+
+      Assert.Equal(ExecutionState.Completed, result.Results["a"].State);
+      Assert.Equal(ExecutionOutcome.Cancelled, result.Results["a"].Outcome);
+      Assert.Contains(transitions, transition =>
+          transition.ResourceId == "a" &&
+          transition.State == ExecutionState.Completed &&
+          transition.Outcome == ExecutionOutcome.Cancelled);
+    }
+    finally
+    {
+      release.TrySetException(new InvalidOperationException("late provider failure"));
+    }
+  }
+
+  [Fact]
   public async Task ExecuteAsync_RunningObserverFailureIsNotReportedAsProviderFailure()
   {
     var invoked = 0;

@@ -173,6 +173,40 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     Assert.DoesNotContain("evidence-secret", disk, StringComparison.Ordinal);
   }
 
+  [Fact]
+  public async Task CreateAsync_RoundTripsRecoveryAssociation()
+  {
+    var priorRunId = Guid.NewGuid();
+    var run = SampleRun() with
+    {
+      RetriedFromRunId = priorRunId,
+      RecoveredFromRunId = priorRunId
+    };
+
+    await _store.CreateAsync(run, CancellationToken.None);
+
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+    Assert.Equal(priorRunId, restored!.RetriedFromRunId);
+    Assert.Equal(priorRunId, restored.RecoveredFromRunId);
+  }
+
+  [Fact]
+  public async Task GetAsync_OldSnapshotWithoutRecoveryAssociationDefaultsToNull()
+  {
+    var run = SampleRun() with { RetriedFromRunId = Guid.NewGuid() };
+    await _store.CreateAsync(run, CancellationToken.None);
+    var snapshotPath = _store.SnapshotPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(snapshotPath))!.AsObject();
+    Assert.True(document.Remove("recoveredFromRunId"));
+    await File.WriteAllTextAsync(snapshotPath, document.ToJsonString());
+
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+
+    Assert.NotNull(restored);
+    Assert.Equal(run.RetriedFromRunId, restored.RetriedFromRunId);
+    Assert.Null(restored.RecoveredFromRunId);
+  }
+
   [Theory]
   [InlineData(-1, false, false)]
   [InlineData(0, true, false)]

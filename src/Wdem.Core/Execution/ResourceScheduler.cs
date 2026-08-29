@@ -84,6 +84,7 @@ public sealed class ResourceScheduler : IResourceScheduler
     var executionToken = executionCancellation.Token;
     var running = new Dictionary<string, Task<CompletedExecution>>(
         StringComparer.OrdinalIgnoreCase);
+    var cancellationSignal = Task.Delay(Timeout.InfiniteTimeSpan, executionToken);
     var semaphoreDisposalDeferred = false;
 
     try
@@ -178,7 +179,43 @@ public sealed class ResourceScheduler : IResourceScheduler
           continue;
         }
 
-        await Task.WhenAny(running.Values).ConfigureAwait(false);
+        var resourceCompletion = Task.WhenAny(running.Values);
+        var activity = await Task.WhenAny(resourceCompletion, cancellationSignal)
+            .ConfigureAwait(false);
+        if (activity == cancellationSignal)
+        {
+          var runningTasks = running.Values.ToArray();
+          var drained = await CancelAndDrainAsync(
+              executionCancellation,
+              runningTasks,
+              _drainTimeout).ConfigureAwait(false);
+          if (!drained)
+          {
+            semaphoreDisposalDeferred = true;
+            DisposeSemaphoresAfterCompletion(
+                runningTasks,
+                globalSemaphore,
+                providerSemaphores.Values.ToArray());
+          }
+
+          foreach (var id in running.Keys.ToArray())
+          {
+            var execution = running[id];
+            ObserveFault(execution);
+            var startedAtUtc = execution.IsCompletedSuccessfully
+                ? execution.Result.Result.StartedAtUtc
+                : null;
+            var cancelled = Cancelled(id) with { StartedAtUtc = startedAtUtc };
+            await NotifyTransitionAsync(transitionAsync, cancelled).ConfigureAwait(false);
+            results[id] = cancelled;
+            rootFailures[id] = id;
+          }
+
+          running.Clear();
+          continue;
+        }
+
+        await resourceCompletion.ConfigureAwait(false);
         var completedIds = resources
             .Select(resource => resource.Definition.Id)
             .Where(id => running.TryGetValue(id, out var execution) && execution.IsCompleted)
@@ -201,18 +238,21 @@ public sealed class ResourceScheduler : IResourceScheduler
     }
     catch (Exception exception)
     {
-      var runningTasks = running.Values.ToArray();
-      var drained = await CancelAndDrainAsync(
-          executionCancellation,
-          runningTasks,
-          _drainTimeout).ConfigureAwait(false);
-      if (!drained)
+      if (!semaphoreDisposalDeferred)
       {
-        semaphoreDisposalDeferred = true;
-        DisposeSemaphoresAfterCompletion(
+        var runningTasks = running.Values.ToArray();
+        var drained = await CancelAndDrainAsync(
+            executionCancellation,
             runningTasks,
-            globalSemaphore,
-            providerSemaphores.Values.ToArray());
+            _drainTimeout).ConfigureAwait(false);
+        if (!drained)
+        {
+          semaphoreDisposalDeferred = true;
+          DisposeSemaphoresAfterCompletion(
+              runningTasks,
+              globalSemaphore,
+              providerSemaphores.Values.ToArray());
+        }
       }
 
       if (exception is TransitionObserverException transitionException)
@@ -454,6 +494,10 @@ public sealed class ResourceScheduler : IResourceScheduler
       return new CompletedExecution(id, result);
     }
     catch (TransitionObserverException)
+    {
+      throw;
+    }
+    catch (RequiredRunEventDeliveryException)
     {
       throw;
     }

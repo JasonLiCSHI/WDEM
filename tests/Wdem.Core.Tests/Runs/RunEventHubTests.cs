@@ -17,7 +17,9 @@ public sealed class RunEventHubTests
     });
 
     await sink.PublishAsync(Event(1), CancellationToken.None);
+    await AssertEventuallyAsync(() => received.Count == 1);
     await sink.PublishAsync(Event(2), CancellationToken.None);
+    await AssertEventuallyAsync(() => received.Count == 2);
 
     Assert.Equal([1L, 2L], received);
   }
@@ -47,10 +49,10 @@ public sealed class RunEventHubTests
     using var required = sink.SubscribeRequired((_, _) =>
         throw new IOException("output failed"));
 
-    var error = await Assert.ThrowsAsync<IOException>(() =>
+    var error = await Assert.ThrowsAsync<RequiredRunEventDeliveryException>(() =>
         sink.PublishAsync(Event(1), CancellationToken.None));
 
-    Assert.Equal("output failed", error.Message);
+    Assert.Equal("output failed", error.Cause.Message);
   }
 
   [Fact]
@@ -64,6 +66,7 @@ public sealed class RunEventHubTests
       return Task.CompletedTask;
     });
     await sink.PublishAsync(Event(1), CancellationToken.None);
+    await AssertEventuallyAsync(() => received.Count == 1);
 
     subscription.Dispose();
     await sink.PublishAsync(Event(2), CancellationToken.None);
@@ -152,6 +155,65 @@ public sealed class RunEventHubTests
   }
 
   [Fact]
+  public async Task PublishAsync_DoesNotInvokeBlockingOptionalObserverUnderRunGate()
+  {
+    using var releaseOptional = new ManualResetEventSlim();
+    var requiredObserved = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    IRunEventSink sink = new RunEventHub();
+    using var optional = sink.Subscribe((_, _) =>
+    {
+      releaseOptional.Wait();
+      return Task.CompletedTask;
+    });
+    using var required = sink.SubscribeRequired((_, _) =>
+    {
+      requiredObserved.SetResult();
+      return Task.CompletedTask;
+    });
+
+    var publication = Task.Run(() => sink.PublishAsync(Event(1), CancellationToken.None));
+    try
+    {
+      await requiredObserved.Task.WaitAsync(TimeSpan.FromSeconds(1));
+      await publication.WaitAsync(TimeSpan.FromSeconds(1));
+    }
+    finally
+    {
+      releaseOptional.Set();
+    }
+  }
+
+  [Fact]
+  public async Task PublishAsync_DropsQueuedEventsForHangingOptionalObserver()
+  {
+    var entered = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var received = new List<long>();
+    IRunEventSink sink = new RunEventHub();
+    using var optional = sink.Subscribe(async (runEvent, cancellationToken) =>
+    {
+      received.Add(runEvent.Sequence);
+      entered.TrySetResult();
+      await release.Task.WaitAsync(cancellationToken);
+    });
+    await sink.PublishAsync(Event(1), CancellationToken.None);
+    await entered.Task.WaitAsync(TimeSpan.FromSeconds(1));
+
+    for (var sequence = 2; sequence <= 100; sequence++)
+    {
+      await sink.PublishAsync(Event(sequence), CancellationToken.None)
+          .WaitAsync(TimeSpan.FromSeconds(1));
+    }
+
+    release.SetResult();
+    await AssertEventuallyAsync(() => received.Count == 1);
+    Assert.Equal([1L], received);
+  }
+
+  [Fact]
   public async Task ScopedRequiredSubscriptionsOnlyReceiveTheirOperationPublications()
   {
     IRunEventSink sink = new RunEventHub();
@@ -177,11 +239,40 @@ public sealed class RunEventHubTests
 
     start.SetResult();
 
-    var error = await Assert.ThrowsAsync<IOException>(() => first);
+    var error = await Assert.ThrowsAsync<RequiredRunEventDeliveryException>(() => first);
     await second.WaitAsync(TimeSpan.FromSeconds(5));
-    Assert.Equal("scoped output failed", error.Message);
+    Assert.Equal("scoped output failed", error.Cause.Message);
     Assert.Equal([1L], firstReceived);
     Assert.Equal([2L], secondReceived);
+  }
+
+  [Fact]
+  public async Task NestedPublish_StillAwaitsOtherRequiredSubscriber()
+  {
+    IRunEventSink sink = new RunEventHub();
+    var recursiveDelivery = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    using var recursive = sink.SubscribeRequired(async (runEvent, cancellationToken) =>
+    {
+      if (runEvent.Sequence == 1)
+      {
+        await sink.PublishAsync(Event(2, runEvent.RunId), cancellationToken);
+      }
+      else
+      {
+        recursiveDelivery.SetResult();
+      }
+    });
+    using var failing = sink.SubscribeRequired((runEvent, _) =>
+        runEvent.Sequence == 2
+            ? Task.FromException(new IOException("nested required delivery failed"))
+            : Task.CompletedTask);
+
+    var error = await Assert.ThrowsAsync<RequiredRunEventDeliveryException>(
+        () => sink.PublishAsync(Event(1), CancellationToken.None));
+
+    Assert.Equal("nested required delivery failed", error.Cause.Message);
+    await recursiveDelivery.Task.WaitAsync(TimeSpan.FromSeconds(5));
   }
 
   [Fact]
@@ -272,6 +363,7 @@ public sealed class RunEventHubTests
           ? Task.FromException(new IOException("scoped output failed"))
           : Task.CompletedTask;
     });
+    sink.BindCurrentScopeToRun(runEvent.RunId);
     ready.Signal();
     await start;
     await sink.PublishAsync(runEvent, CancellationToken.None);
