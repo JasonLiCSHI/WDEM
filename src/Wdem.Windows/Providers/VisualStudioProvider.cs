@@ -485,8 +485,36 @@ public sealed class VisualStudioProvider : IResourceProvider
             cancellationToken).ConfigureAwait(false);
         if (InstallerSucceeded(command))
         {
+          await using var configurationBootstrapper = options.BootstrapperUri is not null
+              ? await _installer.AcquireBootstrapperAsync(
+                  options.BootstrapperUri,
+                  options.BootstrapperSha256!,
+                  cancellationToken).ConfigureAwait(false)
+              : null;
+          var configurationSetupPath = setupPath;
+          if (configurationBootstrapper is not null)
+          {
+            if (!configurationBootstrapper.IsTrusted)
+            {
+              return ApplyFailure(
+                  resource,
+                  step,
+                  configurationBootstrapper.Error! with
+                  {
+                    ResourceId = resource.Id,
+                    StepId = step.Id
+                  },
+                  command.Process.ExitCode,
+                  0.5,
+                  command.Evidence,
+                  command.RestartRequirement);
+            }
+
+            configurationSetupPath = configurationBootstrapper.VerifiedPath!;
+          }
+
           var configurationCommand = await _installer.ModifyAsync(
-              setupPath,
+              configurationSetupPath,
               instance.InstallationPath,
               options.Workloads,
               options.Components,
@@ -906,11 +934,13 @@ public sealed class VisualStudioProvider : IResourceProvider
       evidence[pair.Key] = pair.Value;
     }
 
+    var restartRequirement = (RestartPolicy)Math.Max(
+        (int)first.RestartRequirement,
+        (int)second.RestartRequirement);
+    evidence["restartRequirement"] = restartRequirement.ToString();
     return new VisualStudioInstallerResult(
         second.Process,
-        (RestartPolicy)Math.Max(
-            (int)first.RestartRequirement,
-            (int)second.RestartRequirement),
+        restartRequirement,
         evidence);
   }
 

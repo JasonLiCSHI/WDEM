@@ -289,6 +289,68 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   }
 
   [Fact]
+  public async Task ApplyAsync_DownloadedBootstrapperSupportsUpdateAndConfigurationInvocations()
+  {
+    Directory.CreateDirectory(_root);
+    var vsconfig = Path.Combine(_root, "downloaded-upgrade.vsconfig");
+    await File.WriteAllTextAsync(
+        vsconfig,
+        Vsconfig("Microsoft.VisualStudio.Component.Git"));
+    var configBytes = await File.ReadAllBytesAsync(vsconfig);
+    var configHash = Convert.ToHexString(SHA256.HashData(configBytes));
+    var bootstrapperBytes = "trusted Visual Studio bootstrapper"u8.ToArray();
+    var bootstrapperHash = Convert.ToHexString(SHA256.HashData(bootstrapperBytes));
+    var old = Instance("17.0_a", version: "17.9.0");
+    var converged = Instance(
+        "17.0_a",
+        workloads: ["Microsoft.VisualStudio.Workload.ManagedDesktop"],
+        components:
+        [
+          "Microsoft.NetCore.Component.Runtime.10.0",
+          "Microsoft.VisualStudio.Component.Git"
+        ]);
+    var process = new RecordingRealProcessExecutor();
+    process.ExitCodes.Enqueue(3010);
+    process.ExitCodes.Enqueue(0);
+    var downloads = new CountingContentHandler(bootstrapperBytes);
+    using var httpClient = new HttpClient(downloads);
+    var secureStager = new SecureArtifactStager(new RecordingSecureDirectoryPolicy());
+    var installer = new VisualStudioInstallerClient(
+        process,
+        httpClient: httpClient,
+        secureArtifactStager: secureStager,
+        bootstrapperDownloadDirectory: Path.Combine(_root, "downloads"));
+    var provider = Provider(
+        new SequenceDiscovery([[old], [converged]]),
+        installer,
+        secureStager);
+    var resource = Resource(
+        vsconfig,
+        configHash,
+        useBootstrapper: true,
+        bootstrapperSha256: bootstrapperHash);
+    var plan = await provider.PlanAsync(resource, State(old), CancellationToken.None);
+
+    var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
+    Assert.Equal(RestartPolicy.RestartRecommended, result.RestartRequirement);
+    Assert.Contains(
+        "restartRequirement=RestartRecommended",
+        Assert.Single(result.StepResults).Message);
+    Assert.Equal(2, downloads.RequestCount);
+    Assert.Collection(
+        process.Requests,
+        request => Assert.Equal("update", request.Arguments[0]),
+        request => Assert.Equal("modify", request.Arguments[0]));
+    Assert.NotEqual(process.Requests[0].FileName, process.Requests[1].FileName);
+    Assert.Equal(2, process.ExecutableSnapshots.Count);
+    Assert.All(process.ExecutableSnapshots, bytes => Assert.Equal(bootstrapperBytes, bytes));
+    Assert.Equal(configBytes, Assert.Single(process.ConfigurationSnapshots));
+    Assert.All(process.Requests, request => Assert.False(File.Exists(request.FileName)));
+  }
+
+  [Fact]
   public async Task VerifyAsync_MissingComponentDoesNotReportSuccess()
   {
     var discovery = new SequenceDiscovery([[Instance(
@@ -462,7 +524,8 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
       string? vsconfigPath = null,
       string? expectedSha256 = null,
       bool useBootstrapper = false,
-      string? versionConstraint = ">= 18.0")
+      string? versionConstraint = ">= 18.0",
+      string? bootstrapperSha256 = null)
   {
     var parameters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
     {
@@ -482,7 +545,7 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
     if (useBootstrapper)
     {
       parameters["bootstrapperUri"] = "https://example.test/vs.exe";
-      parameters["bootstrapperSha256"] = new string('A', 64);
+      parameters["bootstrapperSha256"] = bootstrapperSha256 ?? new string('A', 64);
     }
 
     return new ResourceDefinition
@@ -659,6 +722,52 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
       : IProgress<ProviderProgress>
   {
     public void Report(ProviderProgress value) => report(value);
+  }
+
+  private sealed class RecordingRealProcessExecutor : IProcessExecutor
+  {
+    public List<ProcessExecutionRequest> Requests { get; } = [];
+    public List<byte[]> ExecutableSnapshots { get; } = [];
+    public List<byte[]> ConfigurationSnapshots { get; } = [];
+    public Queue<int> ExitCodes { get; } = [];
+
+    public Task<ProcessExecutionResult> ExecuteAsync(
+        ProcessExecutionRequest request,
+        IProgress<string>? output,
+        CancellationToken cancellationToken)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      Requests.Add(request);
+      ExecutableSnapshots.Add(File.ReadAllBytes(request.FileName));
+      var configIndex = request.Arguments.ToList().IndexOf("--config");
+      if (configIndex >= 0)
+      {
+        ConfigurationSnapshots.Add(File.ReadAllBytes(request.Arguments[configIndex + 1]));
+      }
+
+      var exitCode = ExitCodes.TryDequeue(out var configuredExitCode)
+          ? configuredExitCode
+          : 0;
+      return Task.FromResult(new ProcessExecutionResult(true, exitCode, [], []));
+    }
+  }
+
+  private sealed class CountingContentHandler(byte[] content) : HttpMessageHandler
+  {
+    public int RequestCount { get; private set; }
+
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      RequestCount++;
+      return Task.FromResult(new HttpResponseMessage
+      {
+        StatusCode = System.Net.HttpStatusCode.OK,
+        Content = new ByteArrayContent(content)
+      });
+    }
   }
 
   private sealed class RecordingSecureDirectoryPolicy : ISecureArtifactDirectoryPolicy
