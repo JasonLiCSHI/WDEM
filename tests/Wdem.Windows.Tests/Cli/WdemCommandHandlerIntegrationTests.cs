@@ -610,6 +610,77 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
         result.State == ExecutionState.Blocked || result.Outcome == ExecutionOutcome.Failed);
   }
 
+  [Fact]
+  public async Task ApplyAsync_CancellationPreventsLateProviderProgressAfterCliExit()
+  {
+    using var cancellation = new CancellationTokenSource();
+    var provider = new LateProgressAfterCancellationProvider();
+    var registry = new ResourceProviderRegistry([provider]);
+    var compliance = new ComplianceEvaluator();
+    var redactor = new LogRedactor();
+    var sink = new RunEventHub();
+    var store = new JsonExecutionRunStore(new WdemDataPaths(_directory), redactor);
+    var service = new EnvironmentRunService(
+        new FixedProfileCatalog(Profile()),
+        new ResourceGraphBuilder(),
+        registry,
+        compliance,
+        new ExecutionPlanner(registry, compliance),
+        new ResourceScheduler(TimeSpan.FromMilliseconds(50)),
+        store,
+        new DirectResourceApplyDispatcher(),
+        timeProvider: null,
+        sink,
+        redactor);
+    var output = new StringWriter();
+    var handler = new WdemCommandHandler(
+        service,
+        store,
+        output,
+        new StringWriter(),
+        redactor,
+        sink);
+    var execution = handler.ApplyAsync(
+        new RunRequest(
+            Path.GetFullPath("developer.yaml"),
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)),
+        json: true,
+        cancellation.Token);
+    await provider.ApplyEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await cancellation.CancelAsync();
+
+    try
+    {
+      Assert.Equal(130, await execution.WaitAsync(TimeSpan.FromSeconds(5)));
+      var run = Assert.Single(await store.ListAsync(CancellationToken.None));
+      var before = await store.ReadLogPageAsync(
+          run.RunId,
+          0,
+          1000,
+          CancellationToken.None);
+      var outputBefore = output.ToString();
+      Assert.Equal(ExecutionState.Completed, run.State);
+      Assert.Equal(RunEventKind.Completed, before[^1].Kind);
+
+      provider.ReleaseApply.SetResult();
+      await provider.LateProgressReported.Task.WaitAsync(TimeSpan.FromSeconds(5));
+      await Task.Delay(250);
+
+      var after = await store.ReadLogPageAsync(
+          run.RunId,
+          0,
+          1000,
+          CancellationToken.None);
+      Assert.Equal(before, after);
+      Assert.Equal(RunEventKind.Completed, after[^1].Kind);
+      Assert.Equal(outputBefore, output.ToString());
+    }
+    finally
+    {
+      provider.ReleaseApply.TrySetResult();
+    }
+  }
+
   public void Dispose()
   {
     if (Directory.Exists(_directory))
@@ -919,6 +990,92 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
             ]
             : []
       });
+    }
+
+    public ValueTask<VerificationResult> VerifyAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) => ValueTask.FromResult(new VerificationResult
+        {
+          ResourceId = resource.Id,
+          Compliance = ComplianceStatus.Satisfied,
+          DetectedState = new DetectedState
+          {
+            ResourceId = resource.Id,
+            Outcome = DetectionOutcome.Succeeded,
+            Exists = true
+          }
+        });
+  }
+
+  private sealed class LateProgressAfterCancellationProvider : IResourceProvider
+  {
+    public string ResourceType => "package";
+    public string ProviderName => "failing";
+    public ProviderCapabilities Capabilities { get; } = new();
+    public TaskCompletionSource ApplyEntered { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource ReleaseApply { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource LateProgressReported { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public ValueTask<ProviderValidationResult> ValidateAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) =>
+        ValueTask.FromResult(ProviderValidationResult.Valid);
+
+    public ValueTask<DetectedState> DetectAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) => ValueTask.FromResult(new DetectedState
+        {
+          ResourceId = resource.Id,
+          Outcome = DetectionOutcome.Succeeded,
+          Exists = false
+        });
+
+    public ValueTask<ResourcePlan> PlanAsync(
+        ResourceDefinition resource,
+        DetectedState currentState,
+        CancellationToken cancellationToken) => ValueTask.FromResult(new ResourcePlan
+        {
+          ResourceId = resource.Id,
+          ResourceType = resource.Type,
+          ProviderName = resource.Provider,
+          DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(resource),
+          Compliance = ComplianceStatus.Missing,
+          IsExecutable = true,
+          Steps =
+          [
+            new PlanStep
+            {
+              Id = "install",
+              Description = "Install resource",
+              Action = PlanAction.Install,
+              PrivilegeRequirement = PrivilegeRequirement.CurrentUser,
+              RestartPolicy = RestartPolicy.NoRestart
+            }
+          ]
+        });
+
+    public async ValueTask<ResourceApplyResult> ApplyAsync(
+        ResourceDefinition resource,
+        ResourcePlan plan,
+        IProgress<ProviderProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+      ApplyEntered.SetResult();
+      await ReleaseApply.Task;
+      progress?.Report(new ProviderProgress(
+          "install",
+          0.5,
+          "late provider progress",
+          "install"));
+      LateProgressReported.SetResult();
+      return new ResourceApplyResult
+      {
+        ResourceId = resource.Id,
+        Outcome = ApplyOutcome.Succeeded
+      };
     }
 
     public ValueTask<VerificationResult> VerifyAsync(

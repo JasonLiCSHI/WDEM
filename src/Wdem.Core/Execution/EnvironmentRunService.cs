@@ -567,12 +567,27 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         progressPersistence.Token);
     try
     {
-      applied = await _dispatcher.ApplyAsync(
+      cancellationToken.ThrowIfCancellationRequested();
+      var applyTask = _dispatcher.ApplyAsync(
           provider,
           definition,
           planned.ResourcePlan,
           new InlineProgress<ProviderProgress>(progressBuffer.Report),
-          cancellationToken).ConfigureAwait(false);
+          cancellationToken);
+      if (!applyTask.IsCompleted)
+      {
+        var cancellationSignal = Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        var completion = await Task.WhenAny(applyTask, cancellationSignal)
+            .ConfigureAwait(false);
+        if (completion == cancellationSignal)
+        {
+          progressBuffer.StopAccepting();
+          ObserveFault(applyTask);
+          cancellationToken.ThrowIfCancellationRequested();
+        }
+      }
+
+      applied = await applyTask.ConfigureAwait(false);
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
@@ -584,7 +599,15 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     }
     finally
     {
-      progressBuffer.Complete();
+      if (cancellationToken.IsCancellationRequested)
+      {
+        progressBuffer.StopAccepting();
+      }
+      else
+      {
+        progressBuffer.Complete();
+      }
+
       progressPersistence.CancelAfter(_persistenceTimeout);
       try
       {
@@ -1299,6 +1322,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     private readonly Dictionary<string, ProviderProgress> _coalesced = [];
     private readonly HashSet<string> _terminalSteps = [];
     private bool _completed;
+    private bool _discardReports;
 
     public ProviderProgressBuffer(IEnumerable<string> knownSteps)
     {
@@ -1313,6 +1337,11 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           : UnknownStep;
       lock (_gate)
       {
+        if (_discardReports)
+        {
+          return;
+        }
+
         if (_completed)
         {
           throw new InvalidOperationException("Provider progress was reported after completion.");
@@ -1336,6 +1365,21 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         {
           _coalesced[key] = progress;
         }
+      }
+    }
+
+    public void StopAccepting()
+    {
+      lock (_gate)
+      {
+        if (_completed)
+        {
+          return;
+        }
+
+        _discardReports = true;
+        _completed = true;
+        _channel.Writer.TryComplete();
       }
     }
 

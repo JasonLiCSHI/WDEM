@@ -8,6 +8,7 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
   private readonly Dictionary<Guid, RunGate> _runGates = [];
   private readonly AsyncLocal<Guid?> _operationScope = new();
   private readonly AsyncLocal<long?> _deliveringSubscription = new();
+  private readonly AsyncLocal<PublicationContext?> _publicationContext = new();
   private long _nextSubscriptionId;
   private bool _disposed;
 
@@ -79,6 +80,39 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
   public async Task PublishAsync(RunEvent runEvent, CancellationToken cancellationToken)
   {
     ArgumentNullException.ThrowIfNull(runEvent);
+    var context = _publicationContext.Value;
+    if (context is not null)
+    {
+      await PublishCoreAsync(
+          runEvent,
+          cancellationToken,
+          context,
+          ownsContext: false).ConfigureAwait(false);
+      return;
+    }
+
+    context = new PublicationContext();
+    _publicationContext.Value = context;
+    try
+    {
+      await PublishCoreAsync(
+          runEvent,
+          cancellationToken,
+          context,
+          ownsContext: true).ConfigureAwait(false);
+    }
+    finally
+    {
+      _publicationContext.Value = null;
+    }
+  }
+
+  private async Task PublishCoreAsync(
+      RunEvent runEvent,
+      CancellationToken cancellationToken,
+      PublicationContext context,
+      bool ownsContext)
+  {
     var runGate = RetainRunGate(runEvent.RunId);
     var acquired = false;
     var requiredDeliveries = new List<Task>();
@@ -107,7 +141,7 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
         {
           if (subscriber.Id == recursivelyInvokedSubscription)
           {
-            ObserveFault(delivery);
+            context.Defer(delivery);
           }
           else
           {
@@ -130,21 +164,41 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
       ReleaseRunGate(runEvent.RunId, runGate);
     }
 
+    Exception? failure = null;
     try
     {
       await Task.WhenAll(requiredDeliveries).ConfigureAwait(false);
     }
-    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-    {
-      throw;
-    }
-    catch (RequiredRunEventDeliveryException)
-    {
-      throw;
-    }
     catch (Exception exception)
     {
-      throw new RequiredRunEventDeliveryException(exception);
+      failure = exception;
+    }
+
+    if (ownsContext)
+    {
+      try
+      {
+        await context.DrainAsync(cancellationToken).ConfigureAwait(false);
+      }
+      catch (Exception exception)
+      {
+        failure ??= exception;
+      }
+    }
+
+    if (failure is OperationCanceledException && cancellationToken.IsCancellationRequested)
+    {
+      throw new OperationCanceledException(cancellationToken);
+    }
+
+    if (failure is RequiredRunEventDeliveryException requiredFailure)
+    {
+      throw requiredFailure;
+    }
+
+    if (failure is not null)
+    {
+      throw new RequiredRunEventDeliveryException(failure);
     }
   }
 
@@ -213,6 +267,66 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
   {
     public SemaphoreSlim Semaphore { get; } = new(1, 1);
     public int Users { get; set; }
+  }
+
+  private sealed class PublicationContext
+  {
+    private readonly object _gate = new();
+    private readonly List<Task> _deferred = [];
+
+    public void Defer(Task delivery)
+    {
+      lock (_gate)
+      {
+        _deferred.Add(delivery);
+      }
+    }
+
+    public async Task DrainAsync(CancellationToken cancellationToken)
+    {
+      Exception? failure = null;
+      while (TakeDeferred() is { Count: > 0 } deliveries)
+      {
+        var completion = Task.WhenAll(deliveries);
+        try
+        {
+          await completion.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+          if (!completion.IsCompleted)
+          {
+            ObserveFault(completion);
+          }
+
+          failure ??= exception;
+          if (cancellationToken.IsCancellationRequested)
+          {
+            break;
+          }
+        }
+      }
+
+      if (failure is not null)
+      {
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+      }
+    }
+
+    private IReadOnlyList<Task> TakeDeferred()
+    {
+      lock (_gate)
+      {
+        if (_deferred.Count == 0)
+        {
+          return [];
+        }
+
+        var deliveries = _deferred.ToArray();
+        _deferred.Clear();
+        return deliveries;
+      }
+    }
   }
 
   private sealed class Subscription(

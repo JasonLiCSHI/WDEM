@@ -126,6 +126,92 @@ public sealed class RunEventHubTests
   }
 
   [Fact]
+  public async Task PublishAsync_ReentrantRequiredFailurePropagatesToOuterPublication()
+  {
+    IRunEventSink sink = new RunEventHub();
+    using var subscription = sink.SubscribeRequired(async (runEvent, cancellationToken) =>
+    {
+      if (runEvent.Sequence == 1)
+      {
+        await sink.PublishAsync(Event(2), cancellationToken);
+      }
+      else
+      {
+        throw new IOException("recursive output failed");
+      }
+    });
+
+    var error = await Assert.ThrowsAsync<RequiredRunEventDeliveryException>(() =>
+        sink.PublishAsync(Event(1), CancellationToken.None));
+
+    Assert.Equal("recursive output failed", error.Cause.Message);
+  }
+
+  [Fact]
+  public async Task PublishAsync_WaitsForReentrantRequiredDeliveryBeforeReturning()
+  {
+    var deferredEntered = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var releaseDeferred = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    IRunEventSink sink = new RunEventHub();
+    using var subscription = sink.SubscribeRequired(async (runEvent, cancellationToken) =>
+    {
+      if (runEvent.Sequence == 1)
+      {
+        await sink.PublishAsync(Event(2), cancellationToken);
+      }
+      else
+      {
+        deferredEntered.SetResult();
+        await releaseDeferred.Task;
+      }
+    });
+    var publication = sink.PublishAsync(Event(1), CancellationToken.None);
+    await deferredEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    Assert.False(publication.IsCompleted);
+    releaseDeferred.SetResult();
+    await publication.WaitAsync(TimeSpan.FromSeconds(5));
+  }
+
+  [Fact]
+  public async Task PublishAsync_CancellationBoundsHangingReentrantRequiredDelivery()
+  {
+    using var cancellation = new CancellationTokenSource();
+    var deferredEntered = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var releaseDeferred = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    IRunEventSink sink = new RunEventHub();
+    using var subscription = sink.SubscribeRequired(async (runEvent, cancellationToken) =>
+    {
+      if (runEvent.Sequence == 1)
+      {
+        await sink.PublishAsync(Event(2), cancellationToken);
+      }
+      else
+      {
+        deferredEntered.SetResult();
+        await releaseDeferred.Task;
+      }
+    });
+    var publication = sink.PublishAsync(Event(1), cancellation.Token);
+    await deferredEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    try
+    {
+      await cancellation.CancelAsync();
+      await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+          publication.WaitAsync(TimeSpan.FromSeconds(1)));
+    }
+    finally
+    {
+      releaseDeferred.TrySetResult();
+    }
+  }
+
+  [Fact]
   public async Task PublishAsync_HangingOptionalObserverDoesNotBlockRequiredDelivery()
   {
     var optionalEntered = new TaskCompletionSource(
