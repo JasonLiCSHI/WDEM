@@ -3,17 +3,15 @@ namespace Wdem.Windows.Security;
 public sealed record ElevatedHostBootstrapOptions(
     string PipeName,
     Guid RunId,
-    string ProfilesDirectory,
     string LocalApplicationData)
 {
   public static ElevatedHostBootstrapOptions Parse(IReadOnlyList<string> arguments)
   {
     ArgumentNullException.ThrowIfNull(arguments);
-    if (arguments.Count != 8 ||
+    if (arguments.Count != 6 ||
         !string.Equals(arguments[0], "--pipe", StringComparison.Ordinal) ||
         !string.Equals(arguments[2], "--run-id", StringComparison.Ordinal) ||
-        !string.Equals(arguments[4], "--profiles", StringComparison.Ordinal) ||
-        !string.Equals(arguments[6], "--local-app-data", StringComparison.Ordinal))
+        !string.Equals(arguments[4], "--local-app-data", StringComparison.Ordinal))
     {
       throw new ArgumentException(
           "The elevated host accepts only the required bootstrap arguments.",
@@ -32,18 +30,16 @@ public sealed record ElevatedHostBootstrapOptions(
           nameof(arguments));
     }
 
-    if (string.IsNullOrWhiteSpace(arguments[5]) ||
-        string.IsNullOrWhiteSpace(arguments[7]))
+    if (string.IsNullOrWhiteSpace(arguments[5]))
     {
       throw new ArgumentException(
-          "The profiles and local application data paths are required.",
+          "The local application data path is required.",
           nameof(arguments));
     }
 
     return new ElevatedHostBootstrapOptions(
         arguments[1],
         runId,
-        Path.GetFullPath(arguments[5]),
-        Path.GetFullPath(arguments[7]));
+        Path.GetFullPath(arguments[5]));
   }
 }

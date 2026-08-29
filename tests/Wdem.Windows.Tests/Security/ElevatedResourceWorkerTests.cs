@@ -71,6 +71,63 @@ public sealed class ElevatedResourceWorkerTests
   }
 
   [Fact]
+  public async Task ApplyAsync_SealedSnapshot_PassesOriginalResourceValuesToProvider()
+  {
+    var provider = new RecordingProvider();
+    var run = ApprovedRun(provider, out _);
+    var persisted = run.Plan!.Resources.Single();
+    var original = persisted.Definition with
+    {
+      Parameters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["password"] = "original-secret"
+      }
+    };
+    var approvedPlan = persisted.ResourcePlan with
+    {
+      DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(original)
+    };
+    var fingerprint = ApprovedResourceFingerprint.Create(original, approvedPlan);
+    var redactedRun = run with
+    {
+      Plan = run.Plan with
+      {
+        Resources =
+        [
+          persisted with
+          {
+            Definition = original with
+            {
+              Parameters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+              {
+                ["password"] = "***"
+              }
+            },
+            ResourcePlan = approvedPlan
+          }
+        ]
+      }
+    };
+    var worker = new ElevatedResourceWorker(
+        new StubRunStore(redactedRun),
+        new StubApprovedResourceStore(new ApprovedResource(original, approvedPlan, fingerprint)),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+
+    var result = await worker.ApplyAsync(
+        new ElevatedResourceRequest(
+            run.RunId,
+            original.Id,
+            fingerprint,
+            "pipe"),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
+    Assert.Equal("original-secret", provider.LastResource!.Parameters["password"]);
+  }
+
+  [Fact]
   public async Task ApplyAsync_CurrentUserSnapshot_RefusesWithoutCallingProvider()
   {
     var provider = new RecordingProvider();
@@ -117,6 +174,157 @@ public sealed class ElevatedResourceWorkerTests
     Assert.Equal(0, provider.ApplyCalls);
   }
 
+  [Fact]
+  public async Task ApplyAsync_ResourceIsNotPersistedAsRunning_RefusesWithoutCallingProvider()
+  {
+    var provider = new RecordingProvider();
+    var approved = ApprovedRun(provider, out var approvedFingerprint);
+    var notRunning = approved with
+    {
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["admin-resource"] = approved.ResourceResults["admin-resource"] with
+        {
+          State = ExecutionState.Ready
+        }
+      }
+    };
+    var worker = new ElevatedResourceWorker(
+        new StubRunStore(notRunning),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+
+    var result = await worker.ApplyAsync(
+        new ElevatedResourceRequest(
+            approved.RunId,
+            "admin-resource",
+            approvedFingerprint,
+            "pipe"),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(WdemErrorCode.PermissionError, result.Error!.Code);
+    Assert.Equal(0, provider.ApplyCalls);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_DependencyHasNotSucceeded_RefusesOutOfOrderExecution()
+  {
+    var provider = new RecordingProvider();
+    var approved = ApprovedRun(provider, out var approvedFingerprint);
+    var planned = approved.Plan!.Resources.Single();
+    var outOfOrder = approved with
+    {
+      Plan = approved.Plan with
+      {
+        Resources = [planned with { Dependencies = ["dependency"] }]
+      },
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["admin-resource"] = approved.ResourceResults["admin-resource"],
+        ["dependency"] = new ResourceResult
+        {
+          ResourceId = "dependency",
+          State = ExecutionState.Running
+        }
+      }
+    };
+    var worker = new ElevatedResourceWorker(
+        new StubRunStore(outOfOrder),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+
+    var result = await worker.ApplyAsync(
+        new ElevatedResourceRequest(
+            approved.RunId,
+            "admin-resource",
+            approvedFingerprint,
+            "pipe"),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(WdemErrorCode.PermissionError, result.Error!.Code);
+    Assert.Equal(0, provider.ApplyCalls);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_SameApprovedRequestIsReplayed_ExecutesProviderOnce()
+  {
+    var provider = new RecordingProvider();
+    var run = ApprovedRun(provider, out var approvedFingerprint);
+    var worker = new ElevatedResourceWorker(
+        new StubRunStore(run),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+    var request = new ElevatedResourceRequest(
+        run.RunId,
+        "admin-resource",
+        approvedFingerprint,
+        "pipe");
+
+    var first = await worker.ApplyAsync(request, null, CancellationToken.None);
+    var replay = await worker.ApplyAsync(request, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, first.Outcome);
+    Assert.Equal(ApplyOutcome.Failed, replay.Outcome);
+    Assert.Equal(WdemErrorCode.PermissionError, replay.Error!.Code);
+    Assert.Equal(1, provider.ApplyCalls);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_PersistedPlanStepWasTampered_RefusesWithoutCallingProvider()
+  {
+    var provider = new RecordingProvider();
+    var approvedRun = ApprovedRun(provider, out var approvedFingerprint);
+    var approvedPlan = approvedRun.Plan!.Resources.Single();
+    var tampered = approvedRun with
+    {
+      Plan = approvedRun.Plan with
+      {
+        Resources =
+        [
+          approvedPlan with
+          {
+            ResourcePlan = approvedPlan.ResourcePlan with
+            {
+              Steps =
+              [
+                approvedPlan.ResourcePlan.Steps.Single() with
+                {
+                  Action = PlanAction.Upgrade
+                }
+              ]
+            }
+          }
+        ]
+      }
+    };
+    var sealedResource = new ApprovedResource(
+        approvedPlan.Definition,
+        approvedPlan.ResourcePlan,
+        approvedFingerprint);
+    var worker = new ElevatedResourceWorker(
+        new StubRunStore(tampered),
+        new StubApprovedResourceStore(sealedResource),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+
+    var result = await worker.ApplyAsync(
+        new ElevatedResourceRequest(
+            approvedRun.RunId,
+            "admin-resource",
+            approvedFingerprint,
+            "pipe"),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(WdemErrorCode.PermissionError, result.Error!.Code);
+    Assert.Equal(0, provider.ApplyCalls);
+  }
+
   private static ExecutionRun ApprovedRun(
       RecordingProvider provider,
       out string fingerprint)
@@ -128,13 +336,13 @@ public sealed class ElevatedResourceWorkerTests
       Provider = provider.ProviderName,
       PrivilegeRequirement = PrivilegeRequirement.Administrator
     };
-    fingerprint = ResourceDefinitionFingerprint.Create(definition);
+    var desiredFingerprint = ResourceDefinitionFingerprint.Create(definition);
     var resourcePlan = new ResourcePlan
     {
       ResourceId = definition.Id,
       ResourceType = definition.Type,
       ProviderName = definition.Provider,
-      DesiredStateFingerprint = fingerprint,
+      DesiredStateFingerprint = desiredFingerprint,
       Compliance = ComplianceStatus.Missing,
       IsExecutable = true,
       Steps =
@@ -149,6 +357,7 @@ public sealed class ElevatedResourceWorkerTests
         }
       ]
     };
+    fingerprint = ApprovedResourceFingerprint.Create(definition, resourcePlan);
     var planned = new PlannedResource
     {
       Definition = definition,
@@ -181,6 +390,14 @@ public sealed class ElevatedResourceWorkerTests
         Layers = [new ResourceGraphLayer(0, [definition.Id])],
         Resources = [planned],
         IsExecutable = true
+      },
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        [definition.Id] = new ResourceResult
+        {
+          ResourceId = definition.Id,
+          State = ExecutionState.Running
+        }
       }
     };
   }
@@ -188,12 +405,35 @@ public sealed class ElevatedResourceWorkerTests
   private static string Mutate(string fingerprint) =>
       $"{(fingerprint[0] == 'A' ? 'B' : 'A')}{fingerprint[1..]}";
 
-  private sealed class StubRunStore(ExecutionRun run) : IExecutionRunStore
+  private sealed class StubRunStore(ExecutionRun run) :
+      IExecutionRunStore,
+      IApprovedResourceStore
   {
     public IReadOnlyList<StructuredError> Diagnostics => [];
 
     public Task<ExecutionRun?> GetAsync(Guid runId, CancellationToken cancellationToken) =>
         Task.FromResult<ExecutionRun?>(runId == run.RunId ? run : null);
+
+    public Task<ApprovedResource?> GetApprovedResourceAsync(
+        Guid runId,
+        string resourceId,
+        CancellationToken cancellationToken)
+    {
+      var planned = runId == run.RunId
+          ? run.Plan?.Resources.SingleOrDefault(resource => string.Equals(
+              resource.Definition.Id,
+              resourceId,
+              StringComparison.OrdinalIgnoreCase))
+          : null;
+      return Task.FromResult(planned is null
+          ? null
+          : new ApprovedResource(
+              planned.Definition,
+              planned.ResourcePlan,
+              ApprovedResourceFingerprint.Create(
+                  planned.Definition,
+                  planned.ResourcePlan)));
+    }
 
     public Task CreateAsync(ExecutionRun value, CancellationToken cancellationToken) =>
         throw new NotSupportedException();
@@ -229,6 +469,7 @@ public sealed class ElevatedResourceWorkerTests
     public string ProviderName => "test";
     public ProviderCapabilities Capabilities { get; } = new();
     public int ApplyCalls { get; private set; }
+    public ResourceDefinition? LastResource { get; private set; }
 
     public ValueTask<ResourceApplyResult> ApplyAsync(
         ResourceDefinition resource,
@@ -237,6 +478,7 @@ public sealed class ElevatedResourceWorkerTests
         CancellationToken cancellationToken)
     {
       ApplyCalls++;
+      LastResource = resource;
       progress?.Report(new ProviderProgress("apply", 0.5, "password=hunter2"));
       return ValueTask.FromResult(new ResourceApplyResult
       {
@@ -276,6 +518,15 @@ public sealed class ElevatedResourceWorkerTests
     public ValueTask<VerificationResult> VerifyAsync(
         ResourceDefinition resource,
         CancellationToken cancellationToken) => throw new NotSupportedException();
+  }
+
+  private sealed class StubApprovedResourceStore(ApprovedResource approved) :
+      IApprovedResourceStore
+  {
+    public Task<ApprovedResource?> GetApprovedResourceAsync(
+        Guid runId,
+        string resourceId,
+        CancellationToken cancellationToken) => Task.FromResult<ApprovedResource?>(approved);
   }
 
   private sealed class RecordingProgress : IProgress<ProviderProgress>

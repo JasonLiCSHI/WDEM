@@ -10,15 +10,35 @@ namespace Wdem.Windows.Security;
 public sealed class ElevatedResourceWorker
 {
   private readonly IExecutionRunStore _runStore;
+  private readonly IApprovedResourceStore _approvedResources;
   private readonly IResourceProviderRegistry _providers;
   private readonly LogRedactor _redactor;
+  private readonly object _claimsGate = new();
+  private readonly HashSet<string> _claimedResources = new(StringComparer.OrdinalIgnoreCase);
 
   public ElevatedResourceWorker(
       IExecutionRunStore runStore,
       IResourceProviderRegistry providers,
       LogRedactor redactor)
+      : this(
+          runStore,
+          runStore as IApprovedResourceStore ?? throw new ArgumentException(
+              "The execution run store must provide protected approved resources.",
+              nameof(runStore)),
+          providers,
+          redactor)
+  {
+  }
+
+  public ElevatedResourceWorker(
+      IExecutionRunStore runStore,
+      IApprovedResourceStore approvedResources,
+      IResourceProviderRegistry providers,
+      LogRedactor redactor)
   {
     _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
+    _approvedResources = approvedResources ??
+        throw new ArgumentNullException(nameof(approvedResources));
     _providers = providers ?? throw new ArgumentNullException(nameof(providers));
     _redactor = redactor ?? throw new ArgumentNullException(nameof(redactor));
   }
@@ -49,6 +69,22 @@ public sealed class ElevatedResourceWorker
     }
 
     var planned = matches[0];
+    if (!run.ResourceResults.TryGetValue(request.ResourceId, out var persistedResult) ||
+        persistedResult.State != ExecutionState.Running ||
+        persistedResult.Outcome is not null)
+    {
+      return Refused(request.ResourceId, "The resource is not running in the persisted run state.");
+    }
+
+    if (!planned.Dependencies.All(dependency =>
+            run.ResourceResults.TryGetValue(dependency, out var dependencyResult) &&
+            dependencyResult.State == ExecutionState.Completed &&
+            dependencyResult.Outcome is ExecutionOutcome.Succeeded or
+                ExecutionOutcome.NotRequired))
+    {
+      return Refused(request.ResourceId, "The resource dependencies have not succeeded.");
+    }
+
     if (planned.Status != PlannedResourceStatus.Ready ||
         !planned.RequiresElevation ||
         !planned.ResourcePlan.IsExecutable ||
@@ -60,43 +96,77 @@ public sealed class ElevatedResourceWorker
       return Refused(request.ResourceId, "The resource has no approved administrator action.");
     }
 
-    var recomputedFingerprint = ResourceDefinitionFingerprint.Create(planned.Definition);
-    if (!FixedEquals(request.PlanFingerprint, planned.ResourcePlan.DesiredStateFingerprint) ||
-        !FixedEquals(request.PlanFingerprint, recomputedFingerprint))
+    var approved = await _approvedResources.GetApprovedResourceAsync(
+        request.RunId,
+        request.ResourceId,
+        cancellationToken).ConfigureAwait(false);
+    if (approved is null ||
+        !FixedEquals(request.PlanFingerprint, approved.Fingerprint) ||
+        !FixedEquals(
+            approved.Fingerprint,
+            ApprovedResourceFingerprint.Create(approved.Definition, approved.Plan)) ||
+        !FixedEquals(
+            approved.Fingerprint,
+            ApprovedResourceFingerprint.Create(approved.Definition, planned.ResourcePlan)))
     {
       return Refused(request.ResourceId, "The approved resource fingerprint does not match.");
     }
 
     if (!string.Equals(
-            planned.ResourcePlan.ResourceId,
+            approved.Definition.Id,
+            request.ResourceId,
+            StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(
             planned.Definition.Id,
+            approved.Definition.Id,
             StringComparison.OrdinalIgnoreCase) ||
         !string.Equals(
-            planned.ResourcePlan.ResourceType,
             planned.Definition.Type,
+            approved.Definition.Type,
             StringComparison.OrdinalIgnoreCase) ||
         !string.Equals(
-            planned.ResourcePlan.ProviderName,
             planned.Definition.Provider,
+            approved.Definition.Provider,
+            StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(
+            approved.Plan.ResourceId,
+            approved.Definition.Id,
+            StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(
+            approved.Plan.ResourceType,
+            approved.Definition.Type,
+            StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(
+            approved.Plan.ProviderName,
+            approved.Definition.Provider,
             StringComparison.OrdinalIgnoreCase) ||
         !_providers.TryGet(
-            planned.Definition.Type,
-            planned.Definition.Provider,
+            approved.Definition.Type,
+            approved.Definition.Provider,
             out var provider) ||
         provider is null)
     {
       return Refused(request.ResourceId, "The approved provider identity is unavailable.");
     }
 
-    _redactor.RegisterSensitiveParameters(planned.Definition.Parameters);
+    var claim = $"{request.RunId:N}\0{approved.Definition.Id}\0{approved.Fingerprint}";
+    lock (_claimsGate)
+    {
+      if (!_claimedResources.Add(claim))
+      {
+        return Refused(request.ResourceId, "The approved resource request has already been used.");
+      }
+    }
+
+    _redactor.RegisterSensitiveParameters(approved.Definition.Parameters);
     var redactingProgress = progress is null
         ? null
         : new RedactingProgress(progress, _redactor);
     try
     {
       var result = await provider.ApplyAsync(
-          planned.Definition,
-          planned.ResourcePlan,
+          approved.Definition,
+          approved.Plan,
           redactingProgress,
           cancellationToken).ConfigureAwait(false);
       return Redact(result, request.ResourceId);

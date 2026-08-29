@@ -12,21 +12,17 @@ public sealed class ElevatedHostLauncher : IElevatedHostLauncher
   private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
   private static readonly TimeSpan DefaultConnectionTimeout = TimeSpan.FromMinutes(2);
   private readonly string _hostPath;
-  private readonly string _profilesDirectory;
   private readonly string _localApplicationData;
   private readonly TimeSpan _connectionTimeout;
 
   public ElevatedHostLauncher(
       string hostPath,
-      string profilesDirectory,
       string localApplicationData,
       TimeSpan? connectionTimeout = null)
   {
     ArgumentException.ThrowIfNullOrWhiteSpace(hostPath);
-    ArgumentException.ThrowIfNullOrWhiteSpace(profilesDirectory);
     ArgumentException.ThrowIfNullOrWhiteSpace(localApplicationData);
     _hostPath = Path.GetFullPath(hostPath);
-    _profilesDirectory = Path.GetFullPath(profilesDirectory);
     _localApplicationData = Path.GetFullPath(localApplicationData);
     _connectionTimeout = connectionTimeout ?? DefaultConnectionTimeout;
     if (_connectionTimeout <= TimeSpan.Zero)
@@ -60,7 +56,6 @@ public sealed class ElevatedHostLauncher : IElevatedHostLauncher
           _hostPath,
           pipeName,
           runId,
-          _profilesDirectory,
           _localApplicationData)) ?? throw new InvalidOperationException(
           "The elevated host process could not be started.");
       job = ElevatedHostProcessJob.Attach(process);
@@ -88,7 +83,6 @@ public sealed class ElevatedHostLauncher : IElevatedHostLauncher
       string hostPath,
       string pipeName,
       Guid runId,
-      string profilesDirectory,
       string localApplicationData)
   {
     var startInfo = new ProcessStartInfo
@@ -103,8 +97,6 @@ public sealed class ElevatedHostLauncher : IElevatedHostLauncher
     startInfo.ArgumentList.Add(pipeName);
     startInfo.ArgumentList.Add("--run-id");
     startInfo.ArgumentList.Add(runId.ToString("D"));
-    startInfo.ArgumentList.Add("--profiles");
-    startInfo.ArgumentList.Add(profilesDirectory);
     startInfo.ArgumentList.Add("--local-app-data");
     startInfo.ArgumentList.Add(localApplicationData);
     return startInfo;

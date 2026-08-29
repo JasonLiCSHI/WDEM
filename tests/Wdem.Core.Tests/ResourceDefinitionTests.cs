@@ -328,6 +328,56 @@ public sealed class ResourceDefinitionTests
         ResourceDefinitionFingerprint.Create(second));
   }
 
+  [Fact]
+  public void ApprovedFingerprint_CoversOriginalDefinitionAndExecutableSteps()
+  {
+    var resource = new ResourceDefinition
+    {
+      Id = "admin-resource",
+      Type = "test",
+      Provider = "test",
+      Parameters = new Dictionary<string, string?>
+      {
+        ["password"] = "first-secret"
+      }
+    };
+    var plan = new ResourcePlan
+    {
+      ResourceId = resource.Id,
+      ResourceType = resource.Type,
+      ProviderName = resource.Provider,
+      DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(resource),
+      Compliance = ComplianceStatus.Missing,
+      IsExecutable = true,
+      Steps =
+      [
+        new PlanStep
+        {
+          Id = "admin-resource:apply",
+          Description = "Apply resource.",
+          Action = PlanAction.Configure,
+          PrivilegeRequirement = PrivilegeRequirement.Administrator,
+          RestartPolicy = RestartPolicy.NoRestart
+        }
+      ]
+    };
+    var approved = ApprovedResourceFingerprint.Create(resource, plan);
+    var changedDefinition = resource with
+    {
+      Parameters = new Dictionary<string, string?>
+      {
+        ["password"] = "second-secret"
+      }
+    };
+    var changedStep = plan with
+    {
+      Steps = [plan.Steps.Single() with { Action = PlanAction.Upgrade }]
+    };
+
+    Assert.NotEqual(approved, ApprovedResourceFingerprint.Create(changedDefinition, plan));
+    Assert.NotEqual(approved, ApprovedResourceFingerprint.Create(resource, changedStep));
+  }
+
   private sealed class StubProvider(string resourceType, string providerName) : IResourceProvider
   {
     public string ResourceType { get; } = resourceType;

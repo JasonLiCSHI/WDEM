@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Collections.Frozen;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -9,10 +10,11 @@ using Wdem.Core.Planning;
 using Wdem.Core.Providers;
 using Wdem.Core.Resources;
 using Wdem.Core.Runs;
+using Wdem.Windows.Security;
 
 namespace Wdem.Windows.Persistence;
 
-public sealed class JsonExecutionRunStore : IExecutionRunStore
+public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourceStore
 {
   private const int SharingViolationHResult = unchecked((int)0x80070020);
   private const int LockViolationHResult = unchecked((int)0x80070021);
@@ -30,13 +32,28 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
   private readonly JsonSerializerOptions _snapshotJsonOptions;
   private readonly JsonSerializerOptions _logJsonOptions;
   private readonly Func<string, IAsyncDisposable> _recoveryLockOpener;
+  private readonly IApprovedResourceProtector _approvedResourceProtector;
   private readonly TimeProvider _timeProvider;
 
   public JsonExecutionRunStore(
       WdemDataPaths paths,
       LogRedactor redactor,
       TimeProvider? timeProvider = null)
-      : this(paths, redactor, OpenRecoveryLock, timeProvider)
+      : this(
+          paths,
+          redactor,
+          OpenRecoveryLock,
+          new CurrentUserApprovedResourceProtector(),
+          timeProvider)
+  {
+  }
+
+  internal JsonExecutionRunStore(
+      WdemDataPaths paths,
+      LogRedactor redactor,
+      IApprovedResourceProtector approvedResourceProtector,
+      TimeProvider? timeProvider = null)
+      : this(paths, redactor, OpenRecoveryLock, approvedResourceProtector, timeProvider)
   {
   }
 
@@ -45,11 +62,28 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
       LogRedactor redactor,
       Func<string, IAsyncDisposable> recoveryLockOpener,
       TimeProvider? timeProvider = null)
+      : this(
+          paths,
+          redactor,
+          recoveryLockOpener,
+          new CurrentUserApprovedResourceProtector(),
+          timeProvider)
+  {
+  }
+
+  internal JsonExecutionRunStore(
+      WdemDataPaths paths,
+      LogRedactor redactor,
+      Func<string, IAsyncDisposable> recoveryLockOpener,
+      IApprovedResourceProtector approvedResourceProtector,
+      TimeProvider? timeProvider = null)
   {
     _paths = paths ?? throw new ArgumentNullException(nameof(paths));
     _redactor = redactor ?? throw new ArgumentNullException(nameof(redactor));
     _recoveryLockOpener = recoveryLockOpener ??
         throw new ArgumentNullException(nameof(recoveryLockOpener));
+    _approvedResourceProtector = approvedResourceProtector ??
+        throw new ArgumentNullException(nameof(approvedResourceProtector));
     _snapshotJsonOptions = CreateJsonOptions(writeIndented: true);
     _logJsonOptions = CreateJsonOptions(writeIndented: false);
     _timeProvider = timeProvider ?? TimeProvider.System;
@@ -74,6 +108,9 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
 
   public string LogIndexPath(Guid runId) => LogPath(runId) + ".index";
 
+  public string ApprovedResourcesPath(Guid runId) =>
+      Path.Combine(_paths.RunsDirectory, $"{runId:D}.approved.json");
+
   public async Task CreateAsync(ExecutionRun run, CancellationToken cancellationToken)
   {
     ArgumentNullException.ThrowIfNull(run);
@@ -87,7 +124,23 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
       throw new InvalidOperationException($"Execution run '{run.RunId:D}' already exists.");
     }
 
-    await WriteSnapshotAsync(path, Redact(run), cancellationToken).ConfigureAwait(false);
+    var approvedPath = ApprovedResourcesPath(run.RunId);
+    var approvedWritten = false;
+    try
+    {
+      approvedWritten = await WriteApprovedResourcesAsync(run, cancellationToken)
+          .ConfigureAwait(false);
+      await WriteSnapshotAsync(path, Redact(run), cancellationToken).ConfigureAwait(false);
+    }
+    catch
+    {
+      if (approvedWritten && File.Exists(approvedPath))
+      {
+        File.Delete(approvedPath);
+      }
+
+      throw;
+    }
   }
 
   public async Task<ExecutionRun?> GetAsync(Guid runId, CancellationToken cancellationToken)
@@ -102,7 +155,13 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
         runId,
         cancellationToken)
         .ConfigureAwait(false);
-    return await ReadSnapshotAsync(runId, cancellationToken).ConfigureAwait(false);
+    var run = await ReadSnapshotAsync(runId, cancellationToken).ConfigureAwait(false);
+    if (run?.State == ExecutionState.Completed)
+    {
+      DeleteApprovedResources(runId);
+    }
+
+    return run;
   }
 
   public async Task<IReadOnlyList<ExecutionRun>> ListIncompleteAsync(
@@ -212,6 +271,11 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
 
     var saved = run with { Revision = checked(run.Revision + 1) };
     await WriteSnapshotAsync(path, Redact(saved), cancellationToken).ConfigureAwait(false);
+    if (saved.State == ExecutionState.Completed)
+    {
+      DeleteApprovedResources(saved.RunId);
+    }
+
     return saved;
   }
 
@@ -249,7 +313,112 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
     }
 
     await WriteSnapshotAsync(path, Redact(run), cancellationToken).ConfigureAwait(false);
+    if (run.State == ExecutionState.Completed)
+    {
+      DeleteApprovedResources(run.RunId);
+    }
+
     return true;
+  }
+
+  public async Task<ApprovedResource?> GetApprovedResourceAsync(
+      Guid runId,
+      string resourceId,
+      CancellationToken cancellationToken)
+  {
+    if (runId == Guid.Empty)
+    {
+      throw new ArgumentException("An execution run identifier is required.", nameof(runId));
+    }
+
+    ArgumentException.ThrowIfNullOrWhiteSpace(resourceId);
+    cancellationToken.ThrowIfCancellationRequested();
+    await using var runLock = await AcquireRunLockForExistingSnapshotAsync(
+        runId,
+        cancellationToken).ConfigureAwait(false);
+    if (!File.Exists(SnapshotPath(runId)))
+    {
+      return null;
+    }
+
+    var path = ApprovedResourcesPath(runId);
+    if (!File.Exists(path))
+    {
+      return null;
+    }
+
+    try
+    {
+      await using var stream = new FileStream(
+          path,
+          FileMode.Open,
+          FileAccess.Read,
+          FileShare.Read,
+          4096,
+          FileOptions.Asynchronous | FileOptions.SequentialScan);
+      var envelope = await JsonSerializer.DeserializeAsync<ApprovedResourceEnvelope>(
+          stream,
+          _snapshotJsonOptions,
+          cancellationToken).ConfigureAwait(false);
+      if (envelope is null || envelope.RunId != runId)
+      {
+        return null;
+      }
+
+      var matches = envelope.Resources.Where(entry => string.Equals(
+          entry.ResourceId,
+          resourceId,
+          StringComparison.OrdinalIgnoreCase)).ToArray();
+      if (matches.Length != 1)
+      {
+        return null;
+      }
+
+      var entry = matches[0];
+      var protectedData = Convert.FromBase64String(entry.ProtectedPayload);
+      var plaintext = _approvedResourceProtector.Unprotect(
+          protectedData,
+          ApprovedResourceEntropy(runId, entry.ResourceId, entry.Fingerprint));
+      var approved = JsonSerializer.Deserialize<ApprovedResource>(
+          plaintext,
+          _snapshotJsonOptions);
+      if (approved is null ||
+          !string.Equals(
+              approved.Definition.Id,
+              entry.ResourceId,
+              StringComparison.OrdinalIgnoreCase) ||
+          !FixedEquals(approved.Fingerprint, entry.Fingerprint) ||
+          !FixedEquals(
+              approved.Fingerprint,
+              ApprovedResourceFingerprint.Create(approved.Definition, approved.Plan)))
+      {
+        return null;
+      }
+
+      return approved;
+    }
+    catch (Exception exception) when (
+        exception is CryptographicException
+            or JsonException
+            or FormatException
+            or NotSupportedException
+            or InvalidOperationException
+            or ArgumentException)
+    {
+      lock (_diagnosticsGate)
+      {
+        _diagnostics.Add(new StructuredError(
+            WdemErrorCode.PermissionError,
+            "Approved resource snapshot could not be opened.",
+            $"Run '{runId:D}' resource '{resourceId}' was not authorized because its protected snapshot is invalid.")
+        {
+          ResourceId = resourceId,
+          IsRetryable = false
+        });
+      }
+
+      return null;
+    }
   }
 
   public async Task AppendLogAsync(
@@ -456,6 +625,127 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
     lock (_diagnosticsGate)
     {
       _diagnostics.Add(diagnostic);
+    }
+  }
+
+  private async Task<bool> WriteApprovedResourcesAsync(
+      ExecutionRun run,
+      CancellationToken cancellationToken)
+  {
+    if (run.State == ExecutionState.Completed || run.Plan is null)
+    {
+      return false;
+    }
+
+    var entries = new List<ProtectedApprovedResource>();
+    foreach (var planned in run.Plan.Resources.Where(resource =>
+                 resource.Status == PlannedResourceStatus.Ready &&
+                 resource.RequiresElevation &&
+                 resource.ResourcePlan.IsExecutable))
+    {
+      var fingerprint = ApprovedResourceFingerprint.Create(
+          planned.Definition,
+          planned.ResourcePlan);
+      var approved = new ApprovedResource(
+          planned.Definition,
+          planned.ResourcePlan,
+          fingerprint);
+      var plaintext = JsonSerializer.SerializeToUtf8Bytes(approved, _snapshotJsonOptions);
+      var protectedData = _approvedResourceProtector.Protect(
+          plaintext,
+          ApprovedResourceEntropy(run.RunId, planned.Definition.Id, fingerprint));
+      entries.Add(new ProtectedApprovedResource(
+          planned.Definition.Id,
+          fingerprint,
+          Convert.ToBase64String(protectedData)));
+    }
+
+    if (entries.Count == 0)
+    {
+      return false;
+    }
+
+    var bytes = JsonSerializer.SerializeToUtf8Bytes(
+        new ApprovedResourceEnvelope(run.RunId, entries),
+        _snapshotJsonOptions);
+    await WriteBytesAtomicallyAsync(
+        ApprovedResourcesPath(run.RunId),
+        bytes,
+        cancellationToken).ConfigureAwait(false);
+    return true;
+  }
+
+  private static byte[] ApprovedResourceEntropy(
+      Guid runId,
+      string resourceId,
+      string fingerprint) => SHA256.HashData(Utf8WithoutBom.GetBytes(
+          $"wdem-approved-resource\0{runId:D}\0{resourceId}\0{fingerprint}"));
+
+  private static bool FixedEquals(string? left, string? right)
+  {
+    if (left is null || right is null || left.Length != 64 || right.Length != 64)
+    {
+      return false;
+    }
+
+    try
+    {
+      return CryptographicOperations.FixedTimeEquals(
+          Convert.FromHexString(left),
+          Convert.FromHexString(right));
+    }
+    catch (FormatException)
+    {
+      return false;
+    }
+  }
+
+  private void DeleteApprovedResources(Guid runId)
+  {
+    var path = ApprovedResourcesPath(runId);
+    if (File.Exists(path))
+    {
+      File.Delete(path);
+    }
+  }
+
+  private static async Task WriteBytesAtomicallyAsync(
+      string path,
+      byte[] bytes,
+      CancellationToken cancellationToken)
+  {
+    var temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
+    try
+    {
+      await using (var stream = new FileStream(
+          temporaryPath,
+          FileMode.Create,
+          FileAccess.Write,
+          FileShare.None,
+          4096,
+          FileOptions.Asynchronous | FileOptions.WriteThrough))
+      {
+        await stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+        await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+        stream.Flush(flushToDisk: true);
+      }
+
+      cancellationToken.ThrowIfCancellationRequested();
+      if (File.Exists(path))
+      {
+        File.Replace(temporaryPath, path, destinationBackupFileName: null);
+      }
+      else
+      {
+        File.Move(temporaryPath, path);
+      }
+    }
+    finally
+    {
+      if (File.Exists(temporaryPath))
+      {
+        File.Delete(temporaryPath);
+      }
     }
   }
 
@@ -1369,6 +1659,15 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore
       long Sequence,
       long StartOffset,
       long EndOffset);
+
+  private sealed record ApprovedResourceEnvelope(
+      Guid RunId,
+      IReadOnlyList<ProtectedApprovedResource> Resources);
+
+  private sealed record ProtectedApprovedResource(
+      string ResourceId,
+      string Fingerprint,
+      string ProtectedPayload);
 
   private sealed class ReadOnlyStringSetJsonConverter : JsonConverter<IReadOnlySet<string>>
   {

@@ -12,6 +12,7 @@ public sealed class NamedPipePrivilegeBroker :
   private readonly IElevatedHostLauncher _launcher;
   private readonly SemaphoreSlim _sessionsGate = new(1, 1);
   private readonly Dictionary<Guid, HostSession> _sessions = [];
+  private readonly Dictionary<Guid, LaunchFailure> _terminalLaunchFailures = [];
   private bool _disposed;
 
   public NamedPipePrivilegeBroker(IElevatedHostLauncher launcher)
@@ -32,15 +33,9 @@ public sealed class NamedPipePrivilegeBroker :
     {
       session = await GetOrStartAsync(request.RunId, cancellationToken).ConfigureAwait(false);
     }
-    catch (Win32Exception exception) when (exception.NativeErrorCode == 1223)
+    catch (CachedLaunchFailureException exception)
     {
-      return Failure(
-          request.ResourceId,
-          ApplyOutcome.Cancelled,
-          WdemErrorCode.PermissionError,
-          "Administrator approval was declined.",
-          "The elevated resource was cancelled because the UAC prompt was declined.",
-          exception);
+      return exception.Failure.ForResource(request.ResourceId);
     }
 
     await session.RequestGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -71,6 +66,8 @@ public sealed class NamedPipePrivilegeBroker :
       {
         session = removed;
       }
+
+      _terminalLaunchFailures.Remove(runId);
     }
     finally
     {
@@ -124,9 +121,26 @@ public sealed class NamedPipePrivilegeBroker :
         return existing;
       }
 
+      if (_terminalLaunchFailures.TryGetValue(runId, out var terminalFailure))
+      {
+        throw new CachedLaunchFailureException(terminalFailure);
+      }
+
       var pipeName = $"wdem-elevated-{runId:N}-{Guid.NewGuid():N}";
-      var launched = await _launcher.StartAsync(runId, pipeName, cancellationToken)
-          .ConfigureAwait(false);
+      IElevatedHostSession launched;
+      try
+      {
+        launched = await _launcher.StartAsync(runId, pipeName, cancellationToken)
+            .ConfigureAwait(false);
+      }
+      catch (Exception exception) when (
+          exception is not OperationCanceledException ||
+          !cancellationToken.IsCancellationRequested)
+      {
+        var failure = LaunchFailure.From(exception);
+        _terminalLaunchFailures.Add(runId, failure);
+        throw new CachedLaunchFailureException(failure);
+      }
       var session = new HostSession(pipeName, launched, new SemaphoreSlim(1, 1));
       _sessions.Add(runId, session);
       return session;
@@ -179,4 +193,37 @@ public sealed class NamedPipePrivilegeBroker :
       string PipeName,
       IElevatedHostSession Session,
       SemaphoreSlim RequestGate);
+
+  private sealed record LaunchFailure(
+      ApplyOutcome Outcome,
+      string Summary,
+      string Detail,
+      Exception Exception)
+  {
+    public static LaunchFailure From(Exception exception) =>
+        exception is Win32Exception { NativeErrorCode: 1223 }
+            ? new LaunchFailure(
+                ApplyOutcome.Cancelled,
+                "Administrator approval was declined.",
+                "The elevated resource was cancelled because the UAC prompt was declined.",
+                exception)
+            : new LaunchFailure(
+                ApplyOutcome.Failed,
+                "Elevated host could not be started.",
+                "The elevated resource could not run because the administrator host failed to start.",
+                exception);
+
+    public ResourceApplyResult ForResource(string resourceId) => Failure(
+        resourceId,
+        Outcome,
+        WdemErrorCode.PermissionError,
+        Summary,
+        Detail,
+        Exception);
+  }
+
+  private sealed class CachedLaunchFailureException(LaunchFailure failure) : Exception
+  {
+    public LaunchFailure Failure { get; } = failure;
+  }
 }

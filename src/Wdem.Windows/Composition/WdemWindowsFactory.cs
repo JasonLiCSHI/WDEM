@@ -78,7 +78,6 @@ public static class WdemWindowsFactory
     var profiles = new DirectoryProfileCatalog(profilesDirectory, providerRegistry);
     var privilegeBroker = new NamedPipePrivilegeBroker(new ElevatedHostLauncher(
         Path.Combine(AppContext.BaseDirectory, "Wdem.ElevatedHost.exe"),
-        profilesDirectory,
         localApplicationData));
     var environmentRuns = new EnvironmentRunService(
         profiles,

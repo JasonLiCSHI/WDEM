@@ -42,7 +42,7 @@ public sealed class PrivilegeAwareResourceApplyDispatcher(
         new ElevatedResourceRequest(
             runId,
             resource.Id,
-            plan.DesiredStateFingerprint,
+            ApprovedResourceFingerprint.Create(resource, plan),
             string.Empty),
         progress,
         cancellationToken);

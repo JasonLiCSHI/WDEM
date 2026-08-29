@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Wdem.Core.Execution;
@@ -9,6 +10,7 @@ using Wdem.Core.Resources;
 using Wdem.Core.Runs;
 using Wdem.Core.Versions;
 using Wdem.Windows.Persistence;
+using Wdem.Windows.Security;
 using Xunit;
 
 namespace Wdem.Windows.Tests.Persistence;
@@ -30,6 +32,196 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     IExecutionRunStore store = _store;
 
     Assert.Empty(store.Diagnostics);
+  }
+
+  [Fact]
+  public async Task CreateAsync_ProtectsOriginalApprovedResourceAndKeepsPublicSnapshotRedacted()
+  {
+    var protector = new DeterministicApprovedResourceProtector();
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        protector);
+    var run = SampleRun();
+    var planned = Assert.Single(run.Plan!.Resources);
+    var original = planned.Definition with
+    {
+      PrivilegeRequirement = PrivilegeRequirement.Administrator,
+      Parameters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["password"] = "original-secret"
+      }
+    };
+    var executablePlan = planned.ResourcePlan with
+    {
+      Steps =
+      [
+        planned.ResourcePlan.Steps.Single() with
+        {
+          PrivilegeRequirement = PrivilegeRequirement.Administrator
+        }
+      ]
+    };
+    run = run with
+    {
+      Plan = run.Plan with
+      {
+        Resources =
+        [
+          planned with
+          {
+            Definition = original,
+            ResourcePlan = executablePlan,
+            RequiresElevation = true,
+            Risk = PlanRisk.Elevated
+          }
+        ]
+      }
+    };
+
+    await store.CreateAsync(run, CancellationToken.None);
+
+    var approved = await ((IApprovedResourceStore)store).GetApprovedResourceAsync(
+        run.RunId,
+        original.Id,
+        CancellationToken.None);
+    var publicSnapshot = await File.ReadAllTextAsync(store.SnapshotPath(run.RunId));
+    var protectedSnapshot = await File.ReadAllTextAsync(store.ApprovedResourcesPath(run.RunId));
+    Assert.NotNull(approved);
+    Assert.Equal("original-secret", approved.Definition.Parameters["password"]);
+    Assert.Equal(executablePlan.ResourceId, approved.Plan.ResourceId);
+    Assert.Equal(executablePlan.ResourceType, approved.Plan.ResourceType);
+    Assert.Equal(executablePlan.ProviderName, approved.Plan.ProviderName);
+    Assert.Equal(executablePlan.DesiredStateFingerprint, approved.Plan.DesiredStateFingerprint);
+    Assert.Equal(executablePlan.Steps.Single(), approved.Plan.Steps.Single());
+    Assert.Equal(
+        ApprovedResourceFingerprint.Create(original, executablePlan),
+        approved.Fingerprint);
+    Assert.DoesNotContain("original-secret", publicSnapshot, StringComparison.Ordinal);
+    Assert.DoesNotContain("original-secret", protectedSnapshot, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task GetApprovedResourceAsync_TamperedCiphertextIsRejected()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ElevatedRunWithSecret("tamper-secret");
+    await store.CreateAsync(run, CancellationToken.None);
+    var path = store.ApprovedResourcesPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+    var payload = document["resources"]![0]!["protectedPayload"]!.GetValue<string>();
+    document["resources"]![0]!["protectedPayload"] =
+        $"{(payload[0] == 'A' ? 'B' : 'A')}{payload[1..]}";
+    await File.WriteAllTextAsync(path, document.ToJsonString());
+
+    var approved = await store.GetApprovedResourceAsync(
+        run.RunId,
+        "git",
+        CancellationToken.None);
+
+    Assert.Null(approved);
+    Assert.Contains(store.Diagnostics, error => error.Code == WdemErrorCode.PermissionError);
+  }
+
+  [Fact]
+  public async Task GetApprovedResourceAsync_DifferentUserProtectorIsRejected()
+  {
+    var paths = new WdemDataPaths(_directory);
+    var run = ElevatedRunWithSecret("identity-secret");
+    var creator = new JsonExecutionRunStore(
+        paths,
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector("first-user"));
+    await creator.CreateAsync(run, CancellationToken.None);
+    var otherUser = new JsonExecutionRunStore(
+        paths,
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector("second-user"));
+
+    var approved = await otherUser.GetApprovedResourceAsync(
+        run.RunId,
+        "git",
+        CancellationToken.None);
+
+    Assert.Null(approved);
+  }
+
+  [Fact]
+  public async Task SaveAsync_TerminalRunRemovesApprovedResourceSnapshot()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ElevatedRunWithSecret("terminal-secret");
+    await store.CreateAsync(run, CancellationToken.None);
+
+    await store.SaveAsync(
+        run with
+        {
+          State = ExecutionState.Completed,
+          Outcome = ExecutionOutcome.Succeeded,
+          EndedAtUtc = DateTimeOffset.UtcNow
+        },
+        CancellationToken.None);
+
+    Assert.False(File.Exists(store.ApprovedResourcesPath(run.RunId)));
+  }
+
+  [Fact]
+  public async Task ElevatedWorker_NewStoreInstanceExecutesWithProtectedOriginalValues()
+  {
+    var paths = new WdemDataPaths(_directory);
+    var run = ElevatedRunWithSecret("worker-secret");
+    var creator = new JsonExecutionRunStore(
+        paths,
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    await creator.CreateAsync(run, CancellationToken.None);
+    var hostStore = new JsonExecutionRunStore(
+        paths,
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var provider = new OriginalValueRecordingProvider();
+    var planned = run.Plan!.Resources.Single();
+    var worker = new ElevatedResourceWorker(
+        hostStore,
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+
+    var result = await worker.ApplyAsync(
+        new ElevatedResourceRequest(
+            run.RunId,
+            planned.Definition.Id,
+            ApprovedResourceFingerprint.Create(
+                planned.Definition,
+                planned.ResourcePlan),
+            "pipe"),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
+    Assert.Equal("worker-secret", provider.AppliedResource!.Parameters["password"]);
+  }
+
+  [Fact]
+  public void CurrentUserApprovedResourceProtector_RoundTripsWithBoundEntropy()
+  {
+    var protector = new CurrentUserApprovedResourceProtector();
+    var plaintext = System.Text.Encoding.UTF8.GetBytes("dpapi-secret");
+    var entropy = SHA256.HashData("run-resource-fingerprint"u8.ToArray());
+
+    var protectedData = protector.Protect(plaintext, entropy);
+    var restored = protector.Unprotect(protectedData, entropy);
+
+    Assert.False(plaintext.SequenceEqual(protectedData));
+    Assert.Equal(plaintext, restored);
+    Assert.Throws<CryptographicException>(() => protector.Unprotect(
+        protectedData,
+        SHA256.HashData("different-binding"u8.ToArray())));
   }
 
   [Fact]
@@ -1353,6 +1545,47 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     RestartReasons = ["PATH changed"]
   };
 
+  private static ExecutionRun ElevatedRunWithSecret(string secret)
+  {
+    var run = SampleRun();
+    var planned = run.Plan!.Resources.Single();
+    var definition = planned.Definition with
+    {
+      PrivilegeRequirement = PrivilegeRequirement.Administrator,
+      Parameters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["password"] = secret
+      }
+    };
+    var plan = planned.ResourcePlan with
+    {
+      DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(definition),
+      Steps =
+      [
+        planned.ResourcePlan.Steps.Single() with
+        {
+          PrivilegeRequirement = PrivilegeRequirement.Administrator
+        }
+      ]
+    };
+    return run with
+    {
+      Plan = run.Plan with
+      {
+        Resources =
+        [
+          planned with
+          {
+            Definition = definition,
+            ResourcePlan = plan,
+            RequiresElevation = true,
+            Risk = PlanRisk.Elevated
+          }
+        ]
+      }
+    };
+  }
+
   private static ResourceResult SampleResourceResult() => new()
   {
     ResourceId = "git",
@@ -1519,5 +1752,74 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   private sealed class MutableTimeProvider(DateTimeOffset utcNow) : TimeProvider
   {
     public override DateTimeOffset GetUtcNow() => utcNow;
+  }
+
+  private sealed class DeterministicApprovedResourceProtector : IApprovedResourceProtector
+  {
+    private readonly byte[] _key;
+
+    public DeterministicApprovedResourceProtector(string identity = "test-user")
+    {
+      _key = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(identity));
+    }
+
+    public byte[] Protect(byte[] plaintext, byte[] entropy)
+    {
+      var nonce = SHA256.HashData(entropy)[..12];
+      var ciphertext = new byte[plaintext.Length];
+      var tag = new byte[16];
+      using var aes = new AesGcm(_key, tag.Length);
+      aes.Encrypt(nonce, plaintext, ciphertext, tag, entropy);
+      return [.. nonce, .. tag, .. ciphertext];
+    }
+
+    public byte[] Unprotect(byte[] protectedData, byte[] entropy)
+    {
+      var plaintext = new byte[protectedData.Length - 28];
+      using var aes = new AesGcm(_key, 16);
+      aes.Decrypt(
+          protectedData.AsSpan(0, 12),
+          protectedData.AsSpan(28),
+          protectedData.AsSpan(12, 16),
+          plaintext,
+          entropy);
+      return plaintext;
+    }
+  }
+
+  private sealed class OriginalValueRecordingProvider : IResourceProvider
+  {
+    public string ResourceType => "package";
+    public string ProviderName => "winget";
+    public ProviderCapabilities Capabilities { get; } = new();
+    public ResourceDefinition? AppliedResource { get; private set; }
+
+    public ValueTask<ResourceApplyResult> ApplyAsync(
+        ResourceDefinition resource,
+        ResourcePlan plan,
+        IProgress<ProviderProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+      AppliedResource = resource;
+      return ValueTask.FromResult(new ResourceApplyResult
+      {
+        ResourceId = resource.Id,
+        Outcome = ApplyOutcome.Succeeded
+      });
+    }
+
+    public ValueTask<ProviderValidationResult> ValidateAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+    public ValueTask<DetectedState> DetectAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+    public ValueTask<ResourcePlan> PlanAsync(
+        ResourceDefinition resource,
+        DetectedState currentState,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+    public ValueTask<VerificationResult> VerifyAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
   }
 }

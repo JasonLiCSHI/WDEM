@@ -49,6 +49,112 @@ public sealed class NamedPipePrivilegeBrokerTests
   }
 
   [Fact]
+  public async Task ApplyAsync_UacDeclinedTwiceInOneRun_StartsElevatedHostOnce()
+  {
+    var launcher = new RecordingElevatedHostLauncher
+    {
+      StartException = new Win32Exception(1223)
+    };
+    var broker = new NamedPipePrivilegeBroker(launcher);
+    var runId = Guid.NewGuid();
+
+    var first = await broker.ApplyAsync(
+        Request(runId, "visual-studio"),
+        null,
+        CancellationToken.None);
+    var second = await broker.ApplyAsync(
+        Request(runId, "vsix"),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(1, launcher.StartCalls);
+    Assert.Equal(ApplyOutcome.Cancelled, second.Outcome);
+    Assert.Equal(first.Error!.Code, second.Error!.Code);
+    Assert.Equal(first.Error.Summary, second.Error.Summary);
+    Assert.Equal(first.Error.Detail, second.Error.Detail);
+    Assert.Equal("vsix", second.ResourceId);
+    Assert.Equal("vsix", second.Error.ResourceId);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_ConcurrentUacDeclinesInOneRun_StartElevatedHostOnce()
+  {
+    var launcher = new RecordingElevatedHostLauncher
+    {
+      StartException = new Win32Exception(1223)
+    };
+    var broker = new NamedPipePrivilegeBroker(launcher);
+    var runId = Guid.NewGuid();
+
+    var results = await Task.WhenAll(
+        broker.ApplyAsync(
+            Request(runId, "visual-studio"),
+            null,
+            CancellationToken.None),
+        broker.ApplyAsync(
+            Request(runId, "vsix"),
+            null,
+            CancellationToken.None));
+
+    Assert.Equal(1, launcher.StartCalls);
+    Assert.All(results, result =>
+    {
+      Assert.Equal(ApplyOutcome.Cancelled, result.Outcome);
+      Assert.Equal(WdemErrorCode.PermissionError, result.Error!.Code);
+      Assert.Equal("Administrator approval was declined.", result.Error.Summary);
+    });
+  }
+
+  [Fact]
+  public async Task ApplyAsync_UacDeclinedForDifferentRuns_RetriesElevatedLaunch()
+  {
+    var launcher = new RecordingElevatedHostLauncher
+    {
+      StartException = new Win32Exception(1223)
+    };
+    var broker = new NamedPipePrivilegeBroker(launcher);
+
+    await broker.ApplyAsync(
+        Request(Guid.NewGuid(), "visual-studio"),
+        null,
+        CancellationToken.None);
+    await broker.ApplyAsync(
+        Request(Guid.NewGuid(), "vsix"),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(2, launcher.StartCalls);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_ElevatedHostLaunchFails_ReturnsCachedPermissionError()
+  {
+    var launcher = new RecordingElevatedHostLauncher
+    {
+      StartException = new InvalidOperationException("host unavailable")
+    };
+    var broker = new NamedPipePrivilegeBroker(launcher);
+    var runId = Guid.NewGuid();
+
+    var first = await broker.ApplyAsync(
+        Request(runId, "visual-studio"),
+        null,
+        CancellationToken.None);
+    var second = await broker.ApplyAsync(
+        Request(runId, "vsix"),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(1, launcher.StartCalls);
+    Assert.Equal(ApplyOutcome.Failed, first.Outcome);
+    Assert.Equal(WdemErrorCode.PermissionError, first.Error!.Code);
+    Assert.Equal("Elevated host could not be started.", first.Error.Summary);
+    Assert.Equal(first.Error.Summary, second.Error!.Summary);
+    Assert.Equal(first.Error.Detail, second.Error.Detail);
+    Assert.Equal("vsix", second.Error.ResourceId);
+  }
+
+  [Fact]
   public void ElevatedResourceRequest_ContainsOnlyApprovedIdentifiers()
   {
     var properties = typeof(ElevatedResourceRequest)
@@ -164,7 +270,9 @@ public sealed class NamedPipePrivilegeBrokerTests
     var request = Assert.Single(broker.Requests);
     Assert.Equal(runId, request.RunId);
     Assert.Equal(resource.Id, request.ResourceId);
-    Assert.Equal(plan.DesiredStateFingerprint, request.PlanFingerprint);
+    Assert.Equal(
+        ApprovedResourceFingerprint.Create(resource, plan),
+        request.PlanFingerprint);
     Assert.Equal(string.Empty, request.PipeName);
   }
 

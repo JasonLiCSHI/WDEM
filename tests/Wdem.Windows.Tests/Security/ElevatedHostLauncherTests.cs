@@ -14,7 +14,6 @@ public sealed class ElevatedHostLauncherTests
         @"C:\Program Files\WDEM\Wdem.ElevatedHost.exe",
         "wdem-pipe",
         runId,
-        @"C:\Program Files\WDEM\profiles",
         @"C:\Users\user\AppData\Local");
 
     Assert.True(startInfo.UseShellExecute);
@@ -23,7 +22,6 @@ public sealed class ElevatedHostLauncherTests
         [
           "--pipe", "wdem-pipe",
           "--run-id", runId.ToString("D"),
-          "--profiles", @"C:\Program Files\WDEM\profiles",
           "--local-app-data", @"C:\Users\user\AppData\Local"
         ],
         startInfo.ArgumentList);
@@ -40,7 +38,6 @@ public sealed class ElevatedHostLauncherTests
     {
       "--pipe", "wdem-pipe",
       "--run-id", runId.ToString("D"),
-      "--profiles", @"C:\Program Files\WDEM\profiles",
       "--local-app-data", @"C:\Users\user\AppData\Local",
       "--command", "powershell.exe"
     };
@@ -49,5 +46,28 @@ public sealed class ElevatedHostLauncherTests
         ElevatedHostBootstrapOptions.Parse(arguments));
 
     Assert.DoesNotContain("powershell.exe", error.Message, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void BootstrapOptions_ParseContainsNoProfilesDirectory()
+  {
+    var runId = Guid.NewGuid();
+
+    var options = ElevatedHostBootstrapOptions.Parse(
+    [
+      "--pipe", "wdem-pipe",
+      "--run-id", runId.ToString("D"),
+      "--local-app-data", @"C:\Users\user\AppData\Local"
+    ]);
+
+    Assert.Equal("wdem-pipe", options.PipeName);
+    Assert.Equal(runId, options.RunId);
+    Assert.Equal(@"C:\Users\user\AppData\Local", options.LocalApplicationData);
+    Assert.DoesNotContain(
+        typeof(ElevatedHostBootstrapOptions).GetProperties(),
+        property => string.Equals(
+            property.Name,
+            "ProfilesDirectory",
+            StringComparison.Ordinal));
   }
 }
