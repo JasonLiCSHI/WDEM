@@ -183,9 +183,22 @@ public sealed class ReSharperProvider : IResourceProvider
 
     try
     {
-      var manifests = await _manifestReader.ReadInstalledAsync(instance, cancellationToken)
+      var installed = await _manifestReader.ReadInstalledWithDiagnosticsAsync(
+          instance,
+          cancellationToken)
           .ConfigureAwait(false);
-      var matches = manifests.Where(manifest =>
+      var relevantError = installed.Errors.FirstOrDefault(error => Matches(error.ClaimedId, PackageId));
+      if (relevantError is not null)
+      {
+        return Failure(resource, Error(
+            resource,
+            WdemErrorCode.DetectionError,
+            "ReSharper integration manifest is invalid.",
+            "An installed manifest claiming ReSharper is invalid.",
+            relevantError.Error.UnderlyingException));
+      }
+
+      var matches = installed.Manifests.Where(manifest =>
           Matches(manifest.Id, PackageId) &&
           Matches(manifest.VisualStudioInstanceId, instance.InstanceId)).ToArray();
       if (matches.Length == 0)
@@ -203,6 +216,15 @@ public sealed class ReSharperProvider : IResourceProvider
       }
 
       var manifest = matches[0];
+      if (!VsixInstallationTargetCompatibility.IsCompatible(manifest.Targets, instance))
+      {
+        return Failure(resource, Error(
+            resource,
+            WdemErrorCode.DetectionError,
+            "ReSharper integration target is incompatible.",
+            "The installed ReSharper manifest does not target the selected Visual Studio instance."));
+      }
+
       IReadOnlyList<SemanticVersion> versions =
           SemanticVersion.TryParse(manifest.Version, out var version) ? [version] : [];
       return new DetectedState
@@ -362,6 +384,20 @@ public sealed class ReSharperProvider : IResourceProvider
         cancellationToken).ConfigureAwait(false);
     progress?.Report(new ProviderProgress("Verify", 0.75, "Verifying ReSharper integration.", step.Id));
     var verification = await VerifyAsync(resource, cancellationToken).ConfigureAwait(false);
+    if (command.Error is not null || !command.Process.Started || command.Process.ExitCode != 0)
+    {
+      return ProviderLifecycleSupport.Failure(
+          resource,
+          step,
+          command.Error ?? _winGet.CreateInstallationError(
+              resource.Id,
+              step.Id,
+              PackageId,
+              command.Process.ExitCode),
+          command.Process.ExitCode,
+          0.75);
+    }
+
     return ProviderLifecycleSupport.CompleteAfterVerification(
         resource,
         step,

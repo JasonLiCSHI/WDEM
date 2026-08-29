@@ -508,6 +508,7 @@ public sealed class VisualStudioInstallerClientTests
   [Theory]
   [InlineData(SecureArtifactKind.VisualStudioConfiguration, 1024L * 1024, false)]
   [InlineData(SecureArtifactKind.Executable, 64L * 1024 * 1024, false)]
+  [InlineData(SecureArtifactKind.VisualStudioExtension, 512L * 1024 * 1024, false)]
   [InlineData(SecureArtifactKind.VisualStudioConfiguration, 1024L * 1024, true)]
   public async Task SecureArtifactStager_RejectsSourcesAboveKindByteLimit(
       SecureArtifactKind kind,

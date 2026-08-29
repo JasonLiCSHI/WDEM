@@ -39,9 +39,15 @@ internal static class ProviderLifecycleSupport
       ResourceDefinition resource,
       ResourcePlan plan,
       string resourceType,
-      string providerName)
+      string providerName,
+      Func<ResourceDefinition, PlanStep, bool>? stepIdentityValidator = null)
   {
-    var detail = GetPlanMismatch(resource, plan, resourceType, providerName);
+    var detail = GetPlanMismatch(
+        resource,
+        plan,
+        resourceType,
+        providerName,
+        stepIdentityValidator);
     if (detail is null)
     {
       return null;
@@ -179,7 +185,8 @@ internal static class ProviderLifecycleSupport
       ResourceDefinition resource,
       ResourcePlan plan,
       string resourceType,
-      string providerName)
+      string providerName,
+      Func<ResourceDefinition, PlanStep, bool>? stepIdentityValidator)
   {
     if (!plan.IsExecutable)
     {
@@ -225,8 +232,10 @@ internal static class ProviderLifecycleSupport
       _ => PlanAction.None
     };
     var step = plan.Steps[0];
+    var validStepIdentity = stepIdentityValidator?.Invoke(resource, step) ??
+        string.Equals(step.Id, $"{resource.Id}:install", StringComparison.Ordinal);
     if (expectedAction == PlanAction.None ||
-        !string.Equals(step.Id, $"{resource.Id}:install", StringComparison.Ordinal) ||
+        !validStepIdentity ||
         step.Action != expectedAction ||
         step.PrivilegeRequirement != resource.PrivilegeRequirement ||
         step.RestartPolicy != resource.RestartPolicy ||

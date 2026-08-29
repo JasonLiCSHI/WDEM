@@ -10,6 +10,7 @@ namespace Wdem.Windows.Security;
 public enum SecureArtifactKind
 {
   Executable,
+  VisualStudioExtension,
   VisualStudioConfiguration
 }
 
@@ -54,6 +55,14 @@ public sealed class SecureStagedArtifact : IAsyncDisposable
   public string Path { get; }
   public string Sha256 { get; }
 
+  internal string DirectoryPath => _directoryPath;
+
+  internal void ReleaseForHandoff()
+  {
+    Interlocked.Exchange(ref _readLock, null)?.Dispose();
+    Interlocked.Exchange(ref _artifactLease, null)?.Dispose();
+  }
+
   public ValueTask DisposeAsync()
   {
     var readLock = Interlocked.Exchange(ref _readLock, null);
@@ -75,6 +84,7 @@ public sealed class SecureStagedArtifact : IAsyncDisposable
 public sealed class SecureArtifactStager : ISecureArtifactStager
 {
   private const long MaxExecutableBytes = 64L * 1024 * 1024;
+  private const long MaxVisualStudioExtensionBytes = 512L * 1024 * 1024;
   private const long MaxVisualStudioConfigurationBytes = 1024L * 1024;
   private readonly ISecureArtifactDirectoryPolicy _directoryPolicy;
   private readonly ITrustedFileVerifier _verifier;
@@ -116,7 +126,12 @@ public sealed class SecureArtifactStager : ISecureArtifactStager
       partialPath = Path.Combine(directoryPath, $".{Guid.NewGuid():N}.partial");
       finalPath = Path.Combine(
           directoryPath,
-          kind == SecureArtifactKind.Executable ? "installer.exe" : "profile.vsconfig");
+          kind switch
+          {
+            SecureArtifactKind.Executable => "installer.exe",
+            SecureArtifactKind.VisualStudioExtension => "extension.vsix",
+            _ => "profile.vsconfig"
+          });
       if (!Path.IsPathFullyQualified(directoryPath) ||
           !Directory.Exists(directoryPath) ||
           Directory.EnumerateFileSystemEntries(directoryPath).Any())
@@ -142,9 +157,12 @@ public sealed class SecureArtifactStager : ISecureArtifactStager
                        bufferSize: 81920,
                        FileOptions.Asynchronous | FileOptions.SequentialScan))
       {
-        var maxBytes = kind == SecureArtifactKind.Executable
-            ? MaxExecutableBytes
-            : MaxVisualStudioConfigurationBytes;
+        var maxBytes = kind switch
+        {
+          SecureArtifactKind.Executable => MaxExecutableBytes,
+          SecureArtifactKind.VisualStudioExtension => MaxVisualStudioExtensionBytes,
+          _ => MaxVisualStudioConfigurationBytes
+        };
         if (source.Length > maxBytes)
         {
           throw new ArtifactTooLargeException(maxBytes);

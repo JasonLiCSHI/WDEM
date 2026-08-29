@@ -273,6 +273,12 @@ internal sealed class ArtifactCleanupQueue
       roots.Add(Path.Combine(commonData, "Wdem", "SecureArtifacts"));
     }
 
+    var localData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+    if (!string.IsNullOrWhiteSpace(localData))
+    {
+      roots.Add(Path.Combine(localData, "Wdem", "PlanArtifacts"));
+    }
+
     return roots;
   }
 
@@ -326,6 +332,26 @@ internal sealed class ArtifactLease : IDisposable
       File.Delete(markerPath);
       throw;
     }
+  }
+
+  public static ArtifactLease Acquire(string directoryPath)
+  {
+    var markerPath = Path.Combine(directoryPath, OwnershipMarkerFileName);
+    var leasePath = Path.Combine(directoryPath, LeaseFileName);
+    if (!File.Exists(markerPath) || !File.Exists(leasePath) ||
+        File.GetAttributes(leasePath).HasFlag(FileAttributes.ReparsePoint) ||
+        !HasValidOwnershipMarker(markerPath, DateTime.MaxValue))
+    {
+      throw new InvalidDataException("The staged artifact ownership marker is invalid.");
+    }
+
+    return new ArtifactLease(new FileStream(
+        leasePath,
+        FileMode.Open,
+        FileAccess.ReadWrite,
+        FileShare.None,
+        bufferSize: 1,
+        FileOptions.WriteThrough));
   }
 
   public void Dispose()

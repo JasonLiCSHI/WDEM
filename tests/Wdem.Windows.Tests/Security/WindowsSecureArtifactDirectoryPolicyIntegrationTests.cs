@@ -8,6 +8,23 @@ namespace Wdem.Windows.Tests.Security;
 
 public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
 {
+  [WindowsFact]
+  public void CreatePlanArtifactDirectory_AllowsCurrentUserAndTrustedElevatedIdentities()
+  {
+    var path = new WindowsPlanArtifactDirectoryPolicy().CreateRestrictedStagingDirectory();
+
+    try
+    {
+      WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedDirectory(path);
+      File.WriteAllText(Path.Combine(path, "probe"), "writable");
+      Assert.True(File.Exists(Path.Combine(path, "probe")));
+    }
+    finally
+    {
+      Directory.Delete(path, recursive: true);
+    }
+  }
+
   [WindowsAdministratorFact]
   public void CreateRestrictedStagingDirectory_CreatesProtectedAdministratorSystemAcl()
   {
@@ -69,6 +86,17 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
       rule.InheritanceFlags ==
           (InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit) &&
       rule.PropagationFlags == PropagationFlags.None;
+}
+
+internal sealed class WindowsFactAttribute : FactAttribute
+{
+  public WindowsFactAttribute()
+  {
+    if (!OperatingSystem.IsWindows())
+    {
+      Skip = "Requires Windows.";
+    }
+  }
 }
 
 internal sealed class WindowsAdministratorFactAttribute : FactAttribute

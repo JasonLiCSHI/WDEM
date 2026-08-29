@@ -23,7 +23,7 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
   private readonly IVsixManifestReader _manifestReader;
   private readonly IProcessExecutor _processExecutor;
   private readonly IComplianceEvaluator _complianceEvaluator;
-  private readonly ISecureArtifactStager _artifactStager;
+  private readonly IVsixPlanArtifactStore _planArtifactStore;
   private readonly HttpClient _httpClient;
   private readonly ITrustedFileVerifier _trustedFileVerifier;
 
@@ -35,15 +35,42 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
       ISecureArtifactStager? artifactStager = null,
       HttpClient? httpClient = null,
       ITrustedFileVerifier? trustedFileVerifier = null)
+      : this(
+          discovery,
+          manifestReader,
+          processExecutor,
+          complianceEvaluator,
+          artifactStager,
+          httpClient,
+          trustedFileVerifier,
+          planArtifactStore: null)
+  {
+  }
+
+  internal VisualStudioExtensionProvider(
+      IVisualStudioDiscovery discovery,
+      IVsixManifestReader manifestReader,
+      IProcessExecutor processExecutor,
+      IComplianceEvaluator complianceEvaluator,
+      ISecureArtifactStager? artifactStager,
+      HttpClient? httpClient,
+      ITrustedFileVerifier? trustedFileVerifier,
+      IVsixPlanArtifactStore? planArtifactStore)
   {
     _discovery = discovery ?? throw new ArgumentNullException(nameof(discovery));
     _manifestReader = manifestReader ?? throw new ArgumentNullException(nameof(manifestReader));
     _processExecutor = processExecutor ?? throw new ArgumentNullException(nameof(processExecutor));
     _complianceEvaluator = complianceEvaluator ??
         throw new ArgumentNullException(nameof(complianceEvaluator));
-    _artifactStager = artifactStager ?? new SecureArtifactStager();
     _httpClient = httpClient ?? new HttpClient();
     _trustedFileVerifier = trustedFileVerifier ?? new TrustedFileVerifier();
+    var stager = artifactStager ?? new SecureArtifactStager(
+        new WindowsPlanArtifactDirectoryPolicy(),
+        _trustedFileVerifier);
+    _planArtifactStore = planArtifactStore ?? new VsixPlanArtifactStore(
+        stager,
+        _trustedFileVerifier,
+        _manifestReader);
   }
 
   public string ResourceType => "visual-studio-extension";
@@ -165,11 +192,26 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
 
     try
     {
-      var manifests = await _manifestReader.ReadInstalledAsync(
+      var installed = await _manifestReader.ReadInstalledWithDiagnosticsAsync(
           instance.Instance,
           cancellationToken).ConfigureAwait(false);
-      var matches = manifests.Where(manifest =>
-          Matches(manifest.Id, GetParameter(resource, ExtensionIdParameter)!) &&
+      var requestedExtensionId = GetParameter(resource, ExtensionIdParameter)!;
+      var relevantError = installed.Errors.FirstOrDefault(error =>
+          Matches(error.ClaimedId, requestedExtensionId));
+      if (relevantError is not null)
+      {
+        return DetectionFailure(resource, new StructuredError(
+            WdemErrorCode.DetectionError,
+            "Visual Studio extension manifest is invalid.",
+            "An installed manifest claiming the requested extension identity is invalid.")
+        {
+          ResourceId = resource.Id,
+          UnderlyingException = relevantError.Error.UnderlyingException
+        });
+      }
+
+      var matches = installed.Manifests.Where(manifest =>
+          Matches(manifest.Id, requestedExtensionId) &&
           Matches(manifest.VisualStudioInstanceId, instance.Instance.InstanceId)).ToArray();
       if (matches.Length == 0)
       {
@@ -182,6 +224,17 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
             WdemErrorCode.DetectionError,
             "Visual Studio extension detection is ambiguous.",
             "More than one installed manifest has the requested extension identity.")
+        {
+          ResourceId = resource.Id
+        });
+      }
+
+      if (!VsixInstallationTargetCompatibility.IsCompatible(matches[0].Targets, instance.Instance))
+      {
+        return DetectionFailure(resource, new StructuredError(
+            WdemErrorCode.DetectionError,
+            "Visual Studio extension target is incompatible.",
+            "The installed VSIX manifest does not target the selected Visual Studio instance.")
         {
           ResourceId = resource.Id
         });
@@ -239,13 +292,13 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
       };
     }
 
-    var sourceError = await PreflightSourceAsync(resource, cancellationToken).ConfigureAwait(false);
-    if (sourceError is not null)
+    var prepared = await PreparePlanArtifactAsync(resource, cancellationToken).ConfigureAwait(false);
+    if (prepared.Error is not null || prepared.StepEvidence is null)
     {
       return CreatePlan(resource, compliance.Status, false) with
       {
-        Error = sourceError.Detail,
-        StructuredErrors = [sourceError]
+        Error = prepared.Error?.Detail,
+        StructuredErrors = prepared.Error is null ? [] : [prepared.Error]
       };
     }
 
@@ -255,7 +308,7 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
       [
         new PlanStep
         {
-          Id = $"{resource.Id}:install",
+          Id = $"{resource.Id}:install:{prepared.StepEvidence}",
           Description = $"Install {resource.DisplayName ?? resource.Id} with VSIXInstaller.",
           Action = compliance.Status == ComplianceStatus.Missing
               ? PlanAction.Install
@@ -287,7 +340,10 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
         resource,
         plan,
         ResourceType,
-        ProviderName);
+        ProviderName,
+        static (definition, step) => VsixPlanArtifactStore.HasValidStepEvidence(
+            definition.Id,
+            step.Id));
     if (invalidPlan is not null)
     {
       return invalidPlan;
@@ -302,6 +358,10 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
     var instance = await SelectInstanceAsync(resource, cancellationToken).ConfigureAwait(false);
     if (instance.Instance is null)
     {
+      await _planArtifactStore.AbandonAsync(
+          resource.Id,
+          step.Id,
+          cancellationToken).ConfigureAwait(false);
       return ProviderLifecycleSupport.Failure(
           resource,
           step,
@@ -313,77 +373,23 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
           0);
     }
 
-    string? downloadedPath = null;
-    SecureStagedArtifact? staged = null;
+    ClaimedVsixPlanArtifact? approvedArtifact = null;
     try
     {
-      progress?.Report(new ProviderProgress("Plan", 0.25, "Acquiring and verifying the VSIX artifact.", step.Id));
-      var acquired = await AcquireSourceAsync(
-          GetParameter(resource, SourcePathParameter)!,
-          cancellationToken).ConfigureAwait(false);
-      if (acquired.Error is not null)
-      {
-        return ProviderLifecycleSupport.Failure(resource, step, acquired.Error, null, 0.25);
-      }
-
-      downloadedPath = acquired.Temporary ? acquired.Path : null;
-      var stageResult = await _artifactStager.StageVerifiedAsync(
-          acquired.Path!,
+      progress?.Report(new ProviderProgress("Apply", 0.25, "Validating the approved VSIX artifact.", step.Id));
+      var claim = await _planArtifactStore.ClaimAsync(
+          resource.Id,
+          step.Id,
           GetParameter(resource, ExpectedSha256Parameter)!,
-          SecureArtifactKind.Executable,
-          cancellationToken).ConfigureAwait(false);
-      staged = stageResult.Artifact;
-      if (staged is null)
-      {
-        return ProviderLifecycleSupport.Failure(
-            resource,
-            step,
-            stageResult.Error ?? ConfigurationError(resource, "The VSIX artifact is not trusted."),
-            null,
-            0.25);
-      }
-
-      var verifiedVsixPath = Path.Combine(
-          Path.GetDirectoryName(staged.Path)!,
-          "extension.vsix");
-      File.Copy(staged.Path, verifiedVsixPath, overwrite: false);
-      var copiedVerification = await _trustedFileVerifier.VerifySha256Async(
-          verifiedVsixPath,
-          GetParameter(resource, ExpectedSha256Parameter)!,
-          cancellationToken).ConfigureAwait(false);
-      if (!copiedVerification.IsTrusted || copiedVerification.VerifiedPath is null)
-      {
-        return ProviderLifecycleSupport.Failure(
-            resource,
-            step,
-            (copiedVerification.Error ?? ConfigurationError(
-                resource,
-                "The staged VSIX artifact is not trusted.")) with
-            {
-              ResourceId = resource.Id
-            },
-            null,
-            0.25);
-      }
-
-      await using var verifiedVsixLock = new FileStream(
-          copiedVerification.VerifiedPath,
-          FileMode.Open,
-          FileAccess.Read,
-          FileShare.Read,
-          bufferSize: 1,
-          FileOptions.SequentialScan);
-
-      var sourceManifest = await _manifestReader.ReadSourceAsync(
-          copiedVerification.VerifiedPath,
           instance.Instance.InstanceId,
           cancellationToken).ConfigureAwait(false);
-      if (sourceManifest.Manifest is null || sourceManifest.Error is not null)
+      approvedArtifact = claim.Artifact;
+      if (approvedArtifact is null)
       {
         return ProviderLifecycleSupport.Failure(
             resource,
             step,
-            (sourceManifest.Error ?? ConfigurationError(resource, "The VSIX manifest is invalid.")) with
+            (claim.Error ?? ConfigurationError(resource, "The approved VSIX artifact is invalid.")) with
             {
               ResourceId = resource.Id
             },
@@ -391,7 +397,7 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
             0.25);
       }
 
-      if (!SourceManifestMatches(resource, sourceManifest.Manifest, instance.Instance))
+      if (!SourceManifestMatches(resource, approvedArtifact.Manifest, instance.Instance))
       {
         return ProviderLifecycleSupport.Failure(
             resource,
@@ -417,19 +423,28 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
       var process = await _processExecutor.ExecuteAsync(
           new ProcessExecutionRequest(
               installerPath,
-              ["/quiet", "/admin", copiedVerification.VerifiedPath]),
+              ["/quiet", "/admin", approvedArtifact.Path]),
           null,
           cancellationToken).ConfigureAwait(false);
       progress?.Report(new ProviderProgress("Verify", 0.75, "Verifying the installed VSIX manifest.", step.Id));
       var verification = await VerifyAsync(resource, cancellationToken).ConfigureAwait(false);
+      var processError = ProcessError(resource, step, process);
+      if (processError is not null)
+      {
+        return ProviderLifecycleSupport.Failure(
+            resource,
+            step,
+            processError,
+            process.ExitCode,
+            0.75);
+      }
+
       if (verification.Compliance == ComplianceStatus.Satisfied)
       {
-        var diagnostic = ProcessError(resource, step, process);
         return new ResourceApplyResult
         {
           ResourceId = resource.Id,
           Outcome = ApplyOutcome.Succeeded,
-          Diagnostics = diagnostic is null ? [] : [diagnostic],
           StepResults =
           [
             new ProviderStepResult
@@ -444,7 +459,6 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
       }
 
       var error = Evaluate(resource, verification.DetectedState).Error ??
-          ProcessError(resource, step, process) ??
           new StructuredError(
               WdemErrorCode.VerificationError,
               "VSIX installation verification failed.",
@@ -457,14 +471,9 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
     }
     finally
     {
-      if (staged is not null)
+      if (approvedArtifact is not null)
       {
-        await staged.DisposeAsync().ConfigureAwait(false);
-      }
-
-      if (downloadedPath is not null)
-      {
-        TryDeleteDownloaded(downloadedPath);
+        await approvedArtifact.DisposeAsync().ConfigureAwait(false);
       }
     }
   }
@@ -622,25 +631,25 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
     }
   }
 
-  private async Task<StructuredError?> PreflightSourceAsync(
+  private async Task<PreparedPlanArtifact> PreparePlanArtifactAsync(
       ResourceDefinition resource,
       CancellationToken cancellationToken)
   {
     var instance = await SelectInstanceAsync(resource, cancellationToken).ConfigureAwait(false);
     if (instance.Error is not null)
     {
-      return instance.Error;
+      return new PreparedPlanArtifact(null, instance.Error);
     }
 
     if (instance.Instance is null)
     {
-      return new StructuredError(
+      return new PreparedPlanArtifact(null, new StructuredError(
           WdemErrorCode.DependencyError,
           "Visual Studio instance is unavailable.",
           "The selected Visual Studio instance was not found.")
       {
         ResourceId = resource.Id
-      };
+      });
     }
 
     string? downloadedPath = null;
@@ -651,47 +660,46 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
           cancellationToken).ConfigureAwait(false);
       if (acquired.Error is not null)
       {
-        return acquired.Error with { ResourceId = resource.Id };
+        return new PreparedPlanArtifact(
+            null,
+            acquired.Error with { ResourceId = resource.Id });
       }
 
       downloadedPath = acquired.Temporary ? acquired.Path : null;
-      var verification = await _trustedFileVerifier.VerifySha256Async(
+      var staged = await _planArtifactStore.StageAsync(
+          resource.Id,
           acquired.Path!,
           GetParameter(resource, ExpectedSha256Parameter)!,
-          cancellationToken).ConfigureAwait(false);
-      if (!verification.IsTrusted || verification.VerifiedPath is null)
-      {
-        return (verification.Error ?? ConfigurationError(
-            resource,
-            "The VSIX source hash could not be verified.")) with
-        {
-          ResourceId = resource.Id
-        };
-      }
-
-      var manifest = await _manifestReader.ReadSourceAsync(
-          verification.VerifiedPath,
           instance.Instance.InstanceId,
           cancellationToken).ConfigureAwait(false);
-      if (manifest.Error is not null || manifest.Manifest is null)
+      if (staged.Error is not null || staged.Manifest is null || staged.StepEvidence is null)
       {
-        return (manifest.Error ?? ConfigurationError(
-            resource,
-            "The VSIX source manifest is invalid.")) with
-        {
-          ResourceId = resource.Id
-        };
+        return new PreparedPlanArtifact(
+            null,
+            (staged.Error ?? ConfigurationError(resource, "The VSIX source could not be staged.")) with
+            {
+              ResourceId = resource.Id
+            });
       }
 
-      return SourceManifestMatches(resource, manifest.Manifest, instance.Instance)
-          ? null
-          : new StructuredError(
+      if (SourceManifestMatches(resource, staged.Manifest, instance.Instance))
+      {
+        return new PreparedPlanArtifact(staged.StepEvidence, null);
+      }
+
+      await DiscardPreparedArtifactAsync(
+          resource,
+          instance.Instance.InstanceId,
+          staged.StepEvidence,
+          cancellationToken)
+          .ConfigureAwait(false);
+      return new PreparedPlanArtifact(null, new StructuredError(
               WdemErrorCode.ConfigurationError,
               "VSIX source is incompatible.",
               "The verified VSIX identity, version, or Visual Studio installation target does not match the resource.")
-          {
-            ResourceId = resource.Id
-          };
+      {
+        ResourceId = resource.Id
+      });
     }
     finally
     {
@@ -699,6 +707,24 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
       {
         TryDeleteDownloaded(downloadedPath);
       }
+    }
+  }
+
+  private async Task DiscardPreparedArtifactAsync(
+      ResourceDefinition resource,
+      string instanceId,
+      string stepEvidence,
+      CancellationToken cancellationToken)
+  {
+    var claim = await _planArtifactStore.ClaimAsync(
+        resource.Id,
+        $"{resource.Id}:install:{stepEvidence}",
+        GetParameter(resource, ExpectedSha256Parameter)!,
+        instanceId,
+        cancellationToken).ConfigureAwait(false);
+    if (claim.Artifact is not null)
+    {
+      await claim.Artifact.DisposeAsync().ConfigureAwait(false);
     }
   }
 
@@ -736,62 +762,7 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
       VisualStudioInstance instance) =>
       Matches(manifest.Id, GetParameter(resource, ExtensionIdParameter)!) &&
       VersionMatches(resource, manifest.Version) &&
-      IsCompatibleWithInstance(manifest.Targets, instance);
-
-  private static bool IsCompatibleWithInstance(
-      IReadOnlyList<VsixInstallationTarget> targets,
-      VisualStudioInstance instance)
-  {
-    if (targets.Count == 0)
-    {
-      return true;
-    }
-
-    var productId = instance.ProductId.Replace(".Product.", ".", StringComparison.OrdinalIgnoreCase);
-    return targets.Any(target =>
-        (Matches(target.Id, instance.ProductId) || Matches(target.Id, productId)) &&
-        VersionRangeContains(target.VersionRange, instance.InstallationVersion));
-  }
-
-  private static bool VersionRangeContains(string? expression, string versionText)
-  {
-    if (string.IsNullOrWhiteSpace(expression))
-    {
-      return true;
-    }
-
-    if (!Version.TryParse(versionText, out var version))
-    {
-      return false;
-    }
-
-    var range = expression.Trim();
-    if (range.Length < 3 || range[0] is not ('[' or '(') ||
-        range[^1] is not (']' or ')'))
-    {
-      return Version.TryParse(range, out var exact) && version == exact;
-    }
-
-    var bounds = range[1..^1].Split(',', StringSplitOptions.TrimEntries);
-    if (bounds.Length == 1)
-    {
-      return range[0] == '[' && range[^1] == ']' &&
-          Version.TryParse(bounds[0], out var exact) && version == exact;
-    }
-
-    if (bounds.Length != 2)
-    {
-      return false;
-    }
-
-    var minimumMatches = string.IsNullOrEmpty(bounds[0]) ||
-        (Version.TryParse(bounds[0], out var minimum) &&
-         (version > minimum || (range[0] == '[' && version == minimum)));
-    var maximumMatches = string.IsNullOrEmpty(bounds[1]) ||
-        (Version.TryParse(bounds[1], out var maximum) &&
-         (version < maximum || (range[^1] == ']' && version == maximum)));
-    return minimumMatches && maximumMatches;
-  }
+      VsixInstallationTargetCompatibility.IsCompatible(manifest.Targets, instance);
 
   private static DetectedState CreateDetectedState(
       ResourceDefinition resource,
@@ -986,4 +957,5 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
 
   private sealed record InstanceSelection(VisualStudioInstance? Instance, StructuredError? Error);
   private sealed record AcquiredSource(string? Path, bool Temporary, StructuredError? Error);
+  private sealed record PreparedPlanArtifact(string? StepEvidence, StructuredError? Error);
 }

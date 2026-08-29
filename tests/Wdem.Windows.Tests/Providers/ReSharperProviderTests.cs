@@ -61,6 +61,24 @@ public sealed class ReSharperProviderTests
   }
 
   [Fact]
+  public async Task VerifyAsync_RejectsManifestWithIncompatibleInstallationTarget()
+  {
+    var manifests = new FakeManifestReader();
+    manifests.Add(
+        "JetBrains.ReSharper",
+        "2025.2.1",
+        "17.0_a",
+        [new VsixInstallationTarget("Microsoft.VisualStudio.Enterprise", "[17.0,18.0)")]);
+    var provider = Provider(manifests, new ThrowingProcessExecutor());
+
+    var verification = await provider.VerifyAsync(
+        ReSharperResource(["visual-studio"]),
+        CancellationToken.None);
+
+    Assert.Equal(ComplianceStatus.DetectionFailed, verification.Compliance);
+  }
+
+  [Fact]
   public async Task ApplyAsync_InstallsFixedPackageThenVerifiesManifestWithoutLaunchingApplications()
   {
     var manifests = new FakeManifestReader();
@@ -87,6 +105,35 @@ public sealed class ReSharperProviderTests
     Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
     Assert.Empty(process.Remaining);
     Assert.All(process.Requests, request => Assert.Equal("winget", request.FileName));
+  }
+
+  [Fact]
+  public async Task ApplyAsync_WinGetFailureRemainsFailedWhenManifestBecomesCompliant()
+  {
+    var manifests = new FakeManifestReader();
+    var process = new ScriptedProcessExecutor();
+    process.Enqueue(
+        "winget",
+        ["show", "--id", "JetBrains.ReSharper", "--exact",
+         "--accept-source-agreements", "--disable-interactivity"]);
+    process.Enqueue(
+        "winget",
+        ["show", "--id", "JetBrains.ReSharper", "--exact",
+         "--accept-source-agreements", "--disable-interactivity"]);
+    process.Enqueue(
+        "winget",
+        ["install", "--id", "JetBrains.ReSharper", "--exact", "--silent",
+         "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"],
+        () => manifests.Add("JetBrains.ReSharper", "2025.2.1", "17.0_a"),
+        new ProcessExecutionResult(true, 1, [], []));
+    var provider = Provider(manifests, process);
+    var resource = ReSharperResource(["visual-studio"]);
+    var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+
+    var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(1, result.Error!.ProcessExitCode);
   }
 
   [Fact]
@@ -164,12 +211,17 @@ public sealed class ReSharperProviderTests
   {
     private readonly List<VsixManifest> _manifests = [];
 
-    public void Add(string id, string version, string instanceId) => _manifests.Add(
+    public void Add(
+        string id,
+        string version,
+        string instanceId,
+        IReadOnlyList<VsixInstallationTarget>? targets = null) => _manifests.Add(
         new VsixManifest(
             id,
             version,
             $@"C:\VS\{instanceId}\Extensions\{id}\extension.vsixmanifest",
-            instanceId));
+            instanceId,
+            targets));
 
     public Task<IReadOnlyList<VsixManifest>> ReadInstalledAsync(
         VisualStudioInstance instance,
@@ -187,7 +239,11 @@ public sealed class ReSharperProviderTests
 
   private sealed class ScriptedProcessExecutor : IProcessExecutor
   {
-    private readonly Queue<(string FileName, IReadOnlyList<string> Arguments, Action? Action)> _steps = [];
+    private readonly Queue<(
+        string FileName,
+        IReadOnlyList<string> Arguments,
+        Action? Action,
+        ProcessExecutionResult? Result)> _steps = [];
 
     public List<ProcessExecutionRequest> Requests { get; } = [];
     public IReadOnlyCollection<object> Remaining => _steps.Cast<object>().ToArray();
@@ -195,7 +251,8 @@ public sealed class ReSharperProviderTests
     public void Enqueue(
         string fileName,
         IReadOnlyList<string> arguments,
-        Action? action = null) => _steps.Enqueue((fileName, arguments, action));
+        Action? action = null,
+        ProcessExecutionResult? result = null) => _steps.Enqueue((fileName, arguments, action, result));
 
     public Task<ProcessExecutionResult> ExecuteAsync(
         ProcessExecutionRequest request,
@@ -207,7 +264,8 @@ public sealed class ReSharperProviderTests
       Assert.Equal(expected.Arguments, request.Arguments);
       Requests.Add(request);
       expected.Action?.Invoke();
-      return Task.FromResult(new ProcessExecutionResult(true, 0, ["available"], []));
+      return Task.FromResult(
+          expected.Result ?? new ProcessExecutionResult(true, 0, ["available"], []));
     }
   }
 
