@@ -123,6 +123,17 @@ public sealed class VisualStudioProvider : IResourceProvider
       return Failure(resource, error);
     }
 
+    var resolved = await ResolveConfigurationAsync(
+        resource,
+        options!,
+        cancellationToken).ConfigureAwait(false);
+    if (resolved.Error is not null)
+    {
+      return Failure(resource, resolved.Error with { ResourceId = resource.Id });
+    }
+
+    options = resolved.Options;
+
     IReadOnlyList<VisualStudioInstance> instances;
     try
     {
@@ -240,22 +251,12 @@ public sealed class VisualStudioProvider : IResourceProvider
       ["workloads"] = JoinIds(selected.Workloads),
       ["components"] = JoinIds(selected.Components)
     };
-    string? configurationHash = null;
-    if (options.VsConfigPath is not null && GetExpectedSha256(resource) is { } expectedSha256)
+    string? configurationHash = resolved.Sha256;
+    if (options.VsConfigPath is not null)
     {
-      var verification = await _trustedFileVerifier.VerifySha256Async(
-          options.VsConfigPath,
-          expectedSha256,
-          cancellationToken).ConfigureAwait(false);
-      if (!verification.IsTrusted)
-      {
-        return Failure(resource, verification.Error!);
-      }
-
-      configurationHash = verification.Sha256;
-      evidence["vsconfigPath"] = verification.VerifiedPath!;
-      evidence["vsconfigSource"] = verification.VerifiedPath!;
-      evidence["vsconfigSha256"] = verification.Sha256!;
+      evidence["vsconfigPath"] = resolved.VerifiedPath!;
+      evidence["vsconfigSource"] = resolved.VerifiedPath!;
+      evidence["vsconfigSha256"] = resolved.Sha256!;
     }
 
     return new DetectedState
@@ -289,22 +290,21 @@ public sealed class VisualStudioProvider : IResourceProvider
     }
 
     _ = TryParseOptions(resource, out var options, out _);
-    if (options!.VsConfigPath is not null)
+    var resolved = await ResolveConfigurationAsync(
+        resource,
+        options!,
+        cancellationToken).ConfigureAwait(false);
+    if (resolved.Error is not null)
     {
-      var verification = await _trustedFileVerifier.VerifySha256Async(
-          options.VsConfigPath,
-          GetExpectedSha256(resource)!,
-          cancellationToken).ConfigureAwait(false);
-      if (!verification.IsTrusted)
+      var error = resolved.Error with { ResourceId = resource.Id };
+      return BasePlan(resource, ComplianceStatus.ConfigurationMismatch, isExecutable: false) with
       {
-        var error = verification.Error! with { ResourceId = resource.Id };
-        return BasePlan(resource, ComplianceStatus.ConfigurationMismatch, isExecutable: false) with
-        {
-          Error = error.Detail,
-          StructuredErrors = [error]
-        };
-      }
+        Error = error.Detail,
+        StructuredErrors = [error]
+      };
     }
+
+    options = resolved.Options;
 
     var compliance = Evaluate(resource, currentState, options);
     if (compliance.Status is ComplianceStatus.DetectionFailed or ComplianceStatus.Unsupported)
@@ -388,25 +388,22 @@ public sealed class VisualStudioProvider : IResourceProvider
     var step = plan.Steps[0];
     progress?.Report(new ProviderProgress(
         "BootstrapperVerification", 0.1, "Verifying Visual Studio installer inputs.", step.Id));
-    string? verifiedVsConfig = null;
-    if (options!.VsConfigPath is not null)
+    var resolved = await ResolveConfigurationAsync(
+        resource,
+        options!,
+        cancellationToken).ConfigureAwait(false);
+    if (resolved.Error is not null)
     {
-      var verification = await _trustedFileVerifier.VerifySha256Async(
-          options.VsConfigPath,
-          GetExpectedSha256(resource)!,
-          cancellationToken).ConfigureAwait(false);
-      if (!verification.IsTrusted)
-      {
-        return ApplyFailure(
-            resource,
-            step,
-            verification.Error! with { ResourceId = resource.Id, StepId = step.Id },
-            null,
-            0.1);
-      }
-
-      verifiedVsConfig = verification.VerifiedPath;
+      return ApplyFailure(
+          resource,
+          step,
+          resolved.Error with { ResourceId = resource.Id, StepId = step.Id },
+          null,
+          0.1);
     }
+
+    options = resolved.Options;
+    var verifiedVsConfig = resolved.VerifiedPath;
 
     var setupPath = DefaultSetupPath();
     if (options.BootstrapperUri is not null)
@@ -485,7 +482,13 @@ public sealed class VisualStudioProvider : IResourceProvider
         StepId = step.Id,
         ProcessExitCode = command.Process.ExitCode
       };
-      return ApplyFailure(resource, step, error, command.Process.ExitCode, 0.5);
+      return ApplyFailure(
+          resource,
+          step,
+          error,
+          command.Process.ExitCode,
+          0.5,
+          command.Evidence);
     }
 
     progress?.Report(new ProviderProgress(
@@ -505,7 +508,13 @@ public sealed class VisualStudioProvider : IResourceProvider
         StepId = step.Id,
         ProcessExitCode = command.Process.ExitCode
       };
-      return ApplyFailure(resource, step, error, command.Process.ExitCode, 0.85);
+      return ApplyFailure(
+          resource,
+          step,
+          error,
+          command.Process.ExitCode,
+          0.85,
+          command.Evidence);
     }
 
     var evidence = string.Join(
@@ -515,6 +524,7 @@ public sealed class VisualStudioProvider : IResourceProvider
     {
       ResourceId = resource.Id,
       Outcome = ApplyOutcome.Succeeded,
+      RestartRequirement = command.RestartRequirement,
       StepResults =
       [
         new ProviderStepResult
@@ -535,6 +545,15 @@ public sealed class VisualStudioProvider : IResourceProvider
   {
     var detected = await DetectAsync(resource, cancellationToken).ConfigureAwait(false);
     _ = TryParseOptions(resource, out var options, out _);
+    if (options is not null)
+    {
+      var resolved = await ResolveConfigurationAsync(
+          resource,
+          options,
+          cancellationToken).ConfigureAwait(false);
+      options = resolved.Error is null ? resolved.Options : null;
+    }
+
     var compliance = Evaluate(resource, detected, options);
     return new VerificationResult
     {
@@ -749,7 +768,8 @@ public sealed class VisualStudioProvider : IResourceProvider
       PlanStep? step,
       StructuredError error,
       int? exitCode,
-      double progress) => new()
+      double progress,
+      IReadOnlyDictionary<string, string>? evidence = null) => new()
       {
         ResourceId = resource.Id,
         Outcome = ApplyOutcome.Failed,
@@ -765,10 +785,77 @@ public sealed class VisualStudioProvider : IResourceProvider
                 Action = step.Action,
                 Progress = progress,
                 ProcessExitCode = exitCode,
+                Message = FormatEvidence(evidence),
                 Error = error
               }
             ]
       };
+
+  private async Task<ResolvedVisualStudioOptions> ResolveConfigurationAsync(
+      ResourceDefinition resource,
+      VisualStudioResourceOptions options,
+      CancellationToken cancellationToken)
+  {
+    if (options.VsConfigPath is null)
+    {
+      return new ResolvedVisualStudioOptions(options, null, null, null);
+    }
+
+    var verification = await _trustedFileVerifier.VerifySha256Async(
+        options.VsConfigPath,
+        GetExpectedSha256(resource)!,
+        cancellationToken).ConfigureAwait(false);
+    if (!verification.IsTrusted)
+    {
+      return new ResolvedVisualStudioOptions(
+          options,
+          null,
+          null,
+          verification.Error);
+    }
+
+    var parsed = await VisualStudioConfigurationParser.ParseAsync(
+        verification.VerifiedPath!,
+        cancellationToken).ConfigureAwait(false);
+    if (parsed.Error is not null)
+    {
+      return new ResolvedVisualStudioOptions(options, null, null, parsed.Error);
+    }
+
+    var configuration = parsed.Configuration!;
+    return new ResolvedVisualStudioOptions(
+        options with
+        {
+          Workloads = MergeIds(options.Workloads, configuration.Workloads),
+          Components = MergeIds(options.Components, configuration.Components)
+        },
+        verification.VerifiedPath,
+        verification.Sha256,
+        null);
+  }
+
+  private static IReadOnlyList<string> MergeIds(
+      IReadOnlyList<string> declared,
+      IReadOnlyList<string> configured) => declared
+          .Concat(configured)
+          .Distinct(StringComparer.OrdinalIgnoreCase)
+          .ToArray();
+
+  private static string? FormatEvidence(IReadOnlyDictionary<string, string>? evidence)
+  {
+    if (evidence is null || evidence.Count == 0)
+    {
+      return null;
+    }
+
+    var safeEvidence = evidence.Where(pair => pair.Key is
+        "installerPath" or "installerSha256" or "restartRequirement");
+    var formatted = string.Join(
+        "; ",
+        safeEvidence.OrderBy(pair => pair.Key)
+            .Select(pair => $"{pair.Key}={pair.Value}"));
+    return formatted.Length == 0 ? null : formatted;
+  }
 
   private static string DefaultSetupPath()
   {
@@ -830,4 +917,10 @@ public sealed class VisualStudioProvider : IResourceProvider
         Error = error.Detail,
         StructuredError = error
       };
+
+  private sealed record ResolvedVisualStudioOptions(
+      VisualStudioResourceOptions Options,
+      string? VerifiedPath,
+      string? Sha256,
+      StructuredError? Error);
 }

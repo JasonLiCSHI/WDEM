@@ -773,7 +773,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         StartedAtUtc = startedAt,
         EndedAtUtc = DateTimeOffset.UtcNow,
         Error = verified ? null : VerificationError(definition.Id, verification.Message),
-        RestartRequirement = verified ? planned.RestartPolicy : RestartPolicy.NoRestart,
+        RestartRequirement = verified ? applied.RestartRequirement : RestartPolicy.NoRestart,
         StepResults = stepResults
       };
     }

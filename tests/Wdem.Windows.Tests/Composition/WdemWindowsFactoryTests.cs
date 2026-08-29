@@ -50,6 +50,9 @@ public sealed class WdemWindowsFactoryTests : IDisposable
     Assert.IsType<RunEventHub>(composition.RunEvents);
     Assert.IsType<NamedPipePrivilegeBroker>(composition.PrivilegeBroker);
     Assert.Equal("winget", composition.Providers.GetRequired("package", "winget").ProviderName);
+    var visualStudio = Assert.IsType<VisualStudioProvider>(composition.Providers
+        .GetRequired("visual-studio", "visual-studio"));
+    Assert.True(visualStudio.Capabilities.SupportsInstallerParameters);
     Assert.True(File.Exists(Path.Combine(paths.Root, "migration-v1.json")));
   }
 

@@ -71,12 +71,22 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   {
     Directory.CreateDirectory(_root);
     var vsconfig = Path.Combine(_root, "profile.vsconfig");
-    await File.WriteAllTextAsync(vsconfig, "{}");
+    await File.WriteAllTextAsync(vsconfig, Vsconfig(
+        "Microsoft.VisualStudio.Workload.NetWeb",
+        "Microsoft.VisualStudio.Component.Git"));
     var hash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(vsconfig)));
     var compliant = Instance(
         "17.0_a",
-        workloads: ["Microsoft.VisualStudio.Workload.ManagedDesktop"],
-        components: ["Microsoft.NetCore.Component.Runtime.10.0"]);
+        workloads:
+        [
+          "Microsoft.VisualStudio.Workload.ManagedDesktop",
+          "Microsoft.VisualStudio.Workload.NetWeb"
+        ],
+        components:
+        [
+          "Microsoft.NetCore.Component.Runtime.10.0",
+          "Microsoft.VisualStudio.Component.Git"
+        ]);
     var discovery = new SequenceDiscovery([[Instance("17.0_a")], [compliant]]);
     var installer = new RecordingInstallerClient();
     var provider = Provider(discovery, installer);
@@ -91,7 +101,49 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
     Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
     Assert.Contains("--config", installer.LastArguments);
     Assert.Contains(Path.GetFullPath(vsconfig), installer.LastArguments);
-    Assert.True(discovery.CallCount > 0);
+    Assert.Contains("Microsoft.VisualStudio.Workload.NetWeb", discovery.RequestedWorkloads);
+    Assert.Contains("Microsoft.VisualStudio.Component.Git", discovery.RequestedComponents);
+  }
+
+  [Fact]
+  public async Task PlanAsync_EmptyVsconfigIsNonExecutable()
+  {
+    Directory.CreateDirectory(_root);
+    var vsconfig = Path.Combine(_root, "empty.vsconfig");
+    await File.WriteAllTextAsync(vsconfig, "{}");
+    var hash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(vsconfig)));
+    var provider = Provider(new SequenceDiscovery([]), new RecordingInstallerClient());
+
+    var plan = await provider.PlanAsync(
+        Resource(vsconfig, hash), MissingState(), CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Equal(WdemErrorCode.ConfigurationError, Assert.Single(plan.StructuredErrors).Code);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_MissingVsconfigComponentFailsPostExecutionVerification()
+  {
+    Directory.CreateDirectory(_root);
+    var vsconfig = Path.Combine(_root, "profile.vsconfig");
+    await File.WriteAllTextAsync(vsconfig, Vsconfig("Microsoft.VisualStudio.Component.Git"));
+    var hash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(vsconfig)));
+    var installedWithoutConfigComponent = Instance(
+        "17.0_a",
+        workloads: ["Microsoft.VisualStudio.Workload.ManagedDesktop"],
+        components: ["Microsoft.NetCore.Component.Runtime.10.0"]);
+    var discovery = new SequenceDiscovery(
+        [[Instance("17.0_a")], [installedWithoutConfigComponent]]);
+    var provider = Provider(discovery, new RecordingInstallerClient());
+    var resource = Resource(vsconfig, hash);
+    var plan = await provider.PlanAsync(
+        resource, State(Instance("17.0_a")), CancellationToken.None);
+
+    var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(WdemErrorCode.ConfigurationError, result.Error!.Code);
+    Assert.Contains("Microsoft.VisualStudio.Component.Git", discovery.RequestedComponents);
   }
 
   [Fact]
@@ -158,6 +210,58 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
     Assert.Equal(
         ["BootstrapperVerification", "Modify", "Configuration", "Verification"],
         reports.Select(report => report.Stage));
+  }
+
+  [Fact]
+  public async Task ApplyAsync_PropagatesActualInstallerRestartEvidence()
+  {
+    var discovery = new SequenceDiscovery(
+    [[Instance("17.0_a")], [Instance(
+        "17.0_a",
+        workloads: ["Microsoft.VisualStudio.Workload.ManagedDesktop"],
+        components: ["Microsoft.NetCore.Component.Runtime.10.0"])]]);
+    var installer = new RecordingInstallerClient
+    {
+      Result = new VisualStudioInstallerResult(
+          new ProcessExecutionResult(true, 3010, [], []),
+          RestartPolicy.RestartRecommended,
+          new Dictionary<string, string> { ["installerPath"] = @"C:\setup.exe" })
+    };
+    var provider = Provider(discovery, installer);
+    var resource = Resource();
+    var plan = await provider.PlanAsync(
+        resource, State(Instance("17.0_a")), CancellationToken.None);
+
+    var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
+    Assert.Equal(RestartPolicy.RestartRecommended, result.RestartRequirement);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_InstallerFailureRetainsVerifiedArtifactEvidence()
+  {
+    var discovery = new SequenceDiscovery([[Instance("17.0_a")]]);
+    var installer = new RecordingInstallerClient
+    {
+      Result = new VisualStudioInstallerResult(
+          new ProcessExecutionResult(true, 500, [], []),
+          RestartPolicy.NoRestart,
+          new Dictionary<string, string>
+          {
+            ["installerPath"] = @"C:\verified\vs.exe",
+            ["installerSha256"] = new string('A', 64)
+          })
+    };
+    var provider = Provider(discovery, installer);
+    var resource = Resource();
+    var plan = await provider.PlanAsync(
+        resource, State(Instance("17.0_a")), CancellationToken.None);
+
+    var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Contains("installerPath=C:\\verified\\vs.exe", Assert.Single(result.StepResults).Message);
   }
 
   public void Dispose()
@@ -229,6 +333,10 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
     }
   };
 
+  private static string Vsconfig(params string[] components) => $$"""
+      { "version": "1.0", "components": [{{string.Join(',', components.Select(id => $"\"{id}\""))}}] }
+      """;
+
   private static VisualStudioInstance Instance(
       string id,
       string[]? workloads = null,
@@ -254,6 +362,8 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   {
     private int _index;
     public int CallCount { get; private set; }
+    public IReadOnlyList<string> RequestedWorkloads { get; private set; } = [];
+    public IReadOnlyList<string> RequestedComponents { get; private set; } = [];
 
     public Task<IReadOnlyList<VisualStudioInstance>> DiscoverAsync(
         IReadOnlyList<string> requestedWorkloads,
@@ -262,6 +372,8 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
     {
       cancellationToken.ThrowIfCancellationRequested();
       CallCount++;
+      RequestedWorkloads = requestedWorkloads;
+      RequestedComponents = requestedComponents;
       if (sequences.Count == 0)
       {
         return Task.FromResult<IReadOnlyList<VisualStudioInstance>>([]);
@@ -276,6 +388,7 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   private sealed class RecordingInstallerClient : IVisualStudioInstallerClient
   {
     public IReadOnlyList<string> LastArguments { get; private set; } = [];
+    public VisualStudioInstallerResult Result { get; init; } = Success(@"C:\setup.exe");
 
     public Task<TrustedFileVerificationResult> AcquireBootstrapperAsync(
         Uri source,
@@ -299,7 +412,7 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
     {
       LastArguments = VisualStudioInstallerClient.CreateInstallArguments(
           productId, channelUri, installPath, workloads, components, vsconfigPath);
-      return Task.FromResult(Success(executablePath));
+      return Task.FromResult(Result);
     }
 
     public Task<VisualStudioInstallerResult> ModifyAsync(
@@ -312,7 +425,7 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
     {
       LastArguments = VisualStudioInstallerClient.CreateModifyArguments(
           installPath, workloads, components, vsconfigPath);
-      return Task.FromResult(Success(executablePath));
+      return Task.FromResult(Result);
     }
 
     private static VisualStudioInstallerResult Success(string executablePath) => new(

@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Text.Json;
 using Wdem.Core.Execution;
 using Wdem.Core.Processes;
 using Wdem.Core.Resources;
@@ -41,6 +43,8 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
   private readonly IProcessExecutor _processExecutor;
   private readonly ITrustedFileVerifier _trustedFileVerifier;
   private readonly HttpClient _httpClient;
+  private readonly ConcurrentDictionary<string, string> _verifiedBootstrappers =
+      new(StringComparer.OrdinalIgnoreCase);
 
   public VisualStudioInstallerClient(
       IProcessExecutor processExecutor,
@@ -50,7 +54,10 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
     _processExecutor = processExecutor ?? throw new ArgumentNullException(nameof(processExecutor));
     _trustedFileVerifier = trustedFileVerifier ?? new TrustedFileVerifier();
     _httpClient = httpClient ?? new HttpClient();
+    SetupExecutablePath = GetDefaultSetupPath();
   }
+
+  public string SetupExecutablePath { get; }
 
   public async Task<TrustedFileVerificationResult> AcquireBootstrapperAsync(
       Uri source,
@@ -58,10 +65,16 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
       CancellationToken cancellationToken)
   {
     ArgumentNullException.ThrowIfNull(source);
-    if (!source.IsAbsoluteUri ||
-        !string.Equals(source.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+    if (!VisualStudioInputValidation.IsSafeHttpsUri(source))
     {
-      return ConfigurationFailure("The Visual Studio bootstrapper URI must use HTTPS.");
+      return ConfigurationFailure(
+          "The Visual Studio bootstrapper URI must be an HTTPS URI without user information or control characters.");
+    }
+
+    if (!VisualStudioInputValidation.IsSha256(expectedSha256))
+    {
+      return ConfigurationFailure(
+          "The Visual Studio bootstrapper SHA-256 must contain exactly 64 hexadecimal characters.");
     }
 
     var downloadDirectory = Path.Combine(Path.GetTempPath(), "wdem", "visual-studio");
@@ -90,6 +103,10 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
       if (!verification.IsTrusted)
       {
         File.Delete(localPath);
+      }
+      else
+      {
+        _verifiedBootstrappers[verification.VerifiedPath!] = verification.Sha256!;
       }
 
       return verification;
@@ -151,14 +168,15 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
       IReadOnlyList<string> components,
       string? vsconfigPath)
   {
-    ArgumentException.ThrowIfNullOrWhiteSpace(productId);
+    VisualStudioInputValidation.ThrowIfInvalidId(productId, nameof(productId));
     var arguments = new List<string> { "install", "--productId", productId };
     if (channelUri is not null)
     {
-      if (!channelUri.IsAbsoluteUri ||
-          !string.Equals(channelUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+      if (!VisualStudioInputValidation.IsSafeHttpsUri(channelUri))
       {
-        throw new ArgumentException("The channel URI must be an absolute HTTPS URI.", nameof(channelUri));
+        throw new ArgumentException(
+            "The channel URI must be an absolute HTTPS URI without user information or control characters.",
+            nameof(channelUri));
       }
 
       arguments.AddRange(["--channelUri", channelUri.AbsoluteUri]);
@@ -184,17 +202,43 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
       IReadOnlyList<string> arguments,
       CancellationToken cancellationToken)
   {
-    ArgumentException.ThrowIfNullOrWhiteSpace(executablePath);
-    if (!Path.IsPathFullyQualified(executablePath) ||
-        !string.Equals(Path.GetExtension(executablePath), ".exe", StringComparison.OrdinalIgnoreCase))
+    VisualStudioInputValidation.ThrowIfInvalidAbsolutePath(executablePath, nameof(executablePath));
+    var fullPath = Path.GetFullPath(executablePath);
+    if (!string.Equals(
+            Path.GetExtension(executablePath),
+            ".exe",
+            StringComparison.OrdinalIgnoreCase))
     {
       throw new ArgumentException(
           "The Visual Studio installer path must be an absolute executable path.",
           nameof(executablePath));
     }
 
+    string? installerSha256 = null;
+    if (!string.Equals(fullPath, SetupExecutablePath, StringComparison.OrdinalIgnoreCase))
+    {
+      if (!_verifiedBootstrappers.TryGetValue(fullPath, out var expectedSha256))
+      {
+        throw new InvalidOperationException(
+            "The Visual Studio installer executable has not been verified.");
+      }
+
+      var verification = await _trustedFileVerifier.VerifySha256Async(
+          fullPath,
+          expectedSha256,
+          cancellationToken).ConfigureAwait(false);
+      if (!verification.IsTrusted)
+      {
+        _verifiedBootstrappers.TryRemove(fullPath, out _);
+        throw new InvalidOperationException(
+            "The Visual Studio installer executable no longer matches its verified hash.");
+      }
+
+      installerSha256 = verification.Sha256;
+    }
+
     var process = await _processExecutor.ExecuteAsync(
-        new ProcessExecutionRequest(executablePath, arguments),
+        new ProcessExecutionRequest(fullPath, arguments),
         null,
         cancellationToken).ConfigureAwait(false);
     var restart = process.ExitCode switch
@@ -203,14 +247,17 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
       3010 => RestartPolicy.RestartRecommended,
       _ => RestartPolicy.NoRestart
     };
-    return new VisualStudioInstallerResult(
-        process,
-        restart,
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-          ["installerPath"] = Path.GetFullPath(executablePath),
-          ["restartRequirement"] = restart.ToString()
-        });
+    var evidence = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+      ["installerPath"] = fullPath,
+      ["restartRequirement"] = restart.ToString()
+    };
+    if (installerSha256 is not null)
+    {
+      evidence["installerSha256"] = installerSha256;
+    }
+
+    return new VisualStudioInstallerResult(process, restart, evidence);
   }
 
   private static void AddConfigurationArguments(
@@ -220,31 +267,21 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
       IReadOnlyList<string> components,
       string? vsconfigPath)
   {
-    ArgumentException.ThrowIfNullOrWhiteSpace(installPath);
+    VisualStudioInputValidation.ThrowIfInvalidAbsolutePath(installPath, nameof(installPath));
     ArgumentNullException.ThrowIfNull(workloads);
     ArgumentNullException.ThrowIfNull(components);
-    if (!Path.IsPathFullyQualified(installPath))
-    {
-      throw new ArgumentException("The install path must be absolute.", nameof(installPath));
-    }
 
     arguments.AddRange(["--installPath", Path.GetFullPath(installPath)]);
     foreach (var id in workloads.Concat(components))
     {
-      if (string.IsNullOrWhiteSpace(id) || id.StartsWith("-", StringComparison.Ordinal))
-      {
-        throw new ArgumentException("Visual Studio workload and component IDs cannot be arguments.");
-      }
+      VisualStudioInputValidation.ThrowIfInvalidId(id, "id");
 
       arguments.AddRange(["--add", id]);
     }
 
     if (vsconfigPath is not null)
     {
-      if (!Path.IsPathFullyQualified(vsconfigPath))
-      {
-        throw new ArgumentException("The .vsconfig path must be absolute.", nameof(vsconfigPath));
-      }
+      VisualStudioInputValidation.ThrowIfInvalidAbsolutePath(vsconfigPath, nameof(vsconfigPath));
 
       arguments.AddRange(["--config", Path.GetFullPath(vsconfigPath)]);
     }
@@ -274,4 +311,151 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
     {
     }
   }
+
+  private static string GetDefaultSetupPath()
+  {
+    var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+    if (string.IsNullOrWhiteSpace(programFiles))
+    {
+      programFiles = Environment.GetEnvironmentVariable("ProgramFiles(x86)") ??
+          @"C:\Program Files (x86)";
+    }
+
+    return Path.GetFullPath(Path.Combine(
+        programFiles,
+        "Microsoft Visual Studio",
+        "Installer",
+        "setup.exe"));
+  }
+}
+
+public sealed record VisualStudioConfiguration(
+    IReadOnlyList<string> Workloads,
+    IReadOnlyList<string> Components);
+
+public sealed record VisualStudioConfigurationParseResult(
+    VisualStudioConfiguration? Configuration,
+    StructuredError? Error);
+
+public static class VisualStudioConfigurationParser
+{
+  public static async Task<VisualStudioConfigurationParseResult> ParseAsync(
+      string path,
+      CancellationToken cancellationToken)
+  {
+    try
+    {
+      VisualStudioInputValidation.ThrowIfInvalidAbsolutePath(path, nameof(path));
+      await using var stream = new FileStream(
+          Path.GetFullPath(path),
+          FileMode.Open,
+          FileAccess.Read,
+          FileShare.Read,
+          bufferSize: 81920,
+          FileOptions.Asynchronous | FileOptions.SequentialScan);
+      using var document = await JsonDocument.ParseAsync(
+          stream,
+          cancellationToken: cancellationToken).ConfigureAwait(false);
+      if (document.RootElement.ValueKind != JsonValueKind.Object ||
+          !document.RootElement.TryGetProperty("version", out var version) ||
+          version.ValueKind != JsonValueKind.String ||
+          string.IsNullOrWhiteSpace(version.GetString()) ||
+          !document.RootElement.TryGetProperty("components", out var componentsElement) ||
+          componentsElement.ValueKind != JsonValueKind.Array ||
+          componentsElement.GetArrayLength() == 0)
+      {
+        return Failure("The .vsconfig file must contain a version and at least one component ID.");
+      }
+
+      var workloads = new List<string>();
+      var components = new List<string>();
+      foreach (var element in componentsElement.EnumerateArray())
+      {
+        if (element.ValueKind != JsonValueKind.String ||
+            !VisualStudioInputValidation.IsValidId(element.GetString()))
+        {
+          return Failure("Every .vsconfig component must be a valid Visual Studio identifier.");
+        }
+
+        var id = element.GetString()!;
+        var destination = id.StartsWith(
+            "Microsoft.VisualStudio.Workload.",
+            StringComparison.OrdinalIgnoreCase)
+            ? workloads
+            : components;
+        if (!destination.Contains(id, StringComparer.OrdinalIgnoreCase))
+        {
+          destination.Add(id);
+        }
+      }
+
+      return new VisualStudioConfigurationParseResult(
+          new VisualStudioConfiguration(workloads, components),
+          null);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      throw;
+    }
+    catch (Exception exception) when (exception is ArgumentException or
+        IOException or UnauthorizedAccessException or JsonException)
+    {
+      return Failure("The .vsconfig file could not be read as a valid Visual Studio configuration.");
+    }
+  }
+
+  private static VisualStudioConfigurationParseResult Failure(string detail) => new(
+      null,
+      new StructuredError(
+          WdemErrorCode.ConfigurationError,
+          "Visual Studio configuration is invalid.",
+          detail));
+}
+
+internal static class VisualStudioInputValidation
+{
+  public static bool IsSha256(string? value) => value is not null &&
+      value.Length == 64 &&
+      value.All(Uri.IsHexDigit);
+
+  public static bool IsSafeHttpsUri(Uri? value) => value is not null &&
+      value.IsAbsoluteUri &&
+      string.Equals(value.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) &&
+      string.IsNullOrEmpty(value.UserInfo) &&
+      !value.OriginalString.Any(char.IsControl);
+
+  public static bool IsValidId(string? value)
+  {
+    if (string.IsNullOrEmpty(value) || !IsAsciiLetterOrDigit(value[0]))
+    {
+      return false;
+    }
+
+    return value.All(character =>
+        IsAsciiLetterOrDigit(character) || character is '.' or '_' or '-');
+  }
+
+  public static void ThrowIfInvalidId(string? value, string parameterName)
+  {
+    if (!IsValidId(value))
+    {
+      throw new ArgumentException(
+          "Visual Studio identifiers may contain only ASCII letters, digits, periods, underscores, and hyphens, and must begin with a letter or digit.",
+          parameterName);
+    }
+  }
+
+  public static void ThrowIfInvalidAbsolutePath(string? value, string parameterName)
+  {
+    if (string.IsNullOrWhiteSpace(value) ||
+        !string.Equals(value, value.Trim(), StringComparison.Ordinal) ||
+        value.Any(char.IsControl) ||
+        !Path.IsPathFullyQualified(value))
+    {
+      throw new ArgumentException("The path must be absolute and contain no control characters.", parameterName);
+    }
+  }
+
+  private static bool IsAsciiLetterOrDigit(char value) =>
+      value is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9';
 }

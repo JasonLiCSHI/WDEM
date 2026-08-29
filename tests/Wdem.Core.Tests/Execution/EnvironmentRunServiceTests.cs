@@ -14,6 +14,28 @@ namespace Wdem.Core.Tests.Execution;
 public sealed class EnvironmentRunServiceTests
 {
   [Fact]
+  public async Task ApplyAsync_UsesActualProviderRestartEvidence()
+  {
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyResult = new ResourceApplyResult
+      {
+        ResourceId = "git",
+        Outcome = ApplyOutcome.Succeeded,
+        RestartRequirement = RestartPolicy.RestartRecommended
+      }
+    };
+    var (service, _) = CreateService(provider);
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    Assert.Equal(
+        RestartPolicy.RestartRecommended,
+        run.ResourceResults["git"].RestartRequirement);
+    Assert.Contains(RestartPolicy.RestartRecommended, run.RestartRequirements);
+  }
+
+  [Fact]
   public async Task ApplyAsync_PublishesPersistedRunEventsInSequenceWithoutDroppingDetails()
   {
     var provider = new ScriptedProvider(Missing("git"))

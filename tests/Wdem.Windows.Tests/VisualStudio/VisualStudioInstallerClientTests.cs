@@ -1,5 +1,8 @@
+using System.Security.Cryptography;
+using Wdem.Core.Execution;
 using Wdem.Core.Processes;
 using Wdem.Core.Resources;
+using Wdem.Windows.Security;
 using Wdem.Windows.VisualStudio;
 using Xunit;
 
@@ -14,7 +17,7 @@ public sealed class VisualStudioInstallerClientTests
     var client = new VisualStudioInstallerClient(process);
 
     await client.ModifyAsync(
-        @"C:\Program Files (x86)\Microsoft Visual Studio\Installer\setup.exe",
+        client.SetupExecutablePath,
         @"C:\VS",
         ["Microsoft.VisualStudio.Workload.ManagedDesktop"],
         ["Microsoft.NetCore.Component.Runtime.10.0"],
@@ -42,7 +45,7 @@ public sealed class VisualStudioInstallerClientTests
     var client = new VisualStudioInstallerClient(process);
 
     await client.InstallAsync(
-        @"C:\verified\vs_community.exe",
+        client.SetupExecutablePath,
         "Microsoft.VisualStudio.Product.Community",
         new Uri("https://example.test/channel.json"),
         @"C:\VS",
@@ -52,7 +55,7 @@ public sealed class VisualStudioInstallerClientTests
         CancellationToken.None);
 
     var request = Assert.Single(process.Requests);
-    Assert.Equal(@"C:\verified\vs_community.exe", request.FileName);
+    Assert.Equal(client.SetupExecutablePath, request.FileName);
     Assert.Equal(
         [
           "install", "--productId", "Microsoft.VisualStudio.Product.Community",
@@ -76,7 +79,7 @@ public sealed class VisualStudioInstallerClientTests
     var client = new VisualStudioInstallerClient(process);
 
     var result = await client.ModifyAsync(
-        @"C:\setup.exe",
+        client.SetupExecutablePath,
         @"C:\VS",
         [],
         [],
@@ -84,6 +87,145 @@ public sealed class VisualStudioInstallerClientTests
         CancellationToken.None);
 
     Assert.Equal(RestartPolicy.RestartRecommended, result.RestartRequirement);
+  }
+
+  [Fact]
+  public async Task InstallAsync_UnverifiedExecutableIsRejectedBeforeExecution()
+  {
+    var process = new RecordingProcessExecutor();
+    var client = new VisualStudioInstallerClient(process);
+
+    await Assert.ThrowsAsync<InvalidOperationException>(() => client.InstallAsync(
+        @"C:\untrusted\payload.exe",
+        "Microsoft.VisualStudio.Product.Community",
+        null,
+        @"C:\VS",
+        [],
+        [],
+        null,
+        CancellationToken.None));
+
+    Assert.Empty(process.Requests);
+  }
+
+  [Theory]
+  [InlineData("--add")]
+  [InlineData("Microsoft.VisualStudio.Product.Community\r\n--quiet")]
+  public void CreateInstallArguments_RejectsInjectedProductId(string productId)
+  {
+    Assert.Throws<ArgumentException>(() => VisualStudioInstallerClient.CreateInstallArguments(
+        productId, null, @"C:\VS", [], [], null));
+  }
+
+  [Fact]
+  public void CreateModifyArguments_RejectsControlCharactersInPathAndIds()
+  {
+    Assert.Throws<ArgumentException>(() => VisualStudioInstallerClient.CreateModifyArguments(
+        "C:\\VS\n--quiet", [], [], null));
+    Assert.Throws<ArgumentException>(() => VisualStudioInstallerClient.CreateModifyArguments(
+        @"C:\VS", ["Microsoft.VisualStudio.Workload.ManagedDesktop\n--quiet"], [], null));
+  }
+
+  [Fact]
+  public void CreateInstallArguments_RejectsChannelUriWithUserInfo()
+  {
+    Assert.Throws<ArgumentException>(() => VisualStudioInstallerClient.CreateInstallArguments(
+        "Microsoft.VisualStudio.Product.Community",
+        new Uri("https://user:secret@example.test/channel.json"),
+        @"C:\VS", [], [], null));
+  }
+
+  [Fact]
+  public async Task VerifiedBootstrapper_IsReverifiedAtLaunchAndRecordedInEvidence()
+  {
+    var bytes = "trusted bootstrapper"u8.ToArray();
+    var hash = Convert.ToHexString(SHA256.HashData(bytes));
+    var process = new RecordingProcessExecutor();
+    var client = new VisualStudioInstallerClient(
+        process,
+        httpClient: new HttpClient(new ContentHandler(bytes)));
+    var verified = await client.AcquireBootstrapperAsync(
+        new Uri("https://example.test/vs.exe"), hash, CancellationToken.None);
+
+    var result = await client.InstallAsync(
+        verified.VerifiedPath!,
+        "Microsoft.VisualStudio.Product.Community",
+        null,
+        @"C:\VS", [], [], null, CancellationToken.None);
+
+    Assert.True(verified.IsTrusted);
+    Assert.Equal(verified.VerifiedPath, Assert.Single(process.Requests).FileName);
+    Assert.Equal(verified.VerifiedPath, result.Evidence["installerPath"]);
+    Assert.Equal(hash, result.Evidence["installerSha256"]);
+  }
+
+  [Fact]
+  public async Task VerifiedBootstrapper_ModifiedAfterVerificationIsNotLaunched()
+  {
+    var bytes = "trusted bootstrapper"u8.ToArray();
+    var hash = Convert.ToHexString(SHA256.HashData(bytes));
+    var process = new RecordingProcessExecutor();
+    var client = new VisualStudioInstallerClient(
+        process,
+        httpClient: new HttpClient(new ContentHandler(bytes)));
+    var verified = await client.AcquireBootstrapperAsync(
+        new Uri("https://example.test/vs.exe"), hash, CancellationToken.None);
+    await File.WriteAllTextAsync(verified.VerifiedPath!, "tampered");
+
+    await Assert.ThrowsAsync<InvalidOperationException>(() => client.InstallAsync(
+        verified.VerifiedPath!,
+        "Microsoft.VisualStudio.Product.Community",
+        null,
+        @"C:\VS", [], [], null, CancellationToken.None));
+
+    Assert.Empty(process.Requests);
+  }
+
+  [Fact]
+  public async Task VsconfigParser_ValidFileReturnsWorkloadsAndComponents()
+  {
+    var path = Path.GetTempFileName();
+    try
+    {
+      await File.WriteAllTextAsync(path, """
+          { "version": "1.0", "components": [
+            "Microsoft.VisualStudio.Workload.ManagedDesktop",
+            "Microsoft.NetCore.Component.Runtime.10.0"
+          ] }
+          """);
+
+      var result = await VisualStudioConfigurationParser.ParseAsync(path, CancellationToken.None);
+
+      Assert.Null(result.Error);
+      Assert.Equal(["Microsoft.VisualStudio.Workload.ManagedDesktop"], result.Configuration!.Workloads);
+      Assert.Equal(["Microsoft.NetCore.Component.Runtime.10.0"], result.Configuration.Components);
+    }
+    finally
+    {
+      File.Delete(path);
+    }
+  }
+
+  [Theory]
+  [InlineData("{}")]
+  [InlineData("{ \"version\": \"1.0\", \"components\": \"not-an-array\" }")]
+  [InlineData("{ \"version\": \"1.0\", \"components\": [] }")]
+  public async Task VsconfigParser_InvalidSchemaOrEmptyContentReturnsConfigurationError(string json)
+  {
+    var path = Path.GetTempFileName();
+    try
+    {
+      await File.WriteAllTextAsync(path, json);
+
+      var result = await VisualStudioConfigurationParser.ParseAsync(path, CancellationToken.None);
+
+      Assert.Null(result.Configuration);
+      Assert.Equal(WdemErrorCode.ConfigurationError, result.Error!.Code);
+    }
+    finally
+    {
+      File.Delete(path);
+    }
   }
 
   [Fact]
@@ -131,5 +273,90 @@ public sealed class VisualStudioInstallerClientTests
         HttpRequestMessage request,
         CancellationToken cancellationToken) => throw new HttpRequestException(
             $"Download failed for a source containing {secret}.");
+  }
+
+  private sealed class ContentHandler(byte[] content) : HttpMessageHandler
+  {
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken) => Task.FromResult(new HttpResponseMessage
+        {
+          StatusCode = System.Net.HttpStatusCode.OK,
+          Content = new ByteArrayContent(content)
+        });
+  }
+}
+
+public sealed class TrustedFileVerifierTests
+{
+  [Fact]
+  public async Task VerifySha256Async_MissingFileReturnsConfigurationError()
+  {
+    var result = await new TrustedFileVerifier().VerifySha256Async(
+        Path.Combine(Path.GetTempPath(), $"missing-{Guid.NewGuid():N}"),
+        new string('A', 64),
+        CancellationToken.None);
+
+    Assert.False(result.IsTrusted);
+    Assert.Equal(WdemErrorCode.ConfigurationError, result.Error!.Code);
+  }
+
+  [Fact]
+  public async Task VerifySha256Async_MalformedExpectedHashReturnsConfigurationError()
+  {
+    var path = Path.GetTempFileName();
+    try
+    {
+      var result = await new TrustedFileVerifier().VerifySha256Async(
+          path, "not-a-hash", CancellationToken.None);
+
+      Assert.False(result.IsTrusted);
+      Assert.Equal(WdemErrorCode.ConfigurationError, result.Error!.Code);
+    }
+    finally
+    {
+      File.Delete(path);
+    }
+  }
+
+  [Fact]
+  public async Task VerifySha256Async_AcceptsCaseInsensitiveHash()
+  {
+    var path = Path.GetTempFileName();
+    try
+    {
+      await File.WriteAllTextAsync(path, "trusted");
+      var expected = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(path)))
+          .ToLowerInvariant();
+
+      var result = await new TrustedFileVerifier().VerifySha256Async(
+          path, expected, CancellationToken.None);
+
+      Assert.True(result.IsTrusted);
+      Assert.Equal(Path.GetFullPath(path), result.VerifiedPath);
+    }
+    finally
+    {
+      File.Delete(path);
+    }
+  }
+
+  [Fact]
+  public async Task VerifySha256Async_MismatchReturnsConfigurationError()
+  {
+    var path = Path.GetTempFileName();
+    try
+    {
+      await File.WriteAllTextAsync(path, "untrusted");
+      var result = await new TrustedFileVerifier().VerifySha256Async(
+          path, new string('A', 64), CancellationToken.None);
+
+      Assert.False(result.IsTrusted);
+      Assert.Equal(WdemErrorCode.ConfigurationError, result.Error!.Code);
+    }
+    finally
+    {
+      File.Delete(path);
+    }
   }
 }
