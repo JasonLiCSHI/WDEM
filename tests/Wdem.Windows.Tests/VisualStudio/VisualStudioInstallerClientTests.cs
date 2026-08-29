@@ -40,6 +40,36 @@ public sealed class VisualStudioInstallerClientTests
   }
 
   [Fact]
+  public async Task ModifyAsync_UsesConfiguredInstallerOperationTimeout()
+  {
+    var process = new RecordingProcessExecutor();
+    var timeout = TimeSpan.FromHours(6);
+    var client = new VisualStudioInstallerClient(
+        process,
+        installerOperationTimeout: timeout);
+
+    await client.ModifyAsync(
+        client.SetupExecutablePath,
+        @"C:\VS",
+        [],
+        [],
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(timeout, Assert.Single(process.Requests).Timeout);
+  }
+
+  [Theory]
+  [InlineData(0)]
+  [InlineData(25)]
+  public void Constructor_RejectsUnboundedInstallerOperationTimeout(int hours)
+  {
+    Assert.Throws<ArgumentOutOfRangeException>(() => new VisualStudioInstallerClient(
+        new RecordingProcessExecutor(),
+        installerOperationTimeout: TimeSpan.FromHours(hours)));
+  }
+
+  [Fact]
   public async Task InstallAsync_IncludesProductChannelConfigAndRequestedIdsAsTokens()
   {
     var process = new RecordingProcessExecutor();
@@ -68,6 +98,22 @@ public sealed class VisualStudioInstallerClientTests
           "--passive", "--wait", "--norestart"
         ],
         request.Arguments);
+  }
+
+  [Fact]
+  public async Task UpdateAsync_UsesNonInteractiveUpdateForExactInstallPath()
+  {
+    var process = new RecordingProcessExecutor();
+    var client = new VisualStudioInstallerClient(process);
+
+    await client.UpdateAsync(
+        client.SetupExecutablePath,
+        @"C:\VS",
+        CancellationToken.None);
+
+    Assert.Equal(
+        ["update", "--installPath", @"C:\VS", "--passive", "--wait", "--norestart"],
+        Assert.Single(process.Requests).Arguments);
   }
 
   [Fact]
@@ -480,6 +526,68 @@ public sealed class VisualStudioInstallerClientTests
         StringComparison.Ordinal);
   }
 
+  [Fact]
+  public async Task AcquireBootstrapperAsync_DownloadDirectoryFailureIsSanitized()
+  {
+    var secretPath = Path.Combine(
+        Path.GetTempPath(),
+        $"secret-download-directory-{Guid.NewGuid():N}");
+    await File.WriteAllTextAsync(secretPath, "not a directory");
+    var client = new VisualStudioInstallerClient(
+        new RecordingProcessExecutor(),
+        bootstrapperDownloadDirectory: secretPath);
+
+    try
+    {
+      var result = await client.AcquireBootstrapperAsync(
+          new Uri("https://example.test/vs.exe"),
+          new string('A', 64),
+          CancellationToken.None);
+
+      Assert.False(result.IsTrusted);
+      Assert.Equal(WdemErrorCode.DownloadError, result.Error!.Code);
+      Assert.DoesNotContain("secret-download", result.Error.Detail, StringComparison.Ordinal);
+    }
+    finally
+    {
+      File.Delete(secretPath);
+    }
+  }
+
+  [Fact]
+  public async Task AcquireBootstrapperAsync_RejectsDeclaredContentLengthAboveLimit()
+  {
+    var client = new VisualStudioInstallerClient(
+        new RecordingProcessExecutor(),
+        httpClient: new HttpClient(new DeclaredLengthHandler(9)),
+        maxBootstrapperBytes: 8);
+
+    var result = await client.AcquireBootstrapperAsync(
+        new Uri("https://example.test/vs.exe"),
+        new string('A', 64),
+        CancellationToken.None);
+
+    Assert.False(result.IsTrusted);
+    Assert.Equal(WdemErrorCode.ConfigurationError, result.Error!.Code);
+  }
+
+  [Fact]
+  public async Task AcquireBootstrapperAsync_RejectsStreamingBodyAboveLimit()
+  {
+    var client = new VisualStudioInstallerClient(
+        new RecordingProcessExecutor(),
+        httpClient: new HttpClient(new StreamingContentHandler(new byte[9])),
+        maxBootstrapperBytes: 8);
+
+    var result = await client.AcquireBootstrapperAsync(
+        new Uri("https://example.test/vs.exe"),
+        new string('A', 64),
+        CancellationToken.None);
+
+    Assert.False(result.IsTrusted);
+    Assert.Equal(WdemErrorCode.ConfigurationError, result.Error!.Code);
+  }
+
   private sealed class RecordingProcessExecutor : IProcessExecutor
   {
     public List<ProcessExecutionRequest> Requests { get; } = [];
@@ -542,6 +650,33 @@ public sealed class VisualStudioInstallerClientTests
         {
           StatusCode = System.Net.HttpStatusCode.OK,
           Content = new ByteArrayContent(content)
+        });
+  }
+
+  private sealed class DeclaredLengthHandler(long contentLength) : HttpMessageHandler
+  {
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+      var content = new ByteArrayContent([]);
+      content.Headers.ContentLength = contentLength;
+      return Task.FromResult(new HttpResponseMessage
+      {
+        StatusCode = System.Net.HttpStatusCode.OK,
+        Content = content
+      });
+    }
+  }
+
+  private sealed class StreamingContentHandler(byte[] content) : HttpMessageHandler
+  {
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken) => Task.FromResult(new HttpResponseMessage
+        {
+          StatusCode = System.Net.HttpStatusCode.OK,
+          Content = new StreamContent(new MemoryStream(content))
         });
   }
 }

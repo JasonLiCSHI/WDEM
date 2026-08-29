@@ -60,6 +60,21 @@ public sealed class LegacySourceProcessExecutorAdapterTests
   }
 
   [Fact]
+  public async Task ExecuteAsync_ForwardsPerRequestTimeout()
+  {
+    var legacy = new RecordingProcessRunner();
+    var adapter = new LegacySourceProcessExecutorAdapter(legacy);
+    var timeout = TimeSpan.FromHours(3);
+
+    await adapter.ExecuteAsync(
+        new ProcessExecutionRequest("tool.exe", [], Timeout: timeout),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(timeout, legacy.Timeout);
+  }
+
+  [Fact]
   public async Task ExecuteAsync_PropagatesCancellation()
   {
     var legacy = new RecordingProcessRunner
@@ -175,12 +190,14 @@ public sealed class LegacySourceProcessExecutorAdapterTests
   private sealed class RecordingProcessRunner : IProcessRunner
   {
     public Func<string, IEnumerable<string>, string?, Action<ProcessOutputLine>?, CancellationToken,
-        Task<ProcessRunResult>> Handler { get; init; } = (_, _, _, _, _) =>
+        Task<ProcessRunResult>> Handler
+    { get; init; } = (_, _, _, _, _) =>
             Task.FromResult(new ProcessRunResult(true, 0, [], []));
 
     public string? FileName { get; private set; }
     public IReadOnlyList<string>? Arguments { get; private set; }
     public string? WorkingDirectory { get; private set; }
+    public TimeSpan? Timeout { get; private set; }
 
     public Task<ProcessRunResult> RunCommandDetailedAsync(
         string fileName,
@@ -204,6 +221,23 @@ public sealed class LegacySourceProcessExecutorAdapterTests
       Arguments = arguments.ToArray();
       WorkingDirectory = workingDirectory;
       return Handler(fileName, Arguments, workingDirectory, onOutput, cancellationToken);
+    }
+
+    public Task<ProcessRunResult> RunCommandDetailedAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        string? workingDirectory,
+        TimeSpan? timeout,
+        Action<ProcessOutputLine>? onOutput,
+        CancellationToken cancellationToken)
+    {
+      Timeout = timeout;
+      return RunCommandDetailedAsync(
+          fileName,
+          arguments,
+          workingDirectory,
+          onOutput,
+          cancellationToken);
     }
 
     public bool RunCommand(string fileName, string arguments, bool dryRun, Action<string>? onOutput = null) =>

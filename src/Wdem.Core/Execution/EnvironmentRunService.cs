@@ -737,7 +737,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
                   $"The provider reported no work was required, but compliance remained '{complianceBefore.Status}'.")
               : ApplyError(id, outcome))
           : null,
-      RestartRequirement = RestartPolicy.NoRestart,
+      RestartRequirement = applied.RestartRequirement ?? RestartPolicy.NoRestart,
       StepResults = stepResults
     };
     return completed;
@@ -773,9 +773,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         StartedAtUtc = startedAt,
         EndedAtUtc = DateTimeOffset.UtcNow,
         Error = verified ? null : VerificationError(definition.Id, verification.Message),
-        RestartRequirement = verified
-            ? applied.RestartRequirement ?? planned.RestartPolicy
-            : RestartPolicy.NoRestart,
+        RestartRequirement = applied.RestartRequirement ?? planned.RestartPolicy,
         StepResults = stepResults
       };
     }
@@ -798,6 +796,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         {
           UnderlyingException = exception
         },
+        RestartRequirement = applied.RestartRequirement ?? planned.RestartPolicy,
         StepResults = stepResults
       };
     }

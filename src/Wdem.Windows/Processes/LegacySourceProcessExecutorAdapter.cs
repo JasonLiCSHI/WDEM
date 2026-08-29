@@ -22,6 +22,7 @@ public sealed class LegacySourceProcessExecutorAdapter(IProcessRunner legacy) : 
         request.FileName,
         request.Arguments,
         request.WorkingDirectory,
+        request.Timeout,
         line => ReportSafely(output, line.Text),
         cancellationToken).ConfigureAwait(false);
 

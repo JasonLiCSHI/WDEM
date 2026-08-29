@@ -155,7 +155,7 @@ public sealed class VisualStudioProviderDetectionTests
   }
 
   [Fact]
-  public async Task DetectAsync_FiltersProductEditionChannelAndVersionBeforeSelection()
+  public async Task DetectAsync_DoesNotHideOldMatchingIdentityWhenNewVersionAlsoExists()
   {
     var discovery = new StubVisualStudioDiscovery
     {
@@ -171,8 +171,31 @@ public sealed class VisualStudioProviderDetectionTests
 
     var state = await provider.DetectAsync(VisualStudioResource(), CancellationToken.None);
 
+    Assert.Equal(DetectionOutcome.Failed, state.Outcome);
+    Assert.Equal("old;selected", state.Evidence["candidateInstanceIds"]);
+  }
+
+  [Fact]
+  public async Task DetectAndPlan_OldMatchingIdentityProducesVersionMismatchUpgrade()
+  {
+    var provider = new VisualStudioProvider(
+        new StubVisualStudioDiscovery
+        {
+          Instances =
+          [
+            Instance("old", "17.9.0", "Community", "VisualStudio.18.Release")
+          ]
+        },
+        new ComplianceEvaluator());
+    var resource = VisualStudioResource();
+
+    var state = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, state, CancellationToken.None);
+
     Assert.True(state.Exists);
-    Assert.Equal("selected", state.Evidence["instanceId"]);
+    Assert.Equal("17.9.0", state.Version);
+    Assert.Equal(ComplianceStatus.VersionMismatch, plan.Compliance);
+    Assert.Equal(PlanAction.Upgrade, Assert.Single(plan.Steps).Action);
   }
 
   [Fact]

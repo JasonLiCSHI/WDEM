@@ -69,6 +69,29 @@ public sealed class ElevatedResourceWorkerTests
   }
 
   [Fact]
+  public async Task ApplyAsync_FailedApprovedProviderPreservesRestartEvidenceThroughRedaction()
+  {
+    var provider = new RecordingProvider
+    {
+      Outcome = ApplyOutcome.Failed,
+      RestartRequirement = RestartPolicy.RestartRequired
+    };
+    var run = ApprovedRun(provider, out var approvedFingerprint);
+    var worker = new ElevatedResourceWorker(
+        new StubRunStore(run),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+
+    var result = await worker.ApplyAsync(
+        new ElevatedResourceRequest(run.RunId, "admin-resource", approvedFingerprint),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(RestartPolicy.RestartRequired, result.RestartRequirement);
+  }
+
+  [Fact]
   public async Task ApplyAsync_SealedSnapshot_PassesOriginalResourceValuesToProvider()
   {
     var provider = new RecordingProvider();
@@ -584,6 +607,8 @@ public sealed class ElevatedResourceWorkerTests
     public int ApplyCalls { get; private set; }
     public ResourceDefinition? LastResource { get; private set; }
     public ResourcePlan? LastPlan { get; private set; }
+    public ApplyOutcome Outcome { get; init; } = ApplyOutcome.Succeeded;
+    public RestartPolicy? RestartRequirement { get; init; }
 
     public ValueTask<ResourceApplyResult> ApplyAsync(
         ResourceDefinition resource,
@@ -598,7 +623,8 @@ public sealed class ElevatedResourceWorkerTests
       return ValueTask.FromResult(new ResourceApplyResult
       {
         ResourceId = resource.Id,
-        Outcome = ApplyOutcome.Succeeded,
+        Outcome = Outcome,
+        RestartRequirement = RestartRequirement,
         StepResults =
         [
           new ProviderStepResult

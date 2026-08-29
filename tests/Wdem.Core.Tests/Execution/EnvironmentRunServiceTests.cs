@@ -53,6 +53,79 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task ApplyAsync_FailedProviderRetainsAndPersistsRestartEvidence()
+  {
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyResult = new ResourceApplyResult
+      {
+        ResourceId = "git",
+        Outcome = ApplyOutcome.Failed,
+        RestartRequirement = RestartPolicy.RestartRequired,
+        Error = ProviderError("git", "Post-install verification failed.")
+      }
+    };
+    var (service, store) = CreateService(provider);
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+    var persisted = await store.GetAsync(run.RunId, CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.Failed, run.ResourceResults["git"].Outcome);
+    Assert.Equal(RestartPolicy.RestartRequired, run.ResourceResults["git"].RestartRequirement);
+    Assert.Equal([RestartPolicy.RestartRequired], persisted!.RestartRequirements);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_CoreVerificationFailureRetainsRestartEvidence()
+  {
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyResult = new ResourceApplyResult
+      {
+        ResourceId = "git",
+        Outcome = ApplyOutcome.Succeeded,
+        RestartRequirement = RestartPolicy.RestartRecommended
+      },
+      VerificationResult = new VerificationResult
+      {
+        ResourceId = "git",
+        Compliance = ComplianceStatus.Missing,
+        DetectedState = Missing("git")
+      }
+    };
+    var (service, _) = CreateService(provider);
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.Failed, run.ResourceResults["git"].Outcome);
+    Assert.Equal(
+        RestartPolicy.RestartRecommended,
+        run.ResourceResults["git"].RestartRequirement);
+    Assert.Contains(RestartPolicy.RestartRecommended, run.RestartRequirements);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_VerificationExceptionRetainsRestartEvidence()
+  {
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyResult = new ResourceApplyResult
+      {
+        ResourceId = "git",
+        Outcome = ApplyOutcome.Succeeded,
+        RestartRequirement = RestartPolicy.RestartRequired
+      },
+      VerificationOperation = _ => throw new IOException("verification unavailable")
+    };
+    var (service, _) = CreateService(provider);
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.Failed, run.ResourceResults["git"].Outcome);
+    Assert.Equal(RestartPolicy.RestartRequired, run.ResourceResults["git"].RestartRequirement);
+  }
+
+  [Fact]
   public async Task ApplyAsync_PublishesPersistedRunEventsInSequenceWithoutDroppingDetails()
   {
     var provider = new ScriptedProvider(Missing("git"))
@@ -1223,6 +1296,7 @@ public sealed class EnvironmentRunServiceTests
     public int VerifyCalls { get; private set; }
     public Func<ResourceDefinition, DetectedState>? DetectState { get; init; }
     public Func<CancellationToken, ValueTask<ResourceApplyResult>>? ApplyOperation { get; init; }
+    public Func<CancellationToken, ValueTask<VerificationResult>>? VerificationOperation { get; init; }
     public IReadOnlyList<ProviderProgress> ProgressEvents { get; init; } = [];
     public RestartPolicy PlannedRestartPolicy { get; init; }
     public List<string> DetectedResourceIds { get; } = [];
@@ -1323,7 +1397,8 @@ public sealed class EnvironmentRunServiceTests
         CancellationToken cancellationToken)
     {
       VerifyCalls++;
-      return ValueTask.FromResult(VerificationResult);
+      return VerificationOperation?.Invoke(cancellationToken) ??
+          ValueTask.FromResult(VerificationResult);
     }
   }
 

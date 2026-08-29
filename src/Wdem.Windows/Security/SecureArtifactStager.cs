@@ -65,18 +65,7 @@ public sealed class SecureStagedArtifact : IAsyncDisposable
   }
 
   internal static void TryDeleteDirectory(string path)
-  {
-    try
-    {
-      Directory.Delete(path, recursive: true);
-    }
-    catch (IOException)
-    {
-    }
-    catch (UnauthorizedAccessException)
-    {
-    }
-  }
+    => ArtifactCleanupQueue.Shared.DeleteDirectory(path);
 }
 
 public sealed class SecureArtifactStager : ISecureArtifactStager
@@ -343,6 +332,12 @@ public sealed class WindowsSecureArtifactDirectoryPolicy : ISecureArtifactDirect
           $"The restricted staging directory '{path}' grants unexpected access.");
     }
   }
+
+  internal static void ValidateRestrictedDirectory(string path) =>
+      ValidateRestrictedDirectory(
+          path,
+          new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+          new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null));
 
   private static bool HasRequiredRule(
       IReadOnlyList<FileSystemAccessRule> rules,

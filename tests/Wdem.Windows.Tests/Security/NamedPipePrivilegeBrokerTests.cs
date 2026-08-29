@@ -474,6 +474,45 @@ public sealed class NamedPipePrivilegeBrokerTests
             step => Assert.Equal(PrivilegeRequirement.CurrentUser, step.PrivilegeRequirement)));
   }
 
+  [Fact]
+  public async Task ApplyAsync_MixedPrivilegeFailurePreservesStrongestRestartEvidence()
+  {
+    var provider = new RecordingProvider
+    {
+      RestartRequirement = RestartPolicy.RestartRecommended
+    };
+    var broker = new RecordingPrivilegeBroker();
+    var dispatcher = new PrivilegeAwareResourceApplyDispatcher(
+        new DirectResourceApplyDispatcher(),
+        broker);
+    var resource = Resource(PrivilegeRequirement.Administrator);
+    var plan = Plan(resource, PrivilegeRequirement.CurrentUser) with
+    {
+      Steps =
+      [
+        Step("current", PrivilegeRequirement.CurrentUser),
+        Step("administrator", PrivilegeRequirement.Administrator)
+      ]
+    };
+    broker.Result = new ResourceApplyResult
+    {
+      ResourceId = resource.Id,
+      Outcome = ApplyOutcome.Failed,
+      RestartRequirement = RestartPolicy.RestartRequired
+    };
+
+    var result = await dispatcher.ApplyAsync(
+        Guid.NewGuid(),
+        provider,
+        resource,
+        plan,
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(RestartPolicy.RestartRequired, result.RestartRequirement);
+  }
+
   private static ElevatedResourceRequest Request(Guid runId, string resourceId) => new(
       runId,
       resourceId,
@@ -658,6 +697,7 @@ public sealed class NamedPipePrivilegeBrokerTests
     public ProviderCapabilities Capabilities { get; } = new();
     public int ApplyCalls { get; private set; }
     public Action<ResourcePlan>? Applied { get; init; }
+    public RestartPolicy? RestartRequirement { get; init; }
     public List<ResourcePlan> AppliedPlans { get; } = [];
 
     public ValueTask<ResourceApplyResult> ApplyAsync(
@@ -669,7 +709,10 @@ public sealed class NamedPipePrivilegeBrokerTests
       ApplyCalls++;
       AppliedPlans.Add(plan);
       Applied?.Invoke(plan);
-      return ValueTask.FromResult(SuccessfulResult(resource.Id, plan.Steps));
+      return ValueTask.FromResult(SuccessfulResult(resource.Id, plan.Steps) with
+      {
+        RestartRequirement = RestartRequirement
+      });
     }
 
     public ValueTask<ProviderValidationResult> ValidateAsync(

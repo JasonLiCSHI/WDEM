@@ -15,6 +15,7 @@ public sealed class VisualStudioProvider : IResourceProvider
   private readonly ITrustedFileVerifier _trustedFileVerifier;
   private readonly ISecureArtifactStager _secureArtifactStager;
   private readonly IComplianceEvaluator _complianceEvaluator;
+  private readonly VisualStudioConfigurationResolver _configurationResolver = new();
 
   public VisualStudioProvider(
       IVisualStudioDiscovery discovery,
@@ -128,9 +129,9 @@ public sealed class VisualStudioProvider : IResourceProvider
       return Failure(resource, error);
     }
 
-    var resolved = await ResolveConfigurationAsync(
-        resource,
+    var resolved = await _configurationResolver.ResolveAsync(
         options!,
+        GetExpectedSha256(resource) ?? string.Empty,
         cancellationToken).ConfigureAwait(false);
     if (resolved.Error is not null)
     {
@@ -177,7 +178,6 @@ public sealed class VisualStudioProvider : IResourceProvider
             instance.ChannelId,
             options.ChannelId,
             StringComparison.OrdinalIgnoreCase))
-        .Where(instance => MatchesVersion(instance, resource.VersionConstraint))
         .ToArray();
     if (candidates.Length > 1)
     {
@@ -233,47 +233,11 @@ public sealed class VisualStudioProvider : IResourceProvider
       };
     }
 
-    var selected = candidates[0];
-    var installedVersions = SemanticVersion.TryParse(
-        selected.ProductDisplayVersion,
-        out var displayVersion)
-        ? new[] { displayVersion }
-        : SemanticVersion.TryParse(selected.InstallationVersion, out var installationVersion)
-            ? [installationVersion]
-            : [];
-    var evidence = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-    {
-      ["instanceId"] = selected.InstanceId,
-      ["installationPath"] = selected.InstallationPath,
-      ["productId"] = selected.ProductId,
-      ["productPath"] = selected.ProductPath,
-      ["productDisplayVersion"] = selected.ProductDisplayVersion,
-      ["installationVersion"] = selected.InstallationVersion,
-      ["edition"] = selected.Edition,
-      ["channel"] = selected.ChannelId,
-      ["isComplete"] = selected.IsComplete.ToString().ToLowerInvariant(),
-      ["isLaunchable"] = selected.IsLaunchable.ToString().ToLowerInvariant(),
-      ["workloads"] = JoinIds(selected.Workloads),
-      ["components"] = JoinIds(selected.Components)
-    };
-    string? configurationHash = resolved.Sha256;
-    if (options.VsConfigPath is not null)
-    {
-      evidence["vsconfigPath"] = resolved.VerifiedPath!;
-      evidence["vsconfigSource"] = resolved.VerifiedPath!;
-      evidence["vsconfigSha256"] = resolved.Sha256!;
-    }
-
-    return new DetectedState
-    {
-      ResourceId = resource.Id,
-      Outcome = DetectionOutcome.Succeeded,
-      Exists = true,
-      Version = selected.ProductDisplayVersion,
-      InstalledVersions = installedVersions,
-      ConfigurationHash = configurationHash,
-      Evidence = evidence
-    };
+    return VisualStudioStateMapper.Create(
+        resource.Id,
+        candidates[0],
+        resolved.VerifiedPath,
+        resolved.Sha256);
   }
 
   public async ValueTask<ResourcePlan> PlanAsync(
@@ -295,9 +259,9 @@ public sealed class VisualStudioProvider : IResourceProvider
     }
 
     _ = TryParseOptions(resource, out var options, out _);
-    var resolved = await ResolveConfigurationAsync(
-        resource,
+    var resolved = await _configurationResolver.ResolveAsync(
         options!,
+        GetExpectedSha256(resource) ?? string.Empty,
         cancellationToken).ConfigureAwait(false);
     if (resolved.Error is not null)
     {
@@ -327,19 +291,31 @@ public sealed class VisualStudioProvider : IResourceProvider
       return plan;
     }
 
-    var action = compliance.Status == ComplianceStatus.Missing
-        ? PlanAction.Install
-        : PlanAction.Configure;
+    var action = compliance.Status switch
+    {
+      ComplianceStatus.Missing => PlanAction.Install,
+      ComplianceStatus.VersionMismatch => PlanAction.Upgrade,
+      _ => PlanAction.Configure
+    };
+    var operation = action switch
+    {
+      PlanAction.Install => "install",
+      PlanAction.Upgrade => "update",
+      _ => "modify"
+    };
     return plan with
     {
       Steps =
       [
         new PlanStep
         {
-          Id = $"{resource.Id}:{(action == PlanAction.Install ? "install" : "modify")}",
-          Description = action == PlanAction.Install
-              ? "Install Visual Studio."
-              : "Modify Visual Studio workloads and components.",
+          Id = $"{resource.Id}:{operation}",
+          Description = action switch
+          {
+            PlanAction.Install => "Install Visual Studio.",
+            PlanAction.Upgrade => "Update Visual Studio.",
+            _ => "Modify Visual Studio workloads and components."
+          },
           Action = action,
           PrivilegeRequirement = PrivilegeRequirement.Administrator,
           RestartPolicy = RestartPolicy.NoRestart
@@ -477,7 +453,12 @@ public sealed class VisualStudioProvider : IResourceProvider
     }
     else
     {
-      progress?.Report(new ProviderProgress("Modify", 0.35, "Modifying Visual Studio.", step.Id));
+      var operation = step.Action == PlanAction.Upgrade ? "Update" : "Modify";
+      progress?.Report(new ProviderProgress(
+          operation,
+          0.35,
+          $"{operation} Visual Studio.",
+          step.Id));
       var instances = await _discovery.DiscoverAsync(
           options.Workloads,
           options.Components,
@@ -496,13 +477,18 @@ public sealed class VisualStudioProvider : IResourceProvider
         return ApplyFailure(resource, step, error, null, 0.35);
       }
 
-      command = await _installer.ModifyAsync(
-          setupPath,
-          instance.InstallationPath,
-          options.Workloads,
-          options.Components,
-          verifiedVsConfig,
-          cancellationToken).ConfigureAwait(false);
+      command = step.Action == PlanAction.Upgrade
+          ? await _installer.UpdateAsync(
+              setupPath,
+              instance.InstallationPath,
+              cancellationToken).ConfigureAwait(false)
+          : await _installer.ModifyAsync(
+              setupPath,
+              instance.InstallationPath,
+              options.Workloads,
+              options.Components,
+              verifiedVsConfig,
+              cancellationToken).ConfigureAwait(false);
     }
 
     if (command.Process.Error is not null ||
@@ -524,7 +510,8 @@ public sealed class VisualStudioProvider : IResourceProvider
           error,
           command.Process.ExitCode,
           0.5,
-          command.Evidence);
+          command.Evidence,
+          command.RestartRequirement);
     }
 
     progress?.Report(new ProviderProgress(
@@ -554,7 +541,8 @@ public sealed class VisualStudioProvider : IResourceProvider
           error,
           command.Process.ExitCode,
           0.85,
-          command.Evidence);
+          command.Evidence,
+          command.RestartRequirement);
     }
 
     var evidence = string.Join(
@@ -587,9 +575,9 @@ public sealed class VisualStudioProvider : IResourceProvider
     _ = TryParseOptions(resource, out var options, out _);
     if (options is not null)
     {
-      var resolved = await ResolveConfigurationAsync(
-          resource,
+      var resolved = await _configurationResolver.ResolveAsync(
           options,
+          GetExpectedSha256(resource) ?? string.Empty,
           cancellationToken).ConfigureAwait(false);
       options = resolved.Error is null ? resolved.Options : null;
     }
@@ -619,10 +607,6 @@ public sealed class VisualStudioProvider : IResourceProvider
         (SemanticVersion.TryParse(instance.InstallationVersion, out var installationVersion) &&
          constraint.IsSatisfiedBy(installationVersion));
   }
-
-  private static string JoinIds(IEnumerable<string> ids) => string.Join(
-      ';',
-      ids.Order(StringComparer.OrdinalIgnoreCase));
 
   private ComplianceResult Evaluate(
       ResourceDefinition resource,
@@ -774,15 +758,21 @@ public sealed class VisualStudioProvider : IResourceProvider
         plan.Compliance == ComplianceStatus.Satisfied &&
         plan.Steps.Count == 0;
     var validStep = plan.Steps.Count == 1 &&
-        plan.Steps[0].Action is PlanAction.Install or PlanAction.Configure &&
+        plan.Steps[0].Action is PlanAction.Install or PlanAction.Configure or PlanAction.Upgrade &&
         ((plan.Compliance == ComplianceStatus.Missing &&
           plan.Steps[0].Action == PlanAction.Install) ||
-         (plan.Compliance is ComplianceStatus.VersionMismatch or
-              ComplianceStatus.ConfigurationMismatch &&
+         (plan.Compliance == ComplianceStatus.VersionMismatch &&
+          plan.Steps[0].Action == PlanAction.Upgrade) ||
+         (plan.Compliance == ComplianceStatus.ConfigurationMismatch &&
           plan.Steps[0].Action == PlanAction.Configure)) &&
         string.Equals(
             plan.Steps[0].Id,
-            $"{resource.Id}:{(plan.Steps[0].Action == PlanAction.Install ? "install" : "modify")}",
+            $"{resource.Id}:{plan.Steps[0].Action switch
+            {
+              PlanAction.Install => "install",
+              PlanAction.Upgrade => "update",
+              _ => "modify"
+            }}",
             StringComparison.Ordinal) &&
         plan.Steps[0].PrivilegeRequirement == PrivilegeRequirement.Administrator &&
         plan.Steps[0].RestartPolicy == RestartPolicy.NoRestart &&
@@ -809,10 +799,12 @@ public sealed class VisualStudioProvider : IResourceProvider
       StructuredError error,
       int? exitCode,
       double progress,
-      IReadOnlyDictionary<string, string>? evidence = null) => new()
+      IReadOnlyDictionary<string, string>? evidence = null,
+      RestartPolicy? restartRequirement = null) => new()
       {
         ResourceId = resource.Id,
         Outcome = ApplyOutcome.Failed,
+        RestartRequirement = restartRequirement,
         Error = error,
         Diagnostics = [error],
         StepResults = step is null
@@ -830,49 +822,6 @@ public sealed class VisualStudioProvider : IResourceProvider
               }
             ]
       };
-
-  private async Task<ResolvedVisualStudioOptions> ResolveConfigurationAsync(
-      ResourceDefinition resource,
-      VisualStudioResourceOptions options,
-      CancellationToken cancellationToken)
-  {
-    if (options.VsConfigPath is null)
-    {
-      return new ResolvedVisualStudioOptions(options, null, null, null);
-    }
-
-    var verification = await _trustedFileVerifier.VerifySha256Async(
-        options.VsConfigPath,
-        GetExpectedSha256(resource)!,
-        cancellationToken).ConfigureAwait(false);
-    if (!verification.IsTrusted)
-    {
-      return new ResolvedVisualStudioOptions(
-          options,
-          null,
-          null,
-          verification.Error);
-    }
-
-    var parsed = await VisualStudioConfigurationParser.ParseAsync(
-        verification.VerifiedPath!,
-        cancellationToken).ConfigureAwait(false);
-    if (parsed.Error is not null)
-    {
-      return new ResolvedVisualStudioOptions(options, null, null, parsed.Error);
-    }
-
-    var configuration = parsed.Configuration!;
-    return new ResolvedVisualStudioOptions(
-        options with
-        {
-          Workloads = MergeIds(options.Workloads, configuration.Workloads),
-          Components = MergeIds(options.Components, configuration.Components)
-        },
-        verification.VerifiedPath,
-        verification.Sha256,
-        null);
-  }
 
   private async Task<VerificationResult> VerifyAppliedConfigurationAsync(
       ResourceDefinition resource,
@@ -901,38 +850,11 @@ public sealed class VisualStudioProvider : IResourceProvider
       };
     }
 
-    var evidence = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-    {
-      ["instanceId"] = selected.InstanceId,
-      ["installationPath"] = selected.InstallationPath,
-      ["productId"] = selected.ProductId,
-      ["productPath"] = selected.ProductPath,
-      ["productDisplayVersion"] = selected.ProductDisplayVersion,
-      ["installationVersion"] = selected.InstallationVersion,
-      ["edition"] = selected.Edition,
-      ["channel"] = selected.ChannelId,
-      ["isComplete"] = selected.IsComplete.ToString().ToLowerInvariant(),
-      ["isLaunchable"] = selected.IsLaunchable.ToString().ToLowerInvariant(),
-      ["workloads"] = JoinIds(selected.Workloads),
-      ["components"] = JoinIds(selected.Components)
-    };
-    if (options.VsConfigPath is not null && configurationSha256 is not null)
-    {
-      var sourcePath = Path.GetFullPath(options.VsConfigPath);
-      evidence["vsconfigPath"] = sourcePath;
-      evidence["vsconfigSource"] = sourcePath;
-      evidence["vsconfigSha256"] = configurationSha256;
-    }
-
-    var detected = new DetectedState
-    {
-      ResourceId = resource.Id,
-      Outcome = DetectionOutcome.Succeeded,
-      Exists = true,
-      Version = selected.ProductDisplayVersion,
-      ConfigurationHash = configurationSha256,
-      Evidence = evidence
-    };
+    var detected = VisualStudioStateMapper.Create(
+        resource.Id,
+        selected,
+        options.VsConfigPath,
+        configurationSha256);
     var compliance = Evaluate(resource, detected, options);
     return new VerificationResult
     {
@@ -1027,9 +949,4 @@ public sealed class VisualStudioProvider : IResourceProvider
         StructuredError = error
       };
 
-  private sealed record ResolvedVisualStudioOptions(
-      VisualStudioResourceOptions Options,
-      string? VerifiedPath,
-      string? Sha256,
-      StructuredError? Error);
 }

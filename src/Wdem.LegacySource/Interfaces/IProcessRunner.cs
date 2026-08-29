@@ -42,6 +42,20 @@ namespace Wdem.LegacySource.Interfaces
             onOutput,
             cancellationToken);
 
+    /// <summary>Runs a command with an optional per-request execution timeout.</summary>
+    Task<ProcessRunResult> RunCommandDetailedAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        string? workingDirectory,
+        TimeSpan? timeout,
+        Action<ProcessOutputLine>? onOutput,
+        CancellationToken cancellationToken) => RunCommandDetailedAsync(
+            fileName,
+            arguments,
+            workingDirectory,
+            onOutput,
+            cancellationToken);
+
     /// <summary>Runs a command and captures output using a raw argument string (deprecated).</summary>
     [Obsolete("Use the IEnumerable<string> overload instead to prevent command injection.")]
     string RunCommandWithOutput(string fileName, string args);

@@ -31,6 +31,11 @@ public interface IVisualStudioInstallerClient
       IReadOnlyList<string> components,
       string? vsconfigPath,
       CancellationToken cancellationToken);
+
+  Task<VisualStudioInstallerResult> UpdateAsync(
+      string executablePath,
+      string installPath,
+      CancellationToken cancellationToken);
 }
 
 public sealed record VisualStudioInstallerResult(
@@ -89,10 +94,17 @@ public sealed class VisualStudioBootstrapperAcquisition : IAsyncDisposable
 
 public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
 {
+  private const long DefaultMaxBootstrapperBytes = 64L * 1024 * 1024;
+  private static readonly TimeSpan DefaultInstallerOperationTimeout = TimeSpan.FromHours(4);
+  private static readonly TimeSpan MaximumInstallerOperationTimeout = TimeSpan.FromHours(24);
   private readonly IProcessExecutor _processExecutor;
   private readonly ITrustedFileVerifier _trustedFileVerifier;
   private readonly HttpClient _httpClient;
   private readonly ISecureArtifactStager _secureArtifactStager;
+  private readonly TimeSpan _installerOperationTimeout;
+  private readonly long _maxBootstrapperBytes;
+  private readonly string _bootstrapperDownloadDirectory;
+  private readonly ArtifactCleanupQueue _cleanup = ArtifactCleanupQueue.Shared;
   private readonly ConcurrentDictionary<string, VisualStudioBootstrapperAcquisition>
       _verifiedBootstrappers =
       new(StringComparer.OrdinalIgnoreCase);
@@ -101,13 +113,33 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
       IProcessExecutor processExecutor,
       ITrustedFileVerifier? trustedFileVerifier = null,
       HttpClient? httpClient = null,
-      ISecureArtifactStager? secureArtifactStager = null)
+      ISecureArtifactStager? secureArtifactStager = null,
+      TimeSpan? installerOperationTimeout = null,
+      long maxBootstrapperBytes = DefaultMaxBootstrapperBytes,
+      string? bootstrapperDownloadDirectory = null)
   {
     _processExecutor = processExecutor ?? throw new ArgumentNullException(nameof(processExecutor));
     _trustedFileVerifier = trustedFileVerifier ?? new TrustedFileVerifier();
     _httpClient = httpClient ?? new HttpClient();
     _secureArtifactStager = secureArtifactStager ?? new SecureArtifactStager(
         verifier: _trustedFileVerifier);
+    _installerOperationTimeout = installerOperationTimeout ?? DefaultInstallerOperationTimeout;
+    if (_installerOperationTimeout <= TimeSpan.Zero ||
+        _installerOperationTimeout > MaximumInstallerOperationTimeout)
+    {
+      throw new ArgumentOutOfRangeException(nameof(installerOperationTimeout));
+    }
+
+    if (maxBootstrapperBytes <= 0)
+    {
+      throw new ArgumentOutOfRangeException(nameof(maxBootstrapperBytes));
+    }
+
+    _maxBootstrapperBytes = maxBootstrapperBytes;
+    _bootstrapperDownloadDirectory = bootstrapperDownloadDirectory ?? Path.Combine(
+        Path.GetTempPath(),
+        "wdem",
+        "visual-studio");
     SetupExecutablePath = GetDefaultSetupPath();
   }
 
@@ -131,11 +163,24 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
           "The Visual Studio bootstrapper SHA-256 must contain exactly 64 hexadecimal characters.");
     }
 
-    var downloadDirectory = Path.Combine(Path.GetTempPath(), "wdem", "visual-studio");
-    Directory.CreateDirectory(downloadDirectory);
-    var localPath = Path.Combine(downloadDirectory, $"vs-bootstrapper-{Guid.NewGuid():N}.exe");
+    string? localPath = null;
     try
     {
+      Directory.CreateDirectory(_bootstrapperDownloadDirectory);
+      localPath = Path.Combine(
+          _bootstrapperDownloadDirectory,
+          $"vs-bootstrapper-{Guid.NewGuid():N}.exe");
+      using var response = await _httpClient.SendAsync(
+          new HttpRequestMessage(HttpMethod.Get, source),
+          HttpCompletionOption.ResponseHeadersRead,
+          cancellationToken).ConfigureAwait(false);
+      response.EnsureSuccessStatusCode();
+      if (response.Content.Headers.ContentLength is > 0 and var declaredLength &&
+          declaredLength > _maxBootstrapperBytes)
+      {
+        throw new BootstrapperTooLargeException();
+      }
+
       await using (var destination = new FileStream(
                        localPath,
                        FileMode.CreateNew,
@@ -143,10 +188,25 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
                        FileShare.None,
                        bufferSize: 81920,
                        FileOptions.Asynchronous | FileOptions.SequentialScan))
-      await using (var sourceStream = await _httpClient.GetStreamAsync(source, cancellationToken)
+      await using (var sourceStream = await response.Content.ReadAsStreamAsync(cancellationToken)
                        .ConfigureAwait(false))
       {
-        await sourceStream.CopyToAsync(destination, cancellationToken).ConfigureAwait(false);
+        var buffer = new byte[81920];
+        long downloaded = 0;
+        int read;
+        while ((read = await sourceStream.ReadAsync(buffer, cancellationToken)
+                   .ConfigureAwait(false)) != 0)
+        {
+          downloaded = checked(downloaded + read);
+          if (downloaded > _maxBootstrapperBytes)
+          {
+            throw new BootstrapperTooLargeException();
+          }
+
+          await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken)
+              .ConfigureAwait(false);
+        }
+
         await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
       }
 
@@ -170,6 +230,12 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
     {
       TryDelete(localPath);
       throw;
+    }
+    catch (BootstrapperTooLargeException)
+    {
+      TryDelete(localPath);
+      return ConfigurationFailure(
+          "The Visual Studio bootstrapper exceeds the configured download size limit.");
     }
     catch (Exception)
     {
@@ -216,6 +282,14 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
           CreateModifyArguments(installPath, workloads, components, vsconfigPath),
           cancellationToken);
 
+  public Task<VisualStudioInstallerResult> UpdateAsync(
+      string executablePath,
+      string installPath,
+      CancellationToken cancellationToken) => ExecuteAsync(
+          executablePath,
+          CreateUpdateArguments(installPath),
+          cancellationToken);
+
   public static IReadOnlyList<string> CreateInstallArguments(
       string productId,
       Uri? channelUri,
@@ -251,6 +325,20 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
     var arguments = new List<string> { "modify" };
     AddConfigurationArguments(arguments, installPath, workloads, components, vsconfigPath);
     return arguments;
+  }
+
+  public static IReadOnlyList<string> CreateUpdateArguments(string installPath)
+  {
+    VisualStudioInputValidation.ThrowIfInvalidAbsolutePath(installPath, nameof(installPath));
+    return
+    [
+      "update",
+      "--installPath",
+      Path.GetFullPath(installPath),
+      "--passive",
+      "--wait",
+      "--norestart"
+    ];
   }
 
   private async Task<VisualStudioInstallerResult> ExecuteAsync(
@@ -310,7 +398,10 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
     try
     {
       process = await _processExecutor.ExecuteAsync(
-          new ProcessExecutionRequest(fullPath, arguments),
+          new ProcessExecutionRequest(
+              fullPath,
+              arguments,
+              Timeout: _installerOperationTimeout),
           null,
           cancellationToken).ConfigureAwait(false);
     }
@@ -393,17 +484,11 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
     TryDelete(acquisition.VerifiedPath);
   }
 
-  private static void TryDelete(string path)
+  private void TryDelete(string? path)
   {
-    try
+    if (path is not null)
     {
-      File.Delete(path);
-    }
-    catch (IOException)
-    {
-    }
-    catch (UnauthorizedAccessException)
-    {
+      _cleanup.DeleteFile(path);
     }
   }
 
@@ -422,6 +507,8 @@ public sealed class VisualStudioInstallerClient : IVisualStudioInstallerClient
         "Installer",
         "setup.exe"));
   }
+
+  private sealed class BootstrapperTooLargeException : Exception;
 }
 
 public sealed record VisualStudioConfiguration(
@@ -448,6 +535,25 @@ public static class VisualStudioConfigurationParser
           FileShare.Read,
           bufferSize: 81920,
           FileOptions.Asynchronous | FileOptions.SequentialScan);
+      return await ParseAsync(stream, cancellationToken).ConfigureAwait(false);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      throw;
+    }
+    catch (Exception exception) when (exception is ArgumentException or
+        IOException or UnauthorizedAccessException or JsonException)
+    {
+      return Failure("The .vsconfig file could not be read as a valid Visual Studio configuration.");
+    }
+  }
+
+  internal static async Task<VisualStudioConfigurationParseResult> ParseAsync(
+      Stream stream,
+      CancellationToken cancellationToken)
+  {
+    try
+    {
       using var document = await JsonDocument.ParseAsync(
           stream,
           cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -493,7 +599,7 @@ public static class VisualStudioConfigurationParser
       throw;
     }
     catch (Exception exception) when (exception is ArgumentException or
-        IOException or UnauthorizedAccessException or JsonException)
+        IOException or JsonException)
     {
       return Failure("The .vsconfig file could not be read as a valid Visual Studio configuration.");
     }

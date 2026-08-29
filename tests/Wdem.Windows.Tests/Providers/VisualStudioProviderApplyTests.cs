@@ -228,6 +228,28 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   }
 
   [Fact]
+  public async Task ApplyAsync_VersionMismatchUpdatesExactExistingInstanceWithoutInstall()
+  {
+    var old = Instance("17.0_a", version: "17.9.0");
+    var upgraded = Instance(
+        "17.0_a",
+        workloads: ["Microsoft.VisualStudio.Workload.ManagedDesktop"],
+        components: ["Microsoft.NetCore.Component.Runtime.10.0"]);
+    var discovery = new SequenceDiscovery([[old], [upgraded]]);
+    var installer = new RecordingInstallerClient();
+    var provider = Provider(discovery, installer);
+    var resource = Resource();
+    var plan = await provider.PlanAsync(resource, State(old), CancellationToken.None);
+
+    var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(PlanAction.Upgrade, Assert.Single(plan.Steps).Action);
+    Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
+    Assert.Equal("update", installer.LastOperation);
+    Assert.Equal(@"C:\VS", installer.LastInstallPath);
+  }
+
+  [Fact]
   public async Task VerifyAsync_MissingComponentDoesNotReportSuccess()
   {
     var discovery = new SequenceDiscovery([[Instance(
@@ -291,6 +313,29 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
 
     Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
     Assert.Equal(RestartPolicy.RestartRecommended, result.RestartRequirement);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_PostVerificationFailureRetainsInstallerRestartEvidence()
+  {
+    var discovery = new SequenceDiscovery(
+    [[Instance("17.0_a")], [Instance("17.0_a")]]);
+    var installer = new RecordingInstallerClient
+    {
+      Result = new VisualStudioInstallerResult(
+          new ProcessExecutionResult(true, 1641, [], []),
+          RestartPolicy.RestartRequired,
+          new Dictionary<string, string> { ["installerPath"] = @"C:\setup.exe" })
+    };
+    var provider = Provider(discovery, installer);
+    var resource = Resource();
+    var plan = await provider.PlanAsync(
+        resource, State(Instance("17.0_a")), CancellationToken.None);
+
+    var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(RestartPolicy.RestartRequired, result.RestartRequirement);
   }
 
   [Fact]
@@ -422,14 +467,15 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   private static VisualStudioInstance Instance(
       string id,
       string[]? workloads = null,
-      string[]? components = null) => new()
+      string[]? components = null,
+      string version = "18.3.2") => new()
       {
         InstanceId = id,
         InstallationPath = @"C:\VS",
         ProductId = "Microsoft.VisualStudio.Product.Community",
         ProductPath = @"C:\VS\Common7\IDE\devenv.exe",
-        ProductDisplayVersion = "18.3.2",
-        InstallationVersion = "18.3.2.0",
+        ProductDisplayVersion = version,
+        InstallationVersion = $"{version}.0",
         ChannelId = "VisualStudio.18.Release",
         Edition = "Community",
         IsComplete = true,
@@ -474,6 +520,8 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
     public Action<string?>? BeforeModify { get; init; }
     public VisualStudioInstallerResult Result { get; init; } = Success(@"C:\setup.exe");
     public VisualStudioBootstrapperAcquisition? LastAcquisition { get; private set; }
+    public string? LastOperation { get; private set; }
+    public string? LastInstallPath { get; private set; }
 
     public Task<VisualStudioBootstrapperAcquisition> AcquireBootstrapperAsync(
         Uri source,
@@ -499,6 +547,8 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
         string? vsconfigPath,
         CancellationToken cancellationToken)
     {
+      LastOperation = "install";
+      LastInstallPath = installPath;
       LastArguments = VisualStudioInstallerClient.CreateInstallArguments(
           productId, channelUri, installPath, workloads, components, vsconfigPath);
       return Task.FromResult(Result);
@@ -512,10 +562,23 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
         string? vsconfigPath,
         CancellationToken cancellationToken)
     {
+      LastOperation = "modify";
+      LastInstallPath = installPath;
       LastVsConfigPath = vsconfigPath;
       BeforeModify?.Invoke(vsconfigPath);
       LastArguments = VisualStudioInstallerClient.CreateModifyArguments(
           installPath, workloads, components, vsconfigPath);
+      return Task.FromResult(Result);
+    }
+
+    public Task<VisualStudioInstallerResult> UpdateAsync(
+        string executablePath,
+        string installPath,
+        CancellationToken cancellationToken)
+    {
+      LastOperation = "update";
+      LastInstallPath = installPath;
+      LastArguments = VisualStudioInstallerClient.CreateUpdateArguments(installPath);
       return Task.FromResult(Result);
     }
 

@@ -91,10 +91,24 @@ namespace Wdem.LegacySource.Services.System
             onOutput,
             cancellationToken);
 
+    public Task<ProcessRunResult> RunCommandDetailedAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        string? workingDirectory,
+        Action<ProcessOutputLine>? onOutput,
+        CancellationToken cancellationToken) => RunCommandDetailedAsync(
+            fileName,
+            arguments,
+            workingDirectory,
+            null,
+            onOutput,
+            cancellationToken);
+
     public async Task<ProcessRunResult> RunCommandDetailedAsync(
         string fileName,
         IEnumerable<string> arguments,
         string? workingDirectory,
+        TimeSpan? timeout,
         Action<ProcessOutputLine>? onOutput,
         CancellationToken cancellationToken)
     {
@@ -108,12 +122,14 @@ namespace Wdem.LegacySource.Services.System
               fileName,
               argumentSnapshot,
               workingDirectory,
+              timeout,
               onOutput,
               cancellationToken).ConfigureAwait(false)
           : await RunPortableCommandDetailedAsync(
               fileName,
               argumentSnapshot,
               workingDirectory,
+              timeout,
               onOutput,
               cancellationToken).ConfigureAwait(false);
     }
@@ -122,6 +138,7 @@ namespace Wdem.LegacySource.Services.System
         string fileName,
         IReadOnlyList<string> arguments,
         string? workingDirectory,
+        TimeSpan? requestedTimeout,
         Action<ProcessOutputLine>? onOutput,
         CancellationToken cancellationToken)
     {
@@ -162,7 +179,7 @@ namespace Wdem.LegacySource.Services.System
           standardError,
           outputGate,
           onOutput);
-      using var timeout = new CancellationTokenSource(_hooks.ProcessTimeout);
+      using var timeout = new CancellationTokenSource(ResolveTimeout(requestedTimeout));
       using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
           cancellationToken,
           timeout.Token);
@@ -222,6 +239,7 @@ namespace Wdem.LegacySource.Services.System
         string fileName,
         IReadOnlyList<string> arguments,
         string? workingDirectory,
+        TimeSpan? requestedTimeout,
         Action<ProcessOutputLine>? onOutput,
         CancellationToken cancellationToken)
     {
@@ -267,7 +285,7 @@ namespace Wdem.LegacySource.Services.System
           standardError,
           outputGate,
           onOutput);
-      using var timeout = new CancellationTokenSource(_hooks.ProcessTimeout);
+      using var timeout = new CancellationTokenSource(ResolveTimeout(requestedTimeout));
       using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
           cancellationToken,
           timeout.Token);
@@ -344,6 +362,18 @@ namespace Wdem.LegacySource.Services.System
         CancellationToken cancellationToken) => _hooks.WaitForExitAsync is null
             ? waitForExit(cancellationToken)
             : _hooks.WaitForExitAsync(waitForExit, cancellationToken);
+
+    private TimeSpan ResolveTimeout(TimeSpan? requestedTimeout)
+    {
+      if (requestedTimeout is { } value && value <= TimeSpan.Zero)
+      {
+        throw new ArgumentOutOfRangeException(
+            nameof(requestedTimeout),
+            "The process timeout must be greater than zero.");
+      }
+
+      return requestedTimeout ?? _hooks.ProcessTimeout;
+    }
 
     private async Task<ProcessRunResult> CompleteOutputDrainAsync(
         int? exitCode,
