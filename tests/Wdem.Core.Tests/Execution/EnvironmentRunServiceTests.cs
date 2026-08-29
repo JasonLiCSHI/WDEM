@@ -98,37 +98,53 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Theory]
-  [InlineData(3010, RestartPolicy.RestartRecommended)]
-  [InlineData(1641, RestartPolicy.RestartRequired)]
-  public async Task ApplyAsync_CancelledDuringFinalVerifyPreservesCompletedStepEvidence(
-      int exitCode,
-      RestartPolicy restartRequirement)
+  [InlineData(true, ExecutionOutcome.Succeeded)]
+  [InlineData(false, ExecutionOutcome.Failed)]
+  public async Task ApplyAsync_LateCancellationUsesNonCancelableFinalVerification(
+      bool verificationSatisfied,
+      ExecutionOutcome expectedOutcome)
   {
     using var cancellation = new CancellationTokenSource();
+    var verificationState = verificationSatisfied
+        ? Satisfied("git", "2.52.1")
+        : Missing("git");
+    var verificationTokenCanBeCanceled = true;
     var provider = new ScriptedProvider(Missing("git"))
     {
-      ApplyResult = new ResourceApplyResult
+      ApplyOperation = _ =>
       {
-        ResourceId = "git",
-        Outcome = ApplyOutcome.Succeeded,
-        RestartRequirement = restartRequirement,
-        StepResults =
-        [
-          new ProviderStepResult
-          {
-            StepId = "install",
-            Action = PlanAction.Install,
-            Progress = 1,
-            ProcessExitCode = exitCode,
-            Succeeded = true,
-            Message = $"restartRequirement={restartRequirement}"
-          }
-        ]
+        cancellation.Cancel();
+        return ValueTask.FromResult(new ResourceApplyResult
+        {
+          ResourceId = "git",
+          Outcome = ApplyOutcome.Succeeded,
+          RestartRequirement = RestartPolicy.RestartRecommended,
+          StepResults =
+          [
+            new ProviderStepResult
+            {
+              StepId = "install",
+              Action = PlanAction.Install,
+              Progress = 1,
+              ProcessExitCode = 3010,
+              Succeeded = true,
+              Message = "restartRequirement=RestartRecommended"
+            }
+          ]
+        });
       },
       VerificationOperation = token =>
       {
-        cancellation.Cancel();
-        return ValueTask.FromCanceled<VerificationResult>(token);
+        verificationTokenCanBeCanceled = token.CanBeCanceled;
+        token.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(new VerificationResult
+        {
+          ResourceId = "git",
+          Compliance = verificationSatisfied
+              ? ComplianceStatus.Satisfied
+              : ComplianceStatus.Missing,
+          DetectedState = verificationState
+        });
       }
     };
     var (service, store) = CreateService(provider);
@@ -139,13 +155,15 @@ public sealed class EnvironmentRunServiceTests
     var resource = run.ResourceResults["git"];
     var step = Assert.Single(resource.StepResults);
     Assert.Equal(ExecutionState.Completed, run.State);
-    Assert.Equal(ExecutionOutcome.Cancelled, run.Outcome);
-    Assert.Equal(ExecutionOutcome.Cancelled, resource.Outcome);
-    Assert.Equal(restartRequirement, resource.RestartRequirement);
-    Assert.Equal(exitCode, step.ProcessExitCode);
+    Assert.Equal(expectedOutcome, run.Outcome);
+    Assert.Equal(expectedOutcome, resource.Outcome);
+    Assert.False(verificationTokenCanBeCanceled);
+    Assert.Equal(verificationState, resource.DetectedAfter);
+    Assert.Equal(RestartPolicy.RestartRecommended, resource.RestartRequirement);
+    Assert.Equal(3010, step.ProcessExitCode);
     Assert.True(step.ProcessSucceeded);
     Assert.Equal(resource, persisted!.ResourceResults["git"]);
-    Assert.Contains(restartRequirement, persisted.RestartRequirements);
+    Assert.Contains(RestartPolicy.RestartRecommended, persisted.RestartRequirements);
     Assert.Equal(1, provider.ApplyCalls);
     Assert.Equal(1, provider.VerifyCalls);
   }
