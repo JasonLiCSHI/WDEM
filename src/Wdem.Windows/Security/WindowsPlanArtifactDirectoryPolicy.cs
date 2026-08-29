@@ -164,6 +164,30 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
     WriteRevocationRecord(ledgerHandle, record);
   }
 
+  internal static void AppendActivation(
+      string rootPath,
+      string ownershipToken,
+      string directoryName) =>
+      AppendLedgerRecord(
+          rootPath,
+          VsixPlanArtifactLedger.CreateActivatedRecord(ownershipToken, directoryName));
+
+  internal static void AppendClaimStarted(
+      string rootPath,
+      string ownershipToken,
+      string directoryName) =>
+      AppendLedgerRecord(
+          rootPath,
+          VsixPlanArtifactLedger.CreateClaimStartedRecord(ownershipToken, directoryName));
+
+  internal static void AppendConsumed(
+      string rootPath,
+      string ownershipToken,
+      string directoryName) =>
+      AppendLedgerRecord(
+          rootPath,
+          VsixPlanArtifactLedger.CreateConsumedRecord(ownershipToken, directoryName));
+
   internal static bool ContainsRevocation(
       string rootPath,
       string ownershipToken,
@@ -199,6 +223,22 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
     return VsixPlanArtifactLedger.GetIssuedExpiry(stream, ownershipToken, directoryName);
   }
 
+  internal static VsixPlanArtifactLedgerState GetLedgerState(
+      string rootPath,
+      string ownershipToken,
+      string directoryName)
+  {
+    var fullRootPath = ValidateRevocationRootPath(rootPath);
+    var productPath = Path.GetDirectoryName(fullRootPath)!;
+    using var productHandle = OpenValidatedProductRoot(productPath);
+    using var rootHandle = OpenValidatedIdentityNeutralRoot(fullRootPath);
+    using var ledgerHandle = OpenValidatedRevocationLedger(
+        fullRootPath,
+        GenericRead | ReadControl);
+    using var stream = new FileStream(ledgerHandle, FileAccess.Read, bufferSize: 4096, isAsync: false);
+    return VsixPlanArtifactLedger.ReadState(stream, ownershipToken, directoryName);
+  }
+
   internal static void WriteRevocationRecord(
       SafeFileHandle ledgerHandle,
       string ownershipToken,
@@ -218,6 +258,30 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
               ownershipToken,
               directoryName,
               expiresAtUtc));
+
+  internal static void WriteActivationRecord(
+      SafeFileHandle ledgerHandle,
+      string ownershipToken,
+      string directoryName) =>
+      WriteRevocationRecord(
+          ledgerHandle,
+          VsixPlanArtifactLedger.CreateActivatedRecord(ownershipToken, directoryName));
+
+  internal static void WriteClaimStartedRecord(
+      SafeFileHandle ledgerHandle,
+      string ownershipToken,
+      string directoryName) =>
+      WriteRevocationRecord(
+          ledgerHandle,
+          VsixPlanArtifactLedger.CreateClaimStartedRecord(ownershipToken, directoryName));
+
+  internal static void WriteConsumedRecord(
+      SafeFileHandle ledgerHandle,
+      string ownershipToken,
+      string directoryName) =>
+      WriteRevocationRecord(
+          ledgerHandle,
+          VsixPlanArtifactLedger.CreateConsumedRecord(ownershipToken, directoryName));
 
   internal static bool ContainsRevocationRecord(
       ReadOnlySpan<byte> contents,
@@ -257,6 +321,18 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
           "The VSIX revocation record could not be committed to durable storage.",
           new Win32Exception(Marshal.GetLastWin32Error()));
     }
+  }
+
+  private static void AppendLedgerRecord(string rootPath, byte[] record)
+  {
+    var fullRootPath = ValidateRevocationRootPath(rootPath);
+    var productPath = Path.GetDirectoryName(fullRootPath)!;
+    using var productHandle = OpenValidatedProductRoot(productPath);
+    using var rootHandle = OpenValidatedIdentityNeutralRoot(fullRootPath);
+    using var ledgerHandle = OpenValidatedRevocationLedger(
+        fullRootPath,
+        FileAppendData | ReadControl | Synchronize);
+    WriteRevocationRecord(ledgerHandle, record);
   }
 
   private static SafeFileHandle OpenValidatedIdentityNeutralRoot(string rootPath)

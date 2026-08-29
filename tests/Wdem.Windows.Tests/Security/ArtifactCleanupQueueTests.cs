@@ -758,6 +758,25 @@ public sealed class ArtifactCleanupQueueTests
             ? expiry
             : throw new System.Security.SecurityException("The issuance record is missing.");
 
+    public void Activate(string ownershipToken, string directoryName)
+    {
+    }
+
+    public void ClaimStarted(string ownershipToken, string directoryName)
+    {
+    }
+
+    public void Consume(string ownershipToken, string directoryName)
+    {
+    }
+
+    public VsixPlanArtifactLedgerState GetState(string ownershipToken, string directoryName) =>
+        new(
+            GetIssuedExpiry(ownershipToken, directoryName),
+            IsRevoked(ownershipToken, directoryName)
+                ? VsixPlanArtifactLedgerStatus.Revoked
+                : VsixPlanArtifactLedgerStatus.Active);
+
     public void Revoke(string ownershipToken, string directoryName)
     {
       if (RevokeFailure is not null)

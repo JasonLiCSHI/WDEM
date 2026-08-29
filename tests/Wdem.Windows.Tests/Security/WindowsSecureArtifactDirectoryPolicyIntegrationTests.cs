@@ -220,6 +220,65 @@ public sealed class WindowsSecureArtifactDirectoryPolicyIntegrationTests
     Assert.Equal(new DateTimeOffset(2025, 1, 1, 0, 0, 0, TimeSpan.Zero), expiry);
   }
 
+  [Fact]
+  public void RevocationLedger_RequiresActivationAndNeverRevivesTerminalState()
+  {
+    const string ownershipToken = "00112233445566778899AABBCCDDEEFF";
+    const string directoryName = "00112233445566778899aabbccddeeff";
+    var expiry = new DateTimeOffset(2026, 8, 30, 0, 0, 0, TimeSpan.Zero);
+    var issued = VsixPlanArtifactLedger.CreateIssuedRecord(
+        ownershipToken,
+        directoryName,
+        expiry);
+    var activated = VsixPlanArtifactLedger.CreateActivatedRecord(
+        ownershipToken,
+        directoryName);
+    var claimStarted = VsixPlanArtifactLedger.CreateClaimStartedRecord(
+        ownershipToken,
+        directoryName);
+    var consumed = VsixPlanArtifactLedger.CreateConsumedRecord(
+        ownershipToken,
+        directoryName);
+    var revoked = VsixPlanArtifactLedger.CreateRevokedRecord(
+        ownershipToken,
+        directoryName);
+
+    var pending = ReadState(issued);
+    var active = ReadState([.. issued, .. activated]);
+    var claiming = ReadState([.. issued, .. activated, .. claimStarted, .. activated]);
+    var consumedState = ReadState([.. issued, .. activated, .. claimStarted, .. consumed]);
+    var revokedState = ReadState([.. issued, .. activated, .. consumed, .. revoked, .. activated]);
+
+    Assert.Equal(VsixPlanArtifactLedgerStatus.Pending, pending.Status);
+    Assert.Equal(VsixPlanArtifactLedgerStatus.Active, active.Status);
+    Assert.Equal(VsixPlanArtifactLedgerStatus.ClaimStarted, claiming.Status);
+    Assert.Equal(VsixPlanArtifactLedgerStatus.Consumed, consumedState.Status);
+    Assert.Equal(VsixPlanArtifactLedgerStatus.Revoked, revokedState.Status);
+
+    VsixPlanArtifactLedgerState ReadState(byte[] contents)
+    {
+      using var stream = new MemoryStream(contents, writable: false);
+      return VsixPlanArtifactLedger.ReadState(stream, ownershipToken, directoryName);
+    }
+  }
+
+  [Fact]
+  public void RevocationLedger_RejectsActivationBeforeIssuance()
+  {
+    const string ownershipToken = "00112233445566778899AABBCCDDEEFF";
+    const string directoryName = "00112233445566778899aabbccddeeff";
+    var contents = VsixPlanArtifactLedger.CreateActivatedRecord(ownershipToken, directoryName)
+        .Concat(VsixPlanArtifactLedger.CreateIssuedRecord(
+          ownershipToken,
+          directoryName,
+          new DateTimeOffset(2026, 8, 30, 0, 0, 0, TimeSpan.Zero)))
+        .ToArray();
+    using var stream = new MemoryStream(contents, writable: false);
+
+    Assert.Throws<System.Security.SecurityException>(() =>
+        VsixPlanArtifactLedger.ReadState(stream, ownershipToken, directoryName));
+  }
+
   [WindowsFact]
   public void RevocationLedger_ConcurrentAppendsProduceCompleteDiscoverableRecords()
   {

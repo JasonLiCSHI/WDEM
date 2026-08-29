@@ -598,6 +598,77 @@ public sealed class VisualStudioExtensionProviderTests
   }
 
   [Fact]
+  public async Task PlanAsync_PublicationFailureLeavesNewIssuedLocatorPermanentlyUnclaimable()
+  {
+    var source = TempFile("vsix");
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new RotatingStager();
+    var revocationPath = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-test-revocations-{Guid.NewGuid():N}");
+    ClaimedVsixPlanArtifact? replayedArtifact = null;
+    try
+    {
+      var revocationStore = new TestPlanArtifactRevocationStore(revocationPath);
+      var store = PlanArtifactStore(
+          stager,
+          verifier,
+          manifests,
+          deleteDirectory: static _ => { },
+          revocationStore: revocationStore);
+      var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
+      var provider = Provider(
+          manifests,
+          new ThrowingProcessExecutor(),
+          stager,
+          verifier,
+          planArtifactStore: store);
+
+      var first = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+      revocationStore.RevokeFailure = new IOException("superseded revoke failed");
+      var failed = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+      var unpublishedDirectory = stager.Directories[1];
+      var marker = JsonNode.Parse(await File.ReadAllTextAsync(
+          Path.Combine(unpublishedDirectory, ".wdem-vsix-owner")))!;
+      var locator = $"vsix-v2:{marker["ownershipToken"]!.GetValue<string>()}:" +
+          Path.GetFileName(unpublishedDirectory);
+
+      var replay = await PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              revocationStore: revocationStore)
+          .ClaimAsync(
+              resource.Id,
+              locator,
+              new string('A', 64),
+              new VsixPlanVisualStudioIdentity(
+                  "17.0_a",
+                  "Microsoft.VisualStudio.Product.Community",
+                  "17.0.0"),
+              CancellationToken.None);
+      replayedArtifact = replay.Artifact;
+
+      Assert.True(first.IsExecutable);
+      Assert.False(failed.IsExecutable);
+      Assert.True(Directory.Exists(unpublishedDirectory));
+      Assert.Null(replay.Artifact);
+      Assert.NotNull(replay.Error);
+    }
+    finally
+    {
+      if (replayedArtifact is not null)
+      {
+        await replayedArtifact.DisposeAsync();
+      }
+
+      File.Delete(revocationPath);
+      File.Delete(source);
+    }
+  }
+
+  [Fact]
   public async Task PlanAsync_AbandonedStagedArtifactExpiresDeterministically()
   {
     var source = TempFile("vsix");
@@ -631,6 +702,85 @@ public sealed class VisualStudioExtensionProviderTests
     }
     finally
     {
+      File.Delete(source);
+    }
+  }
+
+  [Fact]
+  public async Task PlanAsync_TimerWaitsForDurableExpiryAndRetainsRegistrationWhenRevocationFails()
+  {
+    var source = TempFile("vsix");
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new RotatingStager();
+    var revocationPath = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-test-revocations-{Guid.NewGuid():N}");
+    var revocationAttempted = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    ClaimedVsixPlanArtifact? replayedArtifact = null;
+    try
+    {
+      var durableExpiry = DateTimeOffset.UtcNow.AddMilliseconds(300);
+      var revocationStore = new TestPlanArtifactRevocationStore(revocationPath)
+      {
+        IssuedExpiryOverride = durableExpiry,
+        BeforeRevoke = () => revocationAttempted.TrySetResult(),
+        RevokeFailure = new IOException("revocation append failed")
+      };
+      var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
+      var store = PlanArtifactStore(
+          stager,
+          verifier,
+          manifests,
+          handoffLifetime: TimeSpan.FromMilliseconds(20),
+          deleteDirectory: static _ => { },
+          revocationStore: revocationStore);
+      var provider = Provider(
+          manifests,
+          new ThrowingProcessExecutor(),
+          stager,
+          verifier,
+          planArtifactStore: store);
+
+      var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+      var directory = Assert.Single(stager.Directories);
+      await Task.Delay(80);
+
+      Assert.True(plan.IsExecutable);
+      Assert.False(revocationAttempted.Task.IsCompleted);
+      Assert.True(Directory.Exists(directory));
+
+      await revocationAttempted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+      Assert.True(Directory.Exists(directory));
+
+      var replay = await PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              revocationStore: revocationStore)
+          .ClaimAsync(
+              resource.Id,
+              Assert.Single(plan.Steps).Id,
+              new string('A', 64),
+              new VsixPlanVisualStudioIdentity(
+                  "17.0_a",
+                  "Microsoft.VisualStudio.Product.Community",
+                  "17.0.0"),
+              CancellationToken.None);
+      replayedArtifact = replay.Artifact;
+
+      Assert.Null(replay.Artifact);
+      Assert.NotNull(replay.Error);
+    }
+    finally
+    {
+      if (replayedArtifact is not null)
+      {
+        await replayedArtifact.DisposeAsync();
+      }
+
+      File.Delete(revocationPath);
       File.Delete(source);
     }
   }
@@ -1699,6 +1849,221 @@ public sealed class VisualStudioExtensionProviderTests
   }
 
   [Fact]
+  public async Task PlanArtifactStore_FailedHashClaimCannotReplayAfterArtifactIsRestored()
+  {
+    var manifests = SourceManifestReader();
+    var verifier = new TrustedFileVerifier();
+    await using var stager = new ScriptedStager();
+    var revocationPath = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-test-revocations-{Guid.NewGuid():N}");
+    var revocationStore = new TestPlanArtifactRevocationStore(revocationPath);
+    var stagingStore = PlanArtifactStore(
+        stager,
+        verifier,
+        manifests,
+        revocationStore: revocationStore);
+    var claimingStore = PlanArtifactStore(
+        stager,
+        verifier,
+        manifests,
+        deleteDirectory: static _ => { },
+        revocationStore: revocationStore);
+    var replayStore = PlanArtifactStore(
+        stager,
+        verifier,
+        manifests,
+        revocationStore: revocationStore);
+    var original = await File.ReadAllBytesAsync(stager.StagedPath);
+    var expectedHash = Convert.ToHexString(SHA256.HashData(original));
+    ClaimedVsixPlanArtifact? replayedArtifact = null;
+    try
+    {
+      var staged = await stagingStore.StageAsync(
+          "extension",
+          stager.StagedPath,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None);
+      await File.WriteAllTextAsync(stager.VerifiedVsixPath, "tampered");
+
+      var failedClaim = await claimingStore.ClaimAsync(
+          "extension",
+          staged.StepEvidence!,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None);
+      await File.WriteAllBytesAsync(stager.VerifiedVsixPath, original);
+      var replay = await replayStore.ClaimAsync(
+          "extension",
+          staged.StepEvidence!,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None);
+      replayedArtifact = replay.Artifact;
+
+      Assert.Null(failedClaim.Artifact);
+      Assert.NotNull(failedClaim.Error);
+      Assert.Null(replay.Artifact);
+      Assert.NotNull(replay.Error);
+    }
+    finally
+    {
+      if (replayedArtifact is not null)
+      {
+        await replayedArtifact.DisposeAsync();
+      }
+
+      File.Delete(revocationPath);
+    }
+  }
+
+  [Fact]
+  public async Task PlanArtifactStore_ClaimStartAppendFailureRetainsActiveLocatorForSafeRetry()
+  {
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new ScriptedStager();
+    var revocationPath = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-test-revocations-{Guid.NewGuid():N}");
+    var revocationStore = new TestPlanArtifactRevocationStore(revocationPath)
+    {
+      ClaimStartedFailure = new IOException("claim-start append failed")
+    };
+    var expectedHash = new string('A', 64);
+    ClaimedVsixPlanArtifact? retriedArtifact = null;
+    try
+    {
+      var staged = await PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              revocationStore: revocationStore)
+          .StageAsync(
+              "extension",
+              stager.StagedPath,
+              expectedHash,
+              "17.0_a",
+              CancellationToken.None);
+      var failed = await PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              deleteDirectory: static _ => { },
+              revocationStore: revocationStore)
+          .ClaimAsync(
+              "extension",
+              staged.StepEvidence!,
+              expectedHash,
+              "17.0_a",
+              CancellationToken.None);
+
+      Assert.Null(failed.Artifact);
+      Assert.NotNull(failed.Error);
+      Assert.True(Directory.Exists(Path.GetDirectoryName(stager.VerifiedVsixPath)));
+
+      revocationStore.ClaimStartedFailure = null;
+      var retried = await PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              deleteDirectory: static _ => { },
+              revocationStore: revocationStore)
+          .ClaimAsync(
+              "extension",
+              staged.StepEvidence!,
+              expectedHash,
+              "17.0_a",
+              CancellationToken.None);
+      retriedArtifact = retried.Artifact;
+
+      Assert.NotNull(retriedArtifact);
+      Assert.Null(retried.Error);
+    }
+    finally
+    {
+      if (retriedArtifact is not null)
+      {
+        await retriedArtifact.DisposeAsync();
+      }
+
+      File.Delete(revocationPath);
+    }
+  }
+
+  [Fact]
+  public async Task PlanArtifactStore_ConcurrentClaimsProduceExactlyOneDurableConsumer()
+  {
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new ScriptedStager();
+    var revocationPath = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-test-revocations-{Guid.NewGuid():N}");
+    var revocationStore = new TestPlanArtifactRevocationStore(revocationPath);
+    var expectedHash = new string('A', 64);
+    var claimedArtifacts = new List<ClaimedVsixPlanArtifact>();
+    try
+    {
+      var staged = await PlanArtifactStore(
+              stager,
+              verifier,
+              manifests,
+              revocationStore: revocationStore)
+          .StageAsync(
+              "extension",
+              stager.StagedPath,
+              expectedHash,
+              "17.0_a",
+              CancellationToken.None);
+      var firstStore = PlanArtifactStore(
+          stager,
+          verifier,
+          manifests,
+          deleteDirectory: static _ => { },
+          revocationStore: revocationStore);
+      var secondStore = PlanArtifactStore(
+          stager,
+          verifier,
+          manifests,
+          deleteDirectory: static _ => { },
+          revocationStore: revocationStore);
+
+      var claims = await Task.WhenAll(
+          firstStore.ClaimAsync(
+              "extension",
+              staged.StepEvidence!,
+              expectedHash,
+              "17.0_a",
+              CancellationToken.None),
+          secondStore.ClaimAsync(
+              "extension",
+              staged.StepEvidence!,
+              expectedHash,
+              "17.0_a",
+              CancellationToken.None));
+      claimedArtifacts.AddRange(claims.Select(result => result.Artifact).OfType<ClaimedVsixPlanArtifact>());
+
+      Assert.Single(claimedArtifacts);
+      Assert.Single(claims, result => result.Error is not null);
+      var state = revocationStore.GetState(
+          staged.StepEvidence!["vsix-v2:".Length..("vsix-v2:".Length + 32)],
+          Path.GetFileName(Path.GetDirectoryName(stager.VerifiedVsixPath)!));
+      Assert.Equal(VsixPlanArtifactLedgerStatus.Consumed, state.Status);
+    }
+    finally
+    {
+      foreach (var artifact in claimedArtifacts)
+      {
+        await artifact.DisposeAsync();
+      }
+
+      File.Delete(revocationPath);
+    }
+  }
+
+  [Fact]
   public async Task PlanArtifactStore_LedgerPoisoningCannotHideRevocationFromFreshStore()
   {
     var manifests = SourceManifestReader();
@@ -2370,30 +2735,55 @@ public sealed class VisualStudioExtensionProviderTests
       : IVsixPlanArtifactRevocationStore
   {
     public Action? BeforeRevoke { get; init; }
-    public Exception? RevokeFailure { get; init; }
+    public Exception? RevokeFailure { get; set; }
+    public DateTimeOffset? IssuedExpiryOverride { get; init; }
+    public Exception? ClaimStartedFailure { get; set; }
 
     public void RecordIssued(
         string ownershipToken,
         string directoryName,
-        DateTimeOffset expiresAtUtc)
-    {
-      using var handle = File.OpenHandle(
-          path,
-          FileMode.Append,
-          FileAccess.Write,
-          FileShare.ReadWrite,
-          FileOptions.WriteThrough);
-      WindowsPlanArtifactDirectoryPolicy.WriteIssuanceRecord(
-          handle,
-          ownershipToken,
-          directoryName,
-          expiresAtUtc);
-    }
+        DateTimeOffset expiresAtUtc) =>
+        Append(handle => WindowsPlanArtifactDirectoryPolicy.WriteIssuanceRecord(
+            handle,
+            ownershipToken,
+            directoryName,
+            IssuedExpiryOverride ?? expiresAtUtc));
 
     public DateTimeOffset GetIssuedExpiry(string ownershipToken, string directoryName)
     {
       using var stream = File.OpenRead(path);
       return VsixPlanArtifactLedger.GetIssuedExpiry(stream, ownershipToken, directoryName);
+    }
+
+    public void Activate(string ownershipToken, string directoryName) =>
+        Append(handle => WindowsPlanArtifactDirectoryPolicy.WriteActivationRecord(
+            handle,
+            ownershipToken,
+            directoryName));
+
+    public void ClaimStarted(string ownershipToken, string directoryName)
+    {
+      if (ClaimStartedFailure is not null)
+      {
+        throw ClaimStartedFailure;
+      }
+
+      Append(handle => WindowsPlanArtifactDirectoryPolicy.WriteClaimStartedRecord(
+          handle,
+          ownershipToken,
+          directoryName));
+    }
+
+    public void Consume(string ownershipToken, string directoryName) =>
+        Append(handle => WindowsPlanArtifactDirectoryPolicy.WriteConsumedRecord(
+            handle,
+            ownershipToken,
+            directoryName));
+
+    public VsixPlanArtifactLedgerState GetState(string ownershipToken, string directoryName)
+    {
+      using var stream = File.OpenRead(path);
+      return VsixPlanArtifactLedger.ReadState(stream, ownershipToken, directoryName);
     }
 
     public void Revoke(string ownershipToken, string directoryName)
@@ -2404,16 +2794,10 @@ public sealed class VisualStudioExtensionProviderTests
         throw RevokeFailure;
       }
 
-      using var handle = File.OpenHandle(
-          path,
-          FileMode.Append,
-          FileAccess.Write,
-          FileShare.ReadWrite,
-          FileOptions.WriteThrough);
-      WindowsPlanArtifactDirectoryPolicy.WriteRevocationRecord(
+      Append(handle => WindowsPlanArtifactDirectoryPolicy.WriteRevocationRecord(
           handle,
           ownershipToken,
-          directoryName);
+          directoryName));
     }
 
     public bool IsRevoked(string ownershipToken, string directoryName) =>
@@ -2421,6 +2805,19 @@ public sealed class VisualStudioExtensionProviderTests
             File.ReadAllBytes(path),
             ownershipToken,
             directoryName);
+
+    private void Append(Action<Microsoft.Win32.SafeHandles.SafeFileHandle> write)
+    {
+      using var stream = new FileStream(
+          path,
+          FileMode.OpenOrCreate,
+          FileAccess.Write,
+          FileShare.ReadWrite,
+          bufferSize: 1,
+          FileOptions.WriteThrough);
+      _ = stream.Seek(0, SeekOrigin.End);
+      write(stream.SafeFileHandle);
+    }
   }
 
   private sealed class ThrowingIssuanceRevocationStore : IVsixPlanArtifactRevocationStore
@@ -2431,6 +2828,21 @@ public sealed class VisualStudioExtensionProviderTests
         DateTimeOffset expiresAtUtc) => throw new IOException("issuance append failed");
 
     public DateTimeOffset GetIssuedExpiry(string ownershipToken, string directoryName) =>
+        throw new System.Security.SecurityException("No issuance was recorded.");
+
+    public void Activate(string ownershipToken, string directoryName)
+    {
+    }
+
+    public void ClaimStarted(string ownershipToken, string directoryName)
+    {
+    }
+
+    public void Consume(string ownershipToken, string directoryName)
+    {
+    }
+
+    public VsixPlanArtifactLedgerState GetState(string ownershipToken, string directoryName) =>
         throw new System.Security.SecurityException("No issuance was recorded.");
 
     public void Revoke(string ownershipToken, string directoryName)
