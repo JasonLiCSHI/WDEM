@@ -128,11 +128,15 @@ internal sealed class WindowsVsixPlanArtifactRevocationStore(string planArtifact
 internal sealed record VsixPlanVisualStudioIdentity(
     string InstanceId,
     string ProductId,
+    string InstallationPath,
+    string ProductPath,
     string InstallationVersion)
 {
   public static VsixPlanVisualStudioIdentity FromInstance(VisualStudioInstance instance) => new(
       instance.InstanceId,
       instance.ProductId,
+      instance.InstallationPath,
+      instance.ProductPath,
       instance.InstallationVersion);
 }
 
@@ -334,18 +338,6 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
               token),
           cancellationToken);
 
-  internal Task<VsixPlanArtifactStageResult> StageAsync(
-      string resourceId,
-      string sourcePath,
-      string expectedSha256,
-      string visualStudioInstanceId,
-      CancellationToken cancellationToken) => StageAsync(
-          resourceId,
-          sourcePath,
-          expectedSha256,
-          LegacyIdentity(visualStudioInstanceId),
-          cancellationToken);
-
   public Task<VsixPlanArtifactStageResult> StageAsync(
       string resourceId,
       Stream source,
@@ -360,18 +352,6 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
               expectedSha256,
               SecureArtifactKind.VisualStudioExtension,
               token),
-          cancellationToken);
-
-  internal Task<VsixPlanArtifactStageResult> StageAsync(
-      string resourceId,
-      Stream source,
-      string expectedSha256,
-      string visualStudioInstanceId,
-      CancellationToken cancellationToken) => StageAsync(
-          resourceId,
-          source,
-          expectedSha256,
-          LegacyIdentity(visualStudioInstanceId),
           cancellationToken);
 
   private async Task<VsixPlanArtifactStageResult> StageCoreAsync(
@@ -433,6 +413,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
           manifestResult.Manifest.ManifestPath,
           manifestResult.Manifest.VisualStudioInstanceId,
           visualStudioIdentity.ProductId,
+          visualStudioIdentity.InstallationPath,
+          visualStudioIdentity.ProductPath,
           visualStudioIdentity.InstallationVersion,
           manifestResult.Manifest.Targets.ToArray(),
           creatorSid,
@@ -540,6 +522,14 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
               evidence.VisualStudioProductId,
               visualStudioIdentity.ProductId,
               StringComparison.Ordinal) ||
+          !string.Equals(
+              evidence.VisualStudioInstallationPath,
+              visualStudioIdentity.InstallationPath,
+              StringComparison.OrdinalIgnoreCase) ||
+          !string.Equals(
+              evidence.VisualStudioProductPath,
+              visualStudioIdentity.ProductPath,
+              StringComparison.OrdinalIgnoreCase) ||
           !string.Equals(
               evidence.VisualStudioInstallationVersion,
               visualStudioIdentity.InstallationVersion,
@@ -715,18 +705,6 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
     destination.Flush(flushToDisk: true);
     return path;
   }
-
-  internal Task<VsixPlanArtifactClaimResult> ClaimAsync(
-      string resourceId,
-      string stepId,
-      string expectedSha256,
-      string visualStudioInstanceId,
-      CancellationToken cancellationToken) => ClaimAsync(
-          resourceId,
-          stepId,
-          expectedSha256,
-          LegacyIdentity(visualStudioInstanceId),
-          cancellationToken);
 
   public Task BeginClaimAsync(
       string resourceId,
@@ -1529,6 +1507,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
         string.IsNullOrWhiteSpace(evidence.ManifestPath) ||
         string.IsNullOrWhiteSpace(evidence.VisualStudioInstanceId) ||
         string.IsNullOrWhiteSpace(evidence.VisualStudioProductId) ||
+        string.IsNullOrWhiteSpace(evidence.VisualStudioInstallationPath) ||
+        string.IsNullOrWhiteSpace(evidence.VisualStudioProductPath) ||
         string.IsNullOrWhiteSpace(evidence.VisualStudioInstallationVersion) ||
         evidence.InstallationTargets is null ||
         evidence.InstallationTargets.Any(target =>
@@ -1589,6 +1569,14 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
           right.VisualStudioProductId,
           StringComparison.Ordinal) &&
       string.Equals(
+          left.VisualStudioInstallationPath,
+          right.VisualStudioInstallationPath,
+          StringComparison.OrdinalIgnoreCase) &&
+      string.Equals(
+          left.VisualStudioProductPath,
+          right.VisualStudioProductPath,
+          StringComparison.OrdinalIgnoreCase) &&
+      string.Equals(
           left.VisualStudioInstallationVersion,
           right.VisualStudioInstallationVersion,
           StringComparison.Ordinal) &&
@@ -1635,6 +1623,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
             evidence.ManifestPath,
             evidence.VisualStudioInstanceId,
             evidence.VisualStudioProductId,
+            evidence.VisualStudioInstallationPath,
+            evidence.VisualStudioProductPath,
             evidence.VisualStudioInstallationVersion,
             evidence.InstallationTargets,
             evidence.CreatorSid,
@@ -1694,9 +1684,6 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       (uptime < 0 ||
        uptime >= evidence.ExpiresAtUptimeMilliseconds ||
        _getUtcNow() >= evidence.ExpiresAtUtc);
-
-  private static VsixPlanVisualStudioIdentity LegacyIdentity(string instanceId) =>
-      new(instanceId, "unknown", "unknown");
 
   private static bool TryGetRegistrationLocator(
       string stepId,
@@ -1846,6 +1833,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       string ManifestPath,
       string VisualStudioInstanceId,
       string VisualStudioProductId,
+      string VisualStudioInstallationPath,
+      string VisualStudioProductPath,
       string VisualStudioInstallationVersion,
       IReadOnlyList<VsixInstallationTarget> InstallationTargets,
       string CreatorSid,
@@ -1867,6 +1856,8 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       string ManifestPath,
       string VisualStudioInstanceId,
       string VisualStudioProductId,
+      string VisualStudioInstallationPath,
+      string VisualStudioProductPath,
       string VisualStudioInstallationVersion,
       IReadOnlyList<VsixInstallationTarget> InstallationTargets,
       string CreatorSid,

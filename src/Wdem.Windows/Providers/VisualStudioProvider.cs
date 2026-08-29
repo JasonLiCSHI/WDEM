@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text.Json;
 using Wdem.Core.Compliance;
 using Wdem.Core.Execution;
 using Wdem.Core.Providers;
@@ -307,13 +309,35 @@ public sealed class VisualStudioProvider : IResourceProvider
       PlanAction.Upgrade => "update",
       _ => "modify"
     };
+    var stepId = $"{resource.Id}:{operation}";
+    if (action != PlanAction.Install)
+    {
+      if (!TryGetPlanIdentity(currentState, out var identity))
+      {
+        var error = new StructuredError(
+            WdemErrorCode.DetectionError,
+            "Visual Studio identity evidence is incomplete.",
+            "Run detect again before planning changes to the selected Visual Studio instance.")
+        {
+          ResourceId = resource.Id
+        };
+        return BasePlan(resource, compliance.Status, isExecutable: false) with
+        {
+          Error = error.Detail,
+          StructuredErrors = [error]
+        };
+      }
+
+      stepId = CreateStepId(resource, operation, identity);
+    }
+
     return plan with
     {
       Steps =
       [
         new PlanStep
         {
-          Id = $"{resource.Id}:{operation}",
+          Id = stepId,
           Description = action switch
           {
             PlanAction.Install => "Install Visual Studio.",
@@ -419,6 +443,7 @@ public sealed class VisualStudioProvider : IResourceProvider
 
     var verifiedVsConfig = stagedConfiguration?.Path;
     var approvedAction = step.Action;
+    VisualStudioInstance? plannedInstance = null;
     if (approvedAction == PlanAction.Install)
     {
       var currentInstances = await _discovery.DiscoverAsync(
@@ -448,6 +473,30 @@ public sealed class VisualStudioProvider : IResourceProvider
             WdemErrorCode.DetectionError,
             "Visual Studio state changed after planning.",
             $"Visual Studio instance '{existingInstance.InstanceId}' now matches the planned installation. Run detect and plan again before applying changes.")
+        {
+          ResourceId = resource.Id,
+          StepId = step.Id
+        };
+        return ApplyFailure(resource, step, error, null, 0.05);
+      }
+    }
+    else
+    {
+      var currentInstances = await _discovery.DiscoverAsync(
+          options.Workloads,
+          options.Components,
+          cancellationToken).ConfigureAwait(false);
+      plannedInstance = SelectInstance(currentInstances, options);
+      var operation = approvedAction == PlanAction.Upgrade ? "update" : "modify";
+      if (plannedInstance is null || !string.Equals(
+              step.Id,
+              CreateStepId(resource, operation, VisualStudioPlanIdentity.FromInstance(plannedInstance)),
+              StringComparison.Ordinal))
+      {
+        var error = new StructuredError(
+            WdemErrorCode.DetectionError,
+            "Visual Studio state changed after planning.",
+            "The selected Visual Studio instance is missing or its identity or paths changed after planning. Run detect and plan again before applying changes.")
         {
           ResourceId = resource.Id,
           StepId = step.Id
@@ -500,24 +549,7 @@ public sealed class VisualStudioProvider : IResourceProvider
           0.35,
           $"{operation} Visual Studio.",
           step.Id));
-      var instances = await _discovery.DiscoverAsync(
-          options.Workloads,
-          options.Components,
-          cancellationToken).ConfigureAwait(false);
-      var instance = SelectInstance(instances, options);
-
-      if (instance is null)
-      {
-        var error = new StructuredError(
-            WdemErrorCode.VerificationError,
-            "Visual Studio instance could not be selected.",
-            "The planned Visual Studio instance was not found before modification.")
-        {
-          ResourceId = resource.Id,
-          StepId = step.Id
-        };
-        return ApplyFailure(resource, step, error, null, 0.35);
-      }
+      var instance = plannedInstance!;
 
       if (approvedAction == PlanAction.Upgrade)
       {
@@ -889,15 +921,7 @@ public sealed class VisualStudioProvider : IResourceProvider
           plan.Steps[0].Action == PlanAction.Upgrade) ||
          (plan.Compliance == ComplianceStatus.ConfigurationMismatch &&
           plan.Steps[0].Action == PlanAction.Configure)) &&
-        string.Equals(
-            plan.Steps[0].Id,
-            $"{resource.Id}:{plan.Steps[0].Action switch
-            {
-              PlanAction.Install => "install",
-              PlanAction.Upgrade => "update",
-              _ => "modify"
-            }}",
-            StringComparison.Ordinal) &&
+        HasValidStepId(resource, plan.Steps[0]) &&
         plan.Steps[0].PrivilegeRequirement == PrivilegeRequirement.Administrator &&
         plan.Steps[0].RestartPolicy == RestartPolicy.NoRestart &&
         !plan.Steps[0].IsDestructive;
@@ -915,6 +939,74 @@ public sealed class VisualStudioProvider : IResourceProvider
       ResourceId = resource.Id
     };
     return false;
+  }
+
+  private static bool HasValidStepId(ResourceDefinition resource, PlanStep step)
+  {
+    var operation = step.Action switch
+    {
+      PlanAction.Install => "install",
+      PlanAction.Upgrade => "update",
+      _ => "modify"
+    };
+    var prefix = $"{resource.Id}:{operation}";
+    if (step.Action == PlanAction.Install)
+    {
+      return string.Equals(step.Id, prefix, StringComparison.Ordinal);
+    }
+
+    prefix += ":";
+    return step.Id.StartsWith(prefix, StringComparison.Ordinal) &&
+        step.Id.Length == prefix.Length + 64 &&
+        step.Id[prefix.Length..].All(Uri.IsHexDigit);
+  }
+
+  private static string CreateStepId(
+      ResourceDefinition resource,
+      string operation,
+      VisualStudioPlanIdentity identity)
+  {
+    var bytes = JsonSerializer.SerializeToUtf8Bytes(identity);
+    return $"{resource.Id}:{operation}:{Convert.ToHexString(SHA256.HashData(bytes))}";
+  }
+
+  private static bool TryGetPlanIdentity(
+      DetectedState state,
+      out VisualStudioPlanIdentity identity)
+  {
+    var evidence = state.Evidence;
+    if (evidence.TryGetValue("instanceId", out var instanceId) &&
+        evidence.TryGetValue("productId", out var productId) &&
+        evidence.TryGetValue("installationPath", out var installationPath) &&
+        evidence.TryGetValue("productPath", out var productPath) &&
+        evidence.TryGetValue("installationVersion", out var installationVersion))
+    {
+      identity = new VisualStudioPlanIdentity(
+          instanceId,
+          productId,
+          installationPath,
+          productPath,
+          installationVersion);
+      return true;
+    }
+
+    identity = null!;
+    return false;
+  }
+
+  private sealed record VisualStudioPlanIdentity(
+      string InstanceId,
+      string ProductId,
+      string InstallationPath,
+      string ProductPath,
+      string InstallationVersion)
+  {
+    public static VisualStudioPlanIdentity FromInstance(VisualStudioInstance instance) => new(
+        instance.InstanceId,
+        instance.ProductId,
+        instance.InstallationPath,
+        instance.ProductPath,
+        instance.InstallationVersion);
   }
 
   private static ResourceApplyResult ApplyFailure(

@@ -15,6 +15,9 @@ public sealed class ReSharperProvider : IResourceProvider
   public const string VisualStudioResourceIdParameter = "visualStudioResourceId";
   public const string InstanceIdParameter = "instanceId";
   public const string VisualStudioInstanceIdParameter = "visualStudioInstanceId";
+  public const string ProductIdParameter = "productId";
+  public const string EditionParameter = "edition";
+  public const string ChannelIdParameter = "channelId";
   public const string SourceParameter = "source";
 
   private readonly IVisualStudioDiscovery _discovery;
@@ -74,13 +77,18 @@ public sealed class ReSharperProvider : IResourceProvider
 
     if (string.IsNullOrWhiteSpace(GetInstanceId(resource)))
     {
-      errors.Add((
-          WdemErrorCode.ConfigurationError,
-          "Parameter 'instanceId' is required."));
+      RequireSelector(resource, ProductIdParameter, errors);
+      RequireSelector(resource, EditionParameter, errors);
+      RequireSelector(resource, ChannelIdParameter, errors);
     }
 
     var instanceId = GetParameter(resource, InstanceIdParameter);
     var legacyInstanceId = GetParameter(resource, VisualStudioInstanceIdParameter);
+    ValidateOptionalSelector(resource, InstanceIdParameter, errors);
+    ValidateOptionalSelector(resource, VisualStudioInstanceIdParameter, errors);
+    ValidateOptionalSelector(resource, ProductIdParameter, errors);
+    ValidateOptionalSelector(resource, EditionParameter, errors);
+    ValidateOptionalSelector(resource, ChannelIdParameter, errors);
     if (!string.IsNullOrWhiteSpace(instanceId) &&
         !string.IsNullOrWhiteSpace(legacyInstanceId) &&
         !Matches(instanceId, legacyInstanceId))
@@ -113,6 +121,9 @@ public sealed class ReSharperProvider : IResourceProvider
       VisualStudioResourceIdParameter,
       InstanceIdParameter,
       VisualStudioInstanceIdParameter,
+      ProductIdParameter,
+      EditionParameter,
+      ChannelIdParameter,
       SourceParameter
     };
     foreach (var parameter in resource.Parameters.Keys.Where(key => !supported.Contains(key)))
@@ -150,19 +161,17 @@ public sealed class ReSharperProvider : IResourceProvider
     try
     {
       var instances = await _discovery.DiscoverAsync([], [], cancellationToken).ConfigureAwait(false);
-      var requestedId = GetInstanceId(resource)!;
-      var matches = instances.Where(candidate =>
-          candidate.IsComplete && Matches(candidate.InstanceId, requestedId)).ToArray();
-      if (matches.Length > 1)
+      var selection = SelectInstance(resource, instances);
+      if (selection.IsAmbiguous)
       {
         return Failure(resource, Error(
             resource,
             WdemErrorCode.DetectionError,
             "ReSharper integration detection is ambiguous.",
-            "More than one Visual Studio instance has the selected instance ID."));
+            $"Set parameter 'instanceId' to one of: {string.Join(", ", selection.CandidateInstanceIds)}."));
       }
 
-      instance = matches.SingleOrDefault();
+      instance = selection.Instance;
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
@@ -242,7 +251,9 @@ public sealed class ReSharperProvider : IResourceProvider
           ["extensionId"] = manifest.Id,
           ["version"] = manifest.Version,
           ["manifestPath"] = manifest.ManifestPath,
-          ["visualStudioInstanceId"] = instance.InstanceId
+          ["visualStudioInstanceId"] = instance.InstanceId,
+          ["visualStudioInstallationPath"] = instance.InstallationPath,
+          ["visualStudioProductPath"] = instance.ProductPath
         }
       };
     }
@@ -498,22 +509,20 @@ public sealed class ReSharperProvider : IResourceProvider
   {
     try
     {
-      var requestedId = GetInstanceId(resource)!;
       var instances = await _discovery.DiscoverAsync([], [], cancellationToken).ConfigureAwait(false);
-      var matches = instances.Where(candidate =>
-          candidate.IsComplete && Matches(candidate.InstanceId, requestedId)).ToArray();
-      if (matches.Length == 1)
+      var selection = SelectInstance(resource, instances);
+      if (selection.Instance is not null)
       {
-        return new InstanceSelection(matches[0], null);
+        return new InstanceSelection(selection.Instance, null);
       }
 
-      return matches.Length == 0
+      return !selection.IsAmbiguous
           ? new InstanceSelection(null, null)
           : new InstanceSelection(null, Error(
               resource,
               WdemErrorCode.DetectionError,
               "Visual Studio instance selection is ambiguous.",
-              "More than one Visual Studio instance has the selected instance ID."));
+              $"Set parameter 'instanceId' to one of: {string.Join(", ", selection.CandidateInstanceIds)}."));
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
@@ -537,6 +546,8 @@ public sealed class ReSharperProvider : IResourceProvider
     var evidence = JsonSerializer.SerializeToUtf8Bytes(new InstanceEvidence(
         instance.InstanceId,
         instance.ProductId,
+        instance.InstallationPath,
+        instance.ProductPath,
         instance.InstallationVersion,
         exactVersion));
     return $"resharper:install:{exactVersion}:" +
@@ -642,12 +653,51 @@ public sealed class ReSharperProvider : IResourceProvider
       GetParameter(resource, InstanceIdParameter) ??
       GetParameter(resource, VisualStudioInstanceIdParameter);
 
+  private static VisualStudioInstanceSelection SelectInstance(
+      ResourceDefinition resource,
+      IReadOnlyList<VisualStudioInstance> instances) => VisualStudioInstanceSelector.Select(
+          instances,
+          new VisualStudioInstanceCriteria(
+              GetInstanceId(resource),
+              GetParameter(resource, ProductIdParameter),
+              GetParameter(resource, EditionParameter),
+              GetParameter(resource, ChannelIdParameter)));
+
+  private static void RequireSelector(
+      ResourceDefinition resource,
+      string parameter,
+      ICollection<(WdemErrorCode Code, string Detail)> errors)
+  {
+    var value = GetParameter(resource, parameter);
+    if (string.IsNullOrWhiteSpace(value) || value.Any(char.IsControl))
+    {
+      errors.Add((WdemErrorCode.ConfigurationError,
+          $"Parameter '{parameter}' is required when 'instanceId' is omitted."));
+    }
+  }
+
+  private static void ValidateOptionalSelector(
+      ResourceDefinition resource,
+      string parameter,
+      ICollection<(WdemErrorCode Code, string Detail)> errors)
+  {
+    if (resource.Parameters.ContainsKey(parameter) &&
+        (GetParameter(resource, parameter) is not { } value ||
+         string.IsNullOrWhiteSpace(value) || value.Any(char.IsControl)))
+    {
+      errors.Add((WdemErrorCode.ConfigurationError,
+          $"Parameter '{parameter}' cannot be empty or contain control characters."));
+    }
+  }
+
   private static bool Matches(string? left, string? right) =>
       string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
 
   private sealed record InstanceEvidence(
       string InstanceId,
       string ProductId,
+      string InstallationPath,
+      string ProductPath,
       string InstallationVersion,
       string ExactVersion);
 

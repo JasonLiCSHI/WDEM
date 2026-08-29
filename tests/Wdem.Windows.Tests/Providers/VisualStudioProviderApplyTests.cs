@@ -52,6 +52,28 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   }
 
   [Fact]
+  public async Task ApplyAsync_ExistingInstancePathChangeAfterPlanningFailsBeforeModify()
+  {
+    var original = Instance("17.0_a");
+    var moved = original with
+    {
+      InstallationPath = @"D:\MovedVS",
+      ProductPath = @"D:\MovedVS\Common7\IDE\devenv.exe"
+    };
+    var discovery = new SequenceDiscovery([[moved]]);
+    var installer = new RecordingInstallerClient();
+    var provider = Provider(discovery, installer);
+    var resource = Resource();
+    var plan = await provider.PlanAsync(resource, State(original), CancellationToken.None);
+
+    var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Contains("changed after planning", result.Error!.Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.Empty(installer.LastArguments);
+  }
+
+  [Fact]
   public async Task PlanAsync_VsconfigHashMismatch_IsNonExecutable()
   {
     Directory.CreateDirectory(_root);
@@ -731,7 +753,7 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   }
 
   [Fact]
-  public async Task ApplyAsync_MissingModifyInstanceDisposesBootstrapperLease()
+  public async Task ApplyAsync_MissingModifyInstanceFailsBeforeBootstrapperAcquisition()
   {
     var installer = new RecordingInstallerClient();
     var provider = Provider(new SequenceDiscovery([[]]), installer);
@@ -742,8 +764,8 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
     var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
 
     Assert.Equal(ApplyOutcome.Failed, result.Outcome);
-    Assert.Equal(WdemErrorCode.VerificationError, result.Error!.Code);
-    Assert.True(installer.LastAcquisition!.IsDisposed);
+    Assert.Equal(WdemErrorCode.DetectionError, result.Error!.Code);
+    Assert.Null(installer.LastAcquisition);
     Assert.Empty(installer.LastArguments);
   }
 
@@ -822,6 +844,9 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
     {
       ["instanceId"] = instance.InstanceId,
       ["installationPath"] = instance.InstallationPath,
+      ["productId"] = instance.ProductId,
+      ["productPath"] = instance.ProductPath,
+      ["installationVersion"] = instance.InstallationVersion,
       ["edition"] = instance.Edition,
       ["channel"] = instance.ChannelId,
       ["workloads"] = string.Join(';', instance.Workloads),

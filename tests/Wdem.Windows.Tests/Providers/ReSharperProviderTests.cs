@@ -12,6 +12,83 @@ namespace Wdem.Windows.Tests.Providers;
 public sealed class ReSharperProviderTests
 {
   [Fact]
+  public async Task DetectAsync_OmittedInstanceIdSelectsOneCompleteConstrainedInstance()
+  {
+    var selected = Instance("17.real");
+    var provider = Provider(
+        new FakeManifestReader(),
+        new ThrowingProcessExecutor(),
+        new MutableVisualStudioDiscovery(
+            selected,
+            Instance("17.other") with { Edition = "Professional" }));
+
+    var state = await provider.DetectAsync(
+        WithOptionalInstanceSelector(ReSharperResource(["visual-studio"])),
+        CancellationToken.None);
+
+    Assert.Equal(DetectionOutcome.Succeeded, state.Outcome);
+    Assert.False(state.Exists);
+    Assert.Equal("17.real", state.Evidence["visualStudioInstanceId"]);
+  }
+
+  [Fact]
+  public async Task DetectAsync_AmbiguousOptionalInstanceSelectorReportsCandidateIds()
+  {
+    var provider = Provider(
+        new FakeManifestReader(),
+        new ThrowingProcessExecutor(),
+        new MutableVisualStudioDiscovery(Instance("17.a"), Instance("17.b")));
+
+    var state = await provider.DetectAsync(
+        WithOptionalInstanceSelector(ReSharperResource(["visual-studio"])),
+        CancellationToken.None);
+
+    Assert.Equal(DetectionOutcome.Failed, state.Outcome);
+    Assert.Contains("17.a", state.StructuredError!.Detail, StringComparison.Ordinal);
+    Assert.Contains("17.b", state.StructuredError.Detail, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task DetectAsync_MissingExplicitInstanceIdDoesNotSelectOtherCandidates()
+  {
+    var provider = Provider(
+        new FakeManifestReader(),
+        new ThrowingProcessExecutor(),
+        new MutableVisualStudioDiscovery(Instance("17.a"), Instance("17.b")));
+    var resource = ReSharperResource(["visual-studio"]);
+
+    var state = await provider.DetectAsync(resource, CancellationToken.None);
+
+    Assert.Equal(DetectionOutcome.Succeeded, state.Outcome);
+    Assert.False(state.Exists);
+    Assert.Null(state.StructuredError);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_SelectedVisualStudioPathChangeFailsBeforeInstall()
+  {
+    var selected = Instance("17.real");
+    var discovery = new MutableVisualStudioDiscovery(selected);
+    var process = new CountingSuccessProcessExecutor();
+    var provider = Provider(new FakeManifestReader(), process, discovery);
+    var resource = WithOptionalInstanceSelector(ReSharperResource(["visual-studio"]));
+    var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+    discovery.Instances =
+    [
+      selected with
+      {
+        InstallationPath = @"D:\MovedVS",
+        ProductPath = @"D:\MovedVS\Common7\IDE\devenv.exe"
+      }
+    ];
+
+    var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Single(process.Requests);
+  }
+
+  [Fact]
   public async Task ReSharperPlan_RequiresVisualStudioDependency()
   {
     var provider = Provider(new FakeManifestReader(), new ThrowingProcessExecutor());
@@ -293,6 +370,17 @@ public sealed class ReSharperProviderTests
       ["instanceId"] = "17.0_a"
     }
   };
+
+  private static ResourceDefinition WithOptionalInstanceSelector(ResourceDefinition resource)
+  {
+    var parameters = resource.Parameters
+        .Where(pair => !string.Equals(pair.Key, "instanceId", StringComparison.OrdinalIgnoreCase))
+        .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+    parameters["productId"] = "Microsoft.VisualStudio.Product.Community";
+    parameters["edition"] = "Community";
+    parameters["channelId"] = "VisualStudio.17.Release";
+    return resource with { Parameters = parameters };
+  }
 
   private static DetectedState Missing(ResourceDefinition resource) => new()
   {

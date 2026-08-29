@@ -17,6 +17,9 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
   public const string VisualStudioResourceIdParameter = "visualStudioResourceId";
   public const string InstanceIdParameter = "instanceId";
   public const string VisualStudioInstanceIdParameter = "visualStudioInstanceId";
+  public const string ProductIdParameter = "productId";
+  public const string EditionParameter = "edition";
+  public const string ChannelIdParameter = "channelId";
 
   private const long MaxVsixBytes = 512L * 1024 * 1024;
   private readonly IVisualStudioDiscovery _discovery;
@@ -103,11 +106,18 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
     RequireId(resource, ExtensionIdParameter, errors);
     if (string.IsNullOrWhiteSpace(GetInstanceId(resource)))
     {
-      errors.Add((WdemErrorCode.ConfigurationError, "Parameter 'instanceId' is required."));
+      RequireSelector(resource, ProductIdParameter, errors);
+      RequireSelector(resource, EditionParameter, errors);
+      RequireSelector(resource, ChannelIdParameter, errors);
     }
 
     var instanceId = GetParameter(resource, InstanceIdParameter);
     var legacyInstanceId = GetParameter(resource, VisualStudioInstanceIdParameter);
+    ValidateOptionalSelector(resource, InstanceIdParameter, errors);
+    ValidateOptionalSelector(resource, VisualStudioInstanceIdParameter, errors);
+    ValidateOptionalSelector(resource, ProductIdParameter, errors);
+    ValidateOptionalSelector(resource, EditionParameter, errors);
+    ValidateOptionalSelector(resource, ChannelIdParameter, errors);
     if (!string.IsNullOrWhiteSpace(instanceId) &&
         !string.IsNullOrWhiteSpace(legacyInstanceId) &&
         !Matches(instanceId, legacyInstanceId))
@@ -158,7 +168,10 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
       ExpectedSha256Parameter,
       VisualStudioResourceIdParameter,
       InstanceIdParameter,
-      VisualStudioInstanceIdParameter
+      VisualStudioInstanceIdParameter,
+      ProductIdParameter,
+      EditionParameter,
+      ChannelIdParameter
     };
     foreach (var parameter in resource.Parameters.Keys.Where(key => !supported.Contains(key)))
     {
@@ -537,21 +550,18 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
     try
     {
       var instances = await _discovery.DiscoverAsync([], [], cancellationToken).ConfigureAwait(false);
-      var requestedId = GetInstanceId(resource)!;
-      var matches = instances.Where(instance =>
-          instance.IsComplete &&
-          Matches(instance.InstanceId, requestedId)).ToArray();
-      if (matches.Length == 1)
+      var selection = SelectInstance(resource, instances);
+      if (selection.Instance is not null)
       {
-        return new InstanceSelection(matches[0], null);
+        return new InstanceSelection(selection.Instance, null);
       }
 
-      return matches.Length == 0
+      return !selection.IsAmbiguous
           ? new InstanceSelection(null, null)
           : new InstanceSelection(null, new StructuredError(
               WdemErrorCode.DetectionError,
               "Visual Studio instance selection is ambiguous.",
-              "More than one Visual Studio instance has the selected instance ID.")
+              $"Set parameter 'instanceId' to one of: {string.Join(", ", selection.CandidateInstanceIds)}.")
           {
             ResourceId = resource.Id
           });
@@ -895,6 +905,43 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
   private static string? GetInstanceId(ResourceDefinition resource) =>
       GetParameter(resource, InstanceIdParameter) ??
       GetParameter(resource, VisualStudioInstanceIdParameter);
+
+  private static VisualStudioInstanceSelection SelectInstance(
+      ResourceDefinition resource,
+      IReadOnlyList<VisualStudioInstance> instances) => VisualStudioInstanceSelector.Select(
+          instances,
+          new VisualStudioInstanceCriteria(
+              GetInstanceId(resource),
+              GetParameter(resource, ProductIdParameter),
+              GetParameter(resource, EditionParameter),
+              GetParameter(resource, ChannelIdParameter)));
+
+  private static void RequireSelector(
+      ResourceDefinition resource,
+      string parameter,
+      ICollection<(WdemErrorCode Code, string Detail)> errors)
+  {
+    var value = GetParameter(resource, parameter);
+    if (string.IsNullOrWhiteSpace(value) || value.Any(char.IsControl))
+    {
+      errors.Add((WdemErrorCode.ConfigurationError,
+          $"Parameter '{parameter}' is required when 'instanceId' is omitted."));
+    }
+  }
+
+  private static void ValidateOptionalSelector(
+      ResourceDefinition resource,
+      string parameter,
+      ICollection<(WdemErrorCode Code, string Detail)> errors)
+  {
+    if (resource.Parameters.ContainsKey(parameter) &&
+        (GetParameter(resource, parameter) is not { } value ||
+         string.IsNullOrWhiteSpace(value) || value.Any(char.IsControl)))
+    {
+      errors.Add((WdemErrorCode.ConfigurationError,
+          $"Parameter '{parameter}' cannot be empty or contain control characters."));
+    }
+  }
 
   private static bool Matches(string? left, string? right) =>
       string.Equals(left, right, StringComparison.OrdinalIgnoreCase);

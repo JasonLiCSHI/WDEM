@@ -380,7 +380,10 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
         IsExecutable = executable
       };
 
-  internal static StructuredError? ValidatePlan(ResourceDefinition resource, ResourcePlan plan)
+  internal static StructuredError? ValidatePlan(
+      ResourceDefinition resource,
+      ResourcePlan plan,
+      Func<PlanStep, bool>? validateStep = null)
   {
     if (!plan.IsExecutable || !Matches(plan.ResourceId, resource.Id) ||
         !Matches(plan.ResourceType, resource.Type) || !Matches(plan.ProviderName, resource.Provider) ||
@@ -396,7 +399,8 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
           : Error(resource, WdemErrorCode.ProviderError, "The configuration plan has no valid action.");
     }
 
-    return plan.Steps.Count == 1 && plan.Steps[0].Id == $"{resource.Id}:configure" &&
+    return plan.Steps.Count == 1 &&
+        (validateStep?.Invoke(plan.Steps[0]) ?? plan.Steps[0].Id == $"{resource.Id}:configure") &&
         plan.Steps[0].Action == PlanAction.Configure &&
         plan.Steps[0].PrivilegeRequirement == resource.PrivilegeRequirement &&
         plan.Steps[0].RestartPolicy == resource.RestartPolicy && !plan.Steps[0].IsDestructive

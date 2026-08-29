@@ -1,4 +1,6 @@
 using System.Security;
+using System.Security.Cryptography;
+using System.Text.Json;
 using Wdem.Core.Compliance;
 using Wdem.Core.Execution;
 using Wdem.Core.Processes;
@@ -15,6 +17,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
   public const string ExpectedSha256Parameter = "expectedSha256";
   public const string SettingsStorePathParameter = "settingsStorePath";
   public const string InstanceIdParameter = "instanceId";
+  public const string ProductIdParameter = "productId";
   public const string EditionParameter = "edition";
   public const string ChannelIdParameter = "channelId";
   public const string VisualStudioResourceIdParameter = "visualStudioResourceId";
@@ -103,7 +106,15 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
           "Parameter 'expectedSha256' must contain exactly 64 hexadecimal characters."));
     }
 
-    RequireText(resource, InstanceIdParameter, errors);
+    if (string.IsNullOrWhiteSpace(Get(resource, InstanceIdParameter)))
+    {
+      RequireText(resource, ProductIdParameter, errors);
+    }
+    else
+    {
+      ValidateOptionalText(resource, InstanceIdParameter, errors);
+      ValidateOptionalText(resource, ProductIdParameter, errors);
+    }
     RequireText(resource, EditionParameter, errors);
     RequireText(resource, ChannelIdParameter, errors);
     ReSharperSettingsProvider.AddUnsupportedParameters(
@@ -113,6 +124,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
         ExpectedSha256Parameter,
         SettingsStorePathParameter,
         InstanceIdParameter,
+        ProductIdParameter,
         EditionParameter,
         ChannelIdParameter,
         VisualStudioResourceIdParameter,
@@ -137,6 +149,17 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     if (!validation.IsValid)
     {
       return ReSharperSettingsProvider.DetectionFailure(resource, validation.StructuredErrors[0]);
+    }
+
+    var source = await _sourceResolver.ResolveAsync(
+        Get(resource, SourcePathParameter)!,
+        Get(resource, ExpectedSha256Parameter)!,
+        cancellationToken).ConfigureAwait(false);
+    if (!source.IsValid)
+    {
+      return ReSharperSettingsProvider.DetectionFailure(
+          resource,
+          source.Error! with { ResourceId = resource.Id });
     }
 
     var selection = await SelectInstanceAsync(resource, cancellationToken).ConfigureAwait(false);
@@ -170,7 +193,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
 
     if (!File.Exists(settingsStorePath))
     {
-      return Missing(resource, selection.Instance, settingsStorePath);
+      return Missing(resource, selection.Instance, settingsStorePath, source.Source!.Sha256);
     }
 
     try
@@ -185,7 +208,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
 
       var hash = await ConfigurationImporter.HashFileAsync(settingsStorePath, cancellationToken)
           .ConfigureAwait(false);
-      return State(resource, selection.Instance, settingsStorePath, hash);
+      return State(resource, selection.Instance, settingsStorePath, hash, source.Source!.Sha256);
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
@@ -229,13 +252,29 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
       };
     }
 
+    var selection = await SelectInstanceAsync(resource, cancellationToken).ConfigureAwait(false);
+    if (selection.Error is not null || selection.Instance is null)
+    {
+      var error = selection.Error ?? ReSharperSettingsProvider.Error(
+          resource,
+          WdemErrorCode.DependencyError,
+          "The selected Visual Studio instance is unavailable.");
+      return ReSharperSettingsProvider.Plan(resource, compliance.Status, false) with
+      {
+        Error = error.Detail,
+        StructuredErrors = [error]
+      };
+    }
+
+    var selectedInstance = selection.Instance;
+
     return ReSharperSettingsProvider.Plan(resource, compliance.Status, true) with
     {
       Steps =
       [
         new PlanStep
         {
-          Id = $"{resource.Id}:configure",
+          Id = CreateStepId(resource, selectedInstance),
           Description = "Import verified Visual Studio settings.",
           Action = PlanAction.Configure,
           PrivilegeRequirement = resource.PrivilegeRequirement,
@@ -258,7 +297,10 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
       return ReSharperSettingsProvider.Failed(resource, validation.StructuredErrors[0]);
     }
 
-    var planError = ReSharperSettingsProvider.ValidatePlan(resource, plan);
+    var planError = ReSharperSettingsProvider.ValidatePlan(
+        resource,
+        plan,
+        step => HasValidStepId(resource, step.Id));
     if (planError is not null)
     {
       return ReSharperSettingsProvider.Failed(resource, planError);
@@ -275,6 +317,16 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
       return ReSharperSettingsProvider.Failed(resource, selection.Error ??
           ReSharperSettingsProvider.Error(resource, WdemErrorCode.DependencyError,
               "The selected Visual Studio instance is unavailable."));
+    }
+
+    if (!string.Equals(
+            plan.Steps[0].Id,
+            CreateStepId(resource, selection.Instance),
+            StringComparison.Ordinal))
+    {
+      return ReSharperSettingsProvider.Failed(resource,
+          ReSharperSettingsProvider.Error(resource, WdemErrorCode.DependencyError,
+              "The selected Visual Studio instance changed after planning."));
     }
 
     var pathError = ValidateSettingsStorePath(resource, selection.Instance, out var settingsStorePath);
@@ -296,44 +348,54 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
           source.Error! with { ResourceId = resource.Id });
     }
 
-    var imported = await _importer.CopyAtomicallyAsync(
+    var staged = await _importer.StageAsync(
         source.Source!, settingsStorePath, cancellationToken).ConfigureAwait(false);
-    if (!imported.Succeeded)
+    if (!staged.Succeeded)
     {
       return ReSharperSettingsProvider.Failed(
           resource,
-          imported.Error! with { ResourceId = resource.Id });
+          staged.Error! with { ResourceId = resource.Id });
     }
 
-    progress?.Report(new ProviderProgress("Apply", 0.7,
-        "Importing Visual Studio settings.", plan.Steps[0].Id));
-    var process = await _processExecutor.ExecuteAsync(
-        new ProcessExecutionRequest(
-            selection.Instance.ProductPath,
-            ["/Command", "File.ImportSettings", settingsStorePath]),
-        null,
-        cancellationToken).ConfigureAwait(false);
-    if (!process.Started || process.ExitCode != 0 || process.Error is not null)
+    try
     {
-      return ReSharperSettingsProvider.Failed(resource, (process.Error ??
-          ReSharperSettingsProvider.Error(resource, WdemErrorCode.ConfigurationError,
-              "devenv.exe did not import the Visual Studio settings successfully.")) with
+      progress?.Report(new ProviderProgress("Apply", 0.7,
+          "Importing Visual Studio settings.", plan.Steps[0].Id));
+      var process = await _processExecutor.ExecuteAsync(
+          new ProcessExecutionRequest(
+              selection.Instance.ProductPath,
+              ["/Command", "File.ImportSettings", staged.Snapshot!.Path]),
+          null,
+          cancellationToken).ConfigureAwait(false);
+      if (!process.Started || process.ExitCode != 0 || process.Error is not null)
       {
-        ResourceId = resource.Id,
-        ProcessExitCode = process.ExitCode
-      });
-    }
+        return ReSharperSettingsProvider.Failed(resource, (process.Error ??
+            ReSharperSettingsProvider.Error(resource, WdemErrorCode.ConfigurationError,
+                "devenv.exe did not import the Visual Studio settings successfully.")) with
+        {
+          ResourceId = resource.Id,
+          ProcessExitCode = process.ExitCode
+        });
+      }
 
-    var verification = await VerifyAsync(resource, cancellationToken).ConfigureAwait(false);
-    if (verification.Compliance != ComplianceStatus.Satisfied)
+      cancellationToken.ThrowIfCancellationRequested();
+      var imported = await _importer.CommitStagedAsync(
+          staged.Snapshot,
+          settingsStorePath,
+          cancellationToken).ConfigureAwait(false);
+      if (!imported.Succeeded)
+      {
+        return ReSharperSettingsProvider.Failed(
+            resource,
+            imported.Error! with { ResourceId = resource.Id });
+      }
+
+      return ReSharperSettingsProvider.Succeeded(resource, plan.Steps[0]);
+    }
+    finally
     {
-      return ReSharperSettingsProvider.Failed(resource,
-          verification.DetectedState.StructuredError ??
-          ReSharperSettingsProvider.Error(resource, WdemErrorCode.VerificationError,
-              "The Visual Studio settings snapshot did not verify."));
+      ConfigurationImporter.DeleteStagingSnapshot(staged.Snapshot!.Path);
     }
-
-    return ReSharperSettingsProvider.Succeeded(resource, plan.Steps[0]);
   }
 
   public async ValueTask<VerificationResult> VerifyAsync(
@@ -358,28 +420,24 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     try
     {
       var instances = await _discovery.DiscoverAsync([], [], cancellationToken).ConfigureAwait(false);
-      var instanceId = Get(resource, InstanceIdParameter)!;
-      var idMatches = instances.Where(instance =>
-          instance.IsComplete && ReSharperSettingsProvider.Matches(instance.InstanceId, instanceId)).ToArray();
-      if (idMatches.Length > 1)
+      var selected = VisualStudioInstanceSelector.Select(
+          instances,
+          new VisualStudioInstanceCriteria(
+              Get(resource, InstanceIdParameter),
+              Get(resource, ProductIdParameter),
+              Get(resource, EditionParameter),
+              Get(resource, ChannelIdParameter)));
+      if (selected.IsAmbiguous)
       {
         return new InstanceSelection(null, ReSharperSettingsProvider.Error(
             resource, WdemErrorCode.ConfigurationError,
-            "More than one Visual Studio instance has the selected instance ID."));
+            $"Set parameter 'instanceId' to one of: {string.Join(", ", selected.CandidateInstanceIds)}."));
       }
 
-      var instance = idMatches.SingleOrDefault();
+      var instance = selected.Instance;
       if (instance is null)
       {
         return new InstanceSelection(null, null);
-      }
-
-      if (!ReSharperSettingsProvider.Matches(instance.Edition, Get(resource, EditionParameter)) ||
-          !ReSharperSettingsProvider.Matches(instance.ChannelId, Get(resource, ChannelIdParameter)))
-      {
-        return new InstanceSelection(null, ReSharperSettingsProvider.Error(
-            resource, WdemErrorCode.ConfigurationError,
-            "The selected Visual Studio instance has an incompatible edition or channel."));
       }
 
       if (!IsExpectedDevenvPath(instance))
@@ -495,44 +553,63 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     }
   }
 
+  private static void ValidateOptionalText(
+      ResourceDefinition resource,
+      string parameter,
+      ICollection<(WdemErrorCode Code, string Detail)> errors)
+  {
+    if (resource.Parameters.ContainsKey(parameter) &&
+        (Get(resource, parameter) is not { } value ||
+         string.IsNullOrWhiteSpace(value) || value.Any(char.IsControl)))
+    {
+      errors.Add((WdemErrorCode.ConfigurationError,
+          $"Parameter '{parameter}' cannot be empty or contain control characters."));
+    }
+  }
+
   private static string? Get(ResourceDefinition resource, string parameter) =>
       ReSharperSettingsProvider.Get(resource, parameter);
 
   private static DetectedState Missing(
       ResourceDefinition resource,
       VisualStudioInstance instance,
-      string path) => new()
+      string path,
+      string sourceHash) => new()
       {
         ResourceId = resource.Id,
         Outcome = DetectionOutcome.Succeeded,
         Exists = false,
-        Evidence = Evidence(resource, instance, path, null)
+        Evidence = Evidence(instance, path, sourceHash, null)
       };
 
   private static DetectedState State(
       ResourceDefinition resource,
       VisualStudioInstance instance,
       string path,
-      string hash) => new()
+      string hash,
+      string sourceHash) => new()
       {
         ResourceId = resource.Id,
         Outcome = DetectionOutcome.Succeeded,
         Exists = true,
         ConfigurationHash = hash,
-        Evidence = Evidence(resource, instance, path, hash)
+        Evidence = Evidence(instance, path, sourceHash, hash)
       };
 
   private static IReadOnlyDictionary<string, string> Evidence(
-      ResourceDefinition resource,
       VisualStudioInstance instance,
       string path,
+      string sourceHash,
       string? destinationHash)
   {
     var evidence = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
-      ["sourceSha256"] = Get(resource, ExpectedSha256Parameter)!.ToUpperInvariant(),
+      ["sourceSha256"] = sourceHash,
       ["settingsStorePath"] = path,
       ["visualStudioInstanceId"] = instance.InstanceId,
+      ["visualStudioProductId"] = instance.ProductId,
+      ["visualStudioInstallationPath"] = instance.InstallationPath,
+      ["visualStudioProductPath"] = instance.ProductPath,
       ["visualStudioEdition"] = instance.Edition,
       ["visualStudioChannelId"] = instance.ChannelId
     };
@@ -545,4 +622,32 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
   }
 
   private sealed record InstanceSelection(VisualStudioInstance? Instance, StructuredError? Error);
+
+  private static string CreateStepId(
+      ResourceDefinition resource,
+      VisualStudioInstance instance)
+  {
+    var identity = JsonSerializer.SerializeToUtf8Bytes(new VisualStudioSettingsPlanIdentity(
+        instance.InstanceId,
+        instance.ProductId,
+        instance.InstallationPath,
+        instance.ProductPath,
+        instance.InstallationVersion));
+    return $"{resource.Id}:configure:{Convert.ToHexString(SHA256.HashData(identity))}";
+  }
+
+  private static bool HasValidStepId(ResourceDefinition resource, string stepId)
+  {
+    var prefix = $"{resource.Id}:configure:";
+    return stepId.StartsWith(prefix, StringComparison.Ordinal) &&
+        stepId.Length == prefix.Length + 64 &&
+        stepId[prefix.Length..].All(Uri.IsHexDigit);
+  }
+
+  private sealed record VisualStudioSettingsPlanIdentity(
+      string InstanceId,
+      string ProductId,
+      string InstallationPath,
+      string ProductPath,
+      string InstallationVersion);
 }

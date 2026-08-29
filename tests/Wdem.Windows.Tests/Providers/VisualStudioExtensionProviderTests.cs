@@ -24,6 +24,42 @@ namespace Wdem.Windows.Tests.Providers;
 public sealed class VisualStudioExtensionProviderTests
 {
   [Fact]
+  public async Task DetectAsync_OmittedInstanceIdSelectsOneCompleteConstrainedInstance()
+  {
+    var selected = Instance("17.real");
+    var incompatible = Instance("17.other") with { Edition = "Professional" };
+    var provider = Provider(
+        new FakeVsixManifestReader(),
+        new ThrowingProcessExecutor(),
+        discovery: new FakeVisualStudioDiscovery(selected, incompatible));
+    var resource = WithOptionalInstanceSelector(
+        ExtensionResource("Contoso.DeveloperTools", "3.2.x", "placeholder"));
+
+    var state = await provider.DetectAsync(resource, CancellationToken.None);
+
+    Assert.Equal(DetectionOutcome.Succeeded, state.Outcome);
+    Assert.False(state.Exists);
+    Assert.Equal("17.real", state.Evidence["visualStudioInstanceId"]);
+  }
+
+  [Fact]
+  public async Task DetectAsync_AmbiguousOptionalInstanceSelectorReportsCandidateIds()
+  {
+    var provider = Provider(
+        new FakeVsixManifestReader(),
+        new ThrowingProcessExecutor(),
+        discovery: new FakeVisualStudioDiscovery(Instance("17.a"), Instance("17.b")));
+    var resource = WithOptionalInstanceSelector(
+        ExtensionResource("Contoso.DeveloperTools", "3.2.x", "placeholder"));
+
+    var state = await provider.DetectAsync(resource, CancellationToken.None);
+
+    Assert.Equal(DetectionOutcome.Failed, state.Outcome);
+    Assert.Contains("17.a", state.StructuredError!.Detail, StringComparison.Ordinal);
+    Assert.Contains("17.b", state.StructuredError.Detail, StringComparison.Ordinal);
+  }
+
+  [Fact]
   public async Task ExecutionPlanner_AcceptsOpaqueVsixPlanLocator()
   {
     var source = TempFile("vsix");
@@ -660,10 +696,7 @@ public sealed class VisualStudioExtensionProviderTests
               resource.Id,
               staleStep.Id,
               new string('A', 64),
-              new VsixPlanVisualStudioIdentity(
-                  "17.0_a",
-                  "Microsoft.VisualStudio.Product.Community",
-                  "17.0.0"),
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       replayedArtifact = replay.Artifact;
 
@@ -729,10 +762,7 @@ public sealed class VisualStudioExtensionProviderTests
               resource.Id,
               locator,
               new string('A', 64),
-              new VsixPlanVisualStudioIdentity(
-                  "17.0_a",
-                  "Microsoft.VisualStudio.Product.Community",
-                  "17.0.0"),
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       replayedArtifact = replay.Artifact;
 
@@ -773,7 +803,7 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               stager.StagedPath,
               new string('A', 64),
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       var locator = Assert.IsType<string>(staged.StepEvidence);
       var activationProof = locator.Split(':')[3];
@@ -908,10 +938,7 @@ public sealed class VisualStudioExtensionProviderTests
               resource.Id,
               locator,
               new string('A', 64),
-              new VsixPlanVisualStudioIdentity(
-                  "17.0_a",
-                  "Microsoft.VisualStudio.Product.Community",
-                  "17.0.0"),
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       replayedArtifact = replay.Artifact;
 
@@ -988,10 +1015,7 @@ public sealed class VisualStudioExtensionProviderTests
               resource.Id,
               Assert.Single(plan.Steps).Id,
               new string('A', 64),
-              new VsixPlanVisualStudioIdentity(
-                  "17.0_a",
-                  "Microsoft.VisualStudio.Product.Community",
-                  "17.0.0"),
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       replayedArtifact = replay.Artifact;
 
@@ -1037,7 +1061,7 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               stager.StagedPath,
               new string('A', 64),
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
 
       var replay = await PlanArtifactStore(
@@ -1053,7 +1077,7 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               staged.StepEvidence!,
               new string('A', 64),
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       replayedArtifact = replay.Artifact;
 
@@ -1088,7 +1112,7 @@ public sealed class VisualStudioExtensionProviderTests
         "extension",
         stager.StagedPath,
         new string('A', 64),
-        "17.0_a",
+        VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
         CancellationToken.None);
 
     Assert.Null(staged.StepEvidence);
@@ -1124,7 +1148,7 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           stager.StagedPath,
           new string('A', 64),
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
 
       Assert.NotNull(staged.StepEvidence);
@@ -1166,7 +1190,7 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               stager.StagedPath,
               new string('A', 64),
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
 
       var replay = await PlanArtifactStore(
@@ -1181,7 +1205,7 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               staged.StepEvidence!,
               new string('A', 64),
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       replayedArtifact = replay.Artifact;
 
@@ -1259,10 +1283,7 @@ public sealed class VisualStudioExtensionProviderTests
               resource.Id,
               Assert.Single(plan.Steps).Id,
               new string('A', 64),
-              new VsixPlanVisualStudioIdentity(
-                  "17.0_a",
-                  "Microsoft.VisualStudio.Product.Community",
-                  "17.0.0"),
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       replayedArtifact = replay.Artifact;
 
@@ -1366,7 +1387,7 @@ public sealed class VisualStudioExtensionProviderTests
           resource.Id,
           step.Id,
           resource.Parameters["expectedSha256"]!,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
       Assert.Null(sameWorkerReplay.Artifact);
       Assert.NotNull(sameWorkerReplay.Error);
@@ -1382,7 +1403,7 @@ public sealed class VisualStudioExtensionProviderTests
               resource.Id,
               step.Id,
               resource.Parameters["expectedSha256"]!,
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       replayedArtifact = replay.Artifact;
 
@@ -2270,7 +2291,7 @@ public sealed class VisualStudioExtensionProviderTests
         "extension",
         stager.StagedPath,
         expectedHash,
-        "17.0_a",
+        VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
         CancellationToken.None);
     var marker = await File.ReadAllTextAsync(Path.Combine(
         Path.GetDirectoryName(stager.VerifiedVsixPath)!,
@@ -2279,7 +2300,7 @@ public sealed class VisualStudioExtensionProviderTests
         "extension",
         staged.StepEvidence!,
         expectedHash,
-        "17.0_a",
+        VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
         CancellationToken.None);
 
     await using var artifact = Assert.IsType<ClaimedVsixPlanArtifact>(claimed.Artifact);
@@ -2300,13 +2321,13 @@ public sealed class VisualStudioExtensionProviderTests
         "extension",
         stager.StagedPath,
         expectedHash,
-        "17.0_a",
+        VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
         CancellationToken.None);
     var claimed = await store.ClaimAsync(
         "extension",
         staged.StepEvidence!,
         expectedHash,
-        "17.0_a",
+        VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
         CancellationToken.None);
     var artifact = Assert.IsType<ClaimedVsixPlanArtifact>(claimed.Artifact);
     var installPath = artifact.Path;
@@ -2349,14 +2370,14 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           stager.StagedPath,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
       terminalStatePath = TerminalStatePath(directory, staged.StepEvidence!);
       var firstClaim = await claimingStore.ClaimAsync(
           "extension",
           staged.StepEvidence!,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
       firstArtifact = Assert.IsType<ClaimedVsixPlanArtifact>(firstClaim.Artifact);
       var consumedMarker = await File.ReadAllTextAsync(
@@ -2370,7 +2391,7 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           staged.StepEvidence!,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
       replayedArtifact = replay.Artifact;
 
@@ -2429,7 +2450,7 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           stager.StagedPath,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
       await File.WriteAllTextAsync(stager.VerifiedVsixPath, "tampered");
 
@@ -2437,14 +2458,14 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           staged.StepEvidence!,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
       await File.WriteAllBytesAsync(stager.VerifiedVsixPath, original);
       var replay = await replayStore.ClaimAsync(
           "extension",
           staged.StepEvidence!,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
       replayedArtifact = replay.Artifact;
 
@@ -2490,7 +2511,7 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               stager.StagedPath,
               expectedHash,
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       var failed = await PlanArtifactStore(
               stager,
@@ -2502,7 +2523,7 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               staged.StepEvidence!,
               expectedHash,
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
 
       Assert.Null(failed.Artifact);
@@ -2520,7 +2541,7 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               staged.StepEvidence!,
               expectedHash,
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       retriedArtifact = retried.Artifact;
 
@@ -2560,7 +2581,7 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           stager.StagedPath,
           new string('A', 64),
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
       terminalStatePath = TerminalStatePath(
           Path.GetDirectoryName(stager.VerifiedVsixPath)!,
@@ -2576,7 +2597,7 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           staged.StepEvidence!,
           new string('A', 64),
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
 
       Assert.Null(result.Artifact);
@@ -2611,7 +2632,7 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               stager.StagedPath,
               new string('A', 64),
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       var directory = Path.GetDirectoryName(stager.VerifiedVsixPath)!;
       revocationStore.GetStateFailure = new UnauthorizedAccessException("Users lack ReadData");
@@ -2657,7 +2678,7 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               stager.StagedPath,
               expectedHash,
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       var directory = Path.GetDirectoryName(stager.VerifiedVsixPath)!;
       terminalStatePath = TerminalStatePath(directory, staged.StepEvidence!);
@@ -2682,7 +2703,7 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               staged.StepEvidence!,
               expectedHash,
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       replayedArtifact = replay.Artifact;
 
@@ -2727,7 +2748,7 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               stager.StagedPath,
               expectedHash,
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       var directory = Path.GetDirectoryName(stager.VerifiedVsixPath)!;
       terminalStatePath = TerminalStatePath(directory, staged.StepEvidence!);
@@ -2742,7 +2763,7 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               staged.StepEvidence!,
               expectedHash,
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       Directory.Delete(terminalStatePath);
       var replay = await PlanArtifactStore(
@@ -2754,7 +2775,7 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               staged.StepEvidence!,
               expectedHash,
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       replayedArtifact = replay.Artifact;
 
@@ -2796,7 +2817,7 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               stager.StagedPath,
               new string('A', 64),
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       revocationStore.RevokeFailure = new UnauthorizedAccessException("append denied");
 
@@ -2837,7 +2858,7 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           source,
           new string('A', 64),
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
       var firstDirectory = Assert.Single(stager.Directories);
       revocationStore.GetStateFailure = new UnauthorizedAccessException("Users lack ReadData");
@@ -2846,7 +2867,7 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           source,
           new string('A', 64),
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
 
       Assert.NotNull(second.StepEvidence);
@@ -2882,7 +2903,7 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               stager.StagedPath,
               expectedHash,
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       var firstStore = PlanArtifactStore(
           stager,
@@ -2902,13 +2923,13 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               staged.StepEvidence!,
               expectedHash,
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None),
           secondStore.ClaimAsync(
               "extension",
               staged.StepEvidence!,
               expectedHash,
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None));
       claimedArtifacts.AddRange(claims.Select(result => result.Artifact).OfType<ClaimedVsixPlanArtifact>());
 
@@ -2950,7 +2971,7 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               stager.StagedPath,
               expectedHash,
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       var winningStore = PlanArtifactStore(
           stager,
@@ -2992,14 +3013,14 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           staged.StepEvidence!,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
       claimedArtifact = winningClaim.Artifact;
       var losingClaim = await losingStore.ClaimAsync(
           "extension",
           staged.StepEvidence!,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
 
       Assert.NotNull(claimedArtifact);
@@ -3159,7 +3180,7 @@ public sealed class VisualStudioExtensionProviderTests
               "extension",
               stager.StagedPath,
               expectedHash,
-              "17.0_a",
+              VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
               CancellationToken.None);
       var claimingStore = PlanArtifactStore(
           stager,
@@ -3178,7 +3199,7 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           staged.StepEvidence!,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None));
       Assert.True(consumeEntered.Wait(TimeSpan.FromSeconds(5)));
       await abandoningStore.AbandonAsync(
@@ -3248,14 +3269,14 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           stager.StagedPath,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
 
       var claimTask = Task.Run(() => store.ClaimAsync(
           "extension",
           staged.StepEvidence!,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None));
       Assert.True(consumeEntered.Wait(TimeSpan.FromSeconds(5)));
       utcNow = issuedAtUtc.AddMinutes(2);
@@ -3367,7 +3388,7 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           stager.StagedPath,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
       ownershipToken = staged.StepEvidence!.Split(':')[1];
       directoryName = Path.GetFileName(Path.GetDirectoryName(stager.VerifiedVsixPath)!);
@@ -3388,7 +3409,7 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           staged.StepEvidence,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
 
       Assert.Null(claim.Artifact);
@@ -3450,7 +3471,7 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           stager.StagedPath,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
       terminalStatePath = TerminalStatePath(directory, staged.StepEvidence!);
       await abandoningStore.AbandonAsync(
@@ -3472,7 +3493,7 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           staged.StepEvidence!,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
       replayedArtifact = replay.Artifact;
 
@@ -3532,7 +3553,7 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           source,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
       Assert.NotNull(staged.StepEvidence);
       Assert.InRange(staged.StepEvidence.Length, 1, 128);
@@ -3541,7 +3562,7 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           staged.StepEvidence,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
 
       await using var artifact = Assert.IsType<ClaimedVsixPlanArtifact>(claimed.Artifact);
@@ -3591,7 +3612,7 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           source,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
       var locator = Assert.IsType<string>(staged.StepEvidence);
       var directoryName = locator.Split(':')[2];
@@ -3649,7 +3670,7 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           source,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
       var locator = Assert.IsType<string>(staged.StepEvidence);
       var directoryName = locator.Split(':')[2];
@@ -3678,7 +3699,7 @@ public sealed class VisualStudioExtensionProviderTests
           "extension",
           locator,
           expectedHash,
-          "17.0_a",
+          VsixPlanVisualStudioIdentity.FromInstance(Instance("17.0_a")),
           CancellationToken.None);
 
       try
@@ -3778,6 +3799,40 @@ public sealed class VisualStudioExtensionProviderTests
           forgedPlan,
           null,
           CancellationToken.None);
+
+      Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+      Assert.Empty(process.Requests);
+    }
+    finally
+    {
+      File.Delete(source);
+    }
+  }
+
+  [Fact]
+  public async Task ApplyAsync_RebindsApprovedEvidenceToSelectedInstancePaths()
+  {
+    var source = TempFile("vsix");
+    var manifests = SourceManifestReader();
+    await using var stager = new ScriptedStager();
+    var process = new RecordingProcessExecutor(() => { });
+    var selected = Instance("17.0_a");
+    var discovery = new MutableVisualStudioDiscovery(selected);
+    try
+    {
+      var resource = ExtensionResource("Contoso.DeveloperTools", "3.2.x", "17.0_a", source);
+      var provider = Provider(manifests, process, stager, discovery: discovery);
+      var plan = await provider.PlanAsync(resource, Missing(resource), CancellationToken.None);
+      discovery.Instances =
+      [
+        selected with
+        {
+          InstallationPath = @"D:\MovedVS",
+          ProductPath = @"D:\MovedVS\Common7\IDE\devenv.exe"
+        }
+      ];
+
+      var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
 
       Assert.Equal(ApplyOutcome.Failed, result.Outcome);
       Assert.Empty(process.Requests);
@@ -4007,6 +4062,17 @@ public sealed class VisualStudioExtensionProviderTests
         }
       };
 
+  private static ResourceDefinition WithOptionalInstanceSelector(ResourceDefinition resource)
+  {
+    var parameters = resource.Parameters
+        .Where(pair => !string.Equals(pair.Key, "instanceId", StringComparison.OrdinalIgnoreCase))
+        .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+    parameters["productId"] = "Microsoft.VisualStudio.Product.Community";
+    parameters["edition"] = "Community";
+    parameters["channelId"] = "VisualStudio.17.Release";
+    return resource with { Parameters = parameters };
+  }
+
   private static VisualStudioInstance Instance(string instanceId) => new()
   {
     InstanceId = instanceId,
@@ -4053,6 +4119,17 @@ public sealed class VisualStudioExtensionProviderTests
         IReadOnlyList<string> requestedComponents,
         CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<VisualStudioInstance>>(
             instances);
+  }
+
+  private sealed class MutableVisualStudioDiscovery(params VisualStudioInstance[] instances)
+      : IVisualStudioDiscovery
+  {
+    public IReadOnlyList<VisualStudioInstance> Instances { get; set; } = instances;
+
+    public Task<IReadOnlyList<VisualStudioInstance>> DiscoverAsync(
+        IReadOnlyList<string> requestedWorkloads,
+        IReadOnlyList<string> requestedComponents,
+        CancellationToken cancellationToken) => Task.FromResult(Instances);
   }
 
   private sealed class FakeVsixManifestReader : IVsixManifestReader

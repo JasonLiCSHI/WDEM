@@ -215,8 +215,147 @@ public sealed class ConfigurationProviderTests : IDisposable
     Assert.Equal(ApplyOutcome.Succeeded, applied.Outcome);
     var request = Assert.Single(process.Requests);
     Assert.Equal(instance.ProductPath, request.FileName);
-    Assert.Equal(["/Command", "File.ImportSettings", settingsStorePath], request.Arguments);
+    Assert.Equal(["/Command", "File.ImportSettings"], request.Arguments.Take(2));
+    Assert.NotEqual(settingsStorePath, request.Arguments[2]);
+    Assert.Equal(settingsRoot, Path.GetDirectoryName(request.Arguments[2]));
+    Assert.Equal(source, await File.ReadAllBytesAsync(settingsStorePath));
+    Assert.False(File.Exists(request.Arguments[2]));
     Assert.Equal(ComplianceStatus.Missing, verifiedBefore.Compliance);
+  }
+
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public async Task VerifyAsync_VsSettingsRevalidatesSourceWithoutLaunchingVisualStudio(
+      bool deleteSource)
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var settingsRoot = Path.Combine(_root, "Visual Studio 18");
+    var sourcePath = Path.Combine(profiles, "team.vssettings");
+    var settingsStorePath = Path.Combine(settingsRoot, "team.vssettings");
+    Directory.CreateDirectory(profiles);
+    var source = Encoding.UTF8.GetBytes("source settings");
+    await File.WriteAllBytesAsync(sourcePath, source);
+    var sourceHash = Convert.ToHexString(SHA256.HashData(source));
+    var process = new RecordingProcessExecutor();
+    var provider = new VisualStudioSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        new FixedVisualStudioDiscovery(VisualStudioInstance()),
+        process,
+        new ComplianceEvaluator(),
+        _ => settingsRoot);
+    var resource = VisualStudioSettingsResource(sourceHash, settingsStorePath);
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
+    var applied = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+    Assert.Equal(ApplyOutcome.Succeeded, applied.Outcome);
+
+    if (deleteSource)
+    {
+      File.Delete(sourcePath);
+    }
+    else
+    {
+      await File.WriteAllTextAsync(sourcePath, "tampered settings");
+    }
+
+    var verification = await provider.VerifyAsync(resource, CancellationToken.None);
+
+    Assert.NotEqual(ComplianceStatus.Satisfied, verification.Compliance);
+    Assert.Equal(DetectionOutcome.Failed, verification.DetectedState.Outcome);
+    Assert.Equal(WdemErrorCode.ConfigurationError,
+        verification.DetectedState.StructuredError?.Code);
+    Assert.Single(process.Requests);
+  }
+
+  [Theory]
+  [InlineData(false, null)]
+  [InlineData(true, 17)]
+  public async Task ApplyAsync_VsSettingsProcessFailurePreservesSnapshotAndCleansStaging(
+      bool started,
+      int? exitCode)
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var settingsRoot = Path.Combine(_root, "Visual Studio 18");
+    var sourcePath = Path.Combine(profiles, "team.vssettings");
+    var settingsStorePath = Path.Combine(settingsRoot, "team.vssettings");
+    Directory.CreateDirectory(profiles);
+    Directory.CreateDirectory(settingsRoot);
+    var source = Encoding.UTF8.GetBytes("new source settings");
+    var previous = Encoding.UTF8.GetBytes("previous settings snapshot");
+    await File.WriteAllBytesAsync(sourcePath, source);
+    await File.WriteAllBytesAsync(settingsStorePath, previous);
+    var sourceHash = Convert.ToHexString(SHA256.HashData(source));
+    var process = new DelegatingProcessExecutor((request, _) =>
+    {
+      Assert.NotEqual(settingsStorePath, request.Arguments[2]);
+      Assert.Equal(settingsRoot, Path.GetDirectoryName(request.Arguments[2]));
+      Assert.Equal(source, File.ReadAllBytes(request.Arguments[2]));
+      return Task.FromResult(new Wdem.Core.Processes.ProcessExecutionResult(
+          started, exitCode, [], []));
+    });
+    var provider = new VisualStudioSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        new FixedVisualStudioDiscovery(VisualStudioInstance()),
+        process,
+        new ComplianceEvaluator(),
+        _ => settingsRoot);
+    var resource = VisualStudioSettingsResource(sourceHash, settingsStorePath);
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
+
+    var applied = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+    var afterFailure = await provider.DetectAsync(resource, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, applied.Outcome);
+    Assert.Equal(previous, await File.ReadAllBytesAsync(settingsStorePath));
+    Assert.NotEqual(ComplianceStatus.Satisfied,
+        new ComplianceEvaluator().Evaluate(resource, afterFailure).Status);
+    Assert.Equal([settingsStorePath], Directory.GetFiles(settingsRoot));
+    Assert.Single(process.Requests);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_VsSettingsCancellationPreservesSnapshotAndCleansStaging()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var settingsRoot = Path.Combine(_root, "Visual Studio 18");
+    var sourcePath = Path.Combine(profiles, "team.vssettings");
+    var settingsStorePath = Path.Combine(settingsRoot, "team.vssettings");
+    Directory.CreateDirectory(profiles);
+    Directory.CreateDirectory(settingsRoot);
+    var source = Encoding.UTF8.GetBytes("new source settings");
+    var previous = Encoding.UTF8.GetBytes("previous settings snapshot");
+    await File.WriteAllBytesAsync(sourcePath, source);
+    await File.WriteAllBytesAsync(settingsStorePath, previous);
+    var sourceHash = Convert.ToHexString(SHA256.HashData(source));
+    using var cancellation = new CancellationTokenSource();
+    var process = new DelegatingProcessExecutor((request, _) =>
+    {
+      Assert.NotEqual(settingsStorePath, request.Arguments[2]);
+      Assert.True(File.Exists(request.Arguments[2]));
+      cancellation.Cancel();
+      return Task.FromResult(new Wdem.Core.Processes.ProcessExecutionResult(true, 0, [], []));
+    });
+    var provider = new VisualStudioSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        new FixedVisualStudioDiscovery(VisualStudioInstance()),
+        process,
+        new ComplianceEvaluator(),
+        _ => settingsRoot);
+    var resource = VisualStudioSettingsResource(sourceHash, settingsStorePath);
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
+
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        await provider.ApplyAsync(resource, plan, null, cancellation.Token));
+
+    Assert.Equal(previous, await File.ReadAllBytesAsync(settingsStorePath));
+    Assert.Equal([settingsStorePath], Directory.GetFiles(settingsRoot));
+    Assert.Single(process.Requests);
   }
 
   [Fact]
@@ -251,6 +390,103 @@ public sealed class ConfigurationProviderTests : IDisposable
   }
 
   [Fact]
+  public async Task PlanAsync_VsSettingsBecomesExecutableAfterFreshConstrainedInstanceDiscovery()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    Directory.CreateDirectory(profiles);
+    var source = Encoding.UTF8.GetBytes("settings");
+    await File.WriteAllBytesAsync(Path.Combine(profiles, "team.vssettings"), source);
+    var resource = WithOptionalInstanceSelector(VisualStudioSettingsResource(
+        Convert.ToHexString(SHA256.HashData(source)),
+        "team.vssettings"));
+    var discovery = new MutableVisualStudioDiscovery();
+    var process = new RecordingProcessExecutor();
+    var provider = new VisualStudioSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        discovery,
+        process,
+        new ComplianceEvaluator(),
+        _ => Path.Combine(_root, "Visual Studio 18"));
+
+    var missing = await provider.DetectAsync(resource, CancellationToken.None);
+    var unavailablePlan = await provider.PlanAsync(resource, missing, CancellationToken.None);
+    discovery.Instances = [VisualStudioInstance() with { InstanceId = "17.real" }];
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
+
+    Assert.False(unavailablePlan.IsExecutable);
+    Assert.Equal("17.real", detected.Evidence["visualStudioInstanceId"]);
+    Assert.True(plan.IsExecutable);
+    Assert.Single(plan.Steps);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_VsSettingsRejectsSelectedInstancePathChangeAfterPlanning()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    Directory.CreateDirectory(profiles);
+    var source = Encoding.UTF8.GetBytes("settings");
+    await File.WriteAllBytesAsync(Path.Combine(profiles, "team.vssettings"), source);
+    var resource = WithOptionalInstanceSelector(VisualStudioSettingsResource(
+        Convert.ToHexString(SHA256.HashData(source)),
+        "team.vssettings"));
+    var selected = VisualStudioInstance() with { InstanceId = "17.real" };
+    var discovery = new MutableVisualStudioDiscovery(selected);
+    var process = new RecordingProcessExecutor();
+    var provider = new VisualStudioSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        discovery,
+        process,
+        new ComplianceEvaluator(),
+        _ => Path.Combine(_root, "Visual Studio 18"));
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
+    discovery.Instances =
+    [
+      selected with
+      {
+        InstallationPath = @"D:\MovedVS",
+        ProductPath = @"D:\MovedVS\Common7\IDE\devenv.exe"
+      }
+    ];
+
+    var applied = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, applied.Outcome);
+    Assert.Contains("changed after planning", applied.Error!.Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.Empty(process.Requests);
+  }
+
+  [Fact]
+  public async Task DetectAsync_VsSettingsAmbiguityReportsCandidateIds()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    Directory.CreateDirectory(profiles);
+    var source = Encoding.UTF8.GetBytes("settings");
+    await File.WriteAllBytesAsync(Path.Combine(profiles, "team.vssettings"), source);
+    var resource = WithOptionalInstanceSelector(VisualStudioSettingsResource(
+        Convert.ToHexString(SHA256.HashData(source)),
+        "team.vssettings"));
+    var provider = new VisualStudioSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        new MutableVisualStudioDiscovery(
+            VisualStudioInstance() with { InstanceId = "17.a" },
+            VisualStudioInstance() with { InstanceId = "17.b" }),
+        new RecordingProcessExecutor(),
+        new ComplianceEvaluator(),
+        _ => Path.Combine(_root, "Visual Studio 18"));
+
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+
+    Assert.Equal(DetectionOutcome.Failed, detected.Outcome);
+    Assert.Contains("17.a", detected.StructuredError!.Detail, StringComparison.Ordinal);
+    Assert.Contains("17.b", detected.StructuredError.Detail, StringComparison.Ordinal);
+  }
+
+  [Fact]
   public async Task CSharpDeveloperProfile_LoadsAndEnterpriseInputsExpandOnlyWhenSelected()
   {
     var profilePath = Path.GetFullPath(Path.Combine(
@@ -277,6 +513,27 @@ public sealed class ConfigurationProviderTests : IDisposable
         result.Profile.Resources["company-vs-extension"].Parameters["sourcePath"]);
     Assert.Equal("${WDEM_COMPANY_VSIX_SHA256}",
         result.Profile.Resources["company-vs-extension"].Parameters["expectedSha256"]);
+    var visualStudioResources = new[]
+    {
+      "visual-studio",
+      "resharper",
+      "company-vs-extension",
+      "visual-studio-settings"
+    };
+    Assert.All(visualStudioResources, id =>
+        Assert.False(result.Profile.Resources[id].Parameters.ContainsKey("instanceId")));
+    Assert.All(visualStudioResources, id =>
+    {
+      Assert.Equal("Microsoft.VisualStudio.Product.Community",
+          result.Profile.Resources[id].Parameters["productId"]);
+      Assert.Equal("Community", result.Profile.Resources[id].Parameters["edition"]);
+      Assert.Equal("VisualStudio.18.Release",
+          result.Profile.Resources[id].Parameters["channelId"]);
+    });
+    Assert.DoesNotContain(
+        "wdem-vs-community",
+        await File.ReadAllTextAsync(profilePath),
+        StringComparison.OrdinalIgnoreCase);
 
     var unselected = ProfileValueExpander.ExpandSelected(result.Profile, [], _ => null);
     var partial = ProfileValueExpander.ExpandSelected(
@@ -360,10 +617,7 @@ public sealed class ConfigurationProviderTests : IDisposable
 
     var settingsRoot = Path.Combine(_root, "current-user", "Visual Studio 18");
     var process = new RecordingProcessExecutor();
-    var instance = VisualStudioInstance() with
-    {
-      InstanceId = visualStudioResource.Parameters["instanceId"]!
-    };
+    var instance = VisualStudioInstance() with { InstanceId = "17.real" };
     var visualStudio = new VisualStudioSettingsProvider(
         new ConfigurationSourceResolver(repositoryRoot, profiles),
         new ConfigurationImporter(),
@@ -443,6 +697,15 @@ public sealed class ConfigurationProviderTests : IDisposable
             ["settingsStorePath"] = settingsStorePath
           });
 
+  private static ResourceDefinition WithOptionalInstanceSelector(ResourceDefinition resource)
+  {
+    var parameters = resource.Parameters
+        .Where(pair => !string.Equals(pair.Key, "instanceId", StringComparison.OrdinalIgnoreCase))
+        .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+    parameters["productId"] = "Microsoft.VisualStudio.Product.Community";
+    return resource with { Parameters = parameters };
+  }
+
   private static void AssertConfigurationAsset(
       string repositoryRoot,
       ResourceDefinition resource,
@@ -506,6 +769,19 @@ public sealed class ConfigurationProviderTests : IDisposable
         Task.FromResult<IReadOnlyList<Wdem.Windows.VisualStudio.VisualStudioInstance>>([instance]);
   }
 
+  private sealed class MutableVisualStudioDiscovery(
+      params Wdem.Windows.VisualStudio.VisualStudioInstance[] instances)
+      : Wdem.Windows.VisualStudio.IVisualStudioDiscovery
+  {
+    public IReadOnlyList<Wdem.Windows.VisualStudio.VisualStudioInstance> Instances { get; set; } =
+        instances;
+
+    public Task<IReadOnlyList<Wdem.Windows.VisualStudio.VisualStudioInstance>> DiscoverAsync(
+        IReadOnlyList<string> requiredWorkloads,
+        IReadOnlyList<string> requiredComponents,
+        CancellationToken cancellationToken) => Task.FromResult(Instances);
+  }
+
   private sealed class RecordingProcessExecutor : Wdem.Core.Processes.IProcessExecutor
   {
     public List<Wdem.Core.Processes.ProcessExecutionRequest> Requests { get; } = [];
@@ -517,6 +793,24 @@ public sealed class ConfigurationProviderTests : IDisposable
     {
       Requests.Add(request);
       return Task.FromResult(new Wdem.Core.Processes.ProcessExecutionResult(true, 0, [], []));
+    }
+  }
+
+  private sealed class DelegatingProcessExecutor(
+      Func<Wdem.Core.Processes.ProcessExecutionRequest,
+          CancellationToken,
+          Task<Wdem.Core.Processes.ProcessExecutionResult>> handler)
+      : Wdem.Core.Processes.IProcessExecutor
+  {
+    public List<Wdem.Core.Processes.ProcessExecutionRequest> Requests { get; } = [];
+
+    public Task<Wdem.Core.Processes.ProcessExecutionResult> ExecuteAsync(
+        Wdem.Core.Processes.ProcessExecutionRequest request,
+        IProgress<string>? output,
+        CancellationToken cancellationToken)
+    {
+      Requests.Add(request);
+      return handler(request, cancellationToken);
     }
   }
 

@@ -23,7 +23,6 @@ resources:
     provider: visual-studio
     parameters:
       productId: Microsoft.VisualStudio.Product.Community
-      instanceId: wdem-vs-community
       edition: Community
       channelId: VisualStudio.18.Release
       workloads: Microsoft.VisualStudio.Workload.ManagedDesktop
@@ -42,7 +41,9 @@ resources:
     dependsOn:
       - visual-studio
     parameters:
-      instanceId: wdem-vs-community
+      productId: Microsoft.VisualStudio.Product.Community
+      edition: Community
+      channelId: VisualStudio.18.Release
   resharper-settings:
     type: resharper-settings
     provider: file
@@ -60,7 +61,9 @@ resources:
       - visual-studio
     parameters:
       extensionId: Company.VisualStudio.Extension
-      instanceId: wdem-vs-community
+      productId: Microsoft.VisualStudio.Product.Community
+      edition: Community
+      channelId: VisualStudio.18.Release
       sourcePath: ${WDEM_COMPANY_VSIX_PATH}
       expectedSha256: ${WDEM_COMPANY_VSIX_SHA256}
   visual-studio-settings:
@@ -71,7 +74,7 @@ resources:
     parameters:
       sourcePath: profiles/assets/csharp-developer.vssettings
       expectedSha256: 1C15AC04C11C2E5FA6B2003D5AF145CC47332B9284EA1E391876FF46000627AB
-      instanceId: wdem-vs-community
+      productId: Microsoft.VisualStudio.Product.Community
       edition: Community
       channelId: VisualStudio.18.Release
       settingsStorePath: Settings/csharp-developer.vssettings

@@ -10,6 +10,15 @@ public sealed record ConfigurationImportResult(
     string? Sha256,
     StructuredError? Error);
 
+internal sealed record StagedConfigurationSnapshot(string Path, string Sha256);
+
+internal sealed record ConfigurationStagingResult(
+    StagedConfigurationSnapshot? Snapshot,
+    StructuredError? Error)
+{
+  public bool Succeeded => Snapshot is not null && Error is null;
+}
+
 public sealed class ConfigurationImporter
 {
   public async Task<ConfigurationImportResult> CopyAtomicallyAsync(
@@ -17,46 +26,46 @@ public sealed class ConfigurationImporter
       string destinationPath,
       CancellationToken cancellationToken)
   {
-    ArgumentNullException.ThrowIfNull(source);
-    cancellationToken.ThrowIfCancellationRequested();
-    string? temporaryPath = null;
+    var staged = await StageAsync(source, destinationPath, cancellationToken).ConfigureAwait(false);
+    if (!staged.Succeeded)
+    {
+      return new ConfigurationImportResult(false, null, null, staged.Error);
+    }
+
     try
     {
-      if (!Path.IsPathFullyQualified(destinationPath) || destinationPath.Any(char.IsControl))
+      return await CommitStagedAsync(
+          staged.Snapshot!,
+          destinationPath,
+          cancellationToken).ConfigureAwait(false);
+    }
+    finally
+    {
+      DeleteStagingSnapshot(staged.Snapshot!.Path);
+    }
+  }
+
+  internal async Task<ConfigurationStagingResult> StageAsync(
+      ResolvedConfigurationSource source,
+      string destinationPath,
+      CancellationToken cancellationToken)
+  {
+    ArgumentNullException.ThrowIfNull(source);
+    cancellationToken.ThrowIfCancellationRequested();
+    string? stagingPath = null;
+    try
+    {
+      var validationError = ValidateDestination(destinationPath, out _, out var directory);
+      if (validationError is not null)
       {
-        return Failure("The configuration destination must be an absolute local path.");
+        return StagingFailure(validationError);
       }
 
-      var fullDestination = Path.GetFullPath(destinationPath);
-      if (ConfigurationSourceResolver.HasAlternateDataStream(fullDestination))
-      {
-        return Failure("NTFS alternate data stream destinations are not supported.");
-      }
-
-      var directory = Path.GetDirectoryName(fullDestination);
-      if (string.IsNullOrWhiteSpace(directory))
-      {
-        return Failure("The configuration destination directory is invalid.");
-      }
-
-      Directory.CreateDirectory(directory);
-      if (ContainsReparsePoint(directory))
-      {
-        return Failure("The configuration destination directory contains an unsafe reparse point.");
-      }
-
-      if (Path.Exists(fullDestination))
-      {
-        var attributes = File.GetAttributes(fullDestination);
-        if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
-        {
-          return Failure("The configuration destination must be a regular non-reparse file.");
-        }
-      }
-
-      temporaryPath = Path.Combine(directory, $".{Path.GetFileName(fullDestination)}.{Guid.NewGuid():N}.tmp");
+      stagingPath = Path.Combine(
+          directory,
+          $".{Path.GetFileName(destinationPath)}.{Guid.NewGuid():N}.staging");
       await using (var stream = new FileStream(
-                       temporaryPath,
+                       stagingPath,
                        FileMode.CreateNew,
                        FileAccess.Write,
                        FileShare.None,
@@ -68,17 +77,15 @@ public sealed class ConfigurationImporter
         stream.Flush(flushToDisk: true);
       }
 
-      cancellationToken.ThrowIfCancellationRequested();
-      File.Move(temporaryPath, fullDestination, overwrite: true);
-      temporaryPath = null;
-
-      var actualHash = await HashFileAsync(fullDestination, CancellationToken.None).ConfigureAwait(false);
-      if (!string.Equals(actualHash, source.Sha256, StringComparison.OrdinalIgnoreCase))
+      var stagingHash = await HashFileAsync(stagingPath, cancellationToken).ConfigureAwait(false);
+      if (!string.Equals(stagingHash, source.Sha256, StringComparison.OrdinalIgnoreCase))
       {
-        return Failure("The imported destination does not match the verified source SHA-256.");
+        return StagingFailure("The staged snapshot does not match the verified source SHA-256.");
       }
 
-      return new ConfigurationImportResult(true, fullDestination, actualHash, null);
+      var snapshot = new StagedConfigurationSnapshot(stagingPath, stagingHash);
+      stagingPath = null;
+      return new ConfigurationStagingResult(snapshot, null);
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
@@ -87,21 +94,78 @@ public sealed class ConfigurationImporter
     catch (Exception exception) when (exception is ArgumentException or IOException or
         NotSupportedException or UnauthorizedAccessException or SecurityException)
     {
-      return Failure("The configuration could not be atomically imported.", exception);
+      return StagingFailure("The configuration staging snapshot could not be created.", exception);
     }
     finally
     {
-      if (temporaryPath is not null)
+      if (stagingPath is not null)
       {
-        try
-        {
-          File.Delete(temporaryPath);
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-          // Best-effort cleanup. The original destination remains untouched.
-        }
+        DeleteStagingSnapshot(stagingPath);
       }
+    }
+  }
+
+  internal async Task<ConfigurationImportResult> CommitStagedAsync(
+      StagedConfigurationSnapshot snapshot,
+      string destinationPath,
+      CancellationToken cancellationToken)
+  {
+    ArgumentNullException.ThrowIfNull(snapshot);
+    cancellationToken.ThrowIfCancellationRequested();
+    try
+    {
+      var validationError = ValidateDestination(
+          destinationPath,
+          out var fullDestination,
+          out var directory);
+      if (validationError is not null)
+      {
+        return Failure(validationError);
+      }
+
+      var fullStagingPath = Path.GetFullPath(snapshot.Path);
+      if (!string.Equals(
+              Path.GetDirectoryName(fullStagingPath),
+              directory,
+              StringComparison.OrdinalIgnoreCase) ||
+          ConfigurationSourceResolver.HasAlternateDataStream(fullStagingPath) ||
+          !File.Exists(fullStagingPath) ||
+          (File.GetAttributes(fullStagingPath) &
+              (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+      {
+        return Failure("The configuration staging snapshot is invalid.");
+      }
+
+      var stagingHash = await HashFileAsync(fullStagingPath, cancellationToken).ConfigureAwait(false);
+      if (!string.Equals(stagingHash, snapshot.Sha256, StringComparison.OrdinalIgnoreCase))
+      {
+        return Failure("The configuration staging snapshot changed before commit.");
+      }
+
+      cancellationToken.ThrowIfCancellationRequested();
+      File.Move(fullStagingPath, fullDestination, overwrite: true);
+      return new ConfigurationImportResult(true, fullDestination, snapshot.Sha256, null);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      throw;
+    }
+    catch (Exception exception) when (exception is ArgumentException or IOException or
+        NotSupportedException or UnauthorizedAccessException or SecurityException)
+    {
+      return Failure("The configuration staging snapshot could not be atomically committed.", exception);
+    }
+  }
+
+  internal static void DeleteStagingSnapshot(string path)
+  {
+    try
+    {
+      File.Delete(path);
+    }
+    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+    {
+      // Best-effort cleanup. The formal destination remains untouched.
     }
   }
 
@@ -135,17 +199,67 @@ public sealed class ConfigurationImporter
     return false;
   }
 
+  private static string? ValidateDestination(
+      string destinationPath,
+      out string fullDestination,
+      out string directory)
+  {
+    fullDestination = string.Empty;
+    directory = string.Empty;
+    if (!Path.IsPathFullyQualified(destinationPath) || destinationPath.Any(char.IsControl))
+    {
+      return "The configuration destination must be an absolute local path.";
+    }
+
+    fullDestination = Path.GetFullPath(destinationPath);
+    if (ConfigurationSourceResolver.HasAlternateDataStream(fullDestination))
+    {
+      return "NTFS alternate data stream destinations are not supported.";
+    }
+
+    directory = Path.GetDirectoryName(fullDestination) ?? string.Empty;
+    if (string.IsNullOrWhiteSpace(directory))
+    {
+      return "The configuration destination directory is invalid.";
+    }
+
+    Directory.CreateDirectory(directory);
+    if (ContainsReparsePoint(directory))
+    {
+      return "The configuration destination directory contains an unsafe reparse point.";
+    }
+
+    if (Path.Exists(fullDestination))
+    {
+      var attributes = File.GetAttributes(fullDestination);
+      if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+      {
+        return "The configuration destination must be a regular non-reparse file.";
+      }
+    }
+
+    return null;
+  }
+
+  private static ConfigurationStagingResult StagingFailure(
+      string detail,
+      Exception? exception = null) => new(null, CreateError(detail, exception));
+
   private static ConfigurationImportResult Failure(
       string detail,
       Exception? exception = null) => new(
           false,
           null,
           null,
-          new StructuredError(
-              WdemErrorCode.ConfigurationError,
-              "Configuration import failed.",
-              detail)
-          {
-            UnderlyingException = exception
-          });
+          CreateError(detail, exception));
+
+  private static StructuredError CreateError(
+      string detail,
+      Exception? exception) => new(
+          WdemErrorCode.ConfigurationError,
+          "Configuration import failed.",
+          detail)
+      {
+        UnderlyingException = exception
+      };
 }
