@@ -204,9 +204,9 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
       string directoryName,
       string claimNonce,
       string activationCommitment,
-      DateTimeOffset utcNow,
-      Guid bootIdentifier,
-      long uptimeMilliseconds)
+      Func<DateTimeOffset> getUtcNow,
+      Func<Guid> getBootIdentifier,
+      Func<long> getUptimeMilliseconds)
   {
     var record = VsixPlanArtifactLedger.CreateConsumedRecord(ownershipToken, directoryName);
     var fullRootPath = ValidateRevocationRootPath(rootPath);
@@ -224,9 +224,9 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
               state,
               claimNonce,
               activationCommitment,
-              utcNow,
-              bootIdentifier,
-              uptimeMilliseconds))
+              getUtcNow(),
+              getBootIdentifier(),
+              getUptimeMilliseconds()))
       {
         throw new SecurityException(
             "The durable VSIX claim is no longer authorized for consumption.");

@@ -3207,6 +3207,78 @@ public sealed class VisualStudioExtensionProviderTests
     }
   }
 
+  [Fact]
+  public async Task PlanArtifactStore_LedgerLockWaitPastExpiryPreventsConsume()
+  {
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    await using var stager = new ScriptedStager();
+    var revocationPath = Path.Combine(
+        Path.GetTempPath(),
+        $"wdem-test-revocations-{Guid.NewGuid():N}");
+    using var consumeEntered = new ManualResetEventSlim();
+    using var releaseConsume = new ManualResetEventSlim();
+    var revocationStore = new TestPlanArtifactRevocationStore(revocationPath)
+    {
+      BeforeConsume = () =>
+      {
+        consumeEntered.Set();
+        Assert.True(releaseConsume.Wait(TimeSpan.FromSeconds(5)));
+      }
+    };
+    var issuedAtUtc = new DateTimeOffset(2026, 8, 30, 0, 0, 0, TimeSpan.Zero);
+    var utcNow = issuedAtUtc;
+    var bootIdentifier = Guid.Parse("00112233-4455-6677-8899-AABBCCDDEEFF");
+    var uptimeMilliseconds = 10_000L;
+    var expectedHash = new string('A', 64);
+    ClaimedVsixPlanArtifact? claimedArtifact = null;
+    try
+    {
+      var store = PlanArtifactStore(
+          stager,
+          verifier,
+          manifests,
+          handoffLifetime: TimeSpan.FromMinutes(1),
+          getUtcNow: () => utcNow,
+          deleteDirectory: static _ => { },
+          revocationStore: revocationStore,
+          getBootIdentifier: () => bootIdentifier,
+          getUptimeMilliseconds: () => uptimeMilliseconds);
+      var staged = await store.StageAsync(
+          "extension",
+          stager.StagedPath,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None);
+
+      var claimTask = Task.Run(() => store.ClaimAsync(
+          "extension",
+          staged.StepEvidence!,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None));
+      Assert.True(consumeEntered.Wait(TimeSpan.FromSeconds(5)));
+      utcNow = issuedAtUtc.AddMinutes(2);
+      uptimeMilliseconds += 120_000;
+      releaseConsume.Set();
+      var claim = await claimTask;
+      claimedArtifact = claim.Artifact;
+
+      Assert.Null(claim.Artifact);
+      Assert.NotNull(claim.Error);
+    }
+    finally
+    {
+      releaseConsume.Set();
+      if (claimedArtifact is not null)
+      {
+        await claimedArtifact.DisposeAsync();
+      }
+
+      File.Delete(revocationPath);
+    }
+  }
+
   [Theory]
   [InlineData("consumed")]
   [InlineData("claimNonce")]
@@ -4031,9 +4103,9 @@ public sealed class VisualStudioExtensionProviderTests
         string directoryName,
         string claimNonce,
         string activationCommitment,
-        DateTimeOffset utcNow,
-        Guid bootIdentifier,
-        long uptimeMilliseconds)
+        Func<DateTimeOffset> getUtcNow,
+        Func<Guid> getBootIdentifier,
+        Func<long> getUptimeMilliseconds)
     {
       BeforeConsume?.Invoke();
       lock (_transitionSync)
@@ -4042,9 +4114,9 @@ public sealed class VisualStudioExtensionProviderTests
                 GetState(ownershipToken, directoryName),
                 claimNonce,
                 activationCommitment,
-                utcNow,
-                bootIdentifier,
-                uptimeMilliseconds))
+                getUtcNow(),
+                getBootIdentifier(),
+                getUptimeMilliseconds()))
         {
           throw new System.Security.SecurityException(
               "The durable VSIX claim is no longer authorized for consumption.");
@@ -4206,9 +4278,9 @@ public sealed class VisualStudioExtensionProviderTests
         string directoryName,
         string claimNonce,
         string activationCommitment,
-        DateTimeOffset utcNow,
-        Guid bootIdentifier,
-        long uptimeMilliseconds)
+        Func<DateTimeOffset> getUtcNow,
+        Func<Guid> getBootIdentifier,
+        Func<long> getUptimeMilliseconds)
     {
       lock (_sync)
       {
@@ -4218,9 +4290,9 @@ public sealed class VisualStudioExtensionProviderTests
             state,
             claimNonce,
             activationCommitment,
-            utcNow,
-            bootIdentifier,
-            uptimeMilliseconds)
+            getUtcNow(),
+            getBootIdentifier(),
+            getUptimeMilliseconds())
                 ? state with { Status = VsixPlanArtifactLedgerStatus.Consumed }
                 : throw new System.Security.SecurityException(
                     "The durable VSIX claim is no longer authorized for consumption.");
@@ -4291,9 +4363,9 @@ public sealed class VisualStudioExtensionProviderTests
         string directoryName,
         string claimNonce,
         string activationCommitment,
-        DateTimeOffset utcNow,
-        Guid bootIdentifier,
-        long uptimeMilliseconds)
+        Func<DateTimeOffset> getUtcNow,
+        Func<Guid> getBootIdentifier,
+        Func<long> getUptimeMilliseconds)
     {
     }
 

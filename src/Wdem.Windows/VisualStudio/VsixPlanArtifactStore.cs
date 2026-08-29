@@ -37,9 +37,9 @@ internal interface IVsixPlanArtifactRevocationStore
       string directoryName,
       string claimNonce,
       string activationCommitment,
-      DateTimeOffset utcNow,
-      Guid bootIdentifier,
-      long uptimeMilliseconds);
+      Func<DateTimeOffset> getUtcNow,
+      Func<Guid> getBootIdentifier,
+      Func<long> getUptimeMilliseconds);
 
   VsixPlanArtifactLedgerState GetState(string ownershipToken, string directoryName);
 
@@ -93,18 +93,18 @@ internal sealed class WindowsVsixPlanArtifactRevocationStore(string planArtifact
       string directoryName,
       string claimNonce,
       string activationCommitment,
-      DateTimeOffset utcNow,
-      Guid bootIdentifier,
-      long uptimeMilliseconds) =>
+      Func<DateTimeOffset> getUtcNow,
+      Func<Guid> getBootIdentifier,
+      Func<long> getUptimeMilliseconds) =>
       WindowsPlanArtifactDirectoryPolicy.ConsumeClaim(
           planArtifactRoot,
           ownershipToken,
           directoryName,
           claimNonce,
           activationCommitment,
-          utcNow,
-          bootIdentifier,
-          uptimeMilliseconds);
+          getUtcNow,
+          getBootIdentifier,
+          getUptimeMilliseconds);
 
   public VsixPlanArtifactLedgerState GetState(string ownershipToken, string directoryName) =>
       WindowsPlanArtifactDirectoryPolicy.GetLedgerState(
@@ -635,9 +635,9 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
           Path.GetFileName(evidence.OwnershipDirectory),
           claimNonce!,
           CreateActivationCommitment(locator.ActivationProof),
-          _getUtcNow(),
-          _getBootIdentifier(),
-          _getUptimeMilliseconds());
+          _getUtcNow,
+          _getBootIdentifier,
+          _getUptimeMilliseconds);
       evidence = PersistConsumedEvidence(evidence);
       readLock.Dispose();
       readLock = null;
@@ -1943,9 +1943,9 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
         string directoryName,
         string claimNonce,
         string activationCommitment,
-        DateTimeOffset utcNow,
-        Guid bootIdentifier,
-        long uptimeMilliseconds) =>
+        Func<DateTimeOffset> getUtcNow,
+        Func<Guid> getBootIdentifier,
+        Func<long> getUptimeMilliseconds) =>
         _issuances.AddOrUpdate(
             (ownershipToken, directoryName),
             static _ => throw new SecurityException("The VSIX issuance record is missing."),
@@ -1953,9 +1953,9 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
                 existing,
                 claimNonce,
                 activationCommitment,
-                utcNow,
-                bootIdentifier,
-                uptimeMilliseconds)
+                getUtcNow(),
+                getBootIdentifier(),
+                getUptimeMilliseconds())
                     ? existing with { Status = VsixPlanArtifactLedgerStatus.Consumed }
                     : throw new SecurityException(
                         "The durable VSIX claim is no longer authorized for consumption."));
