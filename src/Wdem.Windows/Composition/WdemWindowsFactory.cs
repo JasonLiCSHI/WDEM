@@ -98,8 +98,9 @@ public static class WdemWindowsFactory
         new ResourceScheduler(),
         runStore,
         new DirectResourceApplyDispatcher(),
-        eventSink: runEvents,
-        redactor: redactor);
+        timeProvider: null,
+        runEvents,
+        redactor);
 
     return new WdemWindowsComposition(
         environmentRuns,

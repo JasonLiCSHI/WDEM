@@ -29,9 +29,9 @@ wdem resume --run <guid> [--json]
 wdem runs list [--json]
 ```
 
-`--json` writes newline-delimited JSON. A successful run exits with `0`;
-profile or plan validation errors use `2`, execution failures use `3`, and
-cancellation uses `130`.
+`--json` writes newline-delimited JSON. A successful run exits with `0`; host
+initialization or output failures use `1`, profile or plan validation errors
+use `2`, execution failures use `3`, and cancellation uses `130`.
 
 ## Build and test
 
@@ -49,9 +49,9 @@ environment-variable override.
 
 Execution snapshots and redacted event logs are stored under
 `%LOCALAPPDATA%\WDEM\runs`. On first initialization, WDEM may import supported
-legacy state from `%LOCALAPPDATA%\WinHome`. `WINHOME_STATE_PATH` is recognized
-only as a deliberate legacy migration input; neither source is a continuing
-configuration or state interface.
+legacy state from `%LOCALAPPDATA%\WinHome`. `WINHOME_STATE_PATH` belongs only
+to retired transition behavior and is not read by the supported product host;
+neither source is a continuing configuration or state interface.
 
 ## Source provenance
 

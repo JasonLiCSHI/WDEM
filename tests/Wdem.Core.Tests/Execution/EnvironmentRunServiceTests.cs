@@ -821,6 +821,7 @@ public sealed class EnvironmentRunServiceTests
     var registry = new ResourceProviderRegistry([provider]);
     var compliance = new ComplianceEvaluator();
     store ??= new InMemoryRunStore();
+    eventSink ??= new RunEventHub();
     return (
         new EnvironmentRunService(
             catalog,
@@ -831,7 +832,9 @@ public sealed class EnvironmentRunServiceTests
             new ResourceScheduler(),
             store,
             new DirectResourceApplyDispatcher(),
-            eventSink: eventSink),
+            timeProvider: null,
+            eventSink,
+            new LogRedactor()),
         store);
   }
 

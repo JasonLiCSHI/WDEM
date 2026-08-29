@@ -41,6 +41,19 @@ public sealed class RunEventHubTests
   }
 
   [Fact]
+  public async Task PublishAsync_PropagatesRequiredObserverFailure()
+  {
+    IRunEventSink sink = new RunEventHub();
+    using var required = sink.SubscribeRequired((_, _) =>
+        throw new IOException("output failed"));
+
+    var error = await Assert.ThrowsAsync<IOException>(() =>
+        sink.PublishAsync(Event(1), CancellationToken.None));
+
+    Assert.Equal("output failed", error.Message);
+  }
+
+  [Fact]
   public async Task DisposedSubscription_StopsReceivingEvents()
   {
     var received = new List<long>();
@@ -89,6 +102,46 @@ public sealed class RunEventHubTests
   }
 
   [Fact]
+  public async Task PublishAsync_SlowObserverForOneRunDoesNotBlockAnotherRun()
+  {
+    var firstRun = Guid.Parse("fc1e441a-2db0-4a70-81dc-f6948ce07813");
+    var secondRun = Guid.Parse("328194b6-7c0a-4102-8904-a5ce351219d3");
+    var firstEntered = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var releaseFirst = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var secondObserved = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    IRunEventSink sink = new RunEventHub();
+    using var subscription = sink.Subscribe(async (runEvent, cancellationToken) =>
+    {
+      if (runEvent.RunId == firstRun)
+      {
+        firstEntered.SetResult();
+        await releaseFirst.Task.WaitAsync(cancellationToken);
+      }
+      else
+      {
+        secondObserved.SetResult();
+      }
+    });
+    var first = sink.PublishAsync(Event(1, firstRun), CancellationToken.None);
+    await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    try
+    {
+      await sink.PublishAsync(Event(1, secondRun), CancellationToken.None)
+          .WaitAsync(TimeSpan.FromSeconds(1));
+      await secondObserved.Task.WaitAsync(TimeSpan.FromSeconds(1));
+    }
+    finally
+    {
+      releaseFirst.SetResult();
+      await first.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+  }
+
+  [Fact]
   public async Task Dispose_DoesNotCorruptPublicationAlreadyInProgress()
   {
     var entered = new TaskCompletionSource(
@@ -110,8 +163,8 @@ public sealed class RunEventHubTests
     await publication.WaitAsync(TimeSpan.FromSeconds(5));
   }
 
-  private static RunEvent Event(long sequence) => new(
-      Guid.Parse("74ebec79-51ea-4c67-aa4d-71d542dca987"),
+  private static RunEvent Event(long sequence, Guid? runId = null) => new(
+      runId ?? Guid.Parse("74ebec79-51ea-4c67-aa4d-71d542dca987"),
       sequence,
       DateTimeOffset.Parse("2026-08-29T00:00:00Z"),
       RunEventKind.Log,

@@ -20,6 +20,7 @@ public static class WdemCliHost
     ArgumentNullException.ThrowIfNull(output);
     ArgumentNullException.ThrowIfNull(error);
     redactor ??= new LogRedactor();
+    var jsonRequested = RequestsJson(args);
 
     var lazyHandler = new LazyCommandHandler(handlerFactory);
     async Task<int> HandleExceptionAsync(
@@ -29,13 +30,15 @@ public static class WdemCliHost
     {
       var cancelled = exception is OperationCanceledException &&
           actionToken.IsCancellationRequested;
+      var validationFailure = exception is ArgumentException;
       await WdemCommandHandler.WriteExceptionEventAsync(
           exception,
           json,
           cancelled,
           error,
-          redactor).ConfigureAwait(false);
-      return cancelled ? 130 : 1;
+          redactor,
+          validationFailure ? WdemErrorCode.ProfileError : null).ConfigureAwait(false);
+      return cancelled ? 130 : validationFailure ? 2 : 1;
     }
 
     ParseResult parseResult;
@@ -48,12 +51,12 @@ public static class WdemCliHost
     {
       await WdemCommandHandler.WriteExceptionEventAsync(
           exception,
-          args.Contains("--json", StringComparer.Ordinal),
+          jsonRequested,
           cancelled: false,
           error,
           redactor,
           WdemErrorCode.ProfileError).ConfigureAwait(false);
-      return 1;
+      return 2;
     }
 
     if (parseResult.Errors.Count > 0)
@@ -63,12 +66,12 @@ public static class WdemCliHost
           parseResult.Errors.Select(parseError => parseError.Message)));
       await WdemCommandHandler.WriteExceptionEventAsync(
           parseException,
-          args.Contains("--json", StringComparer.Ordinal),
+          jsonRequested,
           cancelled: false,
           error,
           redactor,
           WdemErrorCode.ProfileError).ConfigureAwait(false);
-      return 1;
+      return 2;
     }
 
     var configuration = new InvocationConfiguration
@@ -86,9 +89,33 @@ public static class WdemCliHost
     {
       return await HandleExceptionAsync(
           exception,
-          args.Contains("--json", StringComparer.Ordinal),
+          jsonRequested,
           cancellationToken).ConfigureAwait(false);
     }
+  }
+
+  private static bool RequestsJson(IReadOnlyList<string> args)
+  {
+    for (var index = 0; index < args.Count; index++)
+    {
+      var argument = args[index];
+      if (argument.Equals("--json", StringComparison.Ordinal))
+      {
+        return index + 1 >= args.Count || !bool.TryParse(args[index + 1], out var value)
+            ? true
+            : value;
+      }
+
+      foreach (var separator in new[] { "--json=", "--json:" })
+      {
+        if (argument.StartsWith(separator, StringComparison.Ordinal))
+        {
+          return !bool.TryParse(argument[separator.Length..], out var value) || value;
+        }
+      }
+    }
+
+    return false;
   }
 
   private sealed class LazyCommandHandler(

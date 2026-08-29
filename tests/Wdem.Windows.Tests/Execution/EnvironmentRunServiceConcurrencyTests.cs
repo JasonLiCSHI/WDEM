@@ -114,6 +114,52 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
   }
 
   [Fact]
+  public async Task ApplyAsync_DrainsReportedProgressAfterCallerCancellation()
+  {
+    using var cancellation = new CancellationTokenSource();
+    var redactor = new LogRedactor();
+    var store = CreateStore(redactor: redactor);
+    var sink = new RunEventHub();
+    var events = new List<RunEvent>();
+    using var subscription = sink.Subscribe((runEvent, _) =>
+    {
+      events.Add(runEvent);
+      return Task.CompletedTask;
+    });
+    var provider = new GatedProvider
+    {
+      WaitForRelease = false,
+      Outcome = ApplyOutcome.Cancelled,
+      ProgressEvents =
+      [
+        new ProviderProgress(
+            "install",
+            0.5,
+            "reported-before-cancel",
+            "install")
+      ],
+      AfterProgress = cancellation.Cancel
+    };
+    var service = CreateService(
+        provider,
+        store,
+        eventSink: sink,
+        redactor: redactor);
+
+    var run = await service.ApplyAsync(Request(), cancellation.Token);
+
+    var log = await store.ReadLogPageAsync(run.RunId, 0, 1000, CancellationToken.None);
+    Assert.Equal(ExecutionOutcome.Cancelled, run.Outcome);
+    Assert.Contains(events, runEvent =>
+        runEvent.Kind == RunEventKind.StepProgress &&
+        runEvent.Message == "reported-before-cancel");
+    Assert.Contains(events, runEvent =>
+        runEvent.Kind == RunEventKind.Log &&
+        runEvent.Message == "reported-before-cancel");
+    Assert.Contains(log, entry => entry.Message == "reported-before-cancel");
+  }
+
+  [Fact]
   public async Task RecoverAsync_ConcurrentJsonStoresOnlyOneExecutesReplacement()
   {
     var provider = new GatedProvider();
@@ -597,6 +643,8 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
   {
     var registry = new ResourceProviderRegistry([provider]);
     var compliance = new ComplianceEvaluator();
+    eventSink ??= new RunEventHub();
+    redactor ??= new LogRedactor();
     return new EnvironmentRunService(
         new FixedProfileCatalog(profile ?? Profile()),
         new ResourceGraphBuilder(),
@@ -870,6 +918,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     public IReadOnlyList<ProviderProgress> ProgressEvents { get; init; } = [];
     public IReadOnlyList<ProviderStepResult> StepResults { get; init; } = [];
     public IReadOnlyList<StructuredError> Diagnostics { get; init; } = [];
+    public Action? AfterProgress { get; init; }
     public TaskCompletionSource FirstApplyEntered { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource SecondApplyEntered { get; } = new(
@@ -929,6 +978,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
       {
         progress?.Report(providerProgress);
       }
+      AfterProgress?.Invoke();
 
       return new ResourceApplyResult
       {

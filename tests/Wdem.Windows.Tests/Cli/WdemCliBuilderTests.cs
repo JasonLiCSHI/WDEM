@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Wdem.Cli;
@@ -16,15 +17,17 @@ public sealed class WdemCliBuilderTests
     Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
   };
 
-  [Fact]
-  public async Task Host_ParseErrorWritesJsonEventWithoutCreatingComposition()
+  [Theory]
+  [InlineData("--json")]
+  [InlineData("--json=true")]
+  public async Task Host_ParseErrorWritesJsonEventWithoutCreatingComposition(string jsonOption)
   {
     var factoryCalled = false;
     var output = new StringWriter();
     var error = new StringWriter();
 
     var exitCode = await WdemCliHost.RunAsync(
-        ["apply", "--profile", "developer.yaml", "--max-concurrency", "password=parse-secret", "--json"],
+        ["apply", "--profile", "developer.yaml", "--max-concurrency", "password=parse-secret", jsonOption],
         _ =>
         {
           factoryCalled = true;
@@ -34,7 +37,7 @@ public sealed class WdemCliBuilderTests
         error,
         CancellationToken.None);
 
-    Assert.Equal(1, exitCode);
+    Assert.Equal(2, exitCode);
     Assert.False(factoryCalled);
     Assert.Empty(output.ToString());
     Assert.DoesNotContain("parse-secret", error.ToString());
@@ -81,7 +84,7 @@ public sealed class WdemCliBuilderTests
         new StringWriter(),
         error);
 
-    Assert.Equal(1, exitCode);
+    Assert.Equal(2, exitCode);
     Assert.False(factoryCalled);
     Assert.Single(DeserializeEvents(error));
   }
@@ -322,6 +325,21 @@ public sealed class WdemCliBuilderTests
         root.Subcommands.Select(command => command.Name));
   }
 
+  [Theory]
+  [InlineData(typeof(WdemCommandHandler))]
+  [InlineData(typeof(EnvironmentRunService))]
+  public void DirectServiceConstructorsRequireSharedEventComponents(Type serviceType)
+  {
+    var constructor = Assert.Single(serviceType.GetConstructors());
+
+    Assert.False(Assert.Single(
+        constructor.GetParameters(),
+        parameter => parameter.ParameterType == typeof(LogRedactor)).IsOptional);
+    Assert.False(Assert.Single(
+        constructor.GetParameters(),
+        parameter => parameter.ParameterType == typeof(IRunEventSink)).IsOptional);
+  }
+
   [Fact]
   public async Task CommandHandler_InspectCallsServiceAndWritesJsonLineEvents()
   {
@@ -374,7 +392,8 @@ public sealed class WdemCliBuilderTests
         new StubExecutionRunStore(),
         output,
         new StringWriter(),
-        eventSink: sink);
+        new LogRedactor(),
+        sink);
 
     var exitCode = await handler.InspectAsync(request, json: true, CancellationToken.None);
 
@@ -409,6 +428,45 @@ public sealed class WdemCliBuilderTests
   }
 
   [Fact]
+  public async Task CommandHandler_RequiredOutputFailureReturnsUnexpectedHostExit()
+  {
+    var run = CompletedRun(ExecutionOutcome.Succeeded);
+    var sink = new RunEventHub();
+    var service = new StubEnvironmentRunService
+    {
+      Result = run,
+      EventSink = sink,
+      Events =
+      [
+        new RunEvent(
+            run.RunId,
+            1,
+            run.EndedAtUtc!.Value,
+            RunEventKind.Completed,
+            null,
+            null,
+            1,
+            "Succeeded",
+            null)
+      ]
+    };
+    var error = new StringWriter();
+    var handler = new WdemCommandHandler(
+        service,
+        new StubExecutionRunStore(),
+        new ThrowingTextWriter(),
+        error,
+        new LogRedactor(),
+        sink);
+
+    var exitCode = await handler.ApplyAsync(Request(), json: true, CancellationToken.None);
+
+    Assert.Equal(1, exitCode);
+    var failure = Assert.Single(DeserializeEvents(error));
+    Assert.Equal(WdemErrorCode.ProviderError, failure.Error?.Code);
+  }
+
+  [Fact]
   public async Task CommandHandler_CommandsCallMatchingRunOperations()
   {
     var run = CompletedRun(ExecutionOutcome.Succeeded);
@@ -418,7 +476,9 @@ public sealed class WdemCliBuilderTests
         service,
         store,
         new StringWriter(),
-        new StringWriter());
+        new StringWriter(),
+        new LogRedactor(),
+        new RunEventHub());
     var request = new RunRequest(
         Path.GetFullPath("developer.yaml"),
         new HashSet<string>(StringComparer.OrdinalIgnoreCase));
@@ -487,7 +547,8 @@ public sealed class WdemCliBuilderTests
         new StubExecutionRunStore(),
         output,
         new StringWriter(),
-        eventSink: sink);
+        new LogRedactor(),
+        sink);
 
     var exitCode = await handler.ApplyAsync(
         new RunRequest(Path.GetFullPath("developer.yaml"), new HashSet<string>()),
@@ -584,7 +645,9 @@ public sealed class WdemCliBuilderTests
         service,
         new StubExecutionRunStore(),
         new StringWriter(),
-        error);
+        error,
+        new LogRedactor(),
+        new RunEventHub());
 
     var exitCode = await handler.ApplyAsync(Request(), json, cancellation.Token);
 
@@ -628,7 +691,9 @@ public sealed class WdemCliBuilderTests
         service,
         new StubExecutionRunStore(),
         new StringWriter(),
-        error);
+        error,
+        new LogRedactor(),
+        new RunEventHub());
 
     var exitCode = await handler.ApplyAsync(Request(), json, CancellationToken.None);
 
@@ -744,7 +809,8 @@ public sealed class WdemCliBuilderTests
         new StubExecutionRunStore(),
         output,
         new StringWriter(),
-        eventSink: sink);
+        new LogRedactor(),
+        sink);
 
     var exitCode = await handler.ApplyAsync(Request(), json, CancellationToken.None);
 
@@ -774,7 +840,9 @@ public sealed class WdemCliBuilderTests
         new StubEnvironmentRunService { Result = run },
         new StubExecutionRunStore { Runs = [run] },
         output,
-        new StringWriter());
+        new StringWriter(),
+        new LogRedactor(),
+        new RunEventHub());
 
     var exitCode = await handler.ListRunsAsync(true, CancellationToken.None);
 
@@ -810,7 +878,9 @@ public sealed class WdemCliBuilderTests
         },
         store,
         output,
-        new StringWriter());
+        new StringWriter(),
+        new LogRedactor(),
+        new RunEventHub());
 
     var exitCode = await handler.ListRunsAsync(true, CancellationToken.None);
 
@@ -831,7 +901,9 @@ public sealed class WdemCliBuilderTests
         new StubEnvironmentRunService { Result = run },
         new StubExecutionRunStore { Runs = [run] },
         output,
-        new StringWriter());
+        new StringWriter(),
+        new LogRedactor(),
+        new RunEventHub());
 
     var exitCode = await handler.ListRunsAsync(false, CancellationToken.None);
 
@@ -853,7 +925,9 @@ public sealed class WdemCliBuilderTests
       service,
       new StubExecutionRunStore(),
       new StringWriter(),
-      new StringWriter());
+      new StringWriter(),
+      new LogRedactor(),
+      new RunEventHub());
 
   private static Task<int> InvokeApplyAsync(ExecutionRun run) =>
       Handler(new StubEnvironmentRunService { Result = run }).ApplyAsync(
@@ -1065,5 +1139,13 @@ public sealed class WdemCliBuilderTests
         int take,
         CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<RunLogEntry>>([]);
+  }
+
+  private sealed class ThrowingTextWriter : TextWriter
+  {
+    public override Encoding Encoding => Encoding.UTF8;
+
+    public override Task WriteLineAsync(string? value) =>
+        Task.FromException(new IOException("output failed"));
   }
 }

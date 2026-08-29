@@ -18,17 +18,17 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
   public WdemCommandHandler(
       IEnvironmentRunService environmentRuns,
       IExecutionRunStore runStore,
-      TextWriter? output = null,
-      TextWriter? error = null,
-      LogRedactor? redactor = null,
-      IRunEventSink? eventSink = null)
+      TextWriter? output,
+      TextWriter? error,
+      LogRedactor redactor,
+      IRunEventSink eventSink)
   {
     _environmentRuns = environmentRuns ?? throw new ArgumentNullException(nameof(environmentRuns));
     _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
     _output = output ?? Console.Out;
     _error = error ?? Console.Error;
-    _redactor = redactor ?? new LogRedactor();
-    _eventSink = eventSink ?? new RunEventHub();
+    _redactor = redactor ?? throw new ArgumentNullException(nameof(redactor));
+    _eventSink = eventSink ?? throw new ArgumentNullException(nameof(eventSink));
   }
 
   public static async Task<WdemCommandHandler> CreateAsync(
@@ -148,7 +148,7 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
   {
     try
     {
-      using var subscription = _eventSink.Subscribe(
+      using var subscription = _eventSink.SubscribeRequired(
           (runEvent, _) => WriteEventAsync(runEvent, json));
       var run = await operation().ConfigureAwait(false);
       return ExitCode(run);

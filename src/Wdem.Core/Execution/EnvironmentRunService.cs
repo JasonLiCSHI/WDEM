@@ -36,9 +36,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       IResourceScheduler scheduler,
       IExecutionRunStore runStore,
       IResourceApplyDispatcher dispatcher,
-      TimeProvider? timeProvider = null,
-      IRunEventSink? eventSink = null,
-      LogRedactor? redactor = null)
+      TimeProvider? timeProvider,
+      IRunEventSink eventSink,
+      LogRedactor redactor)
   {
     _profiles = profiles ?? throw new ArgumentNullException(nameof(profiles));
     _graphBuilder = graphBuilder ?? throw new ArgumentNullException(nameof(graphBuilder));
@@ -50,8 +50,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
     _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
     _timeProvider = timeProvider ?? TimeProvider.System;
-    _eventSink = eventSink ?? new RunEventHub();
-    _redactor = redactor ?? new LogRedactor();
+    _eventSink = eventSink ?? throw new ArgumentNullException(nameof(eventSink));
+    _redactor = redactor ?? throw new ArgumentNullException(nameof(redactor));
   }
 
   public Task<ExecutionRun> InspectAsync(
@@ -355,6 +355,12 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
 
     var loaded = await _profiles.LoadFileAsync(request.ProfilePath, cancellationToken)
         .ConfigureAwait(false);
+    if (loaded.Profile is { } materializedProfile)
+    {
+      _redactor.RegisterSensitiveParameters(materializedProfile.Resources.Values.SelectMany(
+          resource => resource.Parameters));
+    }
+
     if (!loaded.IsValid || loaded.Profile is null)
     {
       var diagnostics = loaded.Errors.Count > 0
@@ -378,8 +384,6 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
 
     var sourcePath = CanonicalizeOrPreservePath(loaded.SourcePath);
     var profile = loaded.Profile;
-    _redactor.RegisterSensitiveParameters(profile.Resources.Values.SelectMany(
-        resource => resource.Parameters));
     var graphResult = _graphBuilder.TryBuild(
         profile,
         new ProfileSelection(request.SelectedOptionalResourceIds));
@@ -451,6 +455,11 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       await events.PublishResourceAsync(result, cancellationToken).ConfigureAwait(false);
     }
 
+    if (!plan.IsExecutable)
+    {
+      return await CompleteUnexecutableAsync(run, events, cancellationToken).ConfigureAwait(false);
+    }
+
     if (mode == RunMode.Inspect)
     {
       var completed = run with
@@ -460,11 +469,6 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         EndedAtUtc = DateTimeOffset.UtcNow
       };
       return await PersistTerminalAsync(completed, events).ConfigureAwait(false);
-    }
-
-    if (!plan.IsExecutable)
-    {
-      return await CompleteUnexecutableAsync(run, events, cancellationToken).ConfigureAwait(false);
     }
 
     var transitions = new RunTransitions(_runStore, events, run);
@@ -529,11 +533,12 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       SingleWriter = false,
       AllowSynchronousContinuations = false
     });
+    using var progressPersistence = new CancellationTokenSource();
     var progressPump = PumpProgressAsync(
         progressChannel.Reader,
         events,
         id,
-        cancellationToken);
+        progressPersistence.Token);
     try
     {
       applied = await _dispatcher.ApplyAsync(
@@ -560,7 +565,17 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     finally
     {
       progressChannel.Writer.TryComplete();
-      await progressPump.ConfigureAwait(false);
+      progressPersistence.CancelAfter(PersistenceTimeout);
+      try
+      {
+        await progressPump.ConfigureAwait(false);
+      }
+      catch (OperationCanceledException) when (
+          cancellationToken.IsCancellationRequested &&
+          progressPersistence.IsCancellationRequested)
+      {
+        // Preserve caller cancellation if bounded progress draining times out.
+      }
     }
 
     foreach (var diagnostic in applied.Diagnostics)
