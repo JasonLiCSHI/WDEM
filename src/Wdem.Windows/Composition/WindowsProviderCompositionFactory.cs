@@ -42,6 +42,8 @@ internal static class WindowsProviderCompositionFactory
     var complianceEvaluator = new ComplianceEvaluator();
     var winGetCommandClient = new WinGetCommandClient(processExecutor);
     var trustedFileVerifier = new TrustedFileVerifier();
+    var visualStudioDiscovery = new VsWhereVisualStudioDiscovery(processExecutor);
+    var vsixManifestReader = new VsixManifestReader();
     var providers = new ResourceProviderRegistry(
     [
       new LegacyPackageManagerProviderAdapter("winget", winget, supportsSource: true),
@@ -49,9 +51,20 @@ internal static class WindowsProviderCompositionFactory
       new GitProvider(processExecutor, winGetCommandClient, complianceEvaluator),
       new DotNetSdkProvider(processExecutor, winGetCommandClient, complianceEvaluator),
       new VisualStudioProvider(
-          new VsWhereVisualStudioDiscovery(processExecutor),
+          visualStudioDiscovery,
           new VisualStudioInstallerClient(processExecutor, trustedFileVerifier),
           trustedFileVerifier,
+          complianceEvaluator),
+      new VisualStudioExtensionProvider(
+          visualStudioDiscovery,
+          vsixManifestReader,
+          processExecutor,
+          complianceEvaluator,
+          trustedFileVerifier: trustedFileVerifier),
+      new ReSharperProvider(
+          visualStudioDiscovery,
+          vsixManifestReader,
+          winGetCommandClient,
           complianceEvaluator)
     ]);
 
