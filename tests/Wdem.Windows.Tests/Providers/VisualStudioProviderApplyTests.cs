@@ -202,9 +202,11 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   }
 
   [Fact]
-  public async Task PlanAsync_InstallAndModifyRequireAdministratorAndNoOpHasNoSteps()
+  public async Task PlanAndApplyAsync_ExecutableOperationsRequireAdministratorAndNoOpReturnsNotRequired()
   {
-    var provider = Provider(new SequenceDiscovery([]), new RecordingInstallerClient());
+    var discovery = new SequenceDiscovery([]);
+    var installer = new RecordingInstallerClient();
+    var provider = Provider(discovery, installer);
     var resource = Resource();
 
     var install = await provider.PlanAsync(resource, MissingState(), CancellationToken.None);
@@ -219,12 +221,21 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
             workloads: ["Microsoft.VisualStudio.Workload.ManagedDesktop"],
             components: ["Microsoft.NetCore.Component.Runtime.10.0"])),
         CancellationToken.None);
+    var noOpResult = await provider.ApplyAsync(
+        resource,
+        satisfied,
+        null,
+        CancellationToken.None);
 
     Assert.Equal(PlanAction.Install, Assert.Single(install.Steps).Action);
     Assert.Equal(PrivilegeRequirement.Administrator, install.Steps[0].PrivilegeRequirement);
     Assert.Equal(PlanAction.Configure, Assert.Single(modify.Steps).Action);
     Assert.Equal(PrivilegeRequirement.Administrator, modify.Steps[0].PrivilegeRequirement);
+    Assert.False(satisfied.RequiresApply);
     Assert.Empty(satisfied.Steps);
+    Assert.Equal(ApplyOutcome.NotRequired, noOpResult.Outcome);
+    Assert.Empty(installer.Operations);
+    Assert.Equal(0, discovery.AttemptCount);
   }
 
   [Fact]
