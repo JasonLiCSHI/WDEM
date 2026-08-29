@@ -15,6 +15,10 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Wdem.Core\Wdem.Core.csproj" />
+    <ProjectReference Include="..\Wdem.ElevatedHost\Wdem.ElevatedHost.csproj"
+                      ReferenceOutputAssembly="false"
+                      Private="false" />
     <ProjectReference Include="..\Wdem.Windows\Wdem.Windows.csproj" />
   </ItemGroup>
+  <Import Project="..\Wdem.ElevatedHost\Wdem.ElevatedHost.deployment.targets" />
 </Project>

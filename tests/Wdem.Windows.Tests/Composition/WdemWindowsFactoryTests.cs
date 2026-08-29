@@ -99,6 +99,26 @@ public sealed class WdemWindowsFactoryTests : IDisposable
     Assert.False(File.Exists(externalStatePath));
   }
 
+  [Fact]
+  public void CreateElevatedHost_DoesNotRunMigrationOrCreateCurrentUserState()
+  {
+    Directory.CreateDirectory(_root);
+    var legacyStatePath = Path.Combine(_root, "legacy-state.json");
+    File.WriteAllText(legacyStatePath, "{}");
+    Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", legacyStatePath);
+    var paths = new WdemDataPaths(_root);
+
+    var composition = WdemElevatedHostFactory.Create(paths);
+
+    Assert.IsType<JsonExecutionRunStore>(composition.RunStore);
+    Assert.IsType<LogRedactor>(composition.Redactor);
+    Assert.Equal("winget", composition.Providers
+        .GetRequired("winget-package", "winget").ProviderName);
+    Assert.False(Directory.Exists(paths.Root));
+    Assert.False(File.Exists(Path.Combine(paths.Root, "migration-v1.json")));
+    Assert.False(File.Exists(Path.Combine(paths.Root, ".wdem-state.json")));
+  }
+
   public void Dispose()
   {
     Environment.SetEnvironmentVariable("WDEM_STATE_PATH", _originalStatePath);

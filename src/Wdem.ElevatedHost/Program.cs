@@ -51,11 +51,8 @@ internal static class Program
         PipeOptions.Asynchronous);
     await pipe.ConnectAsync().ConfigureAwait(false);
 
-    var composition = await WdemWindowsFactory.CreateAsync(
-        options.ProfilesDirectory,
-        new WdemDataPaths(options.LocalApplicationData),
-        CancellationToken.None).ConfigureAwait(false);
-    await using var brokerLifetime = composition.PrivilegeBroker as IAsyncDisposable;
+    var composition = WdemElevatedHostFactory.Create(
+        new WdemDataPaths(options.LocalApplicationData));
     var worker = new ElevatedResourceWorker(
         composition.RunStore,
         composition.Providers,

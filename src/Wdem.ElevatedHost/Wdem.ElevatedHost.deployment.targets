@@ -1,0 +1,28 @@
+<Project>
+  <PropertyGroup>
+    <_WdemElevatedHostOutputDirectory>$(MSBuildThisFileDirectory)bin\$(Configuration)\net10.0-windows\</_WdemElevatedHostOutputDirectory>
+    <_WdemElevatedHostOutputDirectory Condition="'$(RuntimeIdentifier)' != ''">$(_WdemElevatedHostOutputDirectory)$(RuntimeIdentifier)\</_WdemElevatedHostOutputDirectory>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="$(_WdemElevatedHostOutputDirectory)Wdem.ElevatedHost.exe"
+             Link="Wdem.ElevatedHost.exe"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             ExcludeFromSingleFile="true" />
+    <Content Include="$(_WdemElevatedHostOutputDirectory)Wdem.ElevatedHost.dll"
+             Link="Wdem.ElevatedHost.dll"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             ExcludeFromSingleFile="true" />
+    <Content Include="$(_WdemElevatedHostOutputDirectory)Wdem.ElevatedHost.deps.json"
+             Link="Wdem.ElevatedHost.deps.json"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             ExcludeFromSingleFile="true" />
+    <Content Include="$(_WdemElevatedHostOutputDirectory)Wdem.ElevatedHost.runtimeconfig.json"
+             Link="Wdem.ElevatedHost.runtimeconfig.json"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             ExcludeFromSingleFile="true" />
+  </ItemGroup>
+</Project>
