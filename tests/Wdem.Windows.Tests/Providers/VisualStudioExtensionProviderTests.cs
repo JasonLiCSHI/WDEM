@@ -1,6 +1,9 @@
 using System.IO.Compression;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
+using System.Text.Json.Nodes;
 using Wdem.Core.Compliance;
 using Wdem.Core.Execution;
 using Wdem.Core.Graph;
@@ -1117,18 +1120,22 @@ public sealed class VisualStudioExtensionProviderTests
     var verifier = new FakeTrustedFileVerifier(isTrusted: true);
     var validatedCreators = new List<string>();
     await using var stager = new ScriptedStager();
+    var planArtifactRoot = Directory.GetParent(
+        Path.GetDirectoryName(stager.VerifiedVsixPath)!)!.FullName;
     var stagingStore = new VsixPlanArtifactStore(
         stager,
         verifier,
         manifests,
         (_, recordedCreator) => validatedCreators.Add(recordedCreator),
-        () => creatorSid);
+        () => creatorSid,
+        identityNeutralPlanArtifactRoot: planArtifactRoot);
     var claimingStore = new VsixPlanArtifactStore(
         stager,
         verifier,
         manifests,
         (_, recordedCreator) => validatedCreators.Add(recordedCreator),
-        () => "S-1-5-18");
+        () => "S-1-5-18",
+        identityNeutralPlanArtifactRoot: planArtifactRoot);
     var expectedHash = new string('A', 64);
 
     var staged = await stagingStore.StageAsync(
@@ -1219,6 +1226,213 @@ public sealed class VisualStudioExtensionProviderTests
 
       blocker?.Dispose();
       ArtifactCleanupQueue.Shared.RetryPending();
+    }
+  }
+
+  [WindowsFact]
+  public async Task PlanArtifactStore_FreshElevatedStoreResolvesIdentityNeutralRoot()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-cross-identity-{Guid.NewGuid():N}");
+    var sharedRoot = Path.Combine(basePath, "shared", "Wdem", "PlanArtifacts");
+    var source = Path.Combine(basePath, "source.vsix");
+    Directory.CreateDirectory(basePath);
+    await File.WriteAllTextAsync(source, "vsix");
+    var expectedHash = new string('A', 64);
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    var stager = new SecureArtifactStager(
+        new WindowsPlanArtifactDirectoryPolicy(sharedRoot),
+        verifier);
+    var stagingStore = new VsixPlanArtifactStore(
+        stager,
+        verifier,
+        manifests,
+        WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedDirectory,
+        WindowsPlanArtifactDirectoryPolicy.GetCurrentUserSid,
+        identityNeutralPlanArtifactRoot: sharedRoot);
+    var claimingStore = new VsixPlanArtifactStore(
+        stager,
+        verifier,
+        manifests,
+        WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedDirectory,
+        WindowsPlanArtifactDirectoryPolicy.GetCurrentUserSid,
+        identityNeutralPlanArtifactRoot: sharedRoot);
+
+    try
+    {
+      var staged = await stagingStore.StageAsync(
+          "extension",
+          source,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None);
+      Assert.NotNull(staged.StepEvidence);
+      Assert.InRange(staged.StepEvidence.Length, 1, 128);
+
+      var claimed = await claimingStore.ClaimAsync(
+          "extension",
+          staged.StepEvidence,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None);
+
+      await using var artifact = Assert.IsType<ClaimedVsixPlanArtifact>(claimed.Artifact);
+      Assert.StartsWith(sharedRoot, artifact.Path, StringComparison.OrdinalIgnoreCase);
+    }
+    finally
+    {
+      if (Directory.Exists(basePath))
+      {
+        Directory.Delete(basePath, recursive: true);
+      }
+    }
+  }
+
+  [WindowsFact]
+  public async Task PlanArtifactStore_FreshStoreAbandonsArtifactInIdentityNeutralRoot()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-cross-abandon-{Guid.NewGuid():N}");
+    var sharedRoot = Path.Combine(basePath, "shared", "Wdem", "PlanArtifacts");
+    var source = Path.Combine(basePath, "source.vsix");
+    Directory.CreateDirectory(basePath);
+    await File.WriteAllTextAsync(source, "vsix");
+    var expectedHash = new string('A', 64);
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    var stager = new SecureArtifactStager(
+        new WindowsPlanArtifactDirectoryPolicy(sharedRoot),
+        verifier);
+    var stagingStore = new VsixPlanArtifactStore(
+        stager,
+        verifier,
+        manifests,
+        WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedDirectory,
+        WindowsPlanArtifactDirectoryPolicy.GetCurrentUserSid,
+        identityNeutralPlanArtifactRoot: sharedRoot);
+    var abandoningStore = new VsixPlanArtifactStore(
+        stager,
+        verifier,
+        manifests,
+        WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedDirectory,
+        WindowsPlanArtifactDirectoryPolicy.GetCurrentUserSid,
+        identityNeutralPlanArtifactRoot: sharedRoot);
+
+    try
+    {
+      var staged = await stagingStore.StageAsync(
+          "extension",
+          source,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None);
+      var locator = Assert.IsType<string>(staged.StepEvidence);
+      var directoryName = locator[(locator.LastIndexOf(':') + 1)..];
+      var artifactDirectory = Path.Combine(sharedRoot, directoryName);
+
+      await abandoningStore.AbandonAsync(
+          "extension",
+          locator,
+          CancellationToken.None);
+
+      Assert.False(Directory.Exists(artifactDirectory));
+    }
+    finally
+    {
+      if (Directory.Exists(basePath))
+      {
+        Directory.Delete(basePath, recursive: true);
+      }
+    }
+  }
+
+  [WindowsFact]
+  public async Task PlanArtifactStore_ClaimDoesNotFallBackToClaimantProfileForgery()
+  {
+    var basePath = Path.Combine(Path.GetTempPath(), $"wdem-cross-identity-forgery-{Guid.NewGuid():N}");
+    var claimantRoot = Path.Combine(basePath, "claimant", "Wdem", "PlanArtifacts");
+    var sharedRoot = Path.Combine(basePath, "shared", "Wdem", "PlanArtifacts");
+    var source = Path.Combine(basePath, "source.vsix");
+    Directory.CreateDirectory(basePath);
+    await File.WriteAllTextAsync(source, "vsix");
+    var expectedHash = new string('A', 64);
+    var manifests = SourceManifestReader();
+    var verifier = new FakeTrustedFileVerifier(isTrusted: true);
+    var stager = new SecureArtifactStager(
+        new WindowsPlanArtifactDirectoryPolicy(sharedRoot),
+        verifier);
+    var stagingStore = new VsixPlanArtifactStore(
+        stager,
+        verifier,
+        manifests,
+        WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedDirectory,
+        WindowsPlanArtifactDirectoryPolicy.GetCurrentUserSid,
+        identityNeutralPlanArtifactRoot: sharedRoot);
+    var claimingStore = new VsixPlanArtifactStore(
+        stager,
+        verifier,
+        manifests,
+        WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedDirectory,
+        WindowsPlanArtifactDirectoryPolicy.GetCurrentUserSid,
+        identityNeutralPlanArtifactRoot: sharedRoot);
+
+    try
+    {
+      var staged = await stagingStore.StageAsync(
+          "extension",
+          source,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None);
+      var locator = Assert.IsType<string>(staged.StepEvidence);
+      var directoryName = locator[(locator.LastIndexOf(':') + 1)..];
+      var actualDirectory = Path.Combine(sharedRoot, directoryName);
+      var forgedDirectory = Path.Combine(claimantRoot, directoryName);
+      Directory.CreateDirectory(forgedDirectory);
+      foreach (var path in Directory.EnumerateFiles(actualDirectory))
+      {
+        File.Copy(path, Path.Combine(forgedDirectory, Path.GetFileName(path)));
+      }
+
+      using var identity = WindowsIdentity.GetCurrent();
+      new DirectoryInfo(forgedDirectory).SetAccessControl(
+          WindowsPlanArtifactDirectoryPolicy.CreateSecurity(
+              identity.User!,
+              new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+              new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null)));
+      var forgedMarkerPath = Path.Combine(forgedDirectory, ".wdem-vsix-owner");
+      var forgedMarker = JsonNode.Parse(await File.ReadAllTextAsync(forgedMarkerPath))!;
+      forgedMarker["ownershipDirectory"] = forgedDirectory;
+      forgedMarker["artifactPath"] = Path.Combine(forgedDirectory, "extension.vsix");
+      await File.WriteAllTextAsync(forgedMarkerPath, forgedMarker.ToJsonString());
+      File.Delete(Path.Combine(actualDirectory, ".wdem-vsix-owner"));
+
+      var claimed = await claimingStore.ClaimAsync(
+          "extension",
+          locator,
+          expectedHash,
+          "17.0_a",
+          CancellationToken.None);
+
+      try
+      {
+        Assert.Null(claimed.Artifact);
+        Assert.NotNull(claimed.Error);
+        Assert.True(Directory.Exists(forgedDirectory));
+      }
+      finally
+      {
+        if (claimed.Artifact is not null)
+        {
+          await claimed.Artifact.DisposeAsync();
+        }
+      }
+    }
+    finally
+    {
+      if (Directory.Exists(basePath))
+      {
+        Directory.Delete(basePath, recursive: true);
+      }
     }
   }
 
@@ -1401,7 +1615,11 @@ public sealed class VisualStudioExtensionProviderTests
           manifests,
           validateRestrictedDirectory ?? ((_, _) => { }),
           static () => "S-1-0-0",
-          handoffLifetime);
+          handoffLifetime,
+          identityNeutralPlanArtifactRoot: Path.Combine(
+              Path.GetTempPath(),
+              "Wdem",
+              "PlanArtifacts"));
 
   private static VisualStudioExtensionProvider RealReaderProvider(string localApplicationData)
   {

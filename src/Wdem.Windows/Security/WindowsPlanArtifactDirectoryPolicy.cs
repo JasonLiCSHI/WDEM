@@ -9,6 +9,23 @@ namespace Wdem.Windows.Security;
 internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirectoryPolicy
 {
   private const int ErrorAlreadyExists = 183;
+  private readonly string _rootPath;
+
+  public WindowsPlanArtifactDirectoryPolicy()
+      : this(GetIdentityNeutralPlanArtifactRoot())
+  {
+  }
+
+  internal WindowsPlanArtifactDirectoryPolicy(string rootPath)
+  {
+    ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);
+    if (!Path.IsPathFullyQualified(rootPath))
+    {
+      throw new ArgumentException("The plan-artifact root must be fully qualified.", nameof(rootPath));
+    }
+
+    _rootPath = Path.GetFullPath(rootPath);
+  }
 
   public string CreateRestrictedStagingDirectory()
   {
@@ -26,25 +43,38 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
         domainSid: null);
     var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, domainSid: null);
     var security = CreateSecurity(currentUser, administrators, system);
-    var localData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-    if (string.IsNullOrWhiteSpace(localData))
-    {
-      throw new InvalidOperationException("The current user's application-data path is unavailable.");
-    }
-
-    var rootPath = Path.Combine(localData, "Wdem", "PlanArtifacts");
-    CreateRestrictedDirectory(
-        rootPath,
-        security,
-        currentUser,
-        mustCreate: false);
-    var stagingPath = Path.Combine(rootPath, Guid.NewGuid().ToString("N"));
+    EnsureIdentityNeutralRoot(_rootPath);
+    var stagingPath = Path.Combine(_rootPath, Guid.NewGuid().ToString("N"));
     CreateRestrictedDirectory(
         stagingPath,
         security,
         currentUser,
         mustCreate: true);
     return stagingPath;
+  }
+
+  internal static string GetIdentityNeutralPlanArtifactRoot()
+  {
+    var commonData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+    if (string.IsNullOrWhiteSpace(commonData))
+    {
+      throw new InvalidOperationException("The shared Windows application-data path is unavailable.");
+    }
+
+    return Path.Combine(commonData, "Wdem", "PlanArtifacts");
+  }
+
+  private static void EnsureIdentityNeutralRoot(string rootPath)
+  {
+    Directory.CreateDirectory(rootPath);
+    var productPath = Path.GetDirectoryName(rootPath);
+    foreach (var path in new[] { productPath, rootPath })
+    {
+      if (path is null || File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
+      {
+        throw new SecurityException("The shared plan-artifact root is redirected.");
+      }
+    }
   }
 
   internal static void ValidateRestrictedDirectory(string path)

@@ -296,6 +296,7 @@ internal sealed class ArtifactCleanupQueue
     if (!string.IsNullOrWhiteSpace(commonData))
     {
       roots.Add(Path.Combine(commonData, "Wdem", "SecureArtifacts"));
+      roots.Add(Path.Combine(commonData, "Wdem", "PlanArtifacts"));
     }
 
     var localData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);

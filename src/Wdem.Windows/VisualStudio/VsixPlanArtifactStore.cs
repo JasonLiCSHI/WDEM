@@ -88,7 +88,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
   private readonly Action<string, string> _validateRestrictedDirectory;
   private readonly Func<string> _getCurrentUserSid;
   private readonly TimeSpan _handoffLifetime;
-  private readonly IReadOnlyList<string> _planArtifactRoots;
+  private readonly string _planArtifactRoot;
   private readonly ConcurrentDictionary<string, HandoffRegistration> _handoffs =
       new(StringComparer.OrdinalIgnoreCase);
   private static readonly JsonSerializerOptions JsonOptions = new()
@@ -108,7 +108,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
           WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedDirectory,
           WindowsPlanArtifactDirectoryPolicy.GetCurrentUserSid,
           TimeSpan.FromHours(24),
-          planArtifactRoots: null)
+          identityNeutralPlanArtifactRoot: null)
   {
   }
 
@@ -119,7 +119,7 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       Action<string, string> validateRestrictedDirectory,
       Func<string> getCurrentUserSid,
       TimeSpan? handoffLifetime = null,
-      IReadOnlyList<string>? planArtifactRoots = null)
+      string? identityNeutralPlanArtifactRoot = null)
   {
     _stager = stager ?? throw new ArgumentNullException(nameof(stager));
     _verifier = verifier ?? throw new ArgumentNullException(nameof(verifier));
@@ -128,7 +128,9 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
         throw new ArgumentNullException(nameof(validateRestrictedDirectory));
     _getCurrentUserSid = getCurrentUserSid ?? throw new ArgumentNullException(nameof(getCurrentUserSid));
     _handoffLifetime = handoffLifetime ?? TimeSpan.FromHours(24);
-    _planArtifactRoots = planArtifactRoots ?? GetDefaultPlanArtifactRoots();
+    _planArtifactRoot = GetPlanArtifactRoot(
+        identityNeutralPlanArtifactRoot ??
+            WindowsPlanArtifactDirectoryPolicy.GetIdentityNeutralPlanArtifactRoot());
     if (_handoffLifetime <= TimeSpan.Zero)
     {
       throw new ArgumentOutOfRangeException(nameof(handoffLifetime));
@@ -776,70 +778,43 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       string resourceId,
       VsixPlanArtifactLocator locator)
   {
-    var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-    if (_handoffs.TryGetValue(resourceId, out var handoff) &&
-        string.Equals(
-            handoff.RegistrationToken,
-            locator.RegistrationToken,
-            StringComparison.Ordinal) &&
-        string.Equals(
-            Path.GetFileName(handoff.Directory),
-            locator.DirectoryName,
-            StringComparison.OrdinalIgnoreCase))
+    var candidate = Path.Combine(_planArtifactRoot, locator.DirectoryName);
+    try
     {
-      candidates.Add(handoff.Directory);
-    }
+      ValidateOwnershipDirectoryPath(candidate);
+      var evidence = ReadOwnershipMarker(candidate);
+      ValidateRegistration(evidence, resourceId, locator);
+      if (!string.Equals(
+              candidate,
+              evidence.OwnershipDirectory,
+              StringComparison.OrdinalIgnoreCase))
+      {
+        throw new SecurityException("The approved VSIX locator is invalid.");
+      }
 
-    foreach (var root in _planArtifactRoots)
+      return evidence;
+    }
+    catch (Exception exception) when (exception is ArgumentException or IOException or
+        UnauthorizedAccessException or InvalidDataException or JsonException or
+        NotSupportedException or SecurityException)
     {
-      if (!string.IsNullOrWhiteSpace(root) && Path.IsPathFullyQualified(root))
-      {
-        candidates.Add(Path.Combine(Path.GetFullPath(root), locator.DirectoryName));
-      }
+      throw new InvalidDataException(
+          "The approved VSIX locator does not resolve to a sealed registration.",
+          exception);
     }
-
-    VsixPlanArtifactEvidence? match = null;
-    foreach (var candidate in candidates)
-    {
-      try
-      {
-        ValidateOwnershipDirectoryPath(candidate);
-        var evidence = ReadOwnershipMarker(candidate);
-        ValidateRegistration(evidence, resourceId, locator);
-        if (!string.Equals(
-                candidate,
-                evidence.OwnershipDirectory,
-                StringComparison.OrdinalIgnoreCase) ||
-            match is not null)
-        {
-          throw new SecurityException("The approved VSIX locator is ambiguous.");
-        }
-
-        match = evidence;
-      }
-      catch (Exception exception) when (exception is ArgumentException or IOException or
-          UnauthorizedAccessException or InvalidDataException or JsonException or
-          NotSupportedException or SecurityException)
-      {
-        // Ignore invalid candidates; only an exact sealed registration may resolve a locator.
-      }
-    }
-
-    return match ?? throw new InvalidDataException(
-        "The approved VSIX locator does not resolve to a sealed registration.");
   }
 
-  private static IReadOnlyList<string> GetDefaultPlanArtifactRoots()
+  private static string GetPlanArtifactRoot(string identityNeutralPlanArtifactRoot)
   {
-    var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-    var localData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-    if (!string.IsNullOrWhiteSpace(localData))
+    if (string.IsNullOrWhiteSpace(identityNeutralPlanArtifactRoot) ||
+        !Path.IsPathFullyQualified(identityNeutralPlanArtifactRoot))
     {
-      roots.Add(Path.Combine(localData, "Wdem", "PlanArtifacts"));
+      throw new ArgumentException(
+          "The identity-neutral plan artifact root must be fully qualified.",
+          nameof(identityNeutralPlanArtifactRoot));
     }
 
-    roots.Add(Path.Combine(Path.GetTempPath(), "Wdem", "PlanArtifacts"));
-    return roots.ToArray();
+    return Path.GetFullPath(identityNeutralPlanArtifactRoot);
   }
 
   private static void ValidateOwnershipDirectoryPath(string path)
