@@ -24,8 +24,6 @@ internal sealed class ArtifactCleanupQueue
   private readonly IReadOnlyList<string> _knownStagingRoots;
   private readonly TimeSpan _minimumSweepAge;
   private readonly Action? _beforeRetryScheduledReset;
-  private readonly Func<string, IVsixPlanArtifactRevocationStore>
-      _planArtifactRevocationStoreFactory;
   private readonly List<PendingCleanup> _pending = [];
   private bool _retryScheduled;
   private long _enqueueVersion;
@@ -37,9 +35,7 @@ internal sealed class ArtifactCleanupQueue
       int maxDelayedRetryRounds = 4,
       IReadOnlyList<string>? knownStagingRoots = null,
       TimeSpan? minimumSweepAge = null,
-      Action? beforeRetryScheduledReset = null,
-      Func<string, IVsixPlanArtifactRevocationStore>?
-          planArtifactRevocationStoreFactory = null)
+      Action? beforeRetryScheduledReset = null)
   {
     if (maxAttempts <= 0)
     {
@@ -69,8 +65,6 @@ internal sealed class ArtifactCleanupQueue
         (fileSystem is null ? GetKnownStagingRoots() : []);
     _minimumSweepAge = minimumSweepAge ?? DefaultMinimumSweepAge;
     _beforeRetryScheduledReset = beforeRetryScheduledReset;
-    _planArtifactRevocationStoreFactory = planArtifactRevocationStoreFactory ??
-        (static root => new WindowsVsixPlanArtifactRevocationStore(root));
     SweepKnownStagingArtifacts();
   }
 
@@ -255,10 +249,10 @@ internal sealed class ArtifactCleanupQueue
           if (IsPlanArtifactRoot(root))
           {
             var planStaleBeforeUtc = DateTime.UtcNow - _minimumSweepAge;
-            var canReclaimExpired = VsixPlanArtifactStore.TryRevokeExpiredDirectory(
-                    fullPath,
-                    DateTimeOffset.UtcNow,
-                    _planArtifactRevocationStoreFactory(root));
+            var canReclaimExpired = VsixPlanArtifactStore.TryReclaimExpiredDirectory(
+                fullPath,
+                DateTimeOffset.UtcNow,
+                planStaleBeforeUtc);
             if (!canReclaimExpired &&
                 !ArtifactLease.CanReclaimUninitializedPlanArtifact(
                     fullPath,
@@ -498,18 +492,130 @@ internal sealed class ArtifactLease : IDisposable
       string directoryPath,
       DateTime staleBeforeUtc)
   {
-    var name = Path.GetFileName(directoryPath);
-    if (name.Length != 32 || name.Any(character =>
-            character is not (>= '0' and <= '9') and
-                not (>= 'a' and <= 'f')))
+    if (!Path.IsPathFullyQualified(directoryPath))
     {
       return false;
     }
 
     try
     {
-      if (File.GetAttributes(directoryPath).HasFlag(FileAttributes.ReparsePoint) ||
+      var fullPath = Path.GetFullPath(directoryPath);
+      var name = Path.GetFileName(fullPath);
+      var root = Path.GetDirectoryName(fullPath);
+      if (!string.Equals(fullPath, directoryPath, StringComparison.OrdinalIgnoreCase) ||
+          !IsStrictLowerHexGuid(name) ||
+          !string.Equals(
+              Path.GetFileName(root),
+              "PlanArtifacts",
+              StringComparison.OrdinalIgnoreCase) ||
+          !string.Equals(
+              Path.GetFileName(Path.GetDirectoryName(root)),
+              "Wdem",
+              StringComparison.OrdinalIgnoreCase) ||
+          File.GetAttributes(fullPath).HasFlag(FileAttributes.ReparsePoint) ||
           Directory.GetLastWriteTimeUtc(directoryPath) >= staleBeforeUtc)
+      {
+        return false;
+      }
+
+      var entries = Directory.EnumerateFileSystemEntries(fullPath).Take(4).ToArray();
+      if (entries.Length > 3)
+      {
+        return false;
+      }
+
+      if (entries.Length == 0)
+      {
+        return true;
+      }
+
+      foreach (var entry in entries)
+      {
+        if (!string.Equals(
+                Path.GetDirectoryName(Path.GetFullPath(entry)),
+                fullPath,
+                StringComparison.OrdinalIgnoreCase))
+        {
+          return false;
+        }
+
+        var attributes = File.GetAttributes(entry);
+        if (attributes.HasFlag(FileAttributes.Directory) ||
+            attributes.HasFlag(FileAttributes.ReparsePoint) ||
+            File.GetLastWriteTimeUtc(entry) >= staleBeforeUtc)
+        {
+          return false;
+        }
+      }
+
+      var names = entries
+          .Select(entry => Path.GetFileName(entry)!)
+          .ToHashSet(StringComparer.OrdinalIgnoreCase);
+      var markerPath = Path.Combine(fullPath, OwnershipMarkerFileName);
+      if (!names.Remove(OwnershipMarkerFileName) ||
+          !HasValidOwnershipMarker(markerPath, staleBeforeUtc))
+      {
+        return false;
+      }
+
+      if (names.Count == 0)
+      {
+        return true;
+      }
+
+      if (!names.Remove(LeaseFileName))
+      {
+        return false;
+      }
+
+      if (names.Count == 1)
+      {
+        var payloadName = names.Single();
+        if (!string.Equals(payloadName, "extension.vsix", StringComparison.OrdinalIgnoreCase) &&
+            !IsStrictPartialName(payloadName))
+        {
+          return false;
+        }
+      }
+      else if (names.Count != 0)
+      {
+        return false;
+      }
+
+      return CanAcquireForCleanup(fullPath, staleBeforeUtc);
+    }
+    catch (Exception exception) when (exception is IOException or
+        UnauthorizedAccessException or System.Security.SecurityException)
+    {
+      return false;
+    }
+  }
+
+  internal static bool HasReclaimablePublishedPlanArtifactShape(
+      string directoryPath,
+      DateTime staleBeforeUtc)
+  {
+    if (!Path.IsPathFullyQualified(directoryPath))
+    {
+      return false;
+    }
+
+    try
+    {
+      var fullPath = Path.GetFullPath(directoryPath);
+      var root = Path.GetDirectoryName(fullPath);
+      if (!string.Equals(fullPath, directoryPath, StringComparison.OrdinalIgnoreCase) ||
+          !IsStrictLowerHexGuid(Path.GetFileName(fullPath)) ||
+          !string.Equals(
+              Path.GetFileName(root),
+              "PlanArtifacts",
+              StringComparison.OrdinalIgnoreCase) ||
+          !string.Equals(
+              Path.GetFileName(Path.GetDirectoryName(root)),
+              "Wdem",
+              StringComparison.OrdinalIgnoreCase) ||
+          File.GetAttributes(fullPath).HasFlag(FileAttributes.ReparsePoint) ||
+          Directory.GetLastWriteTimeUtc(fullPath) >= staleBeforeUtc)
       {
         return false;
       }
@@ -518,9 +624,10 @@ internal sealed class ArtifactLease : IDisposable
       {
         OwnershipMarkerFileName,
         LeaseFileName,
-        "extension.vsix"
+        "extension.vsix",
+        ".wdem-vsix-owner"
       };
-      var entries = Directory.EnumerateFileSystemEntries(directoryPath).Take(4).ToArray();
+      var entries = Directory.EnumerateFileSystemEntries(fullPath).Take(5).ToArray();
       if (entries.Length != expectedNames.Count ||
           entries.Any(entry => !expectedNames.Remove(Path.GetFileName(entry))))
       {
@@ -538,7 +645,7 @@ internal sealed class ArtifactLease : IDisposable
         }
       }
 
-      return CanAcquireForCleanup(directoryPath, staleBeforeUtc);
+      return true;
     }
     catch (Exception exception) when (exception is IOException or
         UnauthorizedAccessException or System.Security.SecurityException)
@@ -546,6 +653,16 @@ internal sealed class ArtifactLease : IDisposable
       return false;
     }
   }
+
+  private static bool IsStrictPartialName(string name) =>
+      name.Length == 41 &&
+      name[0] == '.' &&
+      name.EndsWith(".partial", StringComparison.Ordinal) &&
+      IsStrictLowerHexGuid(name[1..33]);
+
+  private static bool IsStrictLowerHexGuid(string name) =>
+      name.Length == 32 && name.All(character =>
+          character is (>= '0' and <= '9') or (>= 'a' and <= 'f'));
 
   private static bool HasValidOwnershipMarker(
       string markerPath,

@@ -710,20 +710,23 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
   internal static bool IsPlanArtifactStep(string resourceId, string stepId) =>
       !string.IsNullOrWhiteSpace(resourceId) && TryGetRegistrationLocator(stepId, out _);
 
-  internal static bool TryRevokeExpiredDirectory(
+  internal static bool TryReclaimExpiredDirectory(
       string directory,
       DateTimeOffset utcNow,
-      IVsixPlanArtifactRevocationStore revocationStore)
+      DateTime staleBeforeUtc)
   {
-    ArgumentNullException.ThrowIfNull(revocationStore);
     try
     {
+      if (!ArtifactLease.HasReclaimablePublishedPlanArtifactShape(
+              directory,
+              staleBeforeUtc))
+      {
+        return false;
+      }
+
       ValidateOwnershipDirectoryPath(directory);
       var evidence = ReadOwnershipMarker(directory);
-      var locator = new VsixPlanArtifactLocator(
-          evidence.OwnershipToken,
-          Path.GetFileName(directory));
-      ValidateRegistration(evidence, evidence.ResourceId, locator);
+      ValidateEvidencePaths(evidence);
       if (!string.Equals(
               directory,
               evidence.OwnershipDirectory,
@@ -739,28 +742,29 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       WindowsPlanArtifactDirectoryPolicy.ValidateRestrictedDirectory(
           directory,
           evidence.CreatorSid);
+      if (!ArtifactLease.HasReclaimablePublishedPlanArtifactShape(
+              directory,
+              staleBeforeUtc))
+      {
+        return false;
+      }
+
       var sealedEvidence = ReadOwnershipMarker(directory);
       if (!EvidenceMatches(sealedEvidence, evidence))
       {
         return false;
       }
 
-      var directoryName = Path.GetFileName(directory);
-      var state = revocationStore.GetState(evidence.OwnershipToken, directoryName);
-      if (!state.IsExpired(
+      if (!IsExpired(
+              sealedEvidence,
               utcNow,
               WindowsVsixPlanArtifactClock.GetBootIdentifier(),
-              Environment.TickCount64))
+              Environment.TickCount64) ||
+          !TryPersistRecoveryTerminalState(directory, sealedEvidence.OwnershipToken))
       {
         return false;
       }
 
-      if (!state.IsTerminal)
-      {
-        revocationStore.Revoke(evidence.OwnershipToken, directoryName);
-      }
-
-      _ = PersistRevokedEvidence(sealedEvidence);
       return true;
     }
     catch (Exception exception) when (exception is ArgumentException or IOException or
@@ -770,6 +774,46 @@ internal sealed class VsixPlanArtifactStore : IVsixPlanArtifactStore
       return false;
     }
   }
+
+  private static bool TryPersistRecoveryTerminalState(
+      string directory,
+      string ownershipToken)
+  {
+    var root = Path.GetDirectoryName(directory);
+    if (root is null)
+    {
+      return false;
+    }
+
+    var directoryName = Path.GetFileName(directory);
+    var path = Path.Combine(
+        root,
+        $".{directoryName}.{ownershipToken}.wdem-vsix-terminal");
+    if (!Guid.TryParseExact(directoryName, "N", out _) ||
+        ownershipToken.Length != 32 || !ownershipToken.All(Uri.IsHexDigit) ||
+        !string.Equals(Path.GetDirectoryName(path), root, StringComparison.OrdinalIgnoreCase))
+    {
+      return false;
+    }
+
+    if (File.Exists(path) || Directory.Exists(path))
+    {
+      return true;
+    }
+
+    Directory.CreateDirectory(path);
+    return Directory.Exists(path);
+  }
+
+  private static bool IsExpired(
+      VsixPlanArtifactEvidence evidence,
+      DateTimeOffset utcNow,
+      Guid bootIdentifier,
+      long uptimeMilliseconds) =>
+      evidence.BootIdentifier != bootIdentifier ||
+      uptimeMilliseconds < 0 ||
+      uptimeMilliseconds >= evidence.ExpiresAtUptimeMilliseconds ||
+      utcNow >= evidence.ExpiresAtUtc;
 
   private void RegisterHandoff(
       string resourceId,
