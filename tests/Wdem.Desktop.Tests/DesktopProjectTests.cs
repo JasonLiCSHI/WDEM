@@ -1,7 +1,10 @@
+using System.Diagnostics;
 using System.Xml.Linq;
 using Microsoft.UI.Xaml;
 using Wdem.Desktop;
 using Wdem.Tests;
+using Wdem.Windows.Composition;
+using Wdem.Windows.Persistence;
 using Xunit;
 
 namespace Wdem.Desktop.Tests;
@@ -30,6 +33,24 @@ public sealed class DesktopProjectTests
         string.Equals("true", useWinUi, StringComparison.OrdinalIgnoreCase),
         $"Expected UseWinUI to be true, but found '{useWinUi ?? "<missing>"}'.");
     Assert.Empty(project.Descendants("UseWPF"));
+  }
+
+  [Fact]
+  public void ProfileSelectionViewBindsRetryToLoadCommand()
+  {
+    string desktopDirectory = Path.GetDirectoryName(GetDesktopProjectPath())!;
+    XDocument view = XDocument.Load(Path.Combine(
+        desktopDirectory,
+        "Views",
+        "ProfileSelectionView.xaml"));
+
+    XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+    Assert.Contains(
+        view.Descendants(presentation + "Button"),
+        button => string.Equals(
+            button.Attribute("Command")?.Value,
+            "{Binding LoadCommand}",
+            StringComparison.Ordinal));
   }
 
   [Fact]
@@ -69,6 +90,72 @@ public sealed class DesktopProjectTests
     Assert.DoesNotContain("runtime", result.HostStandardError, StringComparison.OrdinalIgnoreCase);
   }
 
+  [Fact]
+  public async Task DesktopPublishIncludesLoadableShippedProfileTree()
+  {
+    string projectPath = GetDesktopProjectPath();
+    string repositoryRoot = Directory.GetParent(Directory.GetParent(Path.GetDirectoryName(projectPath)!)!.FullName)!.FullName;
+    string testRoot = Path.Combine(
+        Path.GetTempPath(),
+        "wdem-desktop-profile-layout",
+        Guid.NewGuid().ToString("N"));
+    string publishDirectory = Path.Combine(testRoot, "publish");
+    Directory.CreateDirectory(publishDirectory);
+
+    try
+    {
+      ProcessResult publish = await RunAsync(
+          Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet",
+          repositoryRoot,
+          [
+            "publish", projectPath,
+            "-c", "Release",
+            "-o", publishDirectory,
+            "--no-restore",
+            "--nologo",
+            "--verbosity", "minimal",
+            "-m:1"
+          ]);
+
+      Assert.True(publish.ExitCode == 0, publish.Output);
+      string[] expectedProfileFiles =
+      [
+        "csharp-developer.yaml",
+        Path.Combine("assets", "csharp-developer.DotSettings"),
+        Path.Combine("assets", "csharp-developer.vsconfig"),
+        Path.Combine("assets", "csharp-developer.vssettings"),
+        Path.Combine("schemas", "developer-profile.schema.json")
+      ];
+      string profilesDirectory = Path.Combine(publishDirectory, "profiles");
+      Assert.All(
+          expectedProfileFiles,
+          relativePath => Assert.True(
+              File.Exists(Path.Combine(profilesDirectory, relativePath)),
+              $"Published profile file '{relativePath}' was not found."));
+
+      WdemWindowsComposition composition = await WdemWindowsFactory.CreateAsync(
+          profilesDirectory,
+          new WdemDataPaths(Path.Combine(testRoot, "data")));
+      var loaded = await composition.Profiles.LoadAsync("csharp-developer");
+
+      Assert.True(loaded.IsValid, string.Join(Environment.NewLine, loaded.Errors.Select(error => error.Detail)));
+      Assert.Equal("C# Developer", loaded.Profile!.DisplayName);
+    }
+    finally
+    {
+      try
+      {
+        Directory.Delete(testRoot, recursive: true);
+      }
+      catch (IOException)
+      {
+      }
+      catch (UnauthorizedAccessException)
+      {
+      }
+    }
+  }
+
   private static string GetDesktopProjectPath()
   {
     DirectoryInfo? directory = new(AppContext.BaseDirectory);
@@ -86,4 +173,35 @@ public sealed class DesktopProjectTests
 
     throw new FileNotFoundException("Could not locate the Wdem.Desktop project file.");
   }
+
+  private static async Task<ProcessResult> RunAsync(
+      string fileName,
+      string workingDirectory,
+      IReadOnlyList<string> arguments)
+  {
+    var startInfo = new ProcessStartInfo(fileName)
+    {
+      WorkingDirectory = workingDirectory,
+      UseShellExecute = false,
+      CreateNoWindow = true,
+      RedirectStandardOutput = true,
+      RedirectStandardError = true
+    };
+    foreach (string argument in arguments)
+    {
+      startInfo.ArgumentList.Add(argument);
+    }
+
+    using var process = Process.Start(startInfo)
+        ?? throw new InvalidOperationException($"Could not start '{fileName}'.");
+    Task<string> standardOutput = process.StandardOutput.ReadToEndAsync();
+    Task<string> standardError = process.StandardError.ReadToEndAsync();
+    using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+    await process.WaitForExitAsync(timeout.Token);
+    return new ProcessResult(
+        process.ExitCode,
+        await standardOutput + await standardError);
+  }
+
+  private sealed record ProcessResult(int ExitCode, string Output);
 }

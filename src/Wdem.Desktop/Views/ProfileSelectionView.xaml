@@ -35,9 +35,9 @@
             </ListView.ItemTemplate>
         </ListView>
 
-        <Button Grid.Row="2"
-                HorizontalAlignment="Right"
-                Content="选择资源"
-                Command="{Binding SelectProfileCommand}" />
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="12">
+            <Button Content="重试加载" Command="{Binding LoadCommand}" />
+            <Button Content="选择资源" Command="{Binding SelectProfileCommand}" />
+        </StackPanel>
     </Grid>
 </UserControl>

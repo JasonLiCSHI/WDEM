@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using Wdem.Core.Execution;
 using Wdem.Core.Profiles;
 
 namespace Wdem.Desktop.ViewModels;
@@ -30,24 +31,29 @@ public sealed class ProfileSelectionViewModel : ObservableObject
   private const string DeliveredProfileId = "csharp-developer";
   private readonly IProfileCatalog _catalog;
   private readonly Action<DeveloperProfile> _selectProfile;
+  private readonly Action<Exception> _onError;
+  private readonly Action _clearError;
   private string? _errorMessage;
   private ProfileSelectionItemViewModel? _selectedProfile;
 
   public ProfileSelectionViewModel(
       IProfileCatalog catalog,
       Action<DeveloperProfile> selectProfile,
-      Action<Exception>? onError = null)
+      Action<Exception>? onError = null,
+      Action? clearError = null)
   {
     ArgumentNullException.ThrowIfNull(catalog);
     ArgumentNullException.ThrowIfNull(selectProfile);
     _catalog = catalog;
     _selectProfile = selectProfile;
+    _onError = onError ?? (_ => { });
+    _clearError = clearError ?? (() => { });
     Profiles = new ObservableCollection<ProfileSelectionItemViewModel>();
-    LoadCommand = new AsyncRelayCommand(_ => LoadAsync(), onError: ReportError(onError));
+    LoadCommand = new AsyncRelayCommand(_ => LoadAsync(), onError: ReportError);
     SelectProfileCommand = new AsyncRelayCommand(
         _ => SelectAsync(),
         _ => SelectedProfile is not null,
-        ReportError(onError));
+        ReportError);
   }
 
   public ObservableCollection<ProfileSelectionItemViewModel> Profiles { get; }
@@ -76,6 +82,7 @@ public sealed class ProfileSelectionViewModel : ObservableObject
 
   public async Task LoadAsync()
   {
+    ClearErrors();
     IReadOnlyList<ProfileLoadResult> results = await _catalog.LoadAllAsync();
     Profiles.Clear();
     foreach (ProfileLoadResult result in results.Where(result =>
@@ -89,13 +96,28 @@ public sealed class ProfileSelectionViewModel : ObservableObject
     }
 
     SelectedProfile = Profiles.FirstOrDefault();
-    ErrorMessage = Profiles.Count > 0
-        ? null
-        : "未找到可用的 C# Developer 配置文件。";
+    if (Profiles.Count == 0)
+    {
+      StructuredError? error = results
+          .SelectMany(result => result.Errors)
+          .FirstOrDefault();
+      if (error is not null)
+      {
+        var exception = new StructuredErrorException(error);
+        ErrorMessage = exception.UserMessage;
+        _onError(exception);
+      }
+      else
+      {
+        ErrorMessage = "未找到可用的 C# Developer 配置文件。";
+        _onError(new InvalidOperationException(ErrorMessage));
+      }
+    }
   }
 
   private Task SelectAsync()
   {
+    ClearErrors();
     if (SelectedProfile is not null)
     {
       _selectProfile(SelectedProfile.Profile);
@@ -104,9 +126,15 @@ public sealed class ProfileSelectionViewModel : ObservableObject
     return Task.CompletedTask;
   }
 
-  private Action<Exception> ReportError(Action<Exception>? onError) => exception =>
+  private void ReportError(Exception exception)
   {
-    ErrorMessage = "无法加载配置文件。";
-    onError?.Invoke(exception);
-  };
+    ErrorMessage = "无法加载配置文件。请检查配置目录后重试。";
+    _onError(exception);
+  }
+
+  private void ClearErrors()
+  {
+    ErrorMessage = null;
+    _clearError();
+  }
 }

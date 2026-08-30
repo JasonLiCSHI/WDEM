@@ -15,7 +15,11 @@ public sealed class MainWindowViewModel : ObservableObject
     ArgumentNullException.ThrowIfNull(catalog);
     ArgumentNullException.ThrowIfNull(graphBuilder);
     _graphBuilder = graphBuilder;
-    ProfileSelection = new ProfileSelectionViewModel(catalog, SelectProfile, ReportError);
+    ProfileSelection = new ProfileSelectionViewModel(
+        catalog,
+        SelectProfile,
+        ReportError,
+        ClearError);
     _currentPage = ProfileSelection;
     NavigateToProfilesCommand = new AsyncRelayCommand(_ => NavigateToProfilesAsync(), onError: ReportError);
     NavigateToResourcesCommand = new AsyncRelayCommand(
@@ -65,18 +69,21 @@ public sealed class MainWindowViewModel : ObservableObject
         profile,
         _graphBuilder,
         NavigateToPlan,
-        ReportError);
+        ReportError,
+        ClearError);
     CurrentPage = ResourceSelection;
   }
 
   private Task NavigateToProfilesAsync()
   {
+    ClearError();
     CurrentPage = ProfileSelection;
     return Task.CompletedTask;
   }
 
   private Task NavigateToResourcesAsync()
   {
+    ClearError();
     if (ResourceSelection is not null)
     {
       CurrentPage = ResourceSelection;
@@ -96,8 +103,10 @@ public sealed class MainWindowViewModel : ObservableObject
   private void ReportError(Exception exception)
   {
     ArgumentNullException.ThrowIfNull(exception);
-    ErrorMessage = "操作未完成，请重试。";
+    ErrorMessage = ResourceSelectionViewModel.ToUserMessage(exception);
   }
+
+  private void ClearError() => ErrorMessage = null;
 }
 
 public sealed record PlanPagePlaceholderViewModel(

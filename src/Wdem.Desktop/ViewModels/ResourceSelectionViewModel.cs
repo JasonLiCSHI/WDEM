@@ -1,7 +1,9 @@
 using System.Collections.ObjectModel;
 using System.Windows.Input;
+using Wdem.Core.Execution;
 using Wdem.Core.Graph;
 using Wdem.Core.Profiles;
+using Wdem.Core.Runs;
 
 namespace Wdem.Desktop.ViewModels;
 
@@ -17,6 +19,43 @@ public sealed record ResourceSelectionNavigationRequest(
     ProfileSelection Selection,
     ResourceGraph Graph);
 
+public sealed class StructuredErrorException : InvalidOperationException
+{
+  public StructuredErrorException(StructuredError error)
+      : this(CreateDisplay(error))
+  {
+  }
+
+  private StructuredErrorException(StructuredErrorDisplay display)
+      : base(display.UserMessage)
+  {
+    Error = display.Error;
+    UserMessage = display.UserMessage;
+  }
+
+  public StructuredError Error { get; }
+
+  public string UserMessage { get; }
+
+  private static StructuredErrorDisplay CreateDisplay(StructuredError error)
+  {
+    ArgumentNullException.ThrowIfNull(error);
+    var redactor = new LogRedactor();
+    StructuredError safeError = redactor.Redact(error);
+    string? safeAction = safeError.SuggestedAction is null
+        ? null
+        : new StructuredError(safeError.Code, safeError.Summary, safeError.SuggestedAction).Detail;
+    safeError = safeError with { SuggestedAction = safeAction };
+    string userMessage = string.Join(
+        Environment.NewLine,
+        new[] { safeError.Summary, safeError.Detail, safeError.SuggestedAction }
+            .Where(value => !string.IsNullOrWhiteSpace(value)));
+    return new StructuredErrorDisplay(safeError, userMessage);
+  }
+
+  private sealed record StructuredErrorDisplay(StructuredError Error, string UserMessage);
+}
+
 public sealed class ResourceSelectionViewModel : ObservableObject
 {
   private readonly DeveloperProfile _profile;
@@ -25,19 +64,23 @@ public sealed class ResourceSelectionViewModel : ObservableObject
   private readonly HashSet<string> _optionalIds;
   private readonly HashSet<string> _selectedOptionalIds;
   private readonly Action<Exception> _onError;
+  private readonly Action _clearError;
   private ResourceGraph? _resolvedGraph;
+  private string? _errorMessage;
 
   public ResourceSelectionViewModel(
       DeveloperProfile profile,
       ResourceGraphBuilder graphBuilder,
       Action<ResourceSelectionNavigationRequest>? navigateToPlan = null,
-      Action<Exception>? onError = null)
+      Action<Exception>? onError = null,
+      Action? clearError = null)
   {
     ArgumentNullException.ThrowIfNull(profile);
     ArgumentNullException.ThrowIfNull(graphBuilder);
     _profile = profile;
     _graphBuilder = graphBuilder;
     _onError = onError ?? (_ => { });
+    _clearError = clearError ?? (() => { });
     _requiredIds = new HashSet<string>(
         profile.RequiredResources.Select(resource => resource.Id),
         StringComparer.OrdinalIgnoreCase);
@@ -90,6 +133,12 @@ public sealed class ResourceSelectionViewModel : ObservableObject
   public ResourceGraph ResolvedGraph => _resolvedGraph ??
       throw new InvalidOperationException("The resource graph has not been resolved.");
 
+  public string? ErrorMessage
+  {
+    get => _errorMessage;
+    private set => SetProperty(ref _errorMessage, value);
+  }
+
   public ICommand CheckEnvironmentCommand { get; }
 
   public ICommand StartConfigurationCommand { get; }
@@ -110,6 +159,8 @@ public sealed class ResourceSelectionViewModel : ObservableObject
     {
       return;
     }
+
+    ClearErrors();
 
     if (isSelected)
     {
@@ -136,15 +187,20 @@ public sealed class ResourceSelectionViewModel : ObservableObject
       }
 
       RecalculateSelection();
+      ErrorMessage = ToUserMessage(exception);
       _onError(exception);
     }
   }
 
   private void RecalculateSelection()
   {
-    ResourceGraph graph = _graphBuilder.Build(
-        _profile,
-        Selection);
+    ResourceGraphBuildResult result = _graphBuilder.TryBuild(_profile, Selection);
+    if (result.Errors.Count > 0)
+    {
+      throw new StructuredErrorException(result.Errors[0]);
+    }
+
+    ResourceGraph graph = result.Graph!;
     _resolvedGraph = graph;
 
     foreach (ResourceSelectionItemViewModel item in Resources)
@@ -192,6 +248,7 @@ public sealed class ResourceSelectionViewModel : ObservableObject
       ResourceSelectionAction action,
       Action<ResourceSelectionNavigationRequest>? navigateToPlan)
   {
+    ClearErrors();
     navigateToPlan?.Invoke(new ResourceSelectionNavigationRequest(
         action,
         _profile,
@@ -199,4 +256,15 @@ public sealed class ResourceSelectionViewModel : ObservableObject
         ResolvedGraph));
     return Task.CompletedTask;
   }
+
+  private void ClearErrors()
+  {
+    ErrorMessage = null;
+    _clearError();
+  }
+
+  internal static string ToUserMessage(Exception exception) =>
+      exception is StructuredErrorException structuredException
+          ? structuredException.UserMessage
+          : "操作未完成。请检查输入后重试。";
 }
