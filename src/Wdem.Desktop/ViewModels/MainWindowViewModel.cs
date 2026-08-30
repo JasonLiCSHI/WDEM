@@ -1,20 +1,39 @@
 using Wdem.Core.Graph;
+using Wdem.Core.Execution;
 using Wdem.Core.Profiles;
+using Wdem.Core.Runs;
 
 namespace Wdem.Desktop.ViewModels;
 
 public sealed class MainWindowViewModel : ObservableObject
 {
   private readonly ResourceGraphBuilder _graphBuilder;
+  private readonly IProfileCatalog _catalog;
+  private readonly IEnvironmentRunService? _environmentRuns;
+  private readonly IRunEventSink? _runEvents;
+  private readonly LogRedactor? _redactor;
+  private readonly IUiDispatcher? _dispatcher;
   private object _currentPage;
   private ResourceSelectionViewModel? _resourceSelection;
+  private ExecutionMonitorViewModel? _executionMonitor;
   private string? _errorMessage;
 
-  public MainWindowViewModel(IProfileCatalog catalog, ResourceGraphBuilder graphBuilder)
+  public MainWindowViewModel(
+      IProfileCatalog catalog,
+      ResourceGraphBuilder graphBuilder,
+      IEnvironmentRunService? environmentRuns = null,
+      IRunEventSink? runEvents = null,
+      LogRedactor? redactor = null,
+      IUiDispatcher? dispatcher = null)
   {
     ArgumentNullException.ThrowIfNull(catalog);
     ArgumentNullException.ThrowIfNull(graphBuilder);
+    _catalog = catalog;
     _graphBuilder = graphBuilder;
+    _environmentRuns = environmentRuns;
+    _runEvents = runEvents;
+    _redactor = redactor;
+    _dispatcher = dispatcher;
     ProfileSelection = new ProfileSelectionViewModel(
         catalog,
         SelectProfile,
@@ -70,7 +89,7 @@ public sealed class MainWindowViewModel : ObservableObject
     ResourceSelection = new ResourceSelectionViewModel(
         profile,
         _graphBuilder,
-        NavigateToPlan,
+        NavigateToPlanAsync,
         ReportError,
         ClearErrors);
     CurrentPage = ResourceSelection;
@@ -94,12 +113,57 @@ public sealed class MainWindowViewModel : ObservableObject
     return Task.CompletedTask;
   }
 
-  private void NavigateToPlan(ResourceSelectionNavigationRequest request)
+  private async Task NavigateToPlanAsync(ResourceSelectionNavigationRequest request)
   {
-    CurrentPage = new PlanPagePlaceholderViewModel(
-        request.Action == ResourceSelectionAction.CheckEnvironment ? "检查环境" : "开始配置",
-        "执行计划页面将在下一阶段提供。当前尚未执行任何系统更改。",
+    ClearErrors();
+    EnsureExecutionComposition();
+    ProfileLoadResult loaded = await _catalog.LoadAsync(request.Profile.Id);
+    if (!loaded.IsValid)
+    {
+      if (loaded.Errors.FirstOrDefault() is StructuredError error)
+      {
+        throw new StructuredErrorException(error);
+      }
+
+      throw new InvalidOperationException("所选配置文件无法加载。");
+    }
+
+    var runRequest = new RunRequest(
+        loaded.SourcePath,
+        request.Selection.SelectedOptionalResourceIds ??
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+    var plan = new PlanViewModel(
+        _environmentRuns!,
+        _redactor!,
+        runRequest,
+        NavigateToExecutionAsync);
+    CurrentPage = plan;
+    await plan.InitializeAsync();
+  }
+
+  private async Task NavigateToExecutionAsync(RunRequest request)
+  {
+    EnsureExecutionComposition();
+    _executionMonitor?.Dispose();
+    _executionMonitor = new ExecutionMonitorViewModel(
+        _environmentRuns!,
+        _runEvents!,
+        _redactor!,
+        _dispatcher!,
         request);
+    CurrentPage = _executionMonitor;
+    await _executionMonitor.StartAsync();
+  }
+
+  private void EnsureExecutionComposition()
+  {
+    if (_environmentRuns is null ||
+        _runEvents is null ||
+        _redactor is null ||
+        _dispatcher is null)
+    {
+      throw new InvalidOperationException("桌面执行服务尚未初始化。");
+    }
   }
 
   private string ReportError(Exception exception)
@@ -117,8 +181,3 @@ public sealed class MainWindowViewModel : ObservableObject
     ErrorMessage = null;
   }
 }
-
-public sealed record PlanPagePlaceholderViewModel(
-    string Title,
-    string Message,
-    ResourceSelectionNavigationRequest Request);

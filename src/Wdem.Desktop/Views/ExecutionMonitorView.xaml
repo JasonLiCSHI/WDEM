@@ -1,0 +1,114 @@
+<UserControl x:Class="Wdem.Desktop.Views.ExecutionMonitorView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Padding="24" RowSpacing="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Spacing="8">
+            <TextBlock Text="实时执行" FontSize="28" FontWeight="SemiBold" />
+            <ProgressBar Minimum="0" Maximum="100" Value="{Binding TotalProgress}" />
+            <StackPanel Orientation="Horizontal" Spacing="18">
+                <TextBlock Text="{Binding TotalProgressDisplay}" />
+                <TextBlock Text="{Binding ElapsedDisplay}" />
+                <TextBlock Text="{Binding CurrentResourceDisplay}" />
+                <TextBlock Text="{Binding RestartRequirementDisplay}" />
+            </StackPanel>
+        </StackPanel>
+
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="12">
+            <Button Content="取消" Command="{Binding CancelCommand}" />
+            <Button Content="重试失败资源" Command="{Binding RetryFailedCommand}" />
+            <TextBlock Text="{Binding ErrorMessage}"
+                       VerticalAlignment="Center"
+                       TextWrapping="Wrap"
+                       Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+        </StackPanel>
+
+        <Grid Grid.Row="2" ColumnSpacing="16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="2*" />
+                <ColumnDefinition Width="3*" />
+            </Grid.ColumnDefinitions>
+
+            <Grid Grid.Column="0" RowSpacing="6">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" Text="资源与步骤"
+                           FontSize="18" FontWeight="SemiBold" />
+                <ListView Grid.Row="1" ItemsSource="{Binding Resources}" SelectionMode="None">
+                    <ListView.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <ItemsStackPanel Orientation="Vertical" />
+                        </ItemsPanelTemplate>
+                    </ListView.ItemsPanel>
+                    <ListView.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Margin="0,5" Spacing="3">
+                                <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
+                                <ProgressBar Minimum="0" Maximum="100" Value="{Binding Percent}" />
+                                <TextBlock Text="{Binding Message}" TextWrapping="Wrap" />
+                                <ItemsControl ItemsSource="{Binding Steps}" Margin="16,0,0,0">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Margin="0,3">
+                                                <TextBlock Text="{Binding Name}" />
+                                                <ProgressBar Minimum="0" Maximum="100"
+                                                             Value="{Binding Percent}" />
+                                                <TextBlock Text="{Binding Message}" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <TextBlock Text="{Binding ErrorDetail}" TextWrapping="Wrap"
+                                           Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </Grid>
+
+            <Grid Grid.Column="1" RowSpacing="6">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" Text="运行日志（保留最新 5,000 条）"
+                           FontSize="18" FontWeight="SemiBold" />
+                <ListView Grid.Row="1" ItemsSource="{Binding Logs}"
+                          SelectedItem="{Binding SelectedLogEntry, Mode=TwoWay}">
+                    <ListView.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <ItemsStackPanel Orientation="Vertical" />
+                        </ItemsPanelTemplate>
+                    </ListView.ItemsPanel>
+                    <ListView.ItemTemplate>
+                        <DataTemplate>
+                            <Grid ColumnSpacing="8" Padding="2">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="{Binding TimestampDisplay}" />
+                                <TextBlock Grid.Column="1" Text="{Binding ResourceId}" />
+                                <TextBlock Grid.Column="2" Text="{Binding Message}" TextWrapping="Wrap" />
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </Grid>
+        </Grid>
+
+        <Border Grid.Row="3" Padding="10" CornerRadius="4"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+            <TextBlock Text="{Binding SelectedErrorDetail}" TextWrapping="Wrap" />
+        </Border>
+    </Grid>
+</UserControl>

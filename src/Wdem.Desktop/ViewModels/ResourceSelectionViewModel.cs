@@ -33,7 +33,7 @@ public sealed class ResourceSelectionViewModel : ObservableObject
   public ResourceSelectionViewModel(
       DeveloperProfile profile,
       ResourceGraphBuilder graphBuilder,
-      Action<ResourceSelectionNavigationRequest>? navigateToPlan = null,
+      Func<ResourceSelectionNavigationRequest, Task>? navigateToPlan = null,
       Func<Exception, string>? reportError = null,
       Action? clearError = null)
   {
@@ -207,15 +207,14 @@ public sealed class ResourceSelectionViewModel : ObservableObject
 
   private Task NavigateAsync(
       ResourceSelectionAction action,
-      Action<ResourceSelectionNavigationRequest>? navigateToPlan)
+      Func<ResourceSelectionNavigationRequest, Task>? navigateToPlan)
   {
     ClearErrors();
-    navigateToPlan?.Invoke(new ResourceSelectionNavigationRequest(
+    return navigateToPlan?.Invoke(new ResourceSelectionNavigationRequest(
         action,
         _profile,
         Selection,
-        ResolvedGraph));
-    return Task.CompletedTask;
+        ResolvedGraph)) ?? Task.CompletedTask;
   }
 
   private void ClearErrors()

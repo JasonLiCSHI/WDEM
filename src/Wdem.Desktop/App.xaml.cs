@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Dispatching;
 using Wdem.Core.Graph;
 using Wdem.Desktop.ViewModels;
 using Wdem.Windows.Composition;
@@ -23,7 +24,13 @@ public partial class App : Application
       _composition = await WdemWindowsFactory.CreateAsync(FindProfilesDirectory());
       var window = new MainWindow(() => new MainWindowViewModel(
           _composition.Profiles,
-          new ResourceGraphBuilder()));
+          new ResourceGraphBuilder(),
+          _composition.EnvironmentRuns,
+          _composition.RunEvents,
+          _composition.Redactor,
+          new DispatcherQueueUiDispatcher(
+              DispatcherQueue.GetForCurrentThread() ?? throw new InvalidOperationException(
+                  "The WinUI dispatcher is unavailable."))));
       _window = window;
       _window.Activate();
       await window.DataContext.InitializeAsync();

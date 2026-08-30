@@ -57,7 +57,8 @@ public partial class MainWindow : Window
     {
       ProfileSelectionViewModel viewModel => new ProfileSelectionView { DataContext = viewModel },
       ResourceSelectionViewModel viewModel => new ResourceSelectionView { DataContext = viewModel },
-      PlanPagePlaceholderViewModel viewModel => CreatePlanPlaceholder(viewModel),
+      PlanViewModel viewModel => new PlanView { DataContext = viewModel },
+      ExecutionMonitorViewModel viewModel => new ExecutionMonitorView { DataContext = viewModel },
       _ => throw new InvalidOperationException("The current page type is not supported.")
     };
 
@@ -68,15 +69,4 @@ public partial class MainWindow : Window
     _isSynchronizingNavigation = false;
   }
 
-  private static FrameworkElement CreatePlanPlaceholder(PlanPagePlaceholderViewModel viewModel) =>
-      new StackPanel
-      {
-        Padding = new Thickness(32),
-        Spacing = 8,
-        Children =
-        {
-            new TextBlock { Text = viewModel.Title, FontSize = 28 },
-            new TextBlock { Text = viewModel.Message, TextWrapping = TextWrapping.Wrap }
-        }
-      };
 }

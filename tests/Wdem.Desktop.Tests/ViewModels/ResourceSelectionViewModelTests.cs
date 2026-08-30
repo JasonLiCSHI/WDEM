@@ -45,7 +45,11 @@ public sealed class ResourceSelectionViewModelTests
     var viewModel = new ResourceSelectionViewModel(
         Profile(),
         new ResourceGraphBuilder(_ => null),
-        navigationRequest => request = navigationRequest);
+        navigationRequest =>
+        {
+          request = navigationRequest;
+          return Task.CompletedTask;
+        });
     viewModel.Resources.Single(item => item.Id == "resharper-settings").IsSelected = true;
 
     await ((AsyncRelayCommand)viewModel.CheckEnvironmentCommand).ExecuteAsync(null);
