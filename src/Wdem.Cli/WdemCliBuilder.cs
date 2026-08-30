@@ -1,7 +1,6 @@
 using System.CommandLine;
 using System.CommandLine.Parsing;
 using Wdem.Core.Execution;
-using Wdem.Core.Reporting;
 
 namespace Wdem.Cli;
 
@@ -283,7 +282,7 @@ public static class WdemCliBuilder
     {
       try
       {
-        RunReportExporter.ValidateFilePath(result.GetValueOrDefault<string?>()!);
+        ValidateReportPathSyntax(result.GetValueOrDefault<string?>()!);
       }
       catch (ArgumentException exception)
       {
@@ -295,5 +294,21 @@ public static class WdemCliBuilder
 
   private static string? ReportPath(string? value) => value is null
       ? null
-      : RunReportExporter.ValidateFilePath(value);
+      : ValidateReportPathSyntax(value);
+
+  private static string ValidateReportPathSyntax(string filePath)
+  {
+    ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+    string path = Path.GetFullPath(filePath);
+    string extension = Path.GetExtension(path);
+    if (!extension.Equals(".json", StringComparison.OrdinalIgnoreCase) &&
+        !extension.Equals(".md", StringComparison.OrdinalIgnoreCase))
+    {
+      throw new ArgumentException(
+          "Report file must use the .json or .md extension.",
+          nameof(filePath));
+    }
+
+    return path;
+  }
 }

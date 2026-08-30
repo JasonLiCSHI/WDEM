@@ -221,6 +221,80 @@ public sealed class WdemCliBuilderTests
   }
 
   [Fact]
+  public void Build_ParseMissingParentReportPathPerformsNoIoValidation()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"wdem-report-parse-{Guid.NewGuid():N}");
+    string reportPath = Path.Combine(root, "missing", "report.json");
+
+    ParseResult parsed = WdemCliBuilder.Build(new CapturingHandler()).Parse(
+    [
+      "apply", "--profile", "developer.yaml", "--report", reportPath
+    ]);
+
+    Assert.Empty(parsed.Errors);
+    Assert.False(Directory.Exists(root));
+  }
+
+  [Fact]
+  public async Task Build_HelpWithUnavailableReportPathPerformsNoIoValidation()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"wdem-report-help-{Guid.NewGuid():N}");
+    string reportPath = Path.Combine(root, "missing", "report.json");
+    var handler = new CapturingHandler();
+    ParseResult parsed = WdemCliBuilder.Build(handler).Parse(
+    [
+      "apply", "--profile", "developer.yaml", "--report", reportPath, "--help"
+    ]);
+
+    int exitCode = await parsed.InvokeAsync();
+
+    Assert.Equal(0, exitCode);
+    Assert.Empty(parsed.Errors);
+    Assert.Null(handler.Command);
+    Assert.False(Directory.Exists(root));
+  }
+
+  [Fact]
+  public async Task Host_UnavailableReportPathFailsRedactedDuringHandlerPreflight()
+  {
+    const string secret = "unavailable-report-secret";
+    string root = Path.Combine(Path.GetTempPath(), $"wdem-report-host-{Guid.NewGuid():N}");
+    string reportPath = Path.Combine(root, secret, "report.json");
+    var service = new StubEnvironmentRunService
+    {
+      Result = CompletedRun(ExecutionOutcome.Succeeded)
+    };
+    var error = new StringWriter();
+    var redactor = new LogRedactor([secret]);
+    var handler = new WdemCommandHandler(
+        service,
+        new StubExecutionRunStore(),
+        new StringWriter(),
+        error,
+        redactor,
+        new RunEventHub());
+    var handlerFactoryCalls = 0;
+
+    int exitCode = await WdemCliHost.RunAsync(
+        ["apply", "--profile", "developer.yaml", "--report", reportPath, "--json"],
+        _ =>
+        {
+          handlerFactoryCalls++;
+          return Task.FromResult<IWdemCommandHandler>(handler);
+        },
+        new StringWriter(),
+        error,
+        redactor: redactor);
+
+    Assert.Equal(1, exitCode);
+    Assert.Equal(1, handlerFactoryCalls);
+    Assert.Null(service.ApplyRequest);
+    Assert.DoesNotContain(secret, error.ToString(), StringComparison.Ordinal);
+    Assert.Single(DeserializeEvents(error));
+    Assert.False(Directory.Exists(root));
+  }
+
+  [Fact]
   public async Task Apply_BindsProfileSelectionsConcurrencyAndJson()
   {
     var handler = new CapturingHandler();
@@ -738,6 +812,48 @@ public sealed class WdemCliBuilderTests
     }
     finally
     {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task CommandHandler_RejectsReadOnlyReportDestinationBeforeStartingRun()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"wdem-report-readonly-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    string reportPath = Path.Combine(root, "existing-readonly.json");
+    await File.WriteAllTextAsync(reportPath, "user content");
+    File.SetAttributes(reportPath, File.GetAttributes(reportPath) | FileAttributes.ReadOnly);
+    try
+    {
+      var service = new StubEnvironmentRunService
+      {
+        Result = CompletedRun(ExecutionOutcome.Succeeded)
+      };
+      var error = new StringWriter();
+      var handler = new WdemCommandHandler(
+          service,
+          new StubExecutionRunStore(),
+          new StringWriter(),
+          error,
+          new LogRedactor(),
+          new RunEventHub());
+
+      int exitCode = await handler.ApplyAsync(
+          Request(),
+          json: true,
+          reportPath,
+          CancellationToken.None);
+
+      Assert.Equal(1, exitCode);
+      Assert.Null(service.ApplyRequest);
+      Assert.Equal("user content", await File.ReadAllTextAsync(reportPath));
+      Assert.Single(DeserializeEvents(error));
+      Assert.Empty(Directory.EnumerateFiles(root, "*.tmp", SearchOption.AllDirectories));
+    }
+    finally
+    {
+      File.SetAttributes(reportPath, FileAttributes.Normal);
       Directory.Delete(root, recursive: true);
     }
   }

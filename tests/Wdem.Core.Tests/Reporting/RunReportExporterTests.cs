@@ -271,7 +271,7 @@ public sealed class RunReportExporterTests
   }
 
   [Fact]
-  public async Task ExportAsync_ConcurrentWritersProduceWholeReportWithoutTemporaryFiles()
+  public async Task ExportAsync_TargetCreatedDuringWriteIsAtomicallyOverwrittenWithoutTemporaryFiles()
   {
     string directory = Path.Combine(Path.GetTempPath(), $"wdem-report-{Guid.NewGuid():N}");
     Directory.CreateDirectory(directory);
@@ -279,12 +279,24 @@ public sealed class RunReportExporterTests
     try
     {
       var exporter = new RunReportExporter(new LogRedactor());
-      Task[] exports = Enumerable.Range(0, 64)
-          .Select(_ => exporter.ExportAsync(CreateTerminalRun("safe"), path))
-          .ToArray();
+      using var destinationCreated = new ManualResetEventSlim();
+      using var watcher = new FileSystemWatcher(directory, "*.tmp")
+      {
+        EnableRaisingEvents = true
+      };
+      watcher.Created += (_, _) =>
+      {
+        File.WriteAllText(path, "concurrent destination");
+        destinationCreated.Set();
+      };
+      ExecutionRun run = CreateTerminalRun("safe") with
+      {
+        RestartReasons = [new string('x', 16 * 1024 * 1024)]
+      };
 
-      await Task.WhenAll(exports);
+      await exporter.ExportAsync(run, path);
 
+      Assert.True(destinationCreated.IsSet);
       using JsonDocument document = JsonDocument.Parse(await File.ReadAllTextAsync(path));
       Assert.Equal("apply", document.RootElement.GetProperty("mode").GetString());
       Assert.Empty(Directory.EnumerateFiles(directory, "*.tmp"));
@@ -318,6 +330,23 @@ public sealed class RunReportExporterTests
     {
       Directory.Delete(directory, recursive: true);
     }
+  }
+
+  [Theory]
+  [InlineData(unchecked((int)0x80070020), true)]
+  [InlineData(unchecked((int)0x80070021), true)]
+  [InlineData(unchecked((int)0x80070070), false)]
+  [InlineData(unchecked((int)0x80131620), false)]
+  public void MoveRetryPredicate_RetriesOnlyWindowsSharingAndLockViolations(
+      int hResult,
+      bool isWindowsLockCode)
+  {
+    var exception = new IOException("move failed", hResult);
+    bool actual = RunReportExporter.IsRetryableMoveFailure(exception);
+
+    Assert.Equal(isWindowsLockCode && OperatingSystem.IsWindows(), actual);
+    Assert.False(RunReportExporter.IsRetryableMoveFailure(
+        new UnauthorizedAccessException("denied")));
   }
 
   [Fact]

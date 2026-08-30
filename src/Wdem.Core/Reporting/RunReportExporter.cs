@@ -73,6 +73,12 @@ public sealed class RunReportExporter : IRunReportExporter
       throw new IOException("Report destination must be a file, not a directory.");
     }
 
+    if (File.Exists(path) &&
+        (File.GetAttributes(path) & FileAttributes.ReadOnly) != 0)
+    {
+      throw new UnauthorizedAccessException("Report destination is read-only.");
+    }
+
     string directory = Path.GetDirectoryName(path)
         ?? throw new DirectoryNotFoundException("Report destination has no parent directory.");
     if (!Directory.Exists(directory))
@@ -598,12 +604,23 @@ public sealed class RunReportExporter : IRunReportExporter
         return;
       }
       catch (Exception exception) when (
-          exception is IOException or UnauthorizedAccessException && attempt < maximumAttempts)
+          attempt < maximumAttempts && IsRetryableMoveFailure(exception))
       {
         await Task.Delay(TimeSpan.FromMilliseconds(attempt * 10), cancellationToken)
             .ConfigureAwait(false);
       }
     }
+  }
+
+  internal static bool IsRetryableMoveFailure(Exception exception)
+  {
+    if (!OperatingSystem.IsWindows() || exception is not IOException ioException)
+    {
+      return false;
+    }
+
+    int nativeError = ioException.HResult & 0xFFFF;
+    return nativeError is 0x20 or 0x21;
   }
 
   private static JsonSerializerOptions CreateJsonOptions()
