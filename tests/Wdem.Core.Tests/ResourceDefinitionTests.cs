@@ -120,6 +120,7 @@ public sealed class ResourceDefinitionTests
     Assert.Null(state.StructuredError);
     Assert.Empty(apply.StepResults);
     Assert.Null(apply.Error);
+    Assert.False(apply.FinalizeAfterCancellation);
     Assert.Empty(plan.StructuredErrors);
   }
 

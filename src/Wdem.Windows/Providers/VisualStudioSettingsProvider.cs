@@ -63,13 +63,13 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     cancellationToken.ThrowIfCancellationRequested();
     ArgumentNullException.ThrowIfNull(resource);
     var errors = new List<(WdemErrorCode Code, string Detail)>();
-    if (!ReSharperSettingsProvider.Matches(resource.Type, ResourceType))
+    if (!ConfigurationProviderSupport.Matches(resource.Type, ResourceType))
     {
       errors.Add((WdemErrorCode.ProviderError,
           "Resource type must be 'visual-studio-settings'."));
     }
 
-    if (!ReSharperSettingsProvider.Matches(resource.Provider, ProviderName))
+    if (!ConfigurationProviderSupport.Matches(resource.Provider, ProviderName))
     {
       errors.Add((WdemErrorCode.ProviderError,
           "Resource provider must be 'visual-studio-settings'."));
@@ -82,9 +82,9 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
           "The selected Visual Studio resource must be listed in Dependencies."));
     }
 
-    ReSharperSettingsProvider.ValidateFileParameter(
+    ConfigurationProviderSupport.ValidateFileParameter(
         resource, SourcePathParameter, ".vssettings", requireAbsolute: false, errors);
-    ReSharperSettingsProvider.ValidateFileParameter(
+    ConfigurationProviderSupport.ValidateFileParameter(
         resource, SettingsStorePathParameter, ".vssettings", requireAbsolute: false, errors);
     if (Get(resource, SourcePathParameter) is { } source &&
         ConfigurationSourceResolver.HasAlternateDataStream(source))
@@ -117,7 +117,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     }
     RequireText(resource, EditionParameter, errors);
     RequireText(resource, ChannelIdParameter, errors);
-    ReSharperSettingsProvider.AddUnsupportedParameters(
+    ConfigurationProviderSupport.AddUnsupportedParameters(
         resource,
         errors,
         SourcePathParameter,
@@ -135,7 +135,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
       errors.Add((WdemErrorCode.ConfigurationError,
           "Parameter 'settingsStoreSha256' must contain exactly 64 hexadecimal characters."));
     }
-    return ValueTask.FromResult(ReSharperSettingsProvider.ToValidation(
+    return ValueTask.FromResult(ConfigurationProviderSupport.ToValidation(
         resource,
         "Visual Studio settings",
         errors));
@@ -148,7 +148,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     var validation = await ValidateAsync(resource, cancellationToken).ConfigureAwait(false);
     if (!validation.IsValid)
     {
-      return ReSharperSettingsProvider.DetectionFailure(resource, validation.StructuredErrors[0]);
+      return ConfigurationProviderSupport.DetectionFailure(resource, validation.StructuredErrors[0]);
     }
 
     var source = await _sourceResolver.ResolveAsync(
@@ -157,7 +157,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
         cancellationToken).ConfigureAwait(false);
     if (!source.IsValid)
     {
-      return ReSharperSettingsProvider.DetectionFailure(
+      return ConfigurationProviderSupport.DetectionFailure(
           resource,
           source.Error! with { ResourceId = resource.Id });
     }
@@ -165,7 +165,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     var selection = await SelectInstanceAsync(resource, cancellationToken).ConfigureAwait(false);
     if (selection.Error is not null)
     {
-      return ReSharperSettingsProvider.DetectionFailure(resource, selection.Error);
+      return ConfigurationProviderSupport.DetectionFailure(resource, selection.Error);
     }
 
     if (selection.Instance is null)
@@ -181,13 +181,13 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     var pathError = ValidateSettingsStorePath(resource, selection.Instance, out var settingsStorePath);
     if (pathError is not null)
     {
-      return ReSharperSettingsProvider.DetectionFailure(resource, pathError);
+      return ConfigurationProviderSupport.DetectionFailure(resource, pathError);
     }
 
     if (ConfigurationImporter.ContainsReparsePoint(Path.GetDirectoryName(settingsStorePath)!))
     {
-      return ReSharperSettingsProvider.DetectionFailure(resource,
-          ReSharperSettingsProvider.Error(resource, WdemErrorCode.ConfigurationError,
+      return ConfigurationProviderSupport.DetectionFailure(resource,
+          ConfigurationProviderSupport.Error(resource, WdemErrorCode.ConfigurationError,
               "The Visual Studio settings snapshot path contains an unsafe reparse point."));
     }
 
@@ -201,8 +201,8 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
       var attributes = File.GetAttributes(settingsStorePath);
       if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
       {
-        return ReSharperSettingsProvider.DetectionFailure(resource,
-            ReSharperSettingsProvider.Error(resource, WdemErrorCode.ConfigurationError,
+        return ConfigurationProviderSupport.DetectionFailure(resource,
+            ConfigurationProviderSupport.Error(resource, WdemErrorCode.ConfigurationError,
                 "The Visual Studio settings snapshot is not a regular file."));
       }
 
@@ -216,8 +216,8 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     }
     catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or SecurityException)
     {
-      return ReSharperSettingsProvider.DetectionFailure(resource,
-          ReSharperSettingsProvider.Error(resource, WdemErrorCode.DetectionError,
+      return ConfigurationProviderSupport.DetectionFailure(resource,
+          ConfigurationProviderSupport.Error(resource, WdemErrorCode.DetectionError,
               "The Visual Studio settings snapshot could not be safely read.", exception));
     }
   }
@@ -230,7 +230,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     var validation = await ValidateAsync(resource, cancellationToken).ConfigureAwait(false);
     if (!validation.IsValid)
     {
-      return ReSharperSettingsProvider.Plan(resource, ComplianceStatus.DetectionFailed, false) with
+      return ConfigurationProviderSupport.Plan(resource, ComplianceStatus.DetectionFailed, false) with
       {
         Error = validation.StructuredErrors[0].Detail,
         StructuredErrors = validation.StructuredErrors
@@ -243,12 +243,12 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
         "settingsStorePath");
     if (precondition is null)
     {
-      return ReSharperSettingsProvider.Plan(resource, ComplianceStatus.DetectionFailed, false) with
+      return ConfigurationProviderSupport.Plan(resource, ComplianceStatus.DetectionFailed, false) with
       {
         Error = "The detected Visual Studio settings destination state cannot be bound to the plan.",
         StructuredErrors =
         [
-          ReSharperSettingsProvider.Error(resource, WdemErrorCode.DetectionError,
+          ConfigurationProviderSupport.Error(resource, WdemErrorCode.DetectionError,
               "The detected Visual Studio settings destination state cannot be bound to the plan.")
         ]
       };
@@ -256,7 +256,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
 
     if (compliance.Status == ComplianceStatus.Satisfied)
     {
-      return ReSharperSettingsProvider.Plan(resource, compliance.Status, true) with
+      return ConfigurationProviderSupport.Plan(resource, compliance.Status, true) with
       {
         ExecutionPreconditionFingerprint = precondition
       };
@@ -264,7 +264,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
 
     if (compliance.Status is ComplianceStatus.DetectionFailed or ComplianceStatus.Unsupported)
     {
-      return ReSharperSettingsProvider.Plan(resource, compliance.Status, false) with
+      return ConfigurationProviderSupport.Plan(resource, compliance.Status, false) with
       {
         Error = compliance.Error?.Detail,
         StructuredErrors = compliance.Error is null ? [] : [compliance.Error]
@@ -274,11 +274,11 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     var selection = await SelectInstanceAsync(resource, cancellationToken).ConfigureAwait(false);
     if (selection.Error is not null || selection.Instance is null)
     {
-      var error = selection.Error ?? ReSharperSettingsProvider.Error(
+      var error = selection.Error ?? ConfigurationProviderSupport.Error(
           resource,
           WdemErrorCode.DependencyError,
           "The selected Visual Studio instance is unavailable.");
-      return ReSharperSettingsProvider.Plan(resource, compliance.Status, false) with
+      return ConfigurationProviderSupport.Plan(resource, compliance.Status, false) with
       {
         Error = error.Detail,
         StructuredErrors = [error]
@@ -287,7 +287,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
 
     var selectedInstance = selection.Instance;
 
-    return ReSharperSettingsProvider.Plan(resource, compliance.Status, true) with
+    return ConfigurationProviderSupport.Plan(resource, compliance.Status, true) with
     {
       ExecutionPreconditionFingerprint = precondition,
       Steps =
@@ -314,23 +314,23 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     var validation = await ValidateAsync(resource, cancellationToken).ConfigureAwait(false);
     if (!validation.IsValid)
     {
-      return ReSharperSettingsProvider.Failed(resource, validation.StructuredErrors[0]);
+      return ConfigurationProviderSupport.Failed(resource, validation.StructuredErrors[0]);
     }
 
-    var planError = ReSharperSettingsProvider.ValidatePlan(
+    var planError = ConfigurationProviderSupport.ValidatePlan(
         resource,
         plan,
         step => HasValidStepId(resource, step.Id));
     if (planError is not null)
     {
-      return ReSharperSettingsProvider.Failed(resource, planError);
+      return ConfigurationProviderSupport.Failed(resource, planError);
     }
 
     var currentState = await DetectAsync(resource, cancellationToken).ConfigureAwait(false);
     if (!ConfigurationExecutionPrecondition.Matches(plan, currentState, "settingsStorePath"))
     {
-      return ReSharperSettingsProvider.Failed(resource,
-          ReSharperSettingsProvider.Error(
+      return ConfigurationProviderSupport.Failed(resource,
+          ConfigurationProviderSupport.Error(
               resource,
               WdemErrorCode.ConfigurationError,
               "The Visual Studio settings destination changed after planning; the approved plan is stale."));
@@ -344,8 +344,8 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     var selection = await SelectInstanceAsync(resource, cancellationToken).ConfigureAwait(false);
     if (selection.Error is not null || selection.Instance is null)
     {
-      return ReSharperSettingsProvider.Failed(resource, selection.Error ??
-          ReSharperSettingsProvider.Error(resource, WdemErrorCode.DependencyError,
+      return ConfigurationProviderSupport.Failed(resource, selection.Error ??
+          ConfigurationProviderSupport.Error(resource, WdemErrorCode.DependencyError,
               "The selected Visual Studio instance is unavailable."));
     }
 
@@ -354,15 +354,15 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
             CreateStepId(resource, selection.Instance),
             StringComparison.Ordinal))
     {
-      return ReSharperSettingsProvider.Failed(resource,
-          ReSharperSettingsProvider.Error(resource, WdemErrorCode.DependencyError,
+      return ConfigurationProviderSupport.Failed(resource,
+          ConfigurationProviderSupport.Error(resource, WdemErrorCode.DependencyError,
               "The selected Visual Studio instance changed after planning."));
     }
 
     var pathError = ValidateSettingsStorePath(resource, selection.Instance, out var settingsStorePath);
     if (pathError is not null)
     {
-      return ReSharperSettingsProvider.Failed(resource, pathError);
+      return ConfigurationProviderSupport.Failed(resource, pathError);
     }
 
     progress?.Report(new ProviderProgress("Resolve", 0.2,
@@ -373,7 +373,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
         cancellationToken).ConfigureAwait(false);
     if (!source.IsValid)
     {
-      return ReSharperSettingsProvider.Failed(
+      return ConfigurationProviderSupport.Failed(
           resource,
           source.Error! with { ResourceId = resource.Id });
     }
@@ -382,7 +382,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
         source.Source!, settingsStorePath, cancellationToken).ConfigureAwait(false);
     if (!staged.Succeeded)
     {
-      return ReSharperSettingsProvider.Failed(
+      return ConfigurationProviderSupport.Failed(
           resource,
           staged.Error! with { ResourceId = resource.Id });
     }
@@ -399,8 +399,8 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
           cancellationToken).ConfigureAwait(false);
       if (!process.Started || process.ExitCode != 0 || process.Error is not null)
       {
-        return ReSharperSettingsProvider.Failed(resource, (process.Error ??
-            ReSharperSettingsProvider.Error(resource, WdemErrorCode.ConfigurationError,
+        return ConfigurationProviderSupport.Failed(resource, (process.Error ??
+            ConfigurationProviderSupport.Error(resource, WdemErrorCode.ConfigurationError,
                 "devenv.exe did not import the Visual Studio settings successfully.")) with
         {
           ResourceId = resource.Id,
@@ -414,7 +414,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
           CancellationToken.None).ConfigureAwait(false);
       if (!imported.Succeeded)
       {
-        return ReSharperSettingsProvider.Failed(
+        return ConfigurationProviderSupport.Failed(
             resource,
             imported.Error! with { ResourceId = resource.Id });
       }
@@ -422,15 +422,18 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
       var verification = await VerifyAsync(resource, CancellationToken.None).ConfigureAwait(false);
       if (verification.Compliance != ComplianceStatus.Satisfied)
       {
-        return ReSharperSettingsProvider.Failed(
+        return ConfigurationProviderSupport.Failed(
             resource,
-            verification.DetectedState.StructuredError ?? ReSharperSettingsProvider.Error(
+            verification.DetectedState.StructuredError ?? ConfigurationProviderSupport.Error(
                 resource,
                 WdemErrorCode.ConfigurationError,
                 $"The imported Visual Studio settings final verification returned {verification.Compliance}."));
       }
 
-      return ReSharperSettingsProvider.Succeeded(resource, plan.Steps[0]);
+      return ConfigurationProviderSupport.Succeeded(
+          resource,
+          plan.Steps[0],
+          finalizeAfterCancellation: true);
     }
     finally
     {
@@ -469,7 +472,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
               Get(resource, ChannelIdParameter)));
       if (selected.IsIncompatible)
       {
-        return new InstanceSelection(null, ReSharperSettingsProvider.Error(
+        return new InstanceSelection(null, ConfigurationProviderSupport.Error(
             resource,
             WdemErrorCode.ConfigurationError,
             "The selected Visual Studio instance does not match the configured product, edition, or channel."));
@@ -477,7 +480,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
 
       if (selected.IsAmbiguous)
       {
-        return new InstanceSelection(null, ReSharperSettingsProvider.Error(
+        return new InstanceSelection(null, ConfigurationProviderSupport.Error(
             resource, WdemErrorCode.ConfigurationError,
             $"Set parameter 'instanceId' to one of: {string.Join(", ", selected.CandidateInstanceIds)}."));
       }
@@ -490,7 +493,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
 
       if (!IsExpectedDevenvPath(instance))
       {
-        return new InstanceSelection(null, ReSharperSettingsProvider.Error(
+        return new InstanceSelection(null, ConfigurationProviderSupport.Error(
             resource, WdemErrorCode.ConfigurationError,
             "The selected Visual Studio instance does not identify its expected devenv.exe executable."));
       }
@@ -503,7 +506,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     }
     catch (Exception exception)
     {
-      return new InstanceSelection(null, ReSharperSettingsProvider.Error(
+      return new InstanceSelection(null, ConfigurationProviderSupport.Error(
           resource, WdemErrorCode.DetectionError,
           "Visual Studio discovery failed while resolving the settings target.", exception));
     }
@@ -533,7 +536,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
         !Version.TryParse(instance.InstallationVersion, out var installationVersion) ||
         installationVersion.Major <= 0)
     {
-      return ReSharperSettingsProvider.Error(resource, WdemErrorCode.ConfigurationError,
+      return ConfigurationProviderSupport.Error(resource, WdemErrorCode.ConfigurationError,
           "The selected Visual Studio instance cannot identify a safe user settings directory.");
     }
 
@@ -544,13 +547,13 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     }
     catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
     {
-      return ReSharperSettingsProvider.Error(resource, WdemErrorCode.ConfigurationError,
+      return ConfigurationProviderSupport.Error(resource, WdemErrorCode.ConfigurationError,
           "The selected Visual Studio user settings directory is invalid.", exception);
     }
 
     if (!Path.IsPathFullyQualified(root) || ConfigurationSourceResolver.HasAlternateDataStream(root))
     {
-      return ReSharperSettingsProvider.Error(resource, WdemErrorCode.ConfigurationError,
+      return ConfigurationProviderSupport.Error(resource, WdemErrorCode.ConfigurationError,
           "The selected Visual Studio user settings directory is invalid.");
     }
 
@@ -563,13 +566,13 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     }
     catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
     {
-      return ReSharperSettingsProvider.Error(resource, WdemErrorCode.ConfigurationError,
+      return ConfigurationProviderSupport.Error(resource, WdemErrorCode.ConfigurationError,
           "The selected Visual Studio settings snapshot path is invalid.", exception);
     }
 
     return ConfigurationSourceResolver.IsWithin(settingsStorePath, root)
         ? null
-        : ReSharperSettingsProvider.Error(resource, WdemErrorCode.ConfigurationError,
+        : ConfigurationProviderSupport.Error(resource, WdemErrorCode.ConfigurationError,
             "Parameter 'settingsStorePath' must remain within the selected Visual Studio user settings directory.");
   }
 
@@ -649,7 +652,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
   }
 
   private static string? Get(ResourceDefinition resource, string parameter) =>
-      ReSharperSettingsProvider.Get(resource, parameter);
+      ConfigurationProviderSupport.Get(resource, parameter);
 
   private static DetectedState Missing(
       ResourceDefinition resource,

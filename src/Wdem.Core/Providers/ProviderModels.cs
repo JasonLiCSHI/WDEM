@@ -251,6 +251,7 @@ public sealed record ResourceApplyResult
 
   public required string ResourceId { get; init; }
   public required ApplyOutcome Outcome { get; init; }
+  public bool FinalizeAfterCancellation { get; init; }
   public RestartPolicy? RestartRequirement { get; init; }
   public StructuredError? Error { get; init; }
   public IReadOnlyList<ProviderStepResult> StepResults

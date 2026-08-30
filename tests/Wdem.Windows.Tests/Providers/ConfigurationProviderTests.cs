@@ -601,6 +601,7 @@ public sealed class ConfigurationProviderTests : IDisposable
     var applied = await provider.ApplyAsync(resource, plan, null, cancellation.Token);
 
     Assert.Equal(ApplyOutcome.Succeeded, applied.Outcome);
+    Assert.True(applied.FinalizeAfterCancellation);
     Assert.Equal(source, await File.ReadAllBytesAsync(settingsStorePath));
     Assert.Equal([settingsStorePath], Directory.GetFiles(settingsRoot));
     Assert.Single(process.Requests);

@@ -789,7 +789,10 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           applied,
           stepResults,
           detectedBefore,
-          startedAt).ConfigureAwait(false);
+          startedAt,
+          applied.FinalizeAfterCancellation
+              ? CancellationToken.None
+              : cancellationToken).ConfigureAwait(false);
       return verified;
     }
 
@@ -831,11 +834,12 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       ResourceApplyResult applied,
       IReadOnlyList<StepResult> stepResults,
       DetectedState detectedBefore,
-      DateTimeOffset startedAt)
+      DateTimeOffset startedAt,
+      CancellationToken cancellationToken)
   {
     try
     {
-      var verification = await provider.VerifyAsync(definition, CancellationToken.None)
+      var verification = await provider.VerifyAsync(definition, cancellationToken)
           .ConfigureAwait(false);
       var evaluated = _complianceEvaluator.Evaluate(definition, verification.DetectedState);
       var verified = verification.Compliance == ComplianceStatus.Satisfied &&
@@ -863,6 +867,33 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         StartedAtUtc = startedAt,
         EndedAtUtc = DateTimeOffset.UtcNow,
         Error = verificationError,
+        RestartRequirement = applied.RestartRequirement ?? planned.RestartPolicy,
+        StepResults = stepResults
+      };
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      var completedStep = stepResults.LastOrDefault();
+      return new ResourceResult
+      {
+        ResourceId = definition.Id,
+        State = ExecutionState.Completed,
+        Outcome = ExecutionOutcome.Cancelled,
+        FinalCompliance = planned.ResourcePlan.Compliance,
+        DetectedBefore = detectedBefore,
+        Progress = completedStep?.Progress ?? 0,
+        StartedAtUtc = startedAt,
+        EndedAtUtc = DateTimeOffset.UtcNow,
+        Error = new StructuredError(
+            WdemErrorCode.CancellationError,
+            "Final resource verification was cancelled.",
+            "Resource application completed, but cancellation was requested during final verification.")
+        {
+          ResourceId = definition.Id,
+          StepId = completedStep?.StepId,
+          ProcessExitCode = completedStep?.ProcessExitCode,
+          IsRetryable = true
+        },
         RestartRequirement = applied.RestartRequirement ?? planned.RestartPolicy,
         StepResults = stepResults
       };

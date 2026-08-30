@@ -114,10 +114,11 @@ public sealed class EnvironmentRunServiceTests
       ApplyOperation = _ =>
       {
         cancellation.Cancel();
-        return ValueTask.FromResult(new ResourceApplyResult
+        var result = new ResourceApplyResult
         {
           ResourceId = "git",
           Outcome = ApplyOutcome.Succeeded,
+          FinalizeAfterCancellation = true,
           RestartRequirement = RestartPolicy.RestartRecommended,
           StepResults =
           [
@@ -131,7 +132,8 @@ public sealed class EnvironmentRunServiceTests
               Message = "restartRequirement=RestartRecommended"
             }
           ]
-        });
+        };
+        return ValueTask.FromResult(result);
       },
       VerificationOperation = token =>
       {
@@ -164,6 +166,47 @@ public sealed class EnvironmentRunServiceTests
     Assert.True(step.ProcessSucceeded);
     Assert.Equal(resource, persisted!.ResourceResults["git"]);
     Assert.Contains(RestartPolicy.RestartRecommended, persisted.RestartRequirements);
+    Assert.Equal(1, provider.ApplyCalls);
+    Assert.Equal(1, provider.VerifyCalls);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_UnflaggedLateCancellationCancelsFinalVerification()
+  {
+    using var cancellation = new CancellationTokenSource();
+    var verificationTokenCanBeCanceled = false;
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyOperation = _ =>
+      {
+        cancellation.Cancel();
+        return ValueTask.FromResult(new ResourceApplyResult
+        {
+          ResourceId = "git",
+          Outcome = ApplyOutcome.Succeeded
+        });
+      },
+      VerificationOperation = token =>
+      {
+        verificationTokenCanBeCanceled = token.CanBeCanceled;
+        token.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(new VerificationResult
+        {
+          ResourceId = "git",
+          Compliance = ComplianceStatus.Satisfied,
+          DetectedState = Satisfied("git", "2.52.1")
+        });
+      }
+    };
+    var (service, store) = CreateService(provider);
+
+    var run = await service.ApplyAsync(Request(), cancellation.Token);
+    var persisted = await store.GetAsync(run.RunId, CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.Cancelled, run.Outcome);
+    Assert.Equal(ExecutionOutcome.Cancelled, run.ResourceResults["git"].Outcome);
+    Assert.True(verificationTokenCanBeCanceled);
+    Assert.Equal(run.ResourceResults["git"], persisted!.ResourceResults["git"]);
     Assert.Equal(1, provider.ApplyCalls);
     Assert.Equal(1, provider.VerifyCalls);
   }
