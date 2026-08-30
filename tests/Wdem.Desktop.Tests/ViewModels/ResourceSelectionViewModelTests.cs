@@ -61,6 +61,51 @@ public sealed class ResourceSelectionViewModelTests
     Assert.Equal(ResourceOrigin.AutoDependency, request.Graph.Nodes["resharper"].Origin);
   }
 
+  [Theory]
+  [InlineData(true, true)]
+  [InlineData(true, false)]
+  [InlineData(false, true)]
+  [InlineData(false, false)]
+  public async Task NavigationAndCommandStateRecoverWhenAnyObserverThrows(
+      bool executeCheckEnvironment,
+      bool throwFromExecutingCommand)
+  {
+    int navigationCount = 0;
+    var viewModel = new ResourceSelectionViewModel(
+        Profile(),
+        new ResourceGraphBuilder(_ => null),
+        _ =>
+        {
+          navigationCount++;
+          return Task.CompletedTask;
+        });
+    var check = (AsyncRelayCommand)viewModel.CheckEnvironmentCommand;
+    var start = (AsyncRelayCommand)viewModel.StartConfigurationCommand;
+    AsyncRelayCommand executingCommand = executeCheckEnvironment ? check : start;
+    AsyncRelayCommand otherCommand = executeCheckEnvironment ? start : check;
+    AsyncRelayCommand throwingCommand = throwFromExecutingCommand
+        ? executingCommand
+        : otherCommand;
+    int throwingCommandNotifications = 0;
+    int otherCommandNotifications = 0;
+    throwingCommand.CanExecuteChanged += (_, _) =>
+        throw new InvalidOperationException("command observer failed");
+    throwingCommand.CanExecuteChanged += (_, _) => throwingCommandNotifications++;
+    otherCommand.CanExecuteChanged += (_, _) => otherCommandNotifications++;
+
+    Exception? failure = await Record.ExceptionAsync(
+        () => executingCommand.ExecuteAsync(null));
+
+    bool checkCanExecute = check.CanExecute(null);
+    bool startCanExecute = start.CanExecute(null);
+    Assert.True(
+        navigationCount == 1 && checkCanExecute && startCanExecute && failure is null,
+        $"navigationCount={navigationCount}; checkCanExecute={checkCanExecute}; " +
+        $"startCanExecute={startCanExecute}; failure={failure?.GetType().Name ?? "none"}");
+    Assert.True(throwingCommandNotifications >= 2);
+    Assert.True(otherCommandNotifications >= 2);
+  }
+
   [Fact]
   public async Task GraphFailureShowsActionableDetailAndNextSuccessClearsErrors()
   {

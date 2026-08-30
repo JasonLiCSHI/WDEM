@@ -11,6 +11,8 @@ public sealed class PlanViewModel : ObservableObject
   private readonly LogRedactor _redactor;
   private readonly RunRequest _request;
   private readonly Func<RunRequest, string, Task> _startExecution;
+  private readonly Func<Func<CancellationToken, Task>, Task>? _runInspection;
+  private readonly Func<Action, bool>? _presentInspection;
   private bool _isLoading;
   private bool _canApply;
   private string? _approvedPlanFingerprint;
@@ -20,7 +22,9 @@ public sealed class PlanViewModel : ObservableObject
       IEnvironmentRunService runService,
       LogRedactor redactor,
       RunRequest request,
-      Func<RunRequest, string, Task> startExecution)
+      Func<RunRequest, string, Task> startExecution,
+      Func<Func<CancellationToken, Task>, Task>? runInspection = null,
+      Func<Action, bool>? presentInspection = null)
   {
     ArgumentNullException.ThrowIfNull(runService);
     ArgumentNullException.ThrowIfNull(redactor);
@@ -30,6 +34,8 @@ public sealed class PlanViewModel : ObservableObject
     _redactor = redactor;
     _request = request;
     _startExecution = startExecution;
+    _runInspection = runInspection;
+    _presentInspection = presentInspection;
     Layers = new ObservableCollection<PlanLayerViewModel>();
     Resources = new ObservableCollection<PlanResourceViewModel>();
     Errors = new ObservableCollection<string>();
@@ -84,7 +90,22 @@ public sealed class PlanViewModel : ObservableObject
 
   public AsyncRelayCommand ApplyCommand { get; }
 
-  public async Task InitializeAsync()
+  public Task InitializeAsync(CancellationToken cancellationToken = default) =>
+      _runInspection is null
+          ? InitializeCoreAsync(cancellationToken)
+          : _runInspection(async windowCancellationToken =>
+          {
+            using CancellationTokenSource linkedCancellation =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    windowCancellationToken);
+            await InitializeCoreAsync(linkedCancellation.Token);
+          });
+
+  internal Task InitializeWithinTrackedOperationAsync(CancellationToken cancellationToken) =>
+      InitializeCoreAsync(cancellationToken);
+
+  private async Task InitializeCoreAsync(CancellationToken cancellationToken)
   {
     ErrorMessage = null;
     IsLoading = true;
@@ -94,10 +115,18 @@ public sealed class PlanViewModel : ObservableObject
     {
       ExecutionRun inspection = await _runService.InspectAsync(
           _request,
-          CancellationToken.None);
+          cancellationToken);
+      cancellationToken.ThrowIfCancellationRequested();
       ExecutionPlan plan = inspection.Plan ?? throw new InvalidOperationException(
           "环境检查未生成执行计划。");
-      Present(plan);
+      if (_presentInspection is null)
+      {
+        Present(plan);
+      }
+      else if (!_presentInspection(() => Present(plan)))
+      {
+        cancellationToken.ThrowIfCancellationRequested();
+      }
     }
     finally
     {

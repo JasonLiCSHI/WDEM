@@ -15,11 +15,17 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
   private readonly LogRedactor? _redactor;
   private readonly IUiDispatcher? _dispatcher;
   private readonly IRunReportExporter? _reportExporter;
+  private readonly object _inspectionGate = new();
+  private readonly TaskCompletionSource _disposeCompletion = new(
+      TaskCreationOptions.RunContinuationsAsynchronously);
   private object _currentPage;
   private ResourceSelectionViewModel? _resourceSelection;
   private ExecutionMonitorViewModel? _executionMonitor;
+  private TrackedInspectionOperation? _activeInspection;
   private string? _errorMessage;
+  private bool _isInspecting;
   private bool _isDisposed;
+  private bool _disposeStarted;
 
   public MainWindowViewModel(
       IProfileCatalog catalog,
@@ -90,20 +96,78 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
   public Task InitializeAsync() => ProfileSelection.LoadCommand.ExecuteAsync(null);
 
-  public async ValueTask DisposeAsync()
+  public ValueTask DisposeAsync()
   {
-    if (_isDisposed)
+    TrackedInspectionOperation? inspection;
+    lock (_inspectionGate)
     {
-      return;
+      if (_disposeStarted)
+      {
+        return new ValueTask(_disposeCompletion.Task);
+      }
+
+      _disposeStarted = true;
+      _isDisposed = true;
+      inspection = _activeInspection;
     }
 
-    _isDisposed = true;
+    _ = CompleteDisposeAsync(inspection);
+    return new ValueTask(_disposeCompletion.Task);
+  }
+
+  private async Task CompleteDisposeAsync(TrackedInspectionOperation? inspection)
+  {
+    List<Exception>? failures = null;
     RaiseNavigationStates();
+    if (inspection is not null)
+    {
+      try
+      {
+        inspection.Cancel();
+      }
+      catch (Exception exception)
+      {
+        (failures ??= []).Add(exception);
+      }
+
+      try
+      {
+        await inspection.Completion.ConfigureAwait(false);
+      }
+      catch (Exception exception)
+      {
+        (failures ??= []).Add(exception);
+      }
+    }
+
     ExecutionMonitorViewModel? monitor = _executionMonitor;
     if (monitor is not null)
     {
-      await monitor.DisposeAsync().ConfigureAwait(false);
-      monitor.PropertyChanged -= MonitorPropertyChanged;
+      try
+      {
+        await monitor.DisposeAsync().ConfigureAwait(false);
+      }
+      catch (Exception exception)
+      {
+        (failures ??= []).Add(exception);
+      }
+      finally
+      {
+        monitor.PropertyChanged -= MonitorPropertyChanged;
+      }
+    }
+
+    if (failures is null)
+    {
+      _disposeCompletion.TrySetResult();
+    }
+    else if (failures.Count == 1)
+    {
+      _disposeCompletion.TrySetException(failures[0]);
+    }
+    else
+    {
+      _disposeCompletion.TrySetException(new AggregateException(failures));
     }
   }
 
@@ -148,34 +212,113 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
   private async Task NavigateToPlanAsync(ResourceSelectionNavigationRequest request)
   {
-    ClearErrors();
-    EnsureExecutionComposition();
-    ProfileLoadResult loaded = await _catalog.LoadAsync(request.Profile.Id);
-    if (!loaded.IsValid)
+    if (HasActiveExecution || _isDisposed)
     {
-      if (loaded.Errors.FirstOrDefault() is StructuredError error)
-      {
-        throw new StructuredErrorException(error);
-      }
-
-      throw new InvalidOperationException("所选配置文件无法加载。");
+      return;
     }
 
-    var runRequest = new RunRequest(
-        loaded.SourcePath,
-        request.Selection.SelectedOptionalResourceIds ??
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase));
-    PlanViewModel? plan = null;
-    plan = new PlanViewModel(
-        _environmentRuns!,
-        _redactor!,
-        runRequest,
-        (requestToApply, reviewedPlanFingerprint) => NavigateToExecutionAsync(
-            requestToApply,
-            reviewedPlanFingerprint,
-            plan!));
-    CurrentPage = plan;
-    await plan.InitializeAsync();
+    await RunTrackedInspectionAsync(async cancellationToken =>
+    {
+      ClearErrors();
+      EnsureExecutionComposition();
+      ProfileLoadResult loaded = await _catalog.LoadAsync(
+          request.Profile.Id,
+          cancellationToken);
+      cancellationToken.ThrowIfCancellationRequested();
+      if (!loaded.IsValid)
+      {
+        if (loaded.Errors.FirstOrDefault() is StructuredError error)
+        {
+          throw new StructuredErrorException(error);
+        }
+
+        throw new InvalidOperationException("所选配置文件无法加载。");
+      }
+
+      var runRequest = new RunRequest(
+          loaded.SourcePath,
+          request.Selection.SelectedOptionalResourceIds ??
+              new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+      if (request.Action == ResourceSelectionAction.CheckEnvironment)
+      {
+        Task<ExecutionRun> inspection = _environmentRuns!.InspectAsync(
+            runRequest,
+            cancellationToken);
+        ExecutionRun run = await inspection;
+        cancellationToken.ThrowIfCancellationRequested();
+        TryPresentInspectionResult(() => NavigateToCompletion(run, reviewedPlan: null));
+
+        return;
+      }
+
+      PlanViewModel? plan = null;
+      plan = new PlanViewModel(
+          _environmentRuns!,
+          _redactor!,
+          runRequest,
+          (requestToApply, reviewedPlanFingerprint) => NavigateToExecutionAsync(
+              requestToApply,
+              reviewedPlanFingerprint,
+              plan!),
+          RunTrackedInspectionAsync,
+          TryPresentInspectionResult);
+      await plan.InitializeWithinTrackedOperationAsync(cancellationToken);
+      cancellationToken.ThrowIfCancellationRequested();
+      TryPresentInspectionResult(() => CurrentPage = plan);
+    });
+  }
+
+  private async Task RunTrackedInspectionAsync(
+      Func<CancellationToken, Task> operation)
+  {
+    ArgumentNullException.ThrowIfNull(operation);
+    TrackedInspectionOperation tracked;
+    lock (_inspectionGate)
+    {
+      if (_isDisposed || _activeInspection is not null)
+      {
+        return;
+      }
+
+      tracked = new TrackedInspectionOperation();
+      _activeInspection = tracked;
+      _isInspecting = true;
+    }
+
+    RaiseNavigationStates();
+    try
+    {
+      await operation(tracked.Token);
+    }
+    finally
+    {
+      tracked.Complete();
+      lock (_inspectionGate)
+      {
+        if (ReferenceEquals(_activeInspection, tracked))
+        {
+          _activeInspection = null;
+          _isInspecting = false;
+        }
+      }
+
+      RaiseNavigationStates();
+    }
+  }
+
+  private bool TryPresentInspectionResult(Action presentation)
+  {
+    ArgumentNullException.ThrowIfNull(presentation);
+    lock (_inspectionGate)
+    {
+      if (_isDisposed || _activeInspection is null)
+      {
+        return false;
+      }
+
+      presentation();
+      return true;
+    }
   }
 
   private async Task NavigateToExecutionAsync(
@@ -220,15 +363,17 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     }
   }
 
-  private void NavigateToCompletion(ExecutionRun run, PlanViewModel reviewedPlan)
+  private void NavigateToCompletion(ExecutionRun run, PlanViewModel? reviewedPlan)
   {
     CurrentPage = new CompletionViewModel(
         run,
         _reportExporter!,
         _redactor!,
-        () => NavigateToReviewedPlanAsync(reviewedPlan),
+        reviewedPlan is null
+            ? NavigateToResourcesAsync
+            : () => NavigateToReviewedPlanAsync(reviewedPlan),
         NavigateToProfilesAsync,
-        () => RetryFailedAsync(reviewedPlan));
+        reviewedPlan is null ? null : () => RetryFailedAsync(reviewedPlan));
   }
 
   private async Task RetryFailedAsync(PlanViewModel reviewedPlan)
@@ -260,7 +405,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     return Task.CompletedTask;
   }
 
-  private bool HasActiveExecution => _executionMonitor?.IsRunning == true;
+  private bool HasActiveExecution => _isInspecting || _executionMonitor?.IsRunning == true;
 
   private void MonitorPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
   {
@@ -301,5 +446,33 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     ProfileSelection.ClearError();
     ResourceSelection?.ClearError();
     ErrorMessage = null;
+  }
+
+  private sealed class TrackedInspectionOperation
+  {
+    private readonly CancellationTokenSource _cancellation = new();
+    private readonly TaskCompletionSource _completion = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public CancellationToken Token => _cancellation.Token;
+
+    public Task Completion => _completion.Task;
+
+    public void Cancel()
+    {
+      try
+      {
+        _cancellation.Cancel();
+      }
+      catch (ObjectDisposedException)
+      {
+      }
+    }
+
+    public void Complete()
+    {
+      _completion.TrySetResult();
+      _cancellation.Dispose();
+    }
   }
 }

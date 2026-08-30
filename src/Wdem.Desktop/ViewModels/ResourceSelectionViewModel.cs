@@ -27,8 +27,11 @@ public sealed class ResourceSelectionViewModel : ObservableObject
   private readonly HashSet<string> _selectedOptionalIds;
   private readonly Func<Exception, string> _reportError;
   private readonly Action _clearError;
+  private readonly AsyncRelayCommand _checkEnvironmentCommand;
+  private readonly AsyncRelayCommand _startConfigurationCommand;
   private ResourceGraph? _resolvedGraph;
   private string? _errorMessage;
+  private bool _isNavigating;
 
   public ResourceSelectionViewModel(
       DeveloperProfile profile,
@@ -66,11 +69,13 @@ public sealed class ResourceSelectionViewModel : ObservableObject
     OptionalResources = new ObservableCollection<ResourceSelectionItemViewModel>();
     AutoDependencies = new ObservableCollection<ResourceSelectionItemViewModel>();
 
-    CheckEnvironmentCommand = new AsyncRelayCommand(
+    _checkEnvironmentCommand = new AsyncRelayCommand(
         _ => NavigateAsync(ResourceSelectionAction.CheckEnvironment, navigateToPlan),
+        _ => !_isNavigating,
         onError: ReportError);
-    StartConfigurationCommand = new AsyncRelayCommand(
+    _startConfigurationCommand = new AsyncRelayCommand(
         _ => NavigateAsync(ResourceSelectionAction.StartConfiguration, navigateToPlan),
+        _ => !_isNavigating,
         onError: ReportError);
 
     RecalculateSelection();
@@ -101,9 +106,9 @@ public sealed class ResourceSelectionViewModel : ObservableObject
     private set => SetProperty(ref _errorMessage, value);
   }
 
-  public ICommand CheckEnvironmentCommand { get; }
+  public ICommand CheckEnvironmentCommand => _checkEnvironmentCommand;
 
-  public ICommand StartConfigurationCommand { get; }
+  public ICommand StartConfigurationCommand => _startConfigurationCommand;
 
   private ResourceSelectionItemViewModel CreateItem(string id)
   {
@@ -205,16 +210,37 @@ public sealed class ResourceSelectionViewModel : ObservableObject
     }
   }
 
-  private Task NavigateAsync(
+  private async Task NavigateAsync(
       ResourceSelectionAction action,
       Func<ResourceSelectionNavigationRequest, Task>? navigateToPlan)
   {
+    if (_isNavigating)
+    {
+      return;
+    }
+
     ClearErrors();
-    return navigateToPlan?.Invoke(new ResourceSelectionNavigationRequest(
-        action,
-        _profile,
-        Selection,
-        ResolvedGraph)) ?? Task.CompletedTask;
+    _isNavigating = true;
+    try
+    {
+      RaiseNavigationCommandStates();
+      await (navigateToPlan?.Invoke(new ResourceSelectionNavigationRequest(
+          action,
+          _profile,
+          Selection,
+          ResolvedGraph)) ?? Task.CompletedTask);
+    }
+    finally
+    {
+      _isNavigating = false;
+      RaiseNavigationCommandStates();
+    }
+  }
+
+  private void RaiseNavigationCommandStates()
+  {
+    _checkEnvironmentCommand.RaiseCanExecuteChanged();
+    _startConfigurationCommand.RaiseCanExecuteChanged();
   }
 
   private void ClearErrors()

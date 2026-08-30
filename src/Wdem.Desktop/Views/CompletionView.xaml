@@ -27,8 +27,9 @@
                 <Button Content="Export JSON report" Click="ExportJson_Click" />
                 <Button Content="Export Markdown report" Click="ExportMarkdown_Click" />
                 <Button Content="Retry failed resources" Command="{Binding RetryFailedCommand}" />
-                <HyperlinkButton Content="Return to reviewed plan"
-                                 Command="{Binding ReturnToPlanCommand}" />
+                <HyperlinkButton Content="{Binding ReturnToPreviousLabel}"
+                                 AutomationProperties.Name="{Binding ReturnToPreviousLabel}"
+                                 Command="{Binding ReturnToPreviousCommand}" />
                 <HyperlinkButton Content="Choose another profile"
                                  Command="{Binding ReturnToProfilesCommand}" />
             </StackPanel>

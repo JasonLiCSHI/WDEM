@@ -51,6 +51,23 @@ public sealed class AsyncRelayCommand : ICommand
     }
   }
 
-  public void RaiseCanExecuteChanged() =>
-      CanExecuteChanged?.Invoke(this, EventArgs.Empty);
+  public void RaiseCanExecuteChanged()
+  {
+    EventHandler? handlers = CanExecuteChanged;
+    if (handlers is null)
+    {
+      return;
+    }
+
+    foreach (EventHandler handler in handlers.GetInvocationList())
+    {
+      try
+      {
+        handler(this, EventArgs.Empty);
+      }
+      catch (Exception)
+      {
+      }
+    }
+  }
 }

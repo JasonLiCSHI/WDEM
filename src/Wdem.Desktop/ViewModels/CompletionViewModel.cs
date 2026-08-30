@@ -15,7 +15,7 @@ public sealed class CompletionViewModel : ObservableObject
       ExecutionRun run,
       IRunReportExporter reportExporter,
       LogRedactor redactor,
-      Func<Task>? returnToPlan = null,
+      Func<Task>? returnToPrevious = null,
       Func<Task>? returnToProfiles = null,
       Func<Task>? retryFailed = null)
   {
@@ -56,14 +56,19 @@ public sealed class CompletionViewModel : ObservableObject
         result.State == ExecutionState.Blocked ||
         result.Outcome is ExecutionOutcome.Failed
             or ExecutionOutcome.Cancelled);
-    Heading = isPartial
-        ? "Environment Partially Configured"
-        : "C# Developer Environment Ready";
+    Heading = Run.Mode == RunMode.Inspect
+        ? "环境检查完成"
+        : isPartial
+            ? "Environment Partially Configured"
+            : "C# Developer Environment Ready";
     ProfileDisplay = $"{Run.ProfileId} {Run.ProfileVersion}";
     RunId = Run.RunId.ToString("D");
-    ReturnToPlanCommand = new AsyncRelayCommand(
-        _ => returnToPlan?.Invoke() ?? Task.CompletedTask,
-        _ => returnToPlan is not null,
+    ReturnToPreviousLabel = Run.Mode == RunMode.Inspect
+        ? "返回资源选择"
+        : "返回已审阅计划";
+    ReturnToPreviousCommand = new AsyncRelayCommand(
+        _ => returnToPrevious?.Invoke() ?? Task.CompletedTask,
+        _ => returnToPrevious is not null,
         ReportError);
     ReturnToProfilesCommand = new AsyncRelayCommand(
         _ => returnToProfiles?.Invoke() ?? Task.CompletedTask,
@@ -83,6 +88,8 @@ public sealed class CompletionViewModel : ObservableObject
 
   public string RunId { get; }
 
+  public string ReturnToPreviousLabel { get; }
+
   public IReadOnlyList<CompletionResourceViewModel> Satisfied { get; }
 
   public IReadOnlyList<CompletionResourceViewModel> Succeeded { get; }
@@ -101,7 +108,7 @@ public sealed class CompletionViewModel : ObservableObject
     private set => SetProperty(ref _errorMessage, value);
   }
 
-  public AsyncRelayCommand ReturnToPlanCommand { get; }
+  public AsyncRelayCommand ReturnToPreviousCommand { get; }
 
   public AsyncRelayCommand ReturnToProfilesCommand { get; }
 

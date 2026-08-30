@@ -68,6 +68,39 @@ public sealed class CompletionViewModelTests
   }
 
   [Fact]
+  public void InspectionWithMissingResourcesUsesInspectionHeading()
+  {
+    ExecutionRun run = CreateRun(
+        ("missing", ExecutionState.Completed, ExecutionOutcome.Skipped, RestartPolicy.NoRestart))
+        with
+    { Mode = RunMode.Inspect };
+
+    var viewModel = new CompletionViewModel(
+        run,
+        new RunReportExporter(new LogRedactor()),
+        new LogRedactor());
+
+    Assert.Equal("环境检查完成", viewModel.Heading);
+    Assert.Single(viewModel.CancelledOrSkipped);
+  }
+
+  [Fact]
+  public void InspectionUsesResourceSelectionReturnToPreviousLabel()
+  {
+    CompletionViewModel viewModel = ViewModelForMode(RunMode.Inspect);
+
+    Assert.Equal("返回资源选择", viewModel.ReturnToPreviousLabel);
+  }
+
+  [Fact]
+  public void ApplyUsesReviewedPlanReturnToPreviousLabel()
+  {
+    CompletionViewModel viewModel = ViewModelForMode(RunMode.Apply);
+
+    Assert.Equal("返回已审阅计划", viewModel.ReturnToPreviousLabel);
+  }
+
+  [Fact]
   public async Task ExportFailureIsRedactedAndDoesNotPreventAnotherExport()
   {
     var exporter = new FailOnceReportExporter("token=export-secret");
@@ -186,6 +219,12 @@ public sealed class CompletionViewModelTests
             },
             StringComparer.OrdinalIgnoreCase)
       };
+
+  private static CompletionViewModel ViewModelForMode(RunMode mode) => new(
+      CreateRun() with { Mode = mode },
+      new RunReportExporter(new LogRedactor()),
+      new LogRedactor(),
+      returnToPrevious: () => Task.CompletedTask);
 
   private sealed class FailOnceReportExporter(string message) : IRunReportExporter
   {
