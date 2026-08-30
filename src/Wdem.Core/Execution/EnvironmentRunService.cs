@@ -180,7 +180,7 @@ public sealed class EnvironmentRunService :
           "Only a previously approved apply run can be retried.");
     }
 
-    if (!TryCreateRetryApprovalBoundary(prior, out var retryApprovalBoundary))
+    if (!TryCreateApprovalBoundary(prior, out var approvalBoundary))
     {
       throw new InvalidOperationException(
           "The prior apply run does not contain a valid immutable plan approval.");
@@ -211,7 +211,7 @@ public sealed class EnvironmentRunService :
             approvalSource: PlanApprovalSource.Retry,
             reviewedPlanFingerprint: null,
             cancellationToken,
-            retryApprovalBoundary)
+            approvalBoundary)
         .ConfigureAwait(false);
   }
 
@@ -292,6 +292,13 @@ public sealed class EnvironmentRunService :
           $"Execution run '{priorRunId:D}' is not eligible for recovery.");
     }
 
+    if (prior.Mode != RunMode.Apply ||
+        !TryCreateApprovalBoundary(prior, out var approvalBoundary))
+    {
+      throw new InvalidOperationException(
+          "The prior apply run does not contain a valid immutable plan approval.");
+    }
+
     var remaining = PendingResourceIds(prior);
     if (remaining.Count == 0)
     {
@@ -336,7 +343,8 @@ public sealed class EnvironmentRunService :
               recoveredFromRunId: claimed.RunId,
               approvalSource: PlanApprovalSource.Retry,
               reviewedPlanFingerprint: null,
-              cancellationToken).ConfigureAwait(false);
+              cancellationToken,
+              approvalBoundary).ConfigureAwait(false);
     }
     catch (Exception executionException)
     {
@@ -469,7 +477,7 @@ public sealed class EnvironmentRunService :
       PlanApprovalSource? approvalSource,
       string? reviewedPlanFingerprint,
       CancellationToken cancellationToken,
-      RetryApprovalBoundary? retryApprovalBoundary = null)
+      PlanApprovalBoundary? approvalBoundary = null)
   {
     ValidateRequest(request);
     cancellationToken.ThrowIfCancellationRequested();
@@ -521,10 +529,10 @@ public sealed class EnvironmentRunService :
           cancellationToken).ConfigureAwait(false);
     }
 
-    var retrySelectionChanged = retryApprovalBoundary is not null &&
+    var approvedSelectionChanged = approvalBoundary is not null &&
         resourceFilter is not null &&
         resourceFilter.Any(id => !graphResult.Graph.Nodes.ContainsKey(id));
-    var currentResourceFilter = retrySelectionChanged
+    var currentResourceFilter = approvedSelectionChanged
         ? resourceFilter!.Where(graphResult.Graph.Nodes.ContainsKey).ToHashSet(IdComparer)
         : resourceFilter;
     var graph = currentResourceFilter is null
@@ -544,19 +552,19 @@ public sealed class EnvironmentRunService :
     var reviewedPlanRejected = mode == RunMode.Apply &&
         reviewedPlanFingerprint is { } approvedFingerprint &&
         !string.Equals(approvedFingerprint, plan.Fingerprint, StringComparison.Ordinal);
-    var retryPlanRejected = mode == RunMode.Apply &&
-        retryApprovalBoundary is not null &&
-        (retrySelectionChanged || !IsRetryPlanWithinApproval(plan, retryApprovalBoundary));
-    var planApprovalRejected = reviewedPlanRejected || retryPlanRejected;
+    var freshPlanExceedsApproval = mode == RunMode.Apply &&
+        approvalBoundary is not null &&
+        (approvedSelectionChanged || !IsPlanWithinApproval(plan, approvalBoundary));
+    var planApprovalRejected = reviewedPlanRejected || freshPlanExceedsApproval;
     if (planApprovalRejected)
     {
       var approvalError = new StructuredError(
           WdemErrorCode.ConfigurationError,
-          retryPlanRejected
-              ? "The retry execution plan exceeds its prior approval."
+          freshPlanExceedsApproval
+              ? "The execution plan exceeds its prior approval."
               : "The reviewed execution plan has changed.",
-          retryPlanRejected
-              ? "The retry plan is not a refinement of the prior approved plan, so no resources " +
+          freshPlanExceedsApproval
+              ? "The fresh plan is not a refinement of the prior approved plan, so no resources " +
                 "were executed. Review the refreshed plan before applying it."
               : "The environment or configuration changed after plan review, so no resources " +
                 "were executed.")
@@ -1996,26 +2004,28 @@ public sealed class EnvironmentRunService :
     };
   }
 
-  private static bool TryCreateRetryApprovalBoundary(
+  private static bool TryCreateApprovalBoundary(
       ExecutionRun prior,
-      out RetryApprovalBoundary? boundary)
+      out PlanApprovalBoundary? boundary)
   {
     boundary = null;
     var plan = prior.Plan;
     var approval = prior.PlanApproval;
+    var canonicalPlan = plan is null
+        ? null
+        : ExecutionPlanner.CreatePlan(
+            plan.ProfileId,
+            plan.ProfileVersion,
+            plan.Layers,
+            plan.Resources,
+            plan.Errors);
     if (plan is null || approval is null ||
+        canonicalPlan is null ||
+        plan.PlanId != canonicalPlan.PlanId ||
+        !string.Equals(plan.Fingerprint, canonicalPlan.Fingerprint, StringComparison.Ordinal) ||
         !IsSha256(approval.InitialPlanFingerprint) ||
         approval.ConfirmedAtUtc == default ||
         !Enum.IsDefined(approval.Source))
-    {
-      return false;
-    }
-
-    if (!string.Equals(
-            approval.InitialPlanFingerprint,
-            plan.Fingerprint,
-            StringComparison.OrdinalIgnoreCase) &&
-        approval.DeferredAuthorizations.Count == 0)
     {
       return false;
     }
@@ -2032,7 +2042,7 @@ public sealed class EnvironmentRunService :
           !Enum.IsDefined(proof.MaximumRestartPolicy) ||
           !Enum.IsDefined(proof.MaximumRisk) ||
           !proofIds.Add(proof.ResourceId) ||
-          proof.AllowedActions.Count == 0 ||
+          proof.AllowedActions.Count != 1 ||
           proof.AllowedActions.Any(action =>
               action == PlanAction.None || !Enum.IsDefined(action)) ||
           plan.Resources.Count(resource => string.Equals(
@@ -2042,15 +2052,52 @@ public sealed class EnvironmentRunService :
       {
         return false;
       }
+
+      var persistedResource = plan.Resources.Single(resource => string.Equals(
+          resource.Definition.Id,
+          proof.ResourceId,
+          StringComparison.OrdinalIgnoreCase));
+      if (!IsWithinApprovalBoundary(
+              persistedResource,
+              ResourceApprovalBoundary.From(proof)))
+      {
+        return false;
+      }
     }
 
-    boundary = new RetryApprovalBoundary(plan, approval);
+    var approvedResources = plan.Resources.Select(resource =>
+    {
+      var proof = approval.DeferredAuthorizations.SingleOrDefault(candidate => string.Equals(
+          candidate.ResourceId,
+          resource.Definition.Id,
+          StringComparison.OrdinalIgnoreCase));
+      return proof is null
+          ? resource
+          : RestoreApprovedDeferredResource(
+              resource,
+              ResourceApprovalBoundary.From(proof));
+    }).ToArray();
+    var approvedPlan = ExecutionPlanner.CreatePlan(
+        plan.ProfileId,
+        plan.ProfileVersion,
+        plan.Layers,
+        approvedResources,
+        plan.Errors);
+    if (!string.Equals(
+            approval.InitialPlanFingerprint,
+            approvedPlan.Fingerprint,
+            StringComparison.OrdinalIgnoreCase))
+    {
+      return false;
+    }
+
+    boundary = new PlanApprovalBoundary(approvedPlan, approval);
     return true;
   }
 
-  private static bool IsRetryPlanWithinApproval(
+  private static bool IsPlanWithinApproval(
       ExecutionPlan freshPlan,
-      RetryApprovalBoundary boundary)
+      PlanApprovalBoundary boundary)
   {
     foreach (var fresh in freshPlan.Resources)
     {
@@ -2070,18 +2117,9 @@ public sealed class EnvironmentRunService :
               StringComparison.OrdinalIgnoreCase));
       if (proof is not null)
       {
-        if (!IsWithinRetryBoundary(
+        if (!IsWithinApprovalBoundary(
                 fresh,
-                proof.ResourceType,
-                proof.ProviderName,
-                proof.DefinitionFingerprint,
-                proof.Origin,
-                proof.Dependencies,
-                proof.AllowedActions,
-                proof.MaximumPrivilege,
-                proof.MaximumRestartPolicy,
-                proof.MaximumRisk,
-                proof.AllowDestructive))
+                ResourceApprovalBoundary.From(proof)))
         {
           return false;
         }
@@ -2090,25 +2128,10 @@ public sealed class EnvironmentRunService :
       }
 
       var prior = priorMatches[0];
-      var allowedActions = prior.ResourcePlan.Steps
-          .Where(step => step.Action != PlanAction.None)
-          .Select(step => step.Action)
-          .Distinct()
-          .ToArray();
-      if (!IsWithinRetryBoundary(
+      if (!IsWithinApprovalBoundary(
               fresh,
-              prior.Definition.Type,
-              prior.Definition.Provider,
-              prior.ResourcePlan.DesiredStateFingerprint,
-              prior.Origin,
-              prior.Dependencies,
-              allowedActions,
-              prior.RequiresElevation
-                  ? PrivilegeRequirement.Administrator
-                  : PrivilegeRequirement.CurrentUser,
-              prior.RestartPolicy,
-              prior.Risk,
-              prior.IsDestructive))
+              ResourceApprovalBoundary.From(prior)) ||
+          !AreStepsWithinApprovedPlan(fresh.ResourcePlan.Steps, prior.ResourcePlan.Steps))
       {
         return false;
       }
@@ -2117,39 +2140,52 @@ public sealed class EnvironmentRunService :
     return true;
   }
 
-  private static bool IsWithinRetryBoundary(
+  private static bool IsWithinApprovalBoundary(
       PlannedResource fresh,
-      string resourceType,
-      string providerName,
-      string definitionFingerprint,
-      ResourceOrigin origin,
-      IReadOnlyList<string> dependencies,
-      IReadOnlyList<PlanAction> allowedActions,
-      PrivilegeRequirement maximumPrivilege,
-      RestartPolicy maximumRestartPolicy,
-      PlanRisk maximumRisk,
-      bool allowDestructive)
+      ResourceApprovalBoundary boundary)
   {
-    if (!string.Equals(fresh.Definition.Type, resourceType, StringComparison.OrdinalIgnoreCase) ||
-        !string.Equals(fresh.Definition.Provider, providerName, StringComparison.OrdinalIgnoreCase) ||
+    var deferredStatusIsAllowed = boundary.AllowDeferredStatus &&
+        fresh.Status == PlannedResourceStatus.Deferred &&
+        !fresh.ResourcePlan.IsExecutable &&
+        IsDeferredAuthorizationWithinBoundary(
+            fresh.DeferredAuthorization,
+            boundary);
+    if (!string.Equals(
+            fresh.Definition.Type,
+            boundary.ResourceType,
+            StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(
+            fresh.Definition.Provider,
+            boundary.ProviderName,
+            StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(fresh.ResourcePlan.ResourceId, fresh.Definition.Id, StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(
+            fresh.ResourcePlan.ResourceType,
+            boundary.ResourceType,
+            StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(
+            fresh.ResourcePlan.ProviderName,
+            boundary.ProviderName,
+            StringComparison.OrdinalIgnoreCase) ||
         !string.Equals(
             ResourceDefinitionFingerprint.Create(fresh.Definition),
-            definitionFingerprint,
+            boundary.DefinitionFingerprint,
             StringComparison.Ordinal) ||
         !string.Equals(
             fresh.ResourcePlan.DesiredStateFingerprint,
-            definitionFingerprint,
+            boundary.DefinitionFingerprint,
             StringComparison.Ordinal) ||
-        fresh.Origin != origin ||
-        fresh.Dependencies.Count != dependencies.Count ||
+        fresh.Origin != boundary.Origin ||
+        fresh.Dependencies.Count != boundary.Dependencies.Count ||
         fresh.Dependencies.Any(dependency =>
-            !dependencies.Contains(dependency, IdComparer)) ||
+            !boundary.Dependencies.Contains(dependency, IdComparer)) ||
         fresh.Status is not (PlannedResourceStatus.Ready or
-            PlannedResourceStatus.AlreadySatisfied) ||
-        fresh.Risk > maximumRisk ||
-        fresh.RequiresElevation && maximumPrivilege != PrivilegeRequirement.Administrator ||
-        fresh.IsDestructive && !allowDestructive ||
-        fresh.RestartPolicy > maximumRestartPolicy)
+            PlannedResourceStatus.AlreadySatisfied) && !deferredStatusIsAllowed ||
+        RiskRank(fresh.Risk) > RiskRank(boundary.MaximumRisk) ||
+        fresh.RequiresElevation &&
+            boundary.MaximumPrivilege != PrivilegeRequirement.Administrator ||
+        fresh.IsDestructive && !boundary.AllowDestructive ||
+        fresh.RestartPolicy > boundary.MaximumRestartPolicy)
     {
       return false;
     }
@@ -2157,11 +2193,82 @@ public sealed class EnvironmentRunService :
     return fresh.ResourcePlan.Steps.All(step =>
         PlanStepAuthorizationPolicy.IsWithinBoundary(
             step,
-            allowedActions,
-            maximumPrivilege,
-            maximumRestartPolicy,
-            allowDestructive));
+            boundary.AllowedActions,
+            boundary.MaximumPrivilege,
+            boundary.MaximumRestartPolicy,
+            boundary.AllowDestructive));
   }
+
+  private static PlannedResource RestoreApprovedDeferredResource(
+      PlannedResource resource,
+      ResourceApprovalBoundary boundary)
+  {
+    var authorization = boundary.CreateDeferredAuthorization();
+    var expectedAction = boundary.AllowedActions.Single();
+    var approvedCompliance = resource.ResourcePlan.Compliance == ComplianceStatus.Satisfied
+        ? expectedAction switch
+        {
+          PlanAction.Install => ComplianceStatus.Missing,
+          PlanAction.Upgrade => ComplianceStatus.VersionMismatch,
+          PlanAction.Configure when resource.Definition.Type.EndsWith(
+              "settings",
+              StringComparison.OrdinalIgnoreCase) => ComplianceStatus.Missing,
+          _ => ComplianceStatus.ConfigurationMismatch
+        }
+        : resource.ResourcePlan.Compliance;
+    var approvedIdentity = resource with
+    {
+      Origin = boundary.Origin,
+      Dependencies = boundary.Dependencies,
+      ResourcePlan = resource.ResourcePlan with
+      {
+        ResourceType = boundary.ResourceType,
+        ProviderName = boundary.ProviderName,
+        DesiredStateFingerprint = boundary.DefinitionFingerprint,
+        ExecutionPreconditionFingerprint = null
+      }
+    };
+    return ExecutionPlanner.CreateDeferredPlaceholder(
+        approvedIdentity,
+        authorization,
+        approvedCompliance);
+  }
+
+  private static bool IsDeferredAuthorizationWithinBoundary(
+      DeferredPlanAuthorization? authorization,
+      ResourceApprovalBoundary boundary) =>
+      authorization is not null &&
+      authorization.AllowedActions.Count > 0 &&
+      authorization.AllowedActions.All(action =>
+          action != PlanAction.None && boundary.AllowedActions.Contains(action)) &&
+      (authorization.MaximumPrivilege != PrivilegeRequirement.Administrator ||
+          boundary.MaximumPrivilege == PrivilegeRequirement.Administrator) &&
+      authorization.MaximumRestartPolicy <= boundary.MaximumRestartPolicy &&
+      RiskRank(authorization.MaximumRisk) <= RiskRank(boundary.MaximumRisk) &&
+      (!authorization.AllowDestructive || boundary.AllowDestructive);
+
+  private static bool AreStepsWithinApprovedPlan(
+      IReadOnlyList<PlanStep> freshSteps,
+      IReadOnlyList<PlanStep> approvedSteps) =>
+      freshSteps.All(freshStep =>
+      {
+        var matches = approvedSteps.Where(approvedStep => string.Equals(
+            approvedStep.Id,
+            freshStep.Id,
+            StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (matches.Length != 1)
+        {
+          return false;
+        }
+
+        PlanStep approvedStep = matches[0];
+        return PlanStepAuthorizationPolicy.IsWithinBoundary(
+            freshStep,
+            [approvedStep.Action],
+            approvedStep.PrivilegeRequirement,
+            approvedStep.RestartPolicy,
+            approvedStep.IsDestructive);
+      });
 
   private static bool IsSha256(string value) =>
       !string.IsNullOrWhiteSpace(value) &&
@@ -2430,7 +2537,7 @@ public sealed class EnvironmentRunService :
         new KeyValuePair<Guid, Task>(runId, finalization));
   }
 
-  private sealed record RetryApprovalBoundary(
+  private sealed record PlanApprovalBoundary(
       ExecutionPlan Plan,
       PlanApproval Approval);
 

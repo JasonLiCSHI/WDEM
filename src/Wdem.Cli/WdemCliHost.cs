@@ -187,6 +187,13 @@ public static class WdemCliHost
         await (await GetAsync(cancellationToken).ConfigureAwait(false))
             .ResumeAsync(runId, json, reportFile, cancellationToken).ConfigureAwait(false);
 
+    public async Task<int> AbandonAsync(
+        Guid runId,
+        bool json,
+        CancellationToken cancellationToken) =>
+        await (await GetAsync(cancellationToken).ConfigureAwait(false))
+            .AbandonAsync(runId, json, cancellationToken).ConfigureAwait(false);
+
     public async Task<int> ListRunsAsync(
         bool json,
         CancellationToken cancellationToken) =>

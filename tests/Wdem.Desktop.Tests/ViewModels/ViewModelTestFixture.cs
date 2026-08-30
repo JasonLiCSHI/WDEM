@@ -158,6 +158,18 @@ internal static class ViewModelTestFixture
     };
   }
 
+  internal static RecoveryCandidate RecoveryCandidate(Guid? runId = null) => new()
+  {
+    RunId = runId ?? Guid.Parse("b1723fe5-e7e1-4e87-98bd-e057be256c19"),
+    ProfileSourcePath = Path.GetFullPath("profiles/csharp-developer.yaml"),
+    StartedAtUtc = DateTimeOffset.Parse("2026-08-30T08:30:00Z"),
+    PendingResourceIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+      "git",
+      "dotnet-sdk"
+    }
+  };
+
   internal sealed class RecordingDispatcher : IUiDispatcher
   {
     public int EnqueueCalls { get; private set; }
@@ -352,14 +364,25 @@ internal static class ViewModelTestFixture
       Guid runId) : IReviewedPlanEnvironmentRunService
   {
     public IReadOnlyList<RunEvent> Events { get; set; } = [];
+    public IReadOnlyList<RunEvent> RecoveryEvents { get; set; } = [];
     public ExecutionRun ApplyResult { get; set; } = CompletedRun();
     public ExecutionRun InspectResult { get; set; } = InspectRun(executable: true);
     public Exception? InspectException { get; set; }
+    public IReadOnlyList<RecoveryCandidate> RecoveryCandidates { get; set; } = [];
+    public Exception? RecoveryDiscoveryException { get; set; }
+    public Exception? RecoverException { get; set; }
+    public Exception? AbandonException { get; set; }
+    public ExecutionRun RecoverResult { get; set; } = CompletedRun();
     public int InspectCalls { get; private set; }
     public int ApplyCalls { get; private set; }
+    public int FindRecoveryCandidatesCalls { get; private set; }
+    public int RecoverCalls { get; private set; }
+    public int AbandonCalls { get; private set; }
     public RunRequest? AppliedRequest { get; private set; }
     public string? ReviewedPlanFingerprint { get; private set; }
     public Guid? RetriedRunId { get; private set; }
+    public Guid? RecoveredRunId { get; private set; }
+    public Guid? AbandonedRunId { get; private set; }
     public IReadOnlySet<string>? RetriedResourceIds { get; private set; }
     public CancellationToken RetryCancellationToken { get; private set; }
     public CancellationToken ApplyCancellationToken { get; private set; }
@@ -372,6 +395,9 @@ internal static class ViewModelTestFixture
     public bool HoldInspectionAfterCancellation { get; init; }
     public bool IgnoreInspectionCancellation { get; init; }
     public bool ThrowOnInspectionCancellation { get; init; }
+    public bool HoldRecoveryDiscovery { get; init; }
+    public bool HoldRecover { get; init; }
+    public bool HoldAbandon { get; init; }
     public TaskCompletionSource InspectStarted { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource HeldInspectionStarted { get; } = new(
@@ -401,6 +427,24 @@ internal static class ViewModelTestFixture
     public TaskCompletionSource EventsPublished { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource ReleaseEvents { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource RecoveryDiscoveryStarted { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource RecoveryDiscoveryCancellationObserved { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource ReleaseRecoveryDiscovery { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource RecoverStarted { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource RecoverCancellationObserved { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource ReleaseRecover { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource AbandonStarted { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource AbandonCancellationObserved { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource ReleaseAbandon { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
 
     public async Task<ExecutionRun> InspectAsync(
@@ -545,16 +589,83 @@ internal static class ViewModelTestFixture
       return CompletedRun(("git", ExecutionOutcome.Succeeded, "install"));
     }
 
-    public Task<IReadOnlyList<RecoveryCandidate>> FindRecoveryCandidatesAsync(
-        CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<RecoveryCandidate>>([]);
+    public async Task<IReadOnlyList<RecoveryCandidate>> FindRecoveryCandidatesAsync(
+        CancellationToken cancellationToken)
+    {
+      FindRecoveryCandidatesCalls++;
+      RecoveryDiscoveryStarted.TrySetResult();
+      using CancellationTokenRegistration registration = cancellationToken.Register(
+          () => RecoveryDiscoveryCancellationObserved.TrySetResult());
+      if (HoldRecoveryDiscovery)
+      {
+        await ReleaseRecoveryDiscovery.Task.WaitAsync(cancellationToken);
+      }
 
-    public Task<ExecutionRun> RecoverAsync(
+      if (RecoveryDiscoveryException is not null)
+      {
+        throw RecoveryDiscoveryException;
+      }
+
+      return RecoveryCandidates;
+    }
+
+    public async Task<ExecutionRun> RecoverAsync(
         Guid priorRunId,
-        CancellationToken cancellationToken) => throw new NotSupportedException();
+        CancellationToken cancellationToken)
+    {
+      RecoverCalls++;
+      RecoveredRunId = priorRunId;
+      RecoverStarted.TrySetResult();
+      if (HoldRecover)
+      {
+        try
+        {
+          await ReleaseRecover.Task.WaitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+          RecoverCancellationObserved.TrySetResult();
+          throw;
+        }
+      }
 
-    public Task AbandonAsync(Guid priorRunId, CancellationToken cancellationToken) =>
-        throw new NotSupportedException();
+      if (RecoverException is not null)
+      {
+        throw RecoverException;
+      }
+
+      events.BindCurrentScopeToRun(RecoverResult.RunId);
+      foreach (RunEvent runEvent in RecoveryEvents)
+      {
+        await events.PublishAsync(runEvent, cancellationToken);
+      }
+
+      return RecoverResult;
+    }
+
+    public async Task AbandonAsync(Guid priorRunId, CancellationToken cancellationToken)
+    {
+      AbandonCalls++;
+      AbandonedRunId = priorRunId;
+      AbandonStarted.TrySetResult();
+      if (HoldAbandon)
+      {
+        try
+        {
+          await ReleaseAbandon.Task.WaitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+          AbandonCancellationObserved.TrySetResult();
+          throw;
+        }
+      }
+
+      if (AbandonException is not null)
+      {
+        throw AbandonException;
+      }
+    }
   }
 
   internal sealed class CapturingReportExporter : IRunReportExporter

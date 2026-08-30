@@ -53,6 +53,30 @@ public sealed class DesktopProjectTests
   }
 
   [Fact]
+  public void RecoveryCandidatesViewBindsSafeDetailsAndActions()
+  {
+    string desktopDirectory = Path.GetDirectoryName(GetDesktopProjectPath())!;
+    string viewPath = Path.Combine(
+        desktopDirectory,
+        "Views",
+        "RecoveryCandidatesView.xaml");
+
+    Assert.True(File.Exists(viewPath), $"Missing recovery view at '{viewPath}'.");
+    XDocument view = XDocument.Load(viewPath);
+    XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+    string document = view.ToString();
+
+    Assert.Contains("{Binding Candidates}", document, StringComparison.Ordinal);
+    Assert.Contains("{Binding SelectedCandidate, Mode=TwoWay}", document, StringComparison.Ordinal);
+    Assert.Contains("{Binding RecoverCommand}", document, StringComparison.Ordinal);
+    Assert.Contains("{Binding AbandonCommand}", document, StringComparison.Ordinal);
+    Assert.Contains("{Binding Profile}", document, StringComparison.Ordinal);
+    Assert.Contains("{Binding PendingResources}", document, StringComparison.Ordinal);
+    Assert.DoesNotContain("ProfileSourcePath", document, StringComparison.Ordinal);
+    Assert.Equal(2, view.Descendants(presentation + "Button").Count());
+  }
+
+  [Fact]
   public void ExecutionMonitorShowsResourceAndStepStateAndOutcome()
   {
     string desktopDirectory = Path.GetDirectoryName(GetDesktopProjectPath())!;

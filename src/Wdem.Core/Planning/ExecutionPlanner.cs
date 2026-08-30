@@ -135,37 +135,10 @@ public sealed partial class ExecutionPlanner(
         if (CanDeferUntilDependenciesComplete(item, plannedById))
         {
           var authorization = CreateDeferredAuthorization(item);
-          var expectedAction = authorization.AllowedActions.Single();
-          item = item with
-          {
-            Status = PlannedResourceStatus.Deferred,
-            Risk = authorization.MaximumRisk,
-            RequiresElevation = authorization.MaximumPrivilege ==
-                PrivilegeRequirement.Administrator,
-            IsDestructive = authorization.AllowDestructive,
-            RestartPolicy = authorization.MaximumRestartPolicy,
-            Reason = authorization.DynamicPlanNotice,
-            DeferredAuthorization = authorization,
-            Diagnostics = ReadOnly(Array.Empty<StructuredError>()),
-            ResourcePlan = item.ResourcePlan with
-            {
-              Error = null,
-              StructuredErrors = ReadOnly(Array.Empty<StructuredError>()),
-              Steps =
-              [
-                new PlanStep
-                {
-                  Id = "deferred-refinement",
-                  Description = $"Authorize deferred {expectedAction.ToString().ToLowerInvariant()} after dependency re-detection.",
-                  Action = expectedAction,
-                  PrivilegeRequirement = authorization.MaximumPrivilege,
-                  RestartPolicy = authorization.MaximumRestartPolicy,
-                  IsDestructive = authorization.AllowDestructive,
-                  Reason = authorization.DynamicPlanNotice
-                }
-              ]
-            }
-          };
+          item = CreateDeferredPlaceholder(
+              item,
+              authorization,
+              item.ResourcePlan.Compliance);
         }
 
         var blockedBy = item.Dependencies
@@ -652,33 +625,6 @@ public sealed partial class ExecutionPlanner(
             PlannedResourceStatus.Deferred or PlannedResourceStatus.AlreadySatisfied) &&
         dependencies.Any(dependency => dependency?.Status is PlannedResourceStatus.Ready or
             PlannedResourceStatus.Deferred);
-  }
-
-  private static DeferredPlanAuthorization CreateDeferredAuthorization(PlannedResource item)
-  {
-    var action = item.ResourcePlan.Compliance switch
-    {
-      ComplianceStatus.Missing when item.Definition.Type.EndsWith(
-          "settings",
-          StringComparison.OrdinalIgnoreCase) => PlanAction.Configure,
-      ComplianceStatus.Missing => PlanAction.Install,
-      ComplianceStatus.VersionMismatch => PlanAction.Upgrade,
-      _ => PlanAction.Configure
-    };
-    var maximumPrivilege = item.Definition.PrivilegeRequirement;
-    return new DeferredPlanAuthorization
-    {
-      AllowedActions = [action],
-      MaximumPrivilege = maximumPrivilege,
-      MaximumRestartPolicy = item.Definition.RestartPolicy,
-      MaximumRisk = maximumPrivilege == PrivilegeRequirement.Administrator
-          ? PlanRisk.Elevated
-          : PlanRisk.Standard,
-      AllowDestructive = false,
-      DynamicPlanNotice =
-          "This resource will be re-detected after its declared dependencies succeed; " +
-          "the resulting plan must remain within this displayed authorization."
-    };
   }
 
   private static PlannedResource CreatePlannedResource(

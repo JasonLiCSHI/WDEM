@@ -15,6 +15,309 @@ namespace Wdem.Desktop.Tests.ViewModels;
 public sealed class MainWindowViewModelTests
 {
   [Fact]
+  public async Task InitializeAsync_RecoveryCandidatesPreemptProfileSelectionWithUsefulDetails()
+  {
+    var candidate = RecoveryCandidate();
+    var newerCandidate = candidate with
+    {
+      RunId = Guid.NewGuid(),
+      StartedAtUtc = candidate.StartedAtUtc.AddHours(1)
+    };
+    var events = new TestRunEventSink();
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid())
+    {
+      RecoveryCandidates = [newerCandidate, candidate]
+    };
+    var main = new MainWindowViewModel(
+        new FixedProfileCatalog(Profile()),
+        new ResourceGraphBuilder(_ => null),
+        service,
+        events,
+        new LogRedactor(),
+        new RecordingDispatcher());
+
+    await main.InitializeAsync();
+
+    var recovery = Assert.IsType<RecoveryCandidatesViewModel>(main.CurrentPage);
+    Assert.Equal(2, recovery.Candidates.Count);
+    var item = recovery.Candidates[0];
+    Assert.Equal(candidate.RunId, item.RunId);
+    Assert.Contains("csharp-developer", item.Profile, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("2", item.Status, StringComparison.Ordinal);
+    Assert.Contains("git", item.PendingResources, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("2026", item.StartedAtDisplay, StringComparison.Ordinal);
+    Assert.Equal(1, service.FindRecoveryCandidatesCalls);
+    Assert.NotEmpty(main.ProfileSelection.Profiles);
+  }
+
+  [Fact]
+  public async Task InitializeAsync_RedactsRecoveryProfileAndPendingResourceIds()
+  {
+    const string secret = "candidate-secret";
+    var candidate = RecoveryCandidate() with
+    {
+      ProfileSourcePath = Path.Combine("profiles", $"{secret}.yaml"),
+      PendingResourceIds = new HashSet<string>(
+          [$"git-{secret}"],
+          StringComparer.OrdinalIgnoreCase)
+    };
+    var events = new TestRunEventSink();
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid())
+    {
+      RecoveryCandidates = [candidate]
+    };
+    var main = new MainWindowViewModel(
+        new FixedProfileCatalog(Profile()),
+        new ResourceGraphBuilder(_ => null),
+        service,
+        events,
+        new LogRedactor([secret]),
+        new RecordingDispatcher());
+
+    await main.InitializeAsync();
+
+    RecoveryCandidateViewModel item = Assert.Single(
+        Assert.IsType<RecoveryCandidatesViewModel>(main.CurrentPage).Candidates);
+    Assert.DoesNotContain(secret, item.Profile, StringComparison.Ordinal);
+    Assert.DoesNotContain(secret, item.PendingResources, StringComparison.Ordinal);
+    Assert.NotEmpty(item.Profile);
+    Assert.NotEmpty(item.PendingResources);
+  }
+
+  [Fact]
+  public async Task RecoverCandidate_UsesServiceAndExistingMonitorCompletionFlowExactlyOnce()
+  {
+    var candidate = RecoveryCandidate();
+    var events = new TestRunEventSink();
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid())
+    {
+      RecoveryCandidates = [candidate],
+      HoldRecover = true,
+      RecoverResult = CompletedRun(("git", ExecutionOutcome.Succeeded, "install"))
+    };
+    var main = new MainWindowViewModel(
+        new FixedProfileCatalog(Profile()),
+        new ResourceGraphBuilder(_ => null),
+        service,
+        events,
+        new LogRedactor(),
+        new RecordingDispatcher());
+    await main.InitializeAsync();
+    var recovery = Assert.IsType<RecoveryCandidatesViewModel>(main.CurrentPage);
+    recovery.SelectedCandidate = Assert.Single(recovery.Candidates);
+
+    Task recovering = recovery.RecoverCommand.ExecuteAsync(null);
+    await service.RecoverStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await recovery.RecoverCommand.ExecuteAsync(null);
+
+    Assert.Equal(1, service.RecoverCalls);
+    Assert.Equal(candidate.RunId, service.RecoveredRunId);
+    Assert.Equal(0, service.ApplyCalls);
+    Assert.True(Assert.IsType<ExecutionMonitorViewModel>(main.CurrentPage).IsRunning);
+
+    service.ReleaseRecover.TrySetResult();
+    await recovering;
+
+    var completion = Assert.IsType<CompletionViewModel>(main.CurrentPage);
+    Assert.Equal(service.RecoverResult.RunId, completion.Run.RunId);
+  }
+
+  [Fact]
+  public async Task RecoverFailureReturnsToRecoveryPageRedactedAndRetryable()
+  {
+    const string secret = "recover-operation-secret";
+    var candidate = RecoveryCandidate();
+    var events = new TestRunEventSink();
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid())
+    {
+      RecoveryCandidates = [candidate],
+      RecoverException = new InvalidOperationException($"recovery failed: {secret}")
+    };
+    var main = new MainWindowViewModel(
+        new FixedProfileCatalog(Profile()),
+        new ResourceGraphBuilder(_ => null),
+        service,
+        events,
+        new LogRedactor([secret]),
+        new RecordingDispatcher());
+    await main.InitializeAsync();
+    var recovery = Assert.IsType<RecoveryCandidatesViewModel>(main.CurrentPage);
+
+    await recovery.RecoverCommand.ExecuteAsync(null);
+
+    Assert.Same(recovery, main.CurrentPage);
+    Assert.NotNull(main.ErrorMessage);
+    Assert.DoesNotContain(secret, main.ErrorMessage, StringComparison.Ordinal);
+    Assert.True(recovery.RecoverCommand.CanExecute(null));
+    Assert.True(recovery.AbandonCommand.CanExecute(null));
+    Assert.Equal(1, service.RecoverCalls);
+    Assert.Equal(0, service.ApplyCalls);
+
+    service.RecoverException = null;
+    await recovery.RecoverCommand.ExecuteAsync(null);
+
+    Assert.Equal(2, service.RecoverCalls);
+    Assert.IsType<CompletionViewModel>(main.CurrentPage);
+  }
+
+  [Fact]
+  public async Task AbandonCandidate_RemovesItAndSuppressesCompetingClicks()
+  {
+    var candidate = RecoveryCandidate();
+    var events = new TestRunEventSink();
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid())
+    {
+      RecoveryCandidates = [candidate],
+      HoldAbandon = true
+    };
+    var main = new MainWindowViewModel(
+        new FixedProfileCatalog(Profile()),
+        new ResourceGraphBuilder(_ => null),
+        service,
+        events,
+        new LogRedactor(),
+        new RecordingDispatcher());
+    await main.InitializeAsync();
+    var recovery = Assert.IsType<RecoveryCandidatesViewModel>(main.CurrentPage);
+    recovery.SelectedCandidate = Assert.Single(recovery.Candidates);
+
+    Task abandoning = recovery.AbandonCommand.ExecuteAsync(null);
+    await service.AbandonStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await recovery.AbandonCommand.ExecuteAsync(null);
+    await recovery.RecoverCommand.ExecuteAsync(null);
+
+    Assert.Equal(1, service.AbandonCalls);
+    Assert.Equal(0, service.RecoverCalls);
+    Assert.Equal(0, service.ApplyCalls);
+    Assert.False(recovery.RecoverCommand.CanExecute(null));
+
+    service.ReleaseAbandon.TrySetResult();
+    await abandoning;
+
+    Assert.Empty(recovery.Candidates);
+    Assert.Same(main.ProfileSelection, main.CurrentPage);
+  }
+
+  [Fact]
+  public async Task RecoveryDiscoveryFailureIsRedactedAndLeavesProfilesUsable()
+  {
+    const string secret = "recovery-discovery-secret";
+    var events = new TestRunEventSink();
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid())
+    {
+      RecoveryDiscoveryException = new InvalidOperationException($"discovery failed: {secret}")
+    };
+    var main = new MainWindowViewModel(
+        new FixedProfileCatalog(Profile()),
+        new ResourceGraphBuilder(_ => null),
+        service,
+        events,
+        new LogRedactor([secret]),
+        new RecordingDispatcher());
+
+    await main.InitializeAsync();
+
+    Assert.Same(main.ProfileSelection, main.CurrentPage);
+    Assert.NotNull(main.ErrorMessage);
+    Assert.DoesNotContain(secret, main.ErrorMessage, StringComparison.Ordinal);
+    Assert.NotEmpty(main.ProfileSelection.Profiles);
+  }
+
+  [Fact]
+  public async Task DisposeDuringRecoveryDiscoveryCancelsAndPreventsLateNavigation()
+  {
+    var events = new TestRunEventSink();
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid())
+    {
+      RecoveryCandidates = [RecoveryCandidate()],
+      HoldRecoveryDiscovery = true
+    };
+    var main = new MainWindowViewModel(
+        new FixedProfileCatalog(Profile()),
+        new ResourceGraphBuilder(_ => null),
+        service,
+        events,
+        new LogRedactor(),
+        new RecordingDispatcher());
+
+    Task initialization = main.InitializeAsync();
+    await service.RecoveryDiscoveryStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    Task disposal = main.DisposeAsync().AsTask();
+    await service.RecoveryDiscoveryCancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    await disposal;
+    await initialization;
+
+    Assert.Same(main.ProfileSelection, main.CurrentPage);
+    Assert.Equal(1, service.FindRecoveryCandidatesCalls);
+  }
+
+  [Fact]
+  public async Task DisposeDuringRecoverCancelsAndWaitsWithoutLateCompletionNavigation()
+  {
+    var events = new TestRunEventSink();
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid())
+    {
+      RecoveryCandidates = [RecoveryCandidate()],
+      HoldRecover = true
+    };
+    var main = new MainWindowViewModel(
+        new FixedProfileCatalog(Profile()),
+        new ResourceGraphBuilder(_ => null),
+        service,
+        events,
+        new LogRedactor(),
+        new RecordingDispatcher());
+    await main.InitializeAsync();
+    var recovery = Assert.IsType<RecoveryCandidatesViewModel>(main.CurrentPage);
+
+    Task recovering = recovery.RecoverCommand.ExecuteAsync(null);
+    await service.RecoverStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    Task disposal = main.DisposeAsync().AsTask();
+    await service.RecoverCancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    await Task.WhenAll(disposal, recovering);
+
+    Assert.IsNotType<CompletionViewModel>(main.CurrentPage);
+    Assert.Null(main.ErrorMessage);
+    Assert.Equal(1, service.RecoverCalls);
+    Assert.Equal(0, service.ApplyCalls);
+  }
+
+  [Fact]
+  public async Task DisposeDuringAbandonCancelsAndWaitsWithoutRemovingCandidate()
+  {
+    var events = new TestRunEventSink();
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid())
+    {
+      RecoveryCandidates = [RecoveryCandidate()],
+      HoldAbandon = true
+    };
+    var main = new MainWindowViewModel(
+        new FixedProfileCatalog(Profile()),
+        new ResourceGraphBuilder(_ => null),
+        service,
+        events,
+        new LogRedactor(),
+        new RecordingDispatcher());
+    await main.InitializeAsync();
+    var recovery = Assert.IsType<RecoveryCandidatesViewModel>(main.CurrentPage);
+
+    Task abandoning = recovery.AbandonCommand.ExecuteAsync(null);
+    await service.AbandonStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    Task disposal = main.DisposeAsync().AsTask();
+    await service.AbandonCancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    await Task.WhenAll(disposal, abandoning);
+
+    Assert.Same(recovery, main.CurrentPage);
+    Assert.Single(recovery.Candidates);
+    Assert.Null(main.ErrorMessage);
+    Assert.Equal(1, service.AbandonCalls);
+    Assert.Equal(0, service.RecoverCalls);
+  }
+
+  [Fact]
   public async Task PlanInspectionExposesLayersAndDisablesApplyForNonExecutableErrors()
   {
     var events = new TestRunEventSink();

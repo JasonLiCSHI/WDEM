@@ -3311,8 +3311,290 @@ public sealed class EnvironmentRunServiceTests
     Assert.NotEqual(interrupted.RunId, recovered.RunId);
     Assert.Equal(interrupted.RunId, recovered.RetriedFromRunId);
     Assert.True(provider.DetectCalls >= 1);
+    Assert.NotNull(recovered.Plan);
+    Assert.NotNull(recovered.PlanApproval);
     Assert.Equal(ExecutionOutcome.NotRequired, recovered.ResourceResults["git"].Outcome);
     Assert.Equal(0, provider.ApplyCalls);
+  }
+
+  [Theory]
+  [InlineData(false, true)]
+  [InlineData(true, false)]
+  public async Task RecoverAsync_RejectsMissingHistoricalApprovalEvidenceWithoutApplying(
+      bool includePlan,
+      bool includeApproval)
+  {
+    var provider = new ScriptedProvider(Missing("git"));
+    var (service, store) = CreateService(provider);
+    var approved = InterruptedRun();
+    var interrupted = approved with
+    {
+      Plan = includePlan ? approved.Plan : null,
+      PlanApproval = includeApproval ? approved.PlanApproval : null
+    };
+    await store.CreateAsync(interrupted, CancellationToken.None);
+
+    var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        service.RecoverAsync(interrupted.RunId, CancellationToken.None));
+
+    Assert.Contains("approval", exception.Message, StringComparison.OrdinalIgnoreCase);
+    Assert.Equal(0, provider.ApplyCalls);
+    var persisted = await store.GetAsync(interrupted.RunId, CancellationToken.None);
+    Assert.Null(persisted!.RecoveryClaimId);
+  }
+
+  [Theory]
+  [InlineData("definition")]
+  [InlineData("action")]
+  [InlineData("privilege")]
+  [InlineData("step")]
+  public async Task RecoverAsync_FreshPlanOutsideHistoricalBoundaryDoesNotApply(
+      string violation)
+  {
+    DeveloperProfile profile = Profile();
+    if (violation == "definition")
+    {
+      ResourceDefinition changed = profile.Resources["git"] with
+      {
+        VersionConstraint = ">=9.0.0"
+      };
+      profile = profile with
+      {
+        Resources = new Dictionary<string, ResourceDefinition>(StringComparer.OrdinalIgnoreCase)
+        {
+          ["git"] = changed
+        }
+      };
+    }
+
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      PlanOperation = violation == "definition"
+          ? null
+          : (resource, state) => ExecutablePlan(resource, state) with
+          {
+            Steps =
+            [
+              new PlanStep
+              {
+                Id = violation == "step" ? "new-install-step" : "install",
+                Description = "Fresh recovery work",
+                Action = violation == "action" ? PlanAction.Upgrade : PlanAction.Install,
+                PrivilegeRequirement = violation == "privilege"
+                    ? PrivilegeRequirement.Administrator
+                    : PrivilegeRequirement.CurrentUser,
+                RestartPolicy = RestartPolicy.NoRestart
+              }
+            ]
+          }
+    };
+    var (service, store) = CreateService(provider, profile);
+    var interrupted = InterruptedRun();
+    await store.CreateAsync(interrupted, CancellationToken.None);
+
+    var recovered = await service.RecoverAsync(interrupted.RunId, CancellationToken.None);
+
+    Assert.True(provider.DetectCalls >= 1);
+    Assert.Equal(0, provider.ApplyCalls);
+    Assert.Equal(ExecutionOutcome.Failed, recovered.Outcome);
+    Assert.Null(recovered.PlanApproval);
+    var error = Assert.Single(
+        recovered.Plan!.Errors,
+        candidate => candidate.Code == WdemErrorCode.ConfigurationError);
+    Assert.Contains("prior approval", error.Summary, StringComparison.OrdinalIgnoreCase);
+  }
+
+  [Fact]
+  public async Task RecoverAsync_ReplansDeferredResourceWithinHistoricalAuthorization()
+  {
+    var interrupted = await InterruptedDeferredRunAsync();
+    var historicalProof = Assert.Single(interrupted.PlanApproval!.DeferredAuthorizations);
+    Assert.Equal("dependent", historicalProof.ResourceId);
+    Assert.Equal(
+        PlannedResourceStatus.Deferred,
+        interrupted.Plan!.Resources.Single(resource =>
+            resource.Definition.Id == "dependent").Status);
+
+    var dependencyInstalled = false;
+    var provider = DeferredProvider(
+        () => dependencyInstalled,
+        () => dependencyInstalled = true);
+    var (service, store) = CreateService(
+        provider,
+        Profile(includeDependentResource: true));
+    await store.CreateAsync(interrupted, CancellationToken.None);
+
+    var recovered = await service.RecoverAsync(interrupted.RunId, CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.Succeeded, recovered.Outcome);
+    Assert.Equal(2, provider.ApplyCalls);
+    Assert.Equal(ExecutionOutcome.Succeeded, recovered.ResourceResults["dependent"].Outcome);
+    Assert.Equal(
+        PlannedResourceStatus.Ready,
+        recovered.Plan!.Resources.Single(resource =>
+            resource.Definition.Id == "dependent").Status);
+    Assert.Contains(store.SavedSnapshots, snapshot =>
+        snapshot.RunId == recovered.RunId &&
+        snapshot.Plan?.Resources.Single(resource =>
+            resource.Definition.Id == "dependent").Status == PlannedResourceStatus.Deferred);
+  }
+
+  [Fact]
+  public async Task RecoverAsync_AcceptsPersistedConcreteDeferredRefinementWithinProof()
+  {
+    var interrupted = await InterruptedDeferredRunAsync(afterRefinement: true);
+    Assert.Single(interrupted.PlanApproval!.DeferredAuthorizations);
+    Assert.NotEqual(interrupted.PlanApproval.InitialPlanFingerprint, interrupted.Plan!.Fingerprint);
+    Assert.Equal(
+        PlannedResourceStatus.Ready,
+        interrupted.Plan.Resources.Single(resource =>
+            resource.Definition.Id == "dependent").Status);
+
+    var dependencyInstalled = true;
+    var dependentApplyCalls = 0;
+    var provider = DeferredProvider(
+        () => dependencyInstalled,
+        () => dependencyInstalled = true,
+        applyOperation: (resource, _) =>
+        {
+          if (resource.Id == "dependent")
+          {
+            dependentApplyCalls++;
+          }
+
+          return ValueTask.FromResult(new ResourceApplyResult
+          {
+            ResourceId = resource.Id,
+            Outcome = ApplyOutcome.Succeeded
+          });
+        });
+    var (service, store) = CreateService(
+        provider,
+        Profile(includeDependentResource: true));
+    await store.CreateAsync(interrupted, CancellationToken.None);
+
+    var recovered = await service.RecoverAsync(interrupted.RunId, CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.Succeeded, recovered.Outcome);
+    Assert.Equal(1, provider.ApplyCalls);
+    Assert.Equal(1, dependentApplyCalls);
+    Assert.Equal(ExecutionOutcome.Succeeded, recovered.ResourceResults["dependent"].Outcome);
+  }
+
+  [Fact]
+  public async Task RecoverAsync_RejectsDeferredRuntimeRefinementOutsideHistoricalAuthorization()
+  {
+    var interrupted = await InterruptedDeferredRunAsync();
+    var dependencyInstalled = false;
+    var dependentApplyCalls = 0;
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      DetectState = resource => resource.Id == "git" && dependencyInstalled
+          ? Satisfied(resource.Id, "2.52.1")
+          : Missing(resource.Id),
+      PlanOperation = (resource, state) => resource.Id == "dependent" && !dependencyInstalled
+          ? DependencyUnavailablePlan(resource)
+          : ExecutablePlan(resource, state) with
+          {
+            Steps = state.Exists
+                ? []
+                :
+                [
+                  new PlanStep
+                  {
+                    Id = $"install-{resource.Id}",
+                    Description = $"Configure {resource.Id}",
+                    Action = resource.Id == "dependent"
+                        ? PlanAction.Configure
+                        : PlanAction.Install,
+                    PrivilegeRequirement = PrivilegeRequirement.CurrentUser,
+                    RestartPolicy = RestartPolicy.NoRestart
+                  }
+                ]
+          },
+      ApplyForResourceOperation = (resource, _) =>
+      {
+        if (resource.Id == "git")
+        {
+          dependencyInstalled = true;
+        }
+        else
+        {
+          dependentApplyCalls++;
+        }
+
+        return ValueTask.FromResult(new ResourceApplyResult
+        {
+          ResourceId = resource.Id,
+          Outcome = ApplyOutcome.Succeeded
+        });
+      },
+      VerificationForResourceOperation = (resource, _) => ValueTask.FromResult(
+          new VerificationResult
+          {
+            ResourceId = resource.Id,
+            Compliance = ComplianceStatus.Satisfied,
+            DetectedState = Satisfied(resource.Id, "2.52.1")
+          })
+    };
+    var (service, store) = CreateService(
+        provider,
+        Profile(includeDependentResource: true));
+    await store.CreateAsync(interrupted, CancellationToken.None);
+
+    var recovered = await service.RecoverAsync(interrupted.RunId, CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.Failed, recovered.Outcome);
+    Assert.Equal(1, provider.ApplyCalls);
+    Assert.Equal(0, dependentApplyCalls);
+    Assert.Equal(
+        WdemErrorCode.ConfigurationError,
+        recovered.ResourceResults["dependent"].Error!.Code);
+    Assert.Equal(
+        PlannedResourceStatus.Deferred,
+        recovered.Plan!.Resources.Single(resource =>
+            resource.Definition.Id == "dependent").Status);
+  }
+
+  [Fact]
+  public async Task RecoverAsync_RejectsTamperedNonDeferredPlanBesideDeferredProof()
+  {
+    var interrupted = await InterruptedDeferredRunAsync();
+    Assert.Single(interrupted.PlanApproval!.DeferredAuthorizations);
+    var approvedPlan = interrupted.Plan!;
+    var tamperedResources = approvedPlan.Resources.Select(resource =>
+        resource.Definition.Id == "git"
+            ? resource with
+            {
+              ResourcePlan = resource.ResourcePlan with
+              {
+                Steps = resource.ResourcePlan.Steps.Select(step => step with
+                {
+                  Action = PlanAction.Upgrade
+                }).ToArray()
+              }
+            }
+            : resource).ToArray();
+    var tamperedPlan = ExecutionPlanner.CreatePlan(
+        approvedPlan.ProfileId,
+        approvedPlan.ProfileVersion,
+        approvedPlan.Layers,
+        tamperedResources,
+        approvedPlan.Errors);
+    var tampered = interrupted with { Plan = tamperedPlan };
+    var provider = new ScriptedProvider(Missing("git"));
+    var (service, store) = CreateService(
+        provider,
+        Profile(includeDependentResource: true));
+    await store.CreateAsync(tampered, CancellationToken.None);
+
+    var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        service.RecoverAsync(tampered.RunId, CancellationToken.None));
+
+    Assert.Contains("approval", exception.Message, StringComparison.OrdinalIgnoreCase);
+    Assert.Equal(0, provider.ApplyCalls);
+    var persisted = await store.GetAsync(tampered.RunId, CancellationToken.None);
+    Assert.Null(persisted!.RecoveryClaimId);
   }
 
   [Fact]
@@ -3926,27 +4208,54 @@ public sealed class EnvironmentRunServiceTests
     };
   }
 
-  private static ExecutionRun InterruptedRun() => new()
+  private static ExecutionRun InterruptedRun()
   {
-    RunId = Guid.NewGuid(),
-    Mode = RunMode.Apply,
-    ProfileSourcePath = CanonicalProfilePath,
-    ProfileId = "developer",
-    ProfileVersion = "1.0.0",
-    SelectedOptionalResourceIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase),
-    StartedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-1),
-    State = ExecutionState.Running,
-    Machine = new MachineInformation("test", "x64", "test", "test"),
-    ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+    var approved = FailedRun("git");
+    return approved with
     {
-      ["git"] = new()
+      StartedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-1),
+      EndedAtUtc = null,
+      State = ExecutionState.Running,
+      Outcome = null,
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
       {
-        ResourceId = "git",
-        State = ExecutionState.Running,
-        DetectedBefore = Missing("git")
+        ["git"] = new()
+        {
+          ResourceId = "git",
+          State = ExecutionState.Running,
+          DetectedBefore = Missing("git")
+        }
       }
-    }
-  };
+    };
+  }
+
+  private static async Task<ExecutionRun> InterruptedDeferredRunAsync(
+      bool afterRefinement = false)
+  {
+    var dependencyInstalled = false;
+    var provider = DeferredProvider(
+        () => dependencyInstalled,
+        () => dependencyInstalled = true);
+    var (service, store) = CreateService(
+        provider,
+        Profile(includeDependentResource: true));
+
+    await service.ApplyAsync(Request(), CancellationToken.None);
+
+    var approved = afterRefinement
+        ? store.SavedSnapshots.First(snapshot =>
+            snapshot.Plan?.Resources.Single(resource =>
+                resource.Definition.Id == "dependent").Status == PlannedResourceStatus.Ready &&
+            snapshot.PlanApproval?.DeferredAuthorizations.Count == 1)
+        : store.SavedSnapshots[0];
+    return approved with
+    {
+      StartedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-1),
+      EndedAtUtc = null,
+      State = ExecutionState.Running,
+      Outcome = null
+    };
+  }
 
   private static ExecutionRun RestartPendingRun()
   {

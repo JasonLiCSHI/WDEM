@@ -14,6 +14,41 @@ namespace Wdem.Desktop.Tests.ViewModels;
 
 public sealed class ExecutionMonitorViewModelTests
 {
+  [Fact]
+  public async Task RecoverTracksOnlyFreshReplacementRunEvents()
+  {
+    var priorRunId = Guid.NewGuid();
+    var unrelatedRunId = Guid.NewGuid();
+    var replacementRunId = Guid.NewGuid();
+    using var events = new RunEventHub();
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid())
+    {
+      RecoverResult = CompletedRun(("git", ExecutionOutcome.Succeeded, "install")) with
+      {
+        RunId = replacementRunId
+      },
+      RecoveryEvents =
+      [
+        Event(priorRunId, 1, 0.1, "stale prior event"),
+        Event(unrelatedRunId, 1, 0.2, "unrelated event"),
+        Event(replacementRunId, 1, 0.5, "fresh recovery event")
+      ]
+    };
+    var monitor = new ExecutionMonitorViewModel(
+        service,
+        events,
+        new LogRedactor(),
+        new RecordingDispatcher());
+
+    await monitor.RecoverAsync(priorRunId);
+
+    LogEntryViewModel log = Assert.Single(monitor.Logs);
+    Assert.Equal("fresh recovery event", log.Message);
+    Assert.Equal(replacementRunId, monitor.RunId);
+    Assert.Equal(priorRunId, service.RecoveredRunId);
+    Assert.Equal(0, service.ApplyCalls);
+  }
+
   [Theory]
   [InlineData(null)]
   [InlineData("")]

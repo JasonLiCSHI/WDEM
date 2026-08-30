@@ -42,14 +42,21 @@ resources require verification.
 ## Restart and crash recovery
 
 Snapshots and append-only event logs are stored under
-`%LOCALAPPDATA%\WDEM\runs`. After a crash or required restart, use `runs list`
-and `resume --run <guid>` to inspect recovery state. Resume replays only the
-recorded recovery contract; it does not trust stale machine state or silently
-continue a previously confirmed mutation.
+`%LOCALAPPDATA%\WDEM\runs`. After a crash or required restart, the desktop
+shows recovery candidates before profile selection. In the CLI, use
+`runs list` (which marks recoverable runs and lists their pending resource IDs),
+then `resume --run <guid>` to recover or
+`abandon --run <guid>` to mark an incomplete run cancelled without applying
+anything.
 
-Before any further Apply, WDEM must perform a fresh Detect and build a fresh
-Plan. Review and confirm that new plan. Retry is resource-scoped and follows
-the same detection and precondition rules.
+Recovery never replays historical commands or trusts stale machine state. Core
+reloads the profile, rebuilds the resource graph, runs a fresh Detect, and
+creates a fresh Plan in a replacement run. Recovery may apply that fresh plan
+only while it remains inside the prior approval seals and the permitted runtime
+refinement boundary. If current state requires work outside that boundary,
+recovery fails without broadening authority; start the normal inspect, plan,
+confirm, and apply flow to approve a new plan. Retry is resource-scoped and
+follows the same fresh detection, planning, and approval-boundary rules.
 
 ## One-time source-state import
 

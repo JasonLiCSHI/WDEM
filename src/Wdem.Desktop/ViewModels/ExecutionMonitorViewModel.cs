@@ -14,8 +14,8 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
   private readonly IRunEventSink _eventSink;
   private readonly LogRedactor _redactor;
   private readonly IUiDispatcher _dispatcher;
-  private readonly RunRequest _request;
-  private readonly string _reviewedPlanFingerprint;
+  private readonly RunRequest? _request;
+  private readonly string? _reviewedPlanFingerprint;
   private readonly ExecutionEventProjection _projection = new();
   private IDisposable? _subscription;
   private CancellationTokenSource? _runCancellation;
@@ -42,20 +42,32 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
       LogRedactor redactor,
       IUiDispatcher dispatcher,
       RunRequest request,
-      string reviewedPlanFingerprint)
+      string reviewedPlanFingerprint) : this(
+          runService,
+          eventSink,
+          redactor,
+          dispatcher)
+  {
+    ArgumentNullException.ThrowIfNull(request);
+    ArgumentException.ThrowIfNullOrWhiteSpace(reviewedPlanFingerprint);
+    _request = request;
+    _reviewedPlanFingerprint = reviewedPlanFingerprint;
+  }
+
+  public ExecutionMonitorViewModel(
+      IReviewedPlanEnvironmentRunService runService,
+      IRunEventSink eventSink,
+      LogRedactor redactor,
+      IUiDispatcher dispatcher)
   {
     ArgumentNullException.ThrowIfNull(runService);
     ArgumentNullException.ThrowIfNull(eventSink);
     ArgumentNullException.ThrowIfNull(redactor);
     ArgumentNullException.ThrowIfNull(dispatcher);
-    ArgumentNullException.ThrowIfNull(request);
-    ArgumentException.ThrowIfNullOrWhiteSpace(reviewedPlanFingerprint);
     _runService = runService;
     _eventSink = eventSink;
     _redactor = redactor;
     _dispatcher = dispatcher;
-    _request = request;
-    _reviewedPlanFingerprint = reviewedPlanFingerprint;
     Resources = new ObservableCollection<ResourceProgressViewModel>();
     Logs = new BoundedObservableCollection<LogEntryViewModel>(MaximumLogEntries);
     CancelCommand = new AsyncRelayCommand(
@@ -187,9 +199,18 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
   public Task StartAsync(CancellationToken cancellationToken = default) =>
       StartOperation(
           token => _runService.ApplyAsync(
-              _request,
-              _reviewedPlanFingerprint,
+              _request ?? throw new InvalidOperationException(
+                  "This monitor was not configured for a new apply operation."),
+              _reviewedPlanFingerprint ?? throw new InvalidOperationException(
+                  "This monitor was not configured with a reviewed plan."),
               token),
+          cancellationToken);
+
+  public Task RecoverAsync(
+      Guid priorRunId,
+      CancellationToken cancellationToken = default) =>
+      StartOperation(
+          token => _runService.RecoverAsync(priorRunId, token),
           cancellationToken);
 
   public async Task StopAsync()
@@ -207,7 +228,7 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
       operation = _operationTask;
     }
 
-    RequestCancellation(cancellation);
+    await RequestCancellationAsync(cancellation).ConfigureAwait(false);
     if (operation is not null)
     {
       await operation.ConfigureAwait(false);
@@ -232,7 +253,7 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
 
     try
     {
-      RequestCancellation(cancellation);
+      await RequestCancellationAsync(cancellation).ConfigureAwait(false);
       if (operation is not null)
       {
         await operation.ConfigureAwait(false);
@@ -281,7 +302,7 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
     }
 
     subscription?.Dispose();
-    RequestCancellation(cancellation);
+    _ = RequestCancellationAsync(cancellation);
   }
 
   private Task StartOperation(
@@ -298,7 +319,9 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
         throw new InvalidOperationException("An execution run is already active.");
       }
 
-      runCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+      runCancellation = cancellationToken.CanBeCanceled
+          ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
+          : new CancellationTokenSource();
       completion = new TaskCompletionSource(
           TaskCreationOptions.RunContinuationsAsynchronously);
       _runCancellation = runCancellation;
@@ -485,7 +508,7 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
       if (Interlocked.Exchange(ref _dispatcherUnavailable, 1) == 0)
       {
         Interlocked.Exchange(ref _subscription, null)?.Dispose();
-        RequestCancellation();
+        await RequestCancellationAsync().ConfigureAwait(false);
       }
 
       return false;
@@ -599,25 +622,25 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
       ? 0
       : Resources.Average(resource => resource.Percent);
 
-  private Task CancelAsync()
+  private async Task CancelAsync()
   {
-    RequestCancellation();
+    await RequestCancellationAsync().ConfigureAwait(false);
     CancelCommand.RaiseCanExecuteChanged();
-    return Task.CompletedTask;
   }
 
-  private void RequestCancellation()
-      => RequestCancellation(Volatile.Read(ref _runCancellation));
+  private Task RequestCancellationAsync()
+      => RequestCancellationAsync(Volatile.Read(ref _runCancellation));
 
-  private static void RequestCancellation(CancellationTokenSource? cancellation)
+  private static Task RequestCancellationAsync(CancellationTokenSource? cancellation)
   {
     try
     {
-      cancellation?.Cancel();
+      return cancellation?.CancelAsync() ?? Task.CompletedTask;
     }
     catch (ObjectDisposedException)
     {
       // A terminal transition won the race with the command invocation.
+      return Task.CompletedTask;
     }
   }
 

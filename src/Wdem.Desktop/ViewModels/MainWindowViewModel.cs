@@ -94,7 +94,124 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
   public AsyncRelayCommand NavigateToResourcesCommand { get; }
 
-  public Task InitializeAsync() => ProfileSelection.LoadCommand.ExecuteAsync(null);
+  public async Task InitializeAsync()
+  {
+    IReadOnlyList<RecoveryCandidate> candidates = [];
+    Exception? discoveryFailure = null;
+    if (_environmentRuns is not null)
+    {
+      await RunTrackedInspectionAsync(async cancellationToken =>
+      {
+        try
+        {
+          candidates = await _environmentRuns.FindRecoveryCandidatesAsync(cancellationToken);
+          cancellationToken.ThrowIfCancellationRequested();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+          discoveryFailure = exception;
+        }
+      });
+    }
+
+    if (_isDisposed)
+    {
+      return;
+    }
+
+    await ProfileSelection.LoadCommand.ExecuteAsync(null);
+    if (_isDisposed)
+    {
+      return;
+    }
+
+    if (discoveryFailure is not null)
+    {
+      ReportError(discoveryFailure);
+    }
+    else if (candidates.Count > 0)
+    {
+      RecoveryCandidatesViewModel? recovery = null;
+      recovery = new RecoveryCandidatesViewModel(
+          candidates,
+          _redactor!,
+          candidate => RecoverCandidateAsync(candidate, recovery!),
+          candidate => AbandonCandidateAsync(candidate, recovery!));
+      CurrentPage = recovery;
+    }
+  }
+
+  private Task AbandonCandidateAsync(
+      RecoveryCandidate candidate,
+      RecoveryCandidatesViewModel recovery) =>
+      RunTrackedInspectionAsync(async cancellationToken =>
+      {
+        ClearErrors();
+        try
+        {
+          await _environmentRuns!.AbandonAsync(candidate.RunId, cancellationToken);
+          cancellationToken.ThrowIfCancellationRequested();
+          TryPresentInspectionResult(() =>
+          {
+            recovery.Remove(candidate);
+            CurrentPage = recovery.Candidates.Count == 0
+                ? ProfileSelection
+                : recovery;
+          });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+          TryPresentInspectionResult(() => ReportError(exception));
+        }
+      });
+
+  private async Task RecoverCandidateAsync(
+      RecoveryCandidate candidate,
+      RecoveryCandidatesViewModel recovery)
+  {
+    EnsureExecutionComposition();
+    if (HasActiveExecution || _isDisposed)
+    {
+      return;
+    }
+
+    if (_executionMonitor is not null)
+    {
+      _executionMonitor.PropertyChanged -= MonitorPropertyChanged;
+      _executionMonitor.Dispose();
+    }
+
+    var monitor = new ExecutionMonitorViewModel(
+        _environmentRuns!,
+        _runEvents!,
+        _redactor!,
+        _dispatcher!);
+    _executionMonitor = monitor;
+    monitor.PropertyChanged += MonitorPropertyChanged;
+    CurrentPage = monitor;
+    Task operation = monitor.RecoverAsync(candidate.RunId);
+    RaiseNavigationStates();
+    await operation;
+    RaiseNavigationStates();
+    if (monitor.Run is { } terminalRun && !_isDisposed)
+    {
+      NavigateToCompletion(terminalRun, reviewedPlan: null);
+    }
+    else if (!_isDisposed)
+    {
+      CurrentPage = recovery;
+      if (monitor.ErrorMessage is { Length: > 0 } error)
+      {
+        ErrorMessage = error;
+      }
+    }
+  }
 
   public ValueTask DisposeAsync()
   {
@@ -123,7 +240,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     {
       try
       {
-        inspection.Cancel();
+        await inspection.CancelAsync().ConfigureAwait(false);
       }
       catch (Exception exception)
       {
@@ -437,6 +554,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
   {
     ArgumentNullException.ThrowIfNull(exception);
     string message = UserErrorMessageFormatter.Format(exception);
+    message = _redactor?.Redact(message) ?? message;
     ErrorMessage = message;
     return message;
   }
@@ -458,14 +576,15 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     public Task Completion => _completion.Task;
 
-    public void Cancel()
+    public Task CancelAsync()
     {
       try
       {
-        _cancellation.Cancel();
+        return _cancellation.CancelAsync();
       }
       catch (ObjectDisposedException)
       {
+        return Task.CompletedTask;
       }
     }
 

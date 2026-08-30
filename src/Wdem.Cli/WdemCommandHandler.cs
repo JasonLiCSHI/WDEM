@@ -151,6 +151,41 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
           cancellationToken,
           replayPersistedEventsWhenSilent: true);
 
+  public async Task<int> AbandonAsync(
+      Guid runId,
+      bool json,
+      CancellationToken cancellationToken)
+  {
+    try
+    {
+      await _environmentRuns.AbandonAsync(runId, cancellationToken).ConfigureAwait(false);
+      await WriteEventAsync(
+          new RunEvent(
+              runId,
+              1,
+              DateTimeOffset.UtcNow,
+              RunEventKind.RunStateChanged,
+              null,
+              null,
+              null,
+              "Recovery candidate abandoned.",
+              null),
+          json,
+          cancellationToken: cancellationToken).ConfigureAwait(false);
+      return 0;
+    }
+    catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
+    {
+      await TryWriteExceptionAsync(exception, json, cancelled: true).ConfigureAwait(false);
+      return 130;
+    }
+    catch (Exception exception)
+    {
+      await TryWriteExceptionAsync(exception, json, cancelled: false).ConfigureAwait(false);
+      return 1;
+    }
+  }
+
   public async Task<int> ListRunsAsync(
       bool json,
       CancellationToken cancellationToken)
@@ -158,8 +193,22 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
     try
     {
       var runs = await _runStore.ListAsync(cancellationToken).ConfigureAwait(false);
+      var recoveryCandidates = await _environmentRuns
+          .FindRecoveryCandidatesAsync(cancellationToken)
+          .ConfigureAwait(false);
+      var recoveryByRunId = recoveryCandidates
+          .GroupBy(candidate => candidate.RunId)
+          .ToDictionary(group => group.Key, group => group.First());
       foreach (var run in runs.OrderByDescending(run => run.StartedAtUtc))
       {
+        bool recoverable = recoveryByRunId.TryGetValue(run.RunId, out var candidate);
+        string pending = recoverable
+            ? string.Join(
+                ",",
+                candidate!.PendingResourceIds.OrderBy(
+                    id => id,
+                    StringComparer.OrdinalIgnoreCase))
+            : "none";
         await WriteEventAsync(new RunEvent(
             run.RunId,
             1,
@@ -168,7 +217,8 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
             null,
             null,
             null,
-            $"{run.Mode} {run.State} {run.Outcome} {run.ProfileId}",
+            $"{run.Mode} {run.State} {run.Outcome} {run.ProfileId} " +
+                $"recoverable={recoverable.ToString().ToLowerInvariant()} pending={pending}",
             null), json, cancellationToken: cancellationToken).ConfigureAwait(false);
       }
 

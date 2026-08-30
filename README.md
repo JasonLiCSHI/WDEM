@@ -27,6 +27,7 @@ wdem inspect --profile <file> [--select <resourceId> ...] [--json]
 wdem apply --profile <file> [--select <resourceId> ...] [--max-concurrency 1..32] [--json]
 wdem retry --run <guid> --resource <resourceId> ... [--json]
 wdem resume --run <guid> [--json]
+wdem abandon --run <guid> [--json]
 wdem runs list [--json]
 ```
 

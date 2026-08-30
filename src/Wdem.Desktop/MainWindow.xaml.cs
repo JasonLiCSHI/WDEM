@@ -60,6 +60,7 @@ public partial class MainWindow : Window
     PageHost.Content = currentPage switch
     {
       ProfileSelectionViewModel viewModel => new ProfileSelectionView { DataContext = viewModel },
+      RecoveryCandidatesViewModel viewModel => new RecoveryCandidatesView { DataContext = viewModel },
       ResourceSelectionViewModel viewModel => new ResourceSelectionView { DataContext = viewModel },
       PlanViewModel viewModel => new PlanView { DataContext = viewModel },
       ExecutionMonitorViewModel viewModel => new ExecutionMonitorView { DataContext = viewModel },

@@ -73,6 +73,138 @@ public sealed class WdemCliBuilderTests
   }
 
   [Fact]
+  public async Task Host_AbandonHelpDoesNotCreateComposition()
+  {
+    var factoryCalls = 0;
+    var output = new StringWriter();
+    var error = new StringWriter();
+
+    int exitCode = await WdemCliHost.RunAsync(
+        ["abandon", "--help"],
+        _ =>
+        {
+          factoryCalls++;
+          throw new InvalidOperationException("composition should not be created");
+        },
+        output,
+        error);
+
+    Assert.Equal(0, exitCode);
+    Assert.Equal(0, factoryCalls);
+    Assert.Contains("Usage", output.ToString(), StringComparison.OrdinalIgnoreCase);
+    Assert.Empty(error.ToString());
+  }
+
+  [Fact]
+  public async Task Host_AbandonInvalidRunWritesOnePureJsonDiagnosticWithoutComposition()
+  {
+    string[][] invalidArguments =
+    [
+      ["abandon", "--json"],
+      ["abandon", "--run", "not-a-guid", "--json"]
+    ];
+
+    foreach (string[] arguments in invalidArguments)
+    {
+      var factoryCalls = 0;
+      var output = new StringWriter();
+      var error = new StringWriter();
+
+      int exitCode = await WdemCliHost.RunAsync(
+          arguments,
+          _ =>
+          {
+            factoryCalls++;
+            throw new InvalidOperationException("composition should not be created");
+          },
+          output,
+          error);
+
+      Assert.Equal(2, exitCode);
+      Assert.Equal(0, factoryCalls);
+      Assert.Empty(output.ToString());
+      Assert.Single(DeserializeEvents(error));
+      Assert.Single(error.ToString().Split(
+          Environment.NewLine,
+          StringSplitOptions.RemoveEmptyEntries));
+    }
+  }
+
+  [Fact]
+  public async Task Host_AbandonSuccessWritesExactlyOneJsonEventAndNeverRecoversOrApplies()
+  {
+    var runId = Guid.NewGuid();
+    var service = new StubEnvironmentRunService
+    {
+      Result = CompletedRun(ExecutionOutcome.Succeeded)
+    };
+    var output = new StringWriter();
+    var error = new StringWriter();
+    using var sink = new RunEventHub();
+    var handler = new WdemCommandHandler(
+        service,
+        new StubExecutionRunStore(),
+        output,
+        error,
+        new LogRedactor(),
+        sink);
+
+    int exitCode = await WdemCliHost.RunAsync(
+        ["abandon", "--run", runId.ToString("D"), "--json"],
+        _ => Task.FromResult<IWdemCommandHandler>(handler),
+        output,
+        error);
+
+    RunEvent runEvent = Assert.Single(DeserializeEvents(output));
+    Assert.Equal(0, exitCode);
+    Assert.Equal(runId, runEvent.RunId);
+    Assert.Empty(error.ToString());
+    Assert.Equal(1, service.AbandonCalls);
+    Assert.Equal(0, service.RecoverCalls);
+    Assert.Equal(0, service.ApplyCalls);
+  }
+
+  [Theory]
+  [InlineData("Recovery candidate was not found: token=abandon-host-secret")]
+  [InlineData("Recovery candidate is busy: token=abandon-host-secret")]
+  public async Task Host_AbandonFailureWritesOneRedactedJsonDiagnosticAndNeverRecoversOrApplies(
+      string failureMessage)
+  {
+    const string secret = "abandon-host-secret";
+    var service = new StubEnvironmentRunService
+    {
+      Result = CompletedRun(ExecutionOutcome.Succeeded),
+      AbandonFailure = new InvalidOperationException(failureMessage)
+    };
+    var output = new StringWriter();
+    var error = new StringWriter();
+    var redactor = new LogRedactor([secret]);
+    using var sink = new RunEventHub();
+    var handler = new WdemCommandHandler(
+        service,
+        new StubExecutionRunStore(),
+        output,
+        error,
+        redactor,
+        sink);
+
+    int exitCode = await WdemCliHost.RunAsync(
+        ["abandon", "--run", Guid.NewGuid().ToString("D"), "--json"],
+        _ => Task.FromResult<IWdemCommandHandler>(handler),
+        output,
+        error,
+        redactor: redactor);
+
+    Assert.Equal(1, exitCode);
+    Assert.Empty(output.ToString());
+    Assert.Single(DeserializeEvents(error));
+    Assert.DoesNotContain(secret, error.ToString(), StringComparison.Ordinal);
+    Assert.Equal(1, service.AbandonCalls);
+    Assert.Equal(0, service.RecoverCalls);
+    Assert.Equal(0, service.ApplyCalls);
+  }
+
+  [Fact]
   public async Task Host_EmptyProfileWritesJsonEventWithoutCreatingComposition()
   {
     var factoryCalled = false;
@@ -395,6 +527,21 @@ public sealed class WdemCliBuilderTests
   }
 
   [Fact]
+  public async Task Abandon_BindsRunAndJson()
+  {
+    var runId = Guid.Parse("7f661410-2292-4b23-9124-f240584da93c");
+    var handler = new CapturingHandler();
+
+    var exitCode = await WdemCliBuilder.Build(handler).Parse(
+        ["abandon", "--run", runId.ToString("D"), "--json"]).InvokeAsync();
+
+    Assert.Equal(0, exitCode);
+    Assert.Equal("abandon", handler.Command);
+    Assert.Equal(runId, handler.RunId);
+    Assert.True(handler.Json);
+  }
+
+  [Fact]
   public async Task RunsList_BindsJson()
   {
     var handler = new CapturingHandler();
@@ -423,6 +570,7 @@ public sealed class WdemCliBuilderTests
   [InlineData("retry", "--run", "7530dd5c-70bd-47a6-a353-e612ceb6c32c")]
   [InlineData("retry", "--resource", "git")]
   [InlineData("resume")]
+  [InlineData("abandon")]
   public void RequiredOptions_AreRejectedWhenMissing(params string[] arguments)
   {
     var result = WdemCliBuilder.Build(new CapturingHandler()).Parse(arguments);
@@ -433,6 +581,7 @@ public sealed class WdemCliBuilderTests
   [Theory]
   [InlineData("retry", "--run", "not-a-guid", "--resource", "git")]
   [InlineData("resume", "--run", "not-a-guid")]
+  [InlineData("abandon", "--run", "not-a-guid")]
   public void RunOptions_RejectInvalidGuids(params string[] arguments)
   {
     var result = WdemCliBuilder.Build(new CapturingHandler()).Parse(arguments);
@@ -486,7 +635,7 @@ public sealed class WdemCliBuilderTests
     var root = WdemCliBuilder.Build(new CapturingHandler());
 
     Assert.Equal(
-        ["inspect", "apply", "retry", "resume", "runs"],
+        ["inspect", "apply", "retry", "resume", "abandon", "runs"],
         root.Subcommands.Select(command => command.Name));
   }
 
@@ -590,6 +739,93 @@ public sealed class WdemCliBuilderTests
           Assert.Equal(42, runEvent.Sequence);
           Assert.Equal(RunEventKind.Completed, runEvent.Kind);
         });
+  }
+
+  [Fact]
+  public async Task CommandHandler_AbandonCallsServiceAndWritesJsonEvent()
+  {
+    var runId = Guid.Parse("7f661410-2292-4b23-9124-f240584da93c");
+    var service = new StubEnvironmentRunService
+    {
+      Result = CompletedRun(ExecutionOutcome.Succeeded)
+    };
+    var output = new StringWriter();
+    var handler = new WdemCommandHandler(
+        service,
+        new StubExecutionRunStore(),
+        output,
+        new StringWriter(),
+        new LogRedactor(),
+        new RunEventHub());
+
+    var exitCode = await handler.AbandonAsync(runId, json: true, CancellationToken.None);
+
+    Assert.Equal(0, exitCode);
+    Assert.Equal(runId, service.AbandonedRunId);
+    Assert.Null(service.RecoverRunId);
+    var runEvent = Assert.Single(DeserializeEvents(output));
+    Assert.Equal(runId, runEvent.RunId);
+    Assert.Equal(RunEventKind.RunStateChanged, runEvent.Kind);
+    Assert.Equal("Recovery candidate abandoned.", runEvent.Message);
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task CommandHandler_AbandonFailureIsRedactedAndReturnsOne(bool json)
+  {
+    const string secret = "abandon-secret";
+    var service = new StubEnvironmentRunService
+    {
+      Result = CompletedRun(ExecutionOutcome.Succeeded),
+      AbandonFailure = new InvalidOperationException($"token={secret}")
+    };
+    var error = new StringWriter();
+    var handler = new WdemCommandHandler(
+        service,
+        new StubExecutionRunStore(),
+        new StringWriter(),
+        error,
+        new LogRedactor([secret]),
+        new RunEventHub());
+
+    var exitCode = await handler.AbandonAsync(Guid.NewGuid(), json, CancellationToken.None);
+
+    Assert.Equal(1, exitCode);
+    Assert.DoesNotContain(secret, error.ToString(), StringComparison.Ordinal);
+    if (json)
+    {
+      Assert.Single(DeserializeEvents(error));
+    }
+    else
+    {
+      Assert.NotEmpty(error.ToString());
+    }
+  }
+
+  [Fact]
+  public async Task CommandHandler_AbandonCancellationReturns130AndJsonDiagnostic()
+  {
+    using var cancellation = new CancellationTokenSource();
+    cancellation.Cancel();
+    var service = new StubEnvironmentRunService
+    {
+      Result = CompletedRun(ExecutionOutcome.Succeeded)
+    };
+    var error = new StringWriter();
+    var handler = new WdemCommandHandler(
+        service,
+        new StubExecutionRunStore(),
+        new StringWriter(),
+        error,
+        new LogRedactor(),
+        new RunEventHub());
+
+    var exitCode = await handler.AbandonAsync(Guid.NewGuid(), json: true, cancellation.Token);
+
+    Assert.Equal(130, exitCode);
+    var runEvent = Assert.Single(DeserializeEvents(error));
+    Assert.Equal(WdemErrorCode.CancellationError, runEvent.Error!.Code);
   }
 
   [Fact]
@@ -1053,6 +1289,7 @@ public sealed class WdemCliBuilderTests
     Assert.Equal(priorRunId, service.RetryRunId);
     Assert.Same(resources, service.RetryResourceIds);
     Assert.Equal(priorRunId, service.RecoverRunId);
+    Assert.Equal(1, service.FindRecoveryCandidatesCalls);
     Assert.True(store.ListCalled);
   }
 
@@ -1432,6 +1669,52 @@ public sealed class WdemCliBuilderTests
   }
 
   [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task CommandHandler_RunsListMarksCompletedPendingRestartAsRecoverable(bool json)
+  {
+    var output = new StringWriter();
+    var run = CompletedRun(ExecutionOutcome.Succeeded) with
+    {
+      RestartRequirements = [RestartPolicy.RestartRequired]
+    };
+    var service = new StubEnvironmentRunService
+    {
+      Result = run,
+      RecoveryCandidates =
+      [
+        new RecoveryCandidate
+        {
+          RunId = run.RunId,
+          ProfileSourcePath = run.ProfileSourcePath,
+          StartedAtUtc = run.StartedAtUtc,
+          PendingResourceIds = new HashSet<string>(
+              ["git"],
+              StringComparer.OrdinalIgnoreCase)
+        }
+      ]
+    };
+    var handler = new WdemCommandHandler(
+        service,
+        new StubExecutionRunStore { Runs = [run] },
+        output,
+        new StringWriter(),
+        new LogRedactor(),
+        new RunEventHub());
+
+    var exitCode = await handler.ListRunsAsync(json, CancellationToken.None);
+
+    Assert.Equal(0, exitCode);
+    Assert.Equal(1, service.FindRecoveryCandidatesCalls);
+    Assert.Contains("recoverable=true", output.ToString(), StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("pending=git", output.ToString(), StringComparison.OrdinalIgnoreCase);
+    if (json)
+    {
+      Assert.Single(DeserializeEvents(output));
+    }
+  }
+
+  [Theory]
   [InlineData(WdemErrorCode.ProfileError, 2)]
   [InlineData(WdemErrorCode.DependencyError, 2)]
   [InlineData(WdemErrorCode.ProviderError, 3)]
@@ -1641,6 +1924,17 @@ public sealed class WdemCliBuilderTests
       return Task.FromResult(0);
     }
 
+    public Task<int> AbandonAsync(
+        Guid runId,
+        bool json,
+        CancellationToken cancellationToken)
+    {
+      Command = "abandon";
+      RunId = runId;
+      Json = json;
+      return Task.FromResult(0);
+    }
+
     public Task<int> ListRunsAsync(
         bool json,
         CancellationToken cancellationToken)
@@ -1680,6 +1974,11 @@ public sealed class WdemCliBuilderTests
         bool json,
         CancellationToken cancellationToken) => Task.FromResult(0);
 
+    public Task<int> AbandonAsync(
+        Guid runId,
+        bool json,
+        CancellationToken cancellationToken) => Task.FromResult(0);
+
     public Task<int> ListRunsAsync(bool json, CancellationToken cancellationToken) =>
         Task.FromResult(0);
   }
@@ -1696,6 +1995,13 @@ public sealed class WdemCliBuilderTests
     public Guid? RetryRunId { get; private set; }
     public IReadOnlySet<string>? RetryResourceIds { get; private set; }
     public Guid? RecoverRunId { get; private set; }
+    public Guid? AbandonedRunId { get; private set; }
+    public Exception? AbandonFailure { get; init; }
+    public int ApplyCalls { get; private set; }
+    public int RecoverCalls { get; private set; }
+    public int AbandonCalls { get; private set; }
+    public int FindRecoveryCandidatesCalls { get; private set; }
+    public IReadOnlyList<RecoveryCandidate> RecoveryCandidates { get; init; } = [];
 
     public Task<ExecutionRun> InspectAsync(
         RunRequest request,
@@ -1709,6 +2015,7 @@ public sealed class WdemCliBuilderTests
         RunRequest request,
         CancellationToken cancellationToken)
     {
+      ApplyCalls++;
       CommandLineApplyCalled = true;
       ApplyRequest = request;
       return GetResult();
@@ -1738,19 +2045,31 @@ public sealed class WdemCliBuilderTests
     }
 
     public Task<IReadOnlyList<RecoveryCandidate>> FindRecoveryCandidatesAsync(
-        CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<RecoveryCandidate>>([]);
+        CancellationToken cancellationToken)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      FindRecoveryCandidatesCalls++;
+      return Task.FromResult(RecoveryCandidates);
+    }
 
     public Task<ExecutionRun> RecoverAsync(
         Guid priorRunId,
         CancellationToken cancellationToken)
     {
+      RecoverCalls++;
       RecoverRunId = priorRunId;
       return GetResult();
     }
 
-    public Task AbandonAsync(Guid priorRunId, CancellationToken cancellationToken) =>
-        Task.CompletedTask;
+    public Task AbandonAsync(Guid priorRunId, CancellationToken cancellationToken)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      AbandonCalls++;
+      AbandonedRunId = priorRunId;
+      return AbandonFailure is null
+          ? Task.CompletedTask
+          : Task.FromException(AbandonFailure);
+    }
 
     private async Task<ExecutionRun> GetResult()
     {

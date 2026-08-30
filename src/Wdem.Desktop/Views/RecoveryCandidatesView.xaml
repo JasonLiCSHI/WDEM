@@ -1,0 +1,45 @@
+<UserControl x:Class="Wdem.Desktop.Views.RecoveryCandidatesView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Padding="32">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Spacing="8">
+            <TextBlock Text="恢复未完成的运行" Style="{StaticResource SectionTitleStyle}" />
+            <TextBlock Text="选择一项继续安全恢复，或放弃其恢复记录。"
+                       TextWrapping="Wrap" />
+        </StackPanel>
+
+        <ListView Grid.Row="1"
+                  Margin="0,24,0,24"
+                  ItemsSource="{Binding Candidates}"
+                  SelectedItem="{Binding SelectedCandidate, Mode=TwoWay}"
+                  SelectionMode="Single">
+            <ListView.ItemTemplate>
+                <DataTemplate>
+                    <StackPanel Padding="12" Spacing="4">
+                        <TextBlock Text="{Binding Profile}" FontSize="18" FontWeight="SemiBold" />
+                        <TextBlock Text="{Binding RunId}" Opacity="0.72" />
+                        <TextBlock Text="{Binding StartedAtDisplay}" />
+                        <TextBlock Text="{Binding Status}" />
+                        <TextBlock Text="{Binding PendingResources}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+
+        <StackPanel Grid.Row="2"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Right"
+                    Spacing="12">
+            <Button Content="放弃" Command="{Binding AbandonCommand}" />
+            <Button Content="恢复"
+                    Command="{Binding RecoverCommand}"
+                    Style="{StaticResource AccentButtonStyle}" />
+        </StackPanel>
+    </Grid>
+</UserControl>

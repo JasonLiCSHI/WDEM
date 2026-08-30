@@ -54,6 +54,11 @@ public interface IWdemCommandHandler
       bool json,
       CancellationToken cancellationToken);
 
+  Task<int> AbandonAsync(
+      Guid runId,
+      bool json,
+      CancellationToken cancellationToken);
+
   Task<int> ResumeAsync(
       Guid runId,
       bool json,
@@ -81,6 +86,7 @@ public static class WdemCliBuilder
     root.Subcommands.Add(BuildApply(handler, exceptionHandler));
     root.Subcommands.Add(BuildRetry(handler, exceptionHandler));
     root.Subcommands.Add(BuildResume(handler, exceptionHandler));
+    root.Subcommands.Add(BuildAbandon(handler, exceptionHandler));
     root.Subcommands.Add(BuildRuns(handler, exceptionHandler));
     return root;
   }
@@ -221,6 +227,26 @@ public static class WdemCliBuilder
     var runs = new Command("runs", "Inspect persisted environment runs.");
     runs.Subcommands.Add(list);
     return runs;
+  }
+
+  private static Command BuildAbandon(
+      IWdemCommandHandler handler,
+      Func<Exception, bool, CancellationToken, Task<int>>? exceptionHandler)
+  {
+    var run = RequiredOption<Guid>("--run", "Run id to abandon.");
+    var json = JsonOption();
+    var command = new Command("abandon", "Abandon an interrupted run without recovering it.");
+    command.Options.Add(run);
+    command.Options.Add(json);
+    command.SetAction((parseResult, cancellationToken) => InvokeAsync(
+        () => handler.AbandonAsync(
+            parseResult.GetValue(run),
+            parseResult.GetValue(json),
+            cancellationToken),
+        parseResult.GetValue(json),
+        exceptionHandler,
+        cancellationToken));
+    return command;
   }
 
   private static RunRequest CreateRunRequest(
