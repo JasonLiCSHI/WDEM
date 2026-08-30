@@ -2,5 +2,24 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="WDEM">
-    <Grid />
+    <NavigationView x:Name="RootNavigation"
+                    IsBackButtonVisible="Collapsed"
+                    IsSettingsVisible="False"
+                    PaneDisplayMode="Left"
+                    SelectionChanged="NavigationView_SelectionChanged">
+        <NavigationView.MenuItems>
+            <NavigationViewItem x:Name="ProfilesNavigationItem" Content="配置文件" Tag="profiles" />
+            <NavigationViewItem x:Name="ResourcesNavigationItem"
+                                Content="资源"
+                                Tag="resources"
+                                IsEnabled="{Binding CanNavigateToResources}" />
+        </NavigationView.MenuItems>
+        <Grid>
+            <ContentControl x:Name="PageHost" />
+            <TextBlock Margin="24"
+                       Text="{Binding ErrorMessage}"
+                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                       VerticalAlignment="Bottom" />
+        </Grid>
+    </NavigationView>
 </Window>
