@@ -792,9 +792,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           stepResults,
           detectedBefore,
           startedAt,
-          applied.FinalizeAfterCancellation
-              ? CancellationToken.None
-              : cancellationToken).ConfigureAwait(false);
+          cancellationToken).ConfigureAwait(false);
       return verified;
     }
 

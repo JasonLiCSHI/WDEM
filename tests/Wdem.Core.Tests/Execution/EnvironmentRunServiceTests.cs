@@ -98,17 +98,13 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Theory]
-  [InlineData(true, ExecutionOutcome.Succeeded)]
-  [InlineData(false, ExecutionOutcome.Failed)]
-  public async Task ApplyAsync_LateCancellationUsesNonCancelableFinalVerification(
-      bool verificationSatisfied,
-      ExecutionOutcome expectedOutcome)
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task ApplyAsync_LateCancellationWithMissingOrUntrustedFinalVerificationCancelsFallback(
+      bool includeUntrustedFinalVerification)
   {
     using var cancellation = new CancellationTokenSource();
-    var verificationState = verificationSatisfied
-        ? Satisfied("git", "2.52.1")
-        : Missing("git");
-    var verificationTokenCanBeCanceled = true;
+    var verificationObservedCancellation = false;
     var provider = new ScriptedProvider(Missing("git"))
     {
       ApplyOperation = _ =>
@@ -119,6 +115,14 @@ public sealed class EnvironmentRunServiceTests
           ResourceId = "git",
           Outcome = ApplyOutcome.Succeeded,
           FinalizeAfterCancellation = true,
+          FinalVerification = includeUntrustedFinalVerification
+              ? new VerificationResult
+              {
+                ResourceId = "different-resource",
+                Compliance = ComplianceStatus.Satisfied,
+                DetectedState = Satisfied("git", "2.52.1")
+              }
+              : null,
           RestartRequirement = RestartPolicy.RestartRecommended,
           StepResults =
           [
@@ -137,16 +141,9 @@ public sealed class EnvironmentRunServiceTests
       },
       VerificationOperation = token =>
       {
-        verificationTokenCanBeCanceled = token.CanBeCanceled;
+        verificationObservedCancellation = token.IsCancellationRequested;
         token.ThrowIfCancellationRequested();
-        return ValueTask.FromResult(new VerificationResult
-        {
-          ResourceId = "git",
-          Compliance = verificationSatisfied
-              ? ComplianceStatus.Satisfied
-              : ComplianceStatus.Missing,
-          DetectedState = verificationState
-        });
+        throw new InvalidOperationException("Verification should observe cancellation.");
       }
     };
     var (service, store) = CreateService(provider);
@@ -157,10 +154,10 @@ public sealed class EnvironmentRunServiceTests
     var resource = run.ResourceResults["git"];
     var step = Assert.Single(resource.StepResults);
     Assert.Equal(ExecutionState.Completed, run.State);
-    Assert.Equal(expectedOutcome, run.Outcome);
-    Assert.Equal(expectedOutcome, resource.Outcome);
-    Assert.False(verificationTokenCanBeCanceled);
-    Assert.Equal(verificationState, resource.DetectedAfter);
+    Assert.Equal(ExecutionOutcome.Cancelled, run.Outcome);
+    Assert.Equal(ExecutionOutcome.Cancelled, resource.Outcome);
+    Assert.True(verificationObservedCancellation);
+    Assert.Null(resource.DetectedAfter);
     Assert.Equal(RestartPolicy.RestartRecommended, resource.RestartRequirement);
     Assert.Equal(3010, step.ProcessExitCode);
     Assert.True(step.ProcessSucceeded);
