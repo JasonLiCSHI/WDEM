@@ -13,13 +13,14 @@ namespace Wdem.Desktop.Tests.ViewModels;
 public sealed class ExecutionMonitorViewModelTests
 {
   [Fact]
-  public async Task StepProgressIsMarshaledAndUpdatesResourceAndLog()
+  public async Task RunEventsAreAppliedOnlyAfterTheUiDispatcherDrains()
   {
     var runId = Guid.NewGuid();
     using var events = new RunEventHub();
     var service = new FakeEnvironmentRunService(events, runId);
-    var dispatcher = new RecordingDispatcher();
+    var dispatcher = new ControlledDispatcher();
     var viewModel = CreateMonitor(service, events, dispatcher);
+    int foregroundThreadId = Environment.CurrentManagedThreadId;
     var error = new StructuredError(
         WdemErrorCode.InstallationError,
         "Install failed.",
@@ -33,6 +34,18 @@ public sealed class ExecutionMonitorViewModelTests
     [
       new RunEvent(
           runId,
+          6,
+          new DateTimeOffset(2026, 8, 30, 9, 14, 59, TimeSpan.Zero),
+          RunEventKind.ResourceStateChanged,
+          "git",
+          null,
+          0.25,
+          "Installing Git",
+          null,
+          ExecutionState.Running,
+          null),
+      new RunEvent(
+          runId,
           7,
           new DateTimeOffset(2026, 8, 30, 9, 15, 0, TimeSpan.Zero),
           RunEventKind.StepProgress,
@@ -40,23 +53,44 @@ public sealed class ExecutionMonitorViewModelTests
           "install",
           0.65,
           "Downloading Git",
-          error)
+          error,
+          ExecutionState.Completed,
+          ExecutionOutcome.Failed)
     ];
 
     service.HoldAfterEvents = true;
     Task run = viewModel.StartAsync();
+    Assert.True(dispatcher.WaitForEnqueueCount(1, TimeSpan.FromSeconds(5)));
+
+    Assert.Empty(viewModel.Resources);
+    Assert.Empty(viewModel.Logs);
+    Assert.Equal(0, viewModel.TotalProgress);
+    Assert.Null(viewModel.CurrentResource);
+    Assert.NotEqual(foregroundThreadId, dispatcher.EnqueueThreadIds[0]);
+
+    dispatcher.DrainNext();
+    Assert.True(dispatcher.WaitForEnqueueCount(2, TimeSpan.FromSeconds(5)));
+    dispatcher.DrainNext();
     await service.EventsPublished.Task;
 
     ResourceProgressViewModel resource = Assert.Single(viewModel.Resources);
     Assert.Equal(65, resource.Percent);
     Assert.Equal("Downloading Git", resource.Message);
-    LogEntryViewModel log = Assert.Single(viewModel.Logs);
+    Assert.Equal(ExecutionState.Running, resource.State);
+    Assert.Null(resource.Outcome);
+    StepProgressViewModel step = Assert.Single(resource.Steps);
+    Assert.Equal(ExecutionState.Completed, step.State);
+    Assert.Equal(ExecutionOutcome.Failed, step.Outcome);
+    LogEntryViewModel log = viewModel.Logs[^1];
     Assert.Equal(7, log.Sequence);
     Assert.Equal("git", log.ResourceId);
     Assert.Equal("install", log.StepId);
     Assert.Equal("Downloading Git", log.Message);
     Assert.Equal("The package returned an error.", log.ErrorDetail);
-    Assert.True(dispatcher.EnqueueCalls > 0);
+    Assert.Equal(65, viewModel.TotalProgress);
+    Assert.Equal("git", viewModel.CurrentResource);
+    Assert.Equal(2, viewModel.Logs.Count);
+    dispatcher.RunQueuedAndInline();
     service.ReleaseEvents.TrySetResult();
     await run;
   }
@@ -242,6 +276,61 @@ public sealed class ExecutionMonitorViewModelTests
     Assert.Equal(0, service.ApplyCalls);
   }
 
+  [Fact]
+  public async Task NonExecutablePlanApplyCannotBypassGateOrNavigate()
+  {
+    DeveloperProfile profile = Profile();
+    var events = new TestRunEventSink();
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid())
+    {
+      InspectResult = InspectRun(executable: false)
+    };
+    var main = new MainWindowViewModel(
+        new FixedProfileCatalog(profile),
+        new ResourceGraphBuilder(_ => null),
+        service,
+        events,
+        new LogRedactor(),
+        new RecordingDispatcher());
+    await main.InitializeAsync();
+    await main.ProfileSelection.SelectProfileCommand.ExecuteAsync(null);
+    await ((AsyncRelayCommand)main.ResourceSelection!.StartConfigurationCommand)
+        .ExecuteAsync(null);
+    var plan = Assert.IsType<PlanViewModel>(main.CurrentPage);
+
+    await plan.ApplyCommand.ExecuteAsync(null);
+
+    Assert.Same(plan, main.CurrentPage);
+    Assert.False(plan.ApplyCommand.CanExecute(null));
+    Assert.Equal(0, service.ApplyCalls);
+  }
+
+  [Fact]
+  public async Task ExecutablePlanApplyNavigatesToMonitorAndRunsExactlyOnce()
+  {
+    DeveloperProfile profile = Profile();
+    var events = new TestRunEventSink();
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid());
+    var main = new MainWindowViewModel(
+        new FixedProfileCatalog(profile),
+        new ResourceGraphBuilder(_ => null),
+        service,
+        events,
+        new LogRedactor(),
+        new RecordingDispatcher());
+    await main.InitializeAsync();
+    await main.ProfileSelection.SelectProfileCommand.ExecuteAsync(null);
+    await ((AsyncRelayCommand)main.ResourceSelection!.StartConfigurationCommand)
+        .ExecuteAsync(null);
+    var plan = Assert.IsType<PlanViewModel>(main.CurrentPage);
+    Assert.True(plan.ApplyCommand.CanExecute(null));
+
+    await plan.ApplyCommand.ExecuteAsync(null);
+
+    Assert.IsType<ExecutionMonitorViewModel>(main.CurrentPage);
+    Assert.Equal(1, service.ApplyCalls);
+  }
+
   private static ExecutionMonitorViewModel CreateMonitor(
       IEnvironmentRunService service,
       IRunEventSink events,
@@ -409,6 +498,115 @@ public sealed class ExecutionMonitorViewModelTests
       action();
       return Task.CompletedTask;
     }
+  }
+
+  private sealed class ControlledDispatcher : IUiDispatcher
+  {
+    private readonly object _gate = new();
+    private readonly Queue<(Action Action, TaskCompletionSource Completion)> _pending = [];
+    private readonly List<int> _enqueueThreadIds = [];
+    private int _enqueueCalls;
+    private bool _runInline;
+
+    public IReadOnlyList<int> EnqueueThreadIds
+    {
+      get
+      {
+        lock (_gate)
+        {
+          return _enqueueThreadIds.ToArray();
+        }
+      }
+    }
+
+    public Task EnqueueAsync(Action action, CancellationToken cancellationToken = default)
+    {
+      ArgumentNullException.ThrowIfNull(action);
+      cancellationToken.ThrowIfCancellationRequested();
+      TaskCompletionSource? completion = null;
+      lock (_gate)
+      {
+        _enqueueThreadIds.Add(Environment.CurrentManagedThreadId);
+        _enqueueCalls++;
+        if (!_runInline)
+        {
+          completion = NewCompletion();
+          _pending.Enqueue((action, completion));
+        }
+
+        Monitor.PulseAll(_gate);
+      }
+
+      if (completion is not null)
+      {
+        return completion.Task;
+      }
+
+      action();
+      return Task.CompletedTask;
+    }
+
+    public bool WaitForEnqueueCount(int expected, TimeSpan timeout)
+    {
+      var deadline = DateTimeOffset.UtcNow + timeout;
+      lock (_gate)
+      {
+        while (_enqueueCalls < expected)
+        {
+          TimeSpan remaining = deadline - DateTimeOffset.UtcNow;
+          if (remaining <= TimeSpan.Zero || !Monitor.Wait(_gate, remaining))
+          {
+            return false;
+          }
+        }
+
+        return true;
+      }
+    }
+
+    public void DrainNext()
+    {
+      (Action Action, TaskCompletionSource Completion) work;
+      lock (_gate)
+      {
+        work = _pending.Dequeue();
+      }
+
+      try
+      {
+        work.Action();
+        work.Completion.TrySetResult();
+      }
+      catch (Exception exception)
+      {
+        work.Completion.TrySetException(exception);
+        throw;
+      }
+    }
+
+    public void RunQueuedAndInline()
+    {
+      lock (_gate)
+      {
+        _runInline = true;
+      }
+
+      while (true)
+      {
+        lock (_gate)
+        {
+          if (_pending.Count == 0)
+          {
+            return;
+          }
+        }
+
+        DrainNext();
+      }
+    }
+
+    private static TaskCompletionSource NewCompletion() => new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
   }
 
   private sealed class FixedProfileCatalog(DeveloperProfile profile) : IProfileCatalog

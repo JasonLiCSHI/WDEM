@@ -29,7 +29,9 @@ public sealed class RunLogEntryTests
         "verify",
         0.75,
         "Verifying Git.",
-        error);
+        error,
+        ExecutionState.Completed,
+        ExecutionOutcome.Failed);
 
     var entry = RunLogEntry.FromEvent(runEvent, ProviderLogLevel.Warning);
     var restored = entry.ToEvent(runId);

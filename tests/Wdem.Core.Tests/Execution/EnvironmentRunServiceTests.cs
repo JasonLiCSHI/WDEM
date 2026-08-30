@@ -635,6 +635,20 @@ public sealed class EnvironmentRunServiceTests
     Assert.Contains(events, runEvent => runEvent.Kind == RunEventKind.ResourceStateChanged);
     Assert.Contains(events, runEvent => runEvent.Kind == RunEventKind.StepProgress);
     Assert.Contains(events, runEvent =>
+        runEvent.Kind == RunEventKind.ResourceStateChanged &&
+        runEvent.State == ExecutionState.Completed &&
+        runEvent.Outcome == ExecutionOutcome.Succeeded);
+    Assert.Contains(events, runEvent =>
+        runEvent.Kind == RunEventKind.StepProgress &&
+        runEvent.Message == "installing" &&
+        runEvent.State == ExecutionState.Running &&
+        runEvent.Outcome is null);
+    Assert.Contains(events, runEvent =>
+        runEvent.Kind == RunEventKind.StepProgress &&
+        runEvent.Message == "step-complete" &&
+        runEvent.State == ExecutionState.Completed &&
+        runEvent.Outcome == ExecutionOutcome.Succeeded);
+    Assert.Contains(events, runEvent =>
         runEvent.Kind == RunEventKind.Log && runEvent.Message == "provider-log ***");
     Assert.DoesNotContain(events, runEvent => runEvent.Message.Contains("hunter2", StringComparison.Ordinal));
     Assert.DoesNotContain(events, runEvent =>

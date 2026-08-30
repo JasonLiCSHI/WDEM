@@ -12,7 +12,9 @@ public sealed record RunLogEntry(
     string Message,
     StructuredError? Error = null,
     RunEventKind? Kind = null,
-    double? Progress = null)
+    double? Progress = null,
+    ExecutionState? State = null,
+    ExecutionOutcome? Outcome = null)
 {
   public static RunLogEntry FromEvent(RunEvent runEvent, ProviderLogLevel level)
   {
@@ -26,7 +28,9 @@ public sealed record RunLogEntry(
         runEvent.Message,
         runEvent.Error,
         runEvent.Kind,
-        runEvent.Progress);
+        runEvent.Progress,
+        runEvent.State,
+        runEvent.Outcome);
   }
 
   public RunEvent ToEvent(Guid runId) => new(
@@ -38,5 +42,7 @@ public sealed record RunLogEntry(
       StepId,
       Progress,
       Message,
-      Error);
+      Error,
+      State,
+      Outcome);
 }

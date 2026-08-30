@@ -399,7 +399,11 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
             new StructuredError(
                 WdemErrorCode.ProviderError,
                 "token=summary-secret",
-                "password=detail-secret")),
+                "password=detail-secret"),
+            RunEventKind.StepProgress,
+            0.75,
+            ExecutionState.Completed,
+            ExecutionOutcome.Failed),
         CancellationToken.None);
 
     var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
@@ -420,6 +424,8 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     Assert.DoesNotContain("detail-secret", log, StringComparison.Ordinal);
     Assert.Equal("Authorization: Bearer ***", page[0].Message);
     Assert.Equal("token=[REDACTED]", page[0].Error!.Summary);
+    Assert.Equal(ExecutionState.Completed, page[0].State);
+    Assert.Equal(ExecutionOutcome.Failed, page[0].Outcome);
   }
 
   [Fact]
@@ -1123,6 +1129,8 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   [InlineData("level")]
   [InlineData("error")]
   [InlineData("kind")]
+  [InlineData("state")]
+  [InlineData("outcome")]
   public async Task AppendLogAsync_RejectsUndefinedEnumsBeforeWriting(string invalidField)
   {
     var run = SampleRun();
@@ -1137,6 +1145,8 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
               "Invalid code")
       },
       "kind" => SampleLog(1) with { Kind = (RunEventKind)999 },
+      "state" => SampleLog(1) with { State = (ExecutionState)999 },
+      "outcome" => SampleLog(1) with { Outcome = (ExecutionOutcome)999 },
       _ => SampleLog(1) with { Level = (ProviderLogLevel)999 }
     };
 

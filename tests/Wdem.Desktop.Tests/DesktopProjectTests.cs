@@ -53,6 +53,26 @@ public sealed class DesktopProjectTests
   }
 
   [Fact]
+  public void ExecutionMonitorShowsResourceAndStepStateAndOutcome()
+  {
+    string desktopDirectory = Path.GetDirectoryName(GetDesktopProjectPath())!;
+    XDocument view = XDocument.Load(Path.Combine(
+        desktopDirectory,
+        "Views",
+        "ExecutionMonitorView.xaml"));
+    XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+
+    Assert.Equal(
+        2,
+        view.Descendants(presentation + "TextBlock")
+            .Count(element => element.Attribute("Text")?.Value == "{Binding State}"));
+    Assert.Equal(
+        2,
+        view.Descendants(presentation + "TextBlock")
+            .Count(element => element.Attribute("Text")?.Value == "{Binding Outcome}"));
+  }
+
+  [Fact]
   public void ErrorMessageUsesSingleWrappedRowOutsidePageHost()
   {
     string desktopDirectory = Path.GetDirectoryName(GetDesktopProjectPath())!;

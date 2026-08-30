@@ -20,4 +20,6 @@ public sealed record RunEvent(
     string? StepId,
     double? Progress,
     string Message,
-    StructuredError? Error);
+    StructuredError? Error,
+    ExecutionState? State = null,
+    ExecutionOutcome? Outcome = null);

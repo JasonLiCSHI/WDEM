@@ -393,7 +393,12 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
       resource.Error = runEvent.Error;
       if (runEvent.Kind == RunEventKind.ResourceStateChanged)
       {
-        resource.State = ExecutionState.Running;
+        if (runEvent.State is ExecutionState state)
+        {
+          resource.State = state;
+        }
+
+        resource.Outcome = runEvent.Outcome;
       }
 
       if (runEvent.StepId is not null)
@@ -406,7 +411,15 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
 
         step.Message = runEvent.Message;
         step.Error = runEvent.Error;
-        step.State = ExecutionState.Running;
+        if (runEvent.Kind == RunEventKind.StepProgress)
+        {
+          if (runEvent.State is ExecutionState state)
+          {
+            step.State = state;
+          }
+
+          step.Outcome = runEvent.Outcome;
+        }
       }
     }
 

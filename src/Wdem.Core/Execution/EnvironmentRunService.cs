@@ -752,6 +752,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         ? new CancellationTokenSource(cancellationDeadline.Remaining)
         : null;
     var evidenceToken = evidencePersistence?.Token ?? cancellationToken;
+    var stepResults = ToStepResults(planned, applied, startedAt);
     try
     {
       foreach (var diagnostic in applied.Diagnostics)
@@ -764,15 +765,19 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
             evidenceToken).ConfigureAwait(false);
       }
 
-      foreach (var step in applied.StepResults)
+      for (var index = 0; index < applied.StepResults.Count; index++)
       {
+        ProviderStepResult step = applied.StepResults[index];
+        StepResult stepResult = stepResults[index];
         await events.PublishStepAsync(
             id,
             step.StepId,
             step.Progress,
             step.Message ?? step.StepId,
             step.Error,
-            evidenceToken).ConfigureAwait(false);
+            evidenceToken,
+            stepResult.State,
+            stepResult.Outcome).ConfigureAwait(false);
       }
     }
     catch (OperationCanceledException) when (
@@ -781,7 +786,6 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       // The structured result below remains the durable cancellation evidence.
     }
 
-    var stepResults = ToStepResults(planned, applied, startedAt);
     if (applied.Outcome == ApplyOutcome.Succeeded)
     {
       var verified = await VerifySuccessfulApplyAsync(
@@ -1803,7 +1807,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
             $"{run.Mode} {run.State}",
             null,
             ProviderLogLevel.Info,
-            cancellationToken);
+            cancellationToken,
+            run.State,
+            run.Outcome);
 
     public async Task PublishPlanDiagnosticsAsync(
         ExecutionPlan? plan,
@@ -1832,7 +1838,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
                 result.State.ToString(),
             result.Error,
             result.Error is null ? ProviderLogLevel.Info : ProviderLogLevel.Error,
-            cancellationToken);
+            cancellationToken,
+            result.State,
+            result.Outcome);
 
     public Task PublishStepAsync(
         string resourceId,
@@ -1840,7 +1848,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         double progress,
         string message,
         StructuredError? error,
-        CancellationToken cancellationToken) => PublishAsync(
+        CancellationToken cancellationToken,
+        ExecutionState state = ExecutionState.Running,
+        ExecutionOutcome? outcome = null) => PublishAsync(
             RunEventKind.StepProgress,
             resourceId,
             stepId,
@@ -1848,7 +1858,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
             message,
             error,
             error is null ? ProviderLogLevel.Info : ProviderLogLevel.Error,
-            cancellationToken);
+            cancellationToken,
+            state,
+            outcome);
 
     public Task PublishLogAsync(
         string? resourceId,
@@ -1878,7 +1890,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
             run.Outcome == ExecutionOutcome.Succeeded
                 ? ProviderLogLevel.Info
                 : ProviderLogLevel.Error,
-            cancellationToken);
+            cancellationToken,
+            run.State,
+            run.Outcome);
 
     private async Task PublishAsync(
         RunEventKind kind,
@@ -1888,7 +1902,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         string message,
         StructuredError? error,
         ProviderLogLevel level,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ExecutionState? state = null,
+        ExecutionOutcome? outcome = null)
     {
       await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
       try
@@ -1903,7 +1919,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
             stepId,
             progress,
             message,
-            error));
+            error,
+            state,
+            outcome));
         await store.AppendLogAsync(
             runId,
             RunLogEntry.FromEvent(runEvent, level),
