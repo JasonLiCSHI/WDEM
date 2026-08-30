@@ -72,6 +72,46 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task ApplyAsync_PublishesDurableResourceRestartRequirement()
+  {
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      PlannedRestartPolicy = RestartPolicy.RestartRequired
+    };
+    using var events = new RunEventHub();
+    var observed = new List<RunEvent>();
+    using var subscription = events.SubscribeRequired((runEvent, _) =>
+    {
+      observed.Add(runEvent);
+      return Task.CompletedTask;
+    });
+    var (service, _) = CreateService(provider, eventSink: events);
+
+    await service.ApplyAsync(Request(), CancellationToken.None);
+
+    var completed = observed.Last(runEvent =>
+        runEvent.Kind == RunEventKind.ResourceStateChanged &&
+        runEvent.ResourceId == "git" &&
+        runEvent.State == ExecutionState.Completed);
+    Assert.Equal(RestartPolicy.RestartRequired, completed.RestartRequirement);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_ScopedOptionalObserverFailureDoesNotFailExecution()
+  {
+    var provider = new ScriptedProvider(Missing("git"));
+    using var events = new RunEventHub();
+    using var subscription = events.SubscribeScoped((_, _) =>
+        Task.FromException(new InvalidOperationException("UI dispatcher stopped")));
+    var (service, _) = CreateService(provider, eventSink: events);
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.Succeeded, run.Outcome);
+    Assert.Equal(1, provider.ApplyCalls);
+  }
+
+  [Fact]
   public async Task ApplyAsync_UsesActualProviderRestartEvidence()
   {
     var provider = new ScriptedProvider(Missing("git"))

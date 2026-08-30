@@ -6,6 +6,8 @@ public interface IRunEventSink
 
   IDisposable SubscribeRequired(Func<RunEvent, CancellationToken, Task> observer);
 
+  IDisposable SubscribeScoped(Func<RunEvent, CancellationToken, Task> observer);
+
   IDisposable SubscribeRequiredScoped(Func<RunEvent, CancellationToken, Task> observer);
 
   void BindCurrentScopeToRun(Guid runId);

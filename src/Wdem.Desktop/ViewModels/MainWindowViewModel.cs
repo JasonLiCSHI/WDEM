@@ -5,7 +5,7 @@ using Wdem.Core.Runs;
 
 namespace Wdem.Desktop.ViewModels;
 
-public sealed class MainWindowViewModel : ObservableObject
+public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 {
   private readonly ResourceGraphBuilder _graphBuilder;
   private readonly IProfileCatalog _catalog;
@@ -17,6 +17,7 @@ public sealed class MainWindowViewModel : ObservableObject
   private ResourceSelectionViewModel? _resourceSelection;
   private ExecutionMonitorViewModel? _executionMonitor;
   private string? _errorMessage;
+  private bool _isDisposed;
 
   public MainWindowViewModel(
       IProfileCatalog catalog,
@@ -42,10 +43,11 @@ public sealed class MainWindowViewModel : ObservableObject
     _currentPage = ProfileSelection;
     NavigateToProfilesCommand = new AsyncRelayCommand(
         _ => NavigateToProfilesAsync(),
+        _ => !HasActiveExecution && !_isDisposed,
         onError: exception => _ = ReportError(exception));
     NavigateToResourcesCommand = new AsyncRelayCommand(
         _ => NavigateToResourcesAsync(),
-        _ => ResourceSelection is not null,
+        _ => ResourceSelection is not null && !HasActiveExecution && !_isDisposed,
         exception => _ = ReportError(exception));
   }
 
@@ -84,6 +86,23 @@ public sealed class MainWindowViewModel : ObservableObject
 
   public Task InitializeAsync() => ProfileSelection.LoadCommand.ExecuteAsync(null);
 
+  public async ValueTask DisposeAsync()
+  {
+    if (_isDisposed)
+    {
+      return;
+    }
+
+    _isDisposed = true;
+    RaiseNavigationStates();
+    ExecutionMonitorViewModel? monitor = _executionMonitor;
+    if (monitor is not null)
+    {
+      await monitor.DisposeAsync().ConfigureAwait(false);
+      monitor.PropertyChanged -= MonitorPropertyChanged;
+    }
+  }
+
   private void SelectProfile(DeveloperProfile profile)
   {
     ResourceSelection = new ResourceSelectionViewModel(
@@ -97,6 +116,11 @@ public sealed class MainWindowViewModel : ObservableObject
 
   private Task NavigateToProfilesAsync()
   {
+    if (HasActiveExecution || _isDisposed)
+    {
+      return Task.CompletedTask;
+    }
+
     ClearErrors();
     CurrentPage = ProfileSelection;
     return Task.CompletedTask;
@@ -104,6 +128,11 @@ public sealed class MainWindowViewModel : ObservableObject
 
   private Task NavigateToResourcesAsync()
   {
+    if (HasActiveExecution || _isDisposed)
+    {
+      return Task.CompletedTask;
+    }
+
     ClearErrors();
     if (ResourceSelection is not null)
     {
@@ -132,27 +161,66 @@ public sealed class MainWindowViewModel : ObservableObject
         loaded.SourcePath,
         request.Selection.SelectedOptionalResourceIds ??
             new HashSet<string>(StringComparer.OrdinalIgnoreCase));
-    var plan = new PlanViewModel(
+    PlanViewModel? plan = null;
+    plan = new PlanViewModel(
         _environmentRuns!,
         _redactor!,
         runRequest,
-        NavigateToExecutionAsync);
+        requestToApply => NavigateToExecutionAsync(requestToApply, plan!));
     CurrentPage = plan;
     await plan.InitializeAsync();
   }
 
-  private async Task NavigateToExecutionAsync(RunRequest request)
+  private async Task NavigateToExecutionAsync(
+      RunRequest request,
+      PlanViewModel reviewedPlan)
   {
     EnsureExecutionComposition();
-    _executionMonitor?.Dispose();
+    if (HasActiveExecution || _isDisposed)
+    {
+      throw new InvalidOperationException(
+          "当前执行仍在清理，请等待其完成后再开始新的执行。");
+    }
+
+    if (_executionMonitor is not null)
+    {
+      _executionMonitor.PropertyChanged -= MonitorPropertyChanged;
+      _executionMonitor.Dispose();
+    }
+
     _executionMonitor = new ExecutionMonitorViewModel(
         _environmentRuns!,
         _runEvents!,
         _redactor!,
         _dispatcher!,
         request);
+    _executionMonitor.PropertyChanged += MonitorPropertyChanged;
     CurrentPage = _executionMonitor;
-    await _executionMonitor.StartAsync();
+    Task operation = _executionMonitor.StartAsync();
+    RaiseNavigationStates();
+    await operation;
+    RaiseNavigationStates();
+    if (_executionMonitor.Run is { } completed &&
+        reviewedPlan.TryPresentApprovalRejection(completed))
+    {
+      CurrentPage = reviewedPlan;
+    }
+  }
+
+  private bool HasActiveExecution => _executionMonitor?.IsRunning == true;
+
+  private void MonitorPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
+  {
+    if (args.PropertyName == nameof(ExecutionMonitorViewModel.IsRunning))
+    {
+      RaiseNavigationStates();
+    }
+  }
+
+  private void RaiseNavigationStates()
+  {
+    NavigateToProfilesCommand.RaiseCanExecuteChanged();
+    NavigateToResourcesCommand.RaiseCanExecuteChanged();
   }
 
   private void EnsureExecutionComposition()

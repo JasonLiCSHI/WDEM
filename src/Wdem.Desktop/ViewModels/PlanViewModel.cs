@@ -105,6 +105,29 @@ public sealed class PlanViewModel : ObservableObject
     }
   }
 
+  internal bool TryPresentApprovalRejection(ExecutionRun run)
+  {
+    ArgumentNullException.ThrowIfNull(run);
+    ExecutionPlan? plan = run.Plan;
+    if (plan is null || !plan.Errors.Any(error =>
+            error.Code == WdemErrorCode.ConfigurationError))
+    {
+      return false;
+    }
+
+    Present(plan);
+    ErrorMessage = string.Join(
+        Environment.NewLine,
+        plan.Errors
+            .Where(error => error.Code == WdemErrorCode.ConfigurationError)
+            .Select(error =>
+            {
+              StructuredError redacted = _redactor.Redact(error);
+              return $"{redacted.Summary} {redacted.Detail}";
+            }));
+    return true;
+  }
+
   private Task ApplyAsync()
   {
     if (!CanApply)

@@ -1,52 +1,11 @@
 using System.Collections.ObjectModel;
-using Microsoft.UI.Dispatching;
 using Wdem.Core.Execution;
 using Wdem.Core.Resources;
 using Wdem.Core.Runs;
 
 namespace Wdem.Desktop.ViewModels;
 
-public interface IUiDispatcher
-{
-  Task EnqueueAsync(Action action, CancellationToken cancellationToken = default);
-}
-
-public sealed class DispatcherQueueUiDispatcher(DispatcherQueue queue) : IUiDispatcher
-{
-  public Task EnqueueAsync(Action action, CancellationToken cancellationToken = default)
-  {
-    ArgumentNullException.ThrowIfNull(action);
-    cancellationToken.ThrowIfCancellationRequested();
-    if (queue.HasThreadAccess)
-    {
-      action();
-      return Task.CompletedTask;
-    }
-
-    var completion = new TaskCompletionSource(
-        TaskCreationOptions.RunContinuationsAsynchronously);
-    if (!queue.TryEnqueue(() =>
-        {
-          try
-          {
-            action();
-            completion.TrySetResult();
-          }
-          catch (Exception exception)
-          {
-            completion.TrySetException(exception);
-          }
-        }))
-    {
-      completion.TrySetException(new InvalidOperationException(
-          "The desktop dispatcher is shutting down."));
-    }
-
-    return completion.Task;
-  }
-}
-
-public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
+public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, IAsyncDisposable
 {
   private const int MaximumLogEntries = 5_000;
   private readonly object _eventGate = new();
@@ -55,9 +14,10 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
   private readonly LogRedactor _redactor;
   private readonly IUiDispatcher _dispatcher;
   private readonly RunRequest _request;
-  private readonly List<string> _activeResourceIds = [];
+  private readonly ExecutionEventProjection _projection = new();
   private IDisposable? _subscription;
   private CancellationTokenSource? _runCancellation;
+  private Task? _operationTask;
   private ExecutionRun? _run;
   private Guid? _activeRunId;
   private long _lastSequence;
@@ -71,6 +31,7 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
   private string _restartRequirement = "NoRestart";
   private DateTimeOffset _startedAt;
   private bool _disposed;
+  private int _dispatcherUnavailable;
 
   public ExecutionMonitorViewModel(
       IEnvironmentRunService runService,
@@ -90,7 +51,7 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
     _dispatcher = dispatcher;
     _request = request;
     Resources = new ObservableCollection<ResourceProgressViewModel>();
-    Logs = new ObservableCollection<LogEntryViewModel>();
+    Logs = new BoundedObservableCollection<LogEntryViewModel>(MaximumLogEntries);
     CancelCommand = new AsyncRelayCommand(
         _ => CancelAsync(),
         _ => IsRunning && !IsTerminal);
@@ -102,7 +63,7 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
 
   public ObservableCollection<ResourceProgressViewModel> Resources { get; }
 
-  public ObservableCollection<LogEntryViewModel> Logs { get; }
+  public BoundedObservableCollection<LogEntryViewModel> Logs { get; }
 
   public ExecutionRun? Run => _run;
 
@@ -217,10 +178,40 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
 
   public AsyncRelayCommand RetryFailedCommand { get; }
 
-  public Task StartAsync(CancellationToken cancellationToken = default) =>
-      RunOperationAsync(
+  public Task StartAsync(CancellationToken cancellationToken = default)
+  {
+    Task operation = RunOperationAsync(
           token => _runService.ApplyAsync(_request, token),
           cancellationToken);
+    _operationTask = operation;
+    return operation;
+  }
+
+  public async Task StopAsync()
+  {
+    if (_disposed)
+    {
+      return;
+    }
+
+    RequestCancellation();
+    Task? operation = _operationTask;
+    if (operation is not null)
+    {
+      await operation.ConfigureAwait(false);
+    }
+  }
+
+  public async ValueTask DisposeAsync()
+  {
+    if (_disposed)
+    {
+      return;
+    }
+
+    await StopAsync().ConfigureAwait(false);
+    Dispose();
+  }
 
   public async Task RetryFailedAsync(CancellationToken cancellationToken)
   {
@@ -273,7 +264,7 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
     OnPropertyChanged(nameof(Run));
     OnPropertyChanged(nameof(RunId));
     Resources.Clear();
-    ClearCurrentResource();
+    ResetProjection();
     TotalProgress = 0;
     ErrorMessage = null;
     _startedAt = DateTimeOffset.UtcNow;
@@ -281,7 +272,7 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
     IsRunning = true;
     var runCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
     _runCancellation = runCancellation;
-    _subscription = _eventSink.SubscribeRequiredScoped(HandleEventAsync);
+    _subscription = _eventSink.SubscribeScoped(HandleEventAsync);
     using var elapsedRefreshCancellation = new CancellationTokenSource();
     Task elapsedRefresh = RefreshElapsedAsync(elapsedRefreshCancellation.Token);
     try
@@ -289,20 +280,20 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
       ExecutionRun completed = await Task.Run(
           () => operation(runCancellation.Token),
           CancellationToken.None).ConfigureAwait(false);
-      await _dispatcher.EnqueueAsync(
+      await DispatchAsync(
           () => ApplyDurableSnapshot(completed),
           CancellationToken.None).ConfigureAwait(false);
     }
     catch (OperationCanceledException) when (runCancellation.IsCancellationRequested)
     {
-      await _dispatcher.EnqueueAsync(
+      await DispatchAsync(
           () => ErrorMessage = "运行已取消。",
           CancellationToken.None).ConfigureAwait(false);
     }
     catch (Exception exception)
     {
       string message = _redactor.Redact(UserErrorMessageFormatter.Format(exception));
-      await _dispatcher.EnqueueAsync(
+      await DispatchAsync(
           () => ErrorMessage = message,
           CancellationToken.None).ConfigureAwait(false);
     }
@@ -320,10 +311,11 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
       Interlocked.Exchange(ref _subscription, null)?.Dispose();
       try
       {
-        await _dispatcher.EnqueueAsync(() =>
+        await DispatchAsync(() =>
             {
               ElapsedDuration = DateTimeOffset.UtcNow - _startedAt;
-              ClearCurrentResource();
+              _projection.Complete();
+              ApplyProjection();
               IsRunning = false;
               IsTerminal = true;
               RaiseCommandStates();
@@ -344,7 +336,7 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
     {
       while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
       {
-        await _dispatcher.EnqueueAsync(
+        await DispatchAsync(
             () => ElapsedDuration = DateTimeOffset.UtcNow - _startedAt,
             CancellationToken.None).ConfigureAwait(false);
       }
@@ -374,14 +366,41 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
     }
 
     RunEvent redacted = _redactor.Redact(runEvent);
-    await _dispatcher.EnqueueAsync(
+    await DispatchAsync(
         () => ApplyEvent(redacted),
         CancellationToken.None).ConfigureAwait(false);
+  }
+
+  private async Task<bool> DispatchAsync(
+      Action action,
+      CancellationToken cancellationToken)
+  {
+    if (Volatile.Read(ref _dispatcherUnavailable) != 0)
+    {
+      return false;
+    }
+
+    try
+    {
+      await _dispatcher.EnqueueAsync(action, cancellationToken).ConfigureAwait(false);
+      return true;
+    }
+    catch (UiDispatcherUnavailableException)
+    {
+      if (Interlocked.Exchange(ref _dispatcherUnavailable, 1) == 0)
+      {
+        Interlocked.Exchange(ref _subscription, null)?.Dispose();
+        RequestCancellation();
+      }
+
+      return false;
+    }
   }
 
   private void ApplyEvent(RunEvent runEvent)
   {
     ElapsedDuration = DateTimeOffset.UtcNow - _startedAt;
+    _projection.Apply(runEvent);
     if (runEvent.ResourceId is not null)
     {
       ResourceProgressViewModel resource = GetOrAddResource(runEvent.ResourceId);
@@ -400,14 +419,6 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
         }
 
         resource.Outcome = runEvent.Outcome;
-        if (resource.State == ExecutionState.Running)
-        {
-          MarkResourceActive(resource.Id);
-        }
-        else
-        {
-          RemoveActiveResource(resource.Id);
-        }
       }
 
       if (runEvent.StepId is not null)
@@ -431,29 +442,17 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
         }
       }
 
-      if (runEvent.Kind == RunEventKind.StepProgress &&
-          resource.State == ExecutionState.Running)
-      {
-        MarkResourceActive(resource.Id);
-      }
-
-      RefreshCurrentResource();
     }
 
-    if (runEvent.Kind == RunEventKind.Completed ||
-        (runEvent.Kind == RunEventKind.RunStateChanged &&
-         runEvent.State == ExecutionState.Completed))
-    {
-      ClearCurrentResource();
-    }
-
+    ApplyProjection();
     AddLog(new LogEntryViewModel(runEvent, _redactor));
     UpdateTotalProgress();
   }
 
   private void ApplyDurableSnapshot(ExecutionRun run)
   {
-    ClearCurrentResource();
+    _projection.ApplySnapshot(run);
+    ApplyProjection();
     _run = run;
     OnPropertyChanged(nameof(Run));
     OnPropertyChanged(nameof(RunId));
@@ -466,10 +465,6 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
       Resources.Add(resource);
     }
 
-    RestartRequirement = run.RestartRequirements
-        .DefaultIfEmpty(RestartPolicy.NoRestart)
-        .Max()
-        .ToString();
     UpdateTotalProgress();
     OnPropertyChanged(nameof(CanRetryFailed));
   }
@@ -488,37 +483,21 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
     return created;
   }
 
-  private void MarkResourceActive(string resourceId)
+  private void ResetProjection()
   {
-    RemoveActiveResource(resourceId);
-    _activeResourceIds.Add(resourceId);
+    _projection.Reset();
+    ApplyProjection();
   }
 
-  private void RemoveActiveResource(string resourceId) =>
-      _activeResourceIds.RemoveAll(id =>
-          string.Equals(id, resourceId, StringComparison.OrdinalIgnoreCase));
-
-  private void RefreshCurrentResource()
+  private void ApplyProjection()
   {
-    _activeResourceIds.RemoveAll(id => !Resources.Any(resource =>
-        string.Equals(resource.Id, id, StringComparison.OrdinalIgnoreCase) &&
-        resource.State == ExecutionState.Running));
-    CurrentResource = _activeResourceIds.Count == 0 ? null : _activeResourceIds[^1];
-  }
-
-  private void ClearCurrentResource()
-  {
-    _activeResourceIds.Clear();
-    CurrentResource = null;
+    CurrentResource = _projection.CurrentResource;
+    RestartRequirement = _projection.RestartRequirement.ToString();
   }
 
   private void AddLog(LogEntryViewModel entry)
   {
     Logs.Add(entry);
-    while (Logs.Count > MaximumLogEntries)
-    {
-      Logs.RemoveAt(0);
-    }
   }
 
   private void UpdateTotalProgress() => TotalProgress = Resources.Count == 0
@@ -526,6 +505,13 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
       : Resources.Average(resource => resource.Percent);
 
   private Task CancelAsync()
+  {
+    RequestCancellation();
+    CancelCommand.RaiseCanExecuteChanged();
+    return Task.CompletedTask;
+  }
+
+  private void RequestCancellation()
   {
     try
     {
@@ -535,9 +521,6 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
     {
       // A terminal transition won the race with the command invocation.
     }
-
-    CancelCommand.RaiseCanExecuteChanged();
-    return Task.CompletedTask;
   }
 
   private void ResetEventFilter()

@@ -1,6 +1,7 @@
 using Wdem.Core.Execution;
 using Wdem.Core.Providers;
 using Wdem.Core.Runs;
+using Wdem.Core.Resources;
 using Xunit;
 
 namespace Wdem.Core.Tests.Runs;
@@ -31,12 +32,14 @@ public sealed class RunLogEntryTests
         "Verifying Git.",
         error,
         ExecutionState.Completed,
-        ExecutionOutcome.Failed);
+        ExecutionOutcome.Failed,
+        RestartPolicy.RestartRequired);
 
     var entry = RunLogEntry.FromEvent(runEvent, ProviderLogLevel.Warning);
     var restored = entry.ToEvent(runId);
 
     Assert.Equal(ProviderLogLevel.Warning, entry.Level);
+    Assert.Equal(RestartPolicy.RestartRequired, entry.RestartRequirement);
     Assert.Equal(runEvent, restored);
   }
 }

@@ -1861,7 +1861,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
             result.Error is null ? ProviderLogLevel.Info : ProviderLogLevel.Error,
             cancellationToken,
             result.State,
-            result.Outcome);
+            result.Outcome,
+            result.RestartRequirement);
 
     public Task PublishStepAsync(
         string resourceId,
@@ -1925,7 +1926,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         ProviderLogLevel level,
         CancellationToken cancellationToken,
         ExecutionState? state = null,
-        ExecutionOutcome? outcome = null)
+        ExecutionOutcome? outcome = null,
+        RestartPolicy? restartRequirement = null)
     {
       await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
       try
@@ -1942,7 +1944,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
             message,
             error,
             state,
-            outcome));
+            outcome,
+            restartRequirement));
         await store.AppendLogAsync(
             runId,
             RunLogEntry.FromEvent(runEvent, level),

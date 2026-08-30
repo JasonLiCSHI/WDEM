@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Windowing;
 using Wdem.Desktop.ViewModels;
 using Wdem.Desktop.Views;
 
@@ -9,6 +10,8 @@ public partial class MainWindow : Window
 {
   private MainWindowViewModel? _viewModel;
   private bool _isSynchronizingNavigation;
+  private bool _isClosing;
+  private bool _allowClose;
 
   public MainWindow(Func<MainWindowViewModel> viewModelFactory)
   {
@@ -23,6 +26,7 @@ public partial class MainWindow : Window
         ShowCurrentPage();
       }
     };
+    AppWindow.Closing += AppWindow_Closing;
     ShowCurrentPage();
   }
 
@@ -67,6 +71,32 @@ public partial class MainWindow : Window
         ? ProfilesNavigationItem
         : ResourcesNavigationItem;
     _isSynchronizingNavigation = false;
+  }
+
+  private async void AppWindow_Closing(AppWindow sender, AppWindowClosingEventArgs args)
+  {
+    if (_allowClose)
+    {
+      return;
+    }
+
+    args.Cancel = true;
+    if (_isClosing)
+    {
+      return;
+    }
+
+    _isClosing = true;
+    try
+    {
+      await DataContext.DisposeAsync();
+      _allowClose = true;
+      Close();
+    }
+    finally
+    {
+      _isClosing = false;
+    }
   }
 
 }

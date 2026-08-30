@@ -13,20 +13,28 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
   private bool _disposed;
 
   public IDisposable Subscribe(Func<RunEvent, CancellationToken, Task> observer) =>
-      Subscribe(observer, required: false, scopeId: null);
+      Subscribe(observer, required: false, preserveAll: false, scopeId: null);
 
   public IDisposable SubscribeRequired(Func<RunEvent, CancellationToken, Task> observer) =>
-      Subscribe(observer, required: true, scopeId: null);
+      Subscribe(observer, required: true, preserveAll: true, scopeId: null);
+
+  public IDisposable SubscribeScoped(Func<RunEvent, CancellationToken, Task> observer) =>
+      SubscribeScoped(observer, required: false);
 
   public IDisposable SubscribeRequiredScoped(
-      Func<RunEvent, CancellationToken, Task> observer)
+      Func<RunEvent, CancellationToken, Task> observer) =>
+      SubscribeScoped(observer, required: true);
+
+  private IDisposable SubscribeScoped(
+      Func<RunEvent, CancellationToken, Task> observer,
+      bool required)
   {
     var previousScope = _operationScope.Value;
     var scopeId = Guid.NewGuid();
     _operationScope.Value = scopeId;
     try
     {
-      var subscription = Subscribe(observer, required: true, scopeId);
+      var subscription = Subscribe(observer, required, preserveAll: true, scopeId);
       return new ScopeLease(this, subscription, scopeId, previousScope);
     }
     catch
@@ -58,6 +66,7 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
   private IDisposable Subscribe(
       Func<RunEvent, CancellationToken, Task> observer,
       bool required,
+      bool preserveAll,
       Guid? scopeId)
   {
     ArgumentNullException.ThrowIfNull(observer);
@@ -70,6 +79,7 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
           id,
           observer,
           required,
+          preserveAll,
           scopeId,
           _deliveringSubscription);
       _subscriptions.Add(id, subscription);
@@ -148,6 +158,18 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
             requiredDeliveries.Add(delivery);
           }
         }
+        else if (subscriber.PreserveAll)
+        {
+          Task isolatedDelivery = SuppressFailureAsync(delivery);
+          if (subscriber.Id == recursivelyInvokedSubscription)
+          {
+            context.Defer(isolatedDelivery);
+          }
+          else
+          {
+            requiredDeliveries.Add(isolatedDelivery);
+          }
+        }
         else
         {
           ObserveFault(delivery);
@@ -184,6 +206,11 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
       {
         failure ??= exception;
       }
+    }
+
+    if (failure is null)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
     }
 
     if (failure is OperationCanceledException && cancellationToken.IsCancellationRequested)
@@ -263,6 +290,18 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
       TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
       TaskScheduler.Default);
 
+  private static async Task SuppressFailureAsync(Task delivery)
+  {
+    try
+    {
+      await delivery.ConfigureAwait(false);
+    }
+    catch (Exception)
+    {
+      // Isolated observers cannot invalidate an already-persisted run event.
+    }
+  }
+
   private sealed class RunGate
   {
     public SemaphoreSlim Semaphore { get; } = new(1, 1);
@@ -334,6 +373,7 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
       long id,
       Func<RunEvent, CancellationToken, Task> observer,
       bool required,
+      bool preserveAll,
       Guid? scopeId,
       AsyncLocal<long?> deliveringSubscription) : IDisposable
   {
@@ -343,6 +383,7 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
     private Func<RunEvent, CancellationToken, Task>? _observer = observer;
 
     public bool Required { get; } = required;
+    public bool PreserveAll { get; } = preserveAll;
     public long Id { get; } = id;
     public Guid? ScopeId { get; } = scopeId;
     public Guid? TargetRunId { get; set; }
@@ -360,7 +401,7 @@ public sealed class RunEventHub : IRunEventSink, IDisposable
           TaskCreationOptions.RunContinuationsAsynchronously);
       lock (_queueGate)
       {
-        if (!Required &&
+        if (!PreserveAll &&
             (_tails.ContainsKey(runEvent.RunId) ||
                 _tails.Count >= MaximumConcurrentOptionalDeliveries))
         {

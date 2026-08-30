@@ -203,6 +203,70 @@ public sealed class ExecutionMonitorViewModelTests
   }
 
   [Fact]
+  public async Task RestartRequirementUpdatesLiveWithoutLosingParallelRequirements()
+  {
+    var runId = Guid.NewGuid();
+    using var events = new RunEventHub();
+    var service = new FakeEnvironmentRunService(events, runId)
+    {
+      Events =
+      [
+        ResourceEvent(1, "alpha", ExecutionState.Running, RestartPolicy.RestartRecommended),
+        ResourceEvent(2, "beta", ExecutionState.Running, RestartPolicy.RestartRequired),
+        ResourceEvent(3, "alpha", ExecutionState.Completed, RestartPolicy.NoRestart),
+        ResourceEvent(4, "beta", ExecutionState.Completed, RestartPolicy.RestartRequired)
+      ],
+      ApplyResult = CompletedRun() with
+      {
+        RestartRequirements = [RestartPolicy.RestartRecommended]
+      },
+      HoldAfterEvents = true
+    };
+    var dispatcher = new ControlledDispatcher();
+    var viewModel = CreateMonitor(service, events, dispatcher);
+    Task run = viewModel.StartAsync();
+    string[] expected =
+    [
+      "RestartRecommended",
+      "RestartRequired",
+      "RestartRequired",
+      "RestartRequired"
+    ];
+
+    for (int index = 0; index < expected.Length; index++)
+    {
+      Assert.True(dispatcher.WaitForEnqueueCount(index + 1, TimeSpan.FromSeconds(5)));
+      dispatcher.DrainNext();
+      Assert.Equal(expected[index], viewModel.RestartRequirement);
+    }
+
+    await service.EventsPublished.Task;
+    dispatcher.RunQueuedAndInline();
+    service.ReleaseEvents.TrySetResult();
+    await run;
+
+    Assert.Equal("RestartRecommended", viewModel.RestartRequirement);
+
+    RunEvent ResourceEvent(
+        long sequence,
+        string resourceId,
+        ExecutionState state,
+        RestartPolicy restartRequirement) => new(
+            runId,
+            sequence,
+            DateTimeOffset.UnixEpoch.AddSeconds(sequence),
+            RunEventKind.ResourceStateChanged,
+            resourceId,
+            null,
+            null,
+            state.ToString(),
+            null,
+            state,
+            state == ExecutionState.Completed ? ExecutionOutcome.Succeeded : null,
+            restartRequirement);
+  }
+
+  [Fact]
   public async Task RetryFailedPassesFailedResourceIdsRatherThanStepIds()
   {
     var events = new TestRunEventSink();
@@ -298,6 +362,25 @@ public sealed class ExecutionMonitorViewModelTests
     viewModel.Dispose();
 
     Assert.Equal(1, events.SubscriptionDisposals);
+    Assert.Equal(0, events.ObserverCount);
+  }
+
+  [Fact]
+  public async Task DispatcherShutdownCancelsRunAndDoesNotEscapeThroughPublisher()
+  {
+    var runId = Guid.NewGuid();
+    var events = new TestRunEventSink();
+    var service = new FakeEnvironmentRunService(events, runId)
+    {
+      Events = [Event(runId, 1, 0.1, "starting")]
+    };
+    var dispatcher = new RejectingDispatcher();
+    var viewModel = CreateMonitor(service, events, dispatcher);
+
+    await viewModel.StartAsync();
+
+    Assert.True(service.ApplyCancellationToken.IsCancellationRequested);
+    Assert.Equal(1, dispatcher.EnqueueCalls);
     Assert.Equal(0, events.ObserverCount);
   }
 
@@ -439,6 +522,128 @@ public sealed class ExecutionMonitorViewModelTests
     Assert.Equal(
         service.InspectResult.Plan!.Fingerprint,
         service.AppliedRequest!.ApprovedPlanFingerprint);
+  }
+
+  [Fact]
+  public async Task ChangedApprovedPlanReturnsToPlanForReview()
+  {
+    DeveloperProfile profile = Profile();
+    var events = new TestRunEventSink();
+    var approvalError = new StructuredError(
+        WdemErrorCode.ConfigurationError,
+        "The reviewed execution plan has changed.",
+        "Review the refreshed plan before applying it.");
+    ExecutionPlan rejectedPlan = InspectRun(executable: true).Plan! with
+    {
+      Fingerprint = new string('C', 64),
+      IsExecutable = false,
+      Errors = [approvalError]
+    };
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid())
+    {
+      ApplyResult = CompletedRun() with
+      {
+        Outcome = ExecutionOutcome.Failed,
+        Plan = rejectedPlan
+      }
+    };
+    var main = new MainWindowViewModel(
+        new FixedProfileCatalog(profile),
+        new ResourceGraphBuilder(_ => null),
+        service,
+        events,
+        new LogRedactor(),
+        new RecordingDispatcher());
+    await main.InitializeAsync();
+    await main.ProfileSelection.SelectProfileCommand.ExecuteAsync(null);
+    await ((AsyncRelayCommand)main.ResourceSelection!.StartConfigurationCommand)
+        .ExecuteAsync(null);
+    var plan = Assert.IsType<PlanViewModel>(main.CurrentPage);
+
+    await plan.ApplyCommand.ExecuteAsync(null);
+
+    Assert.Same(plan, main.CurrentPage);
+    Assert.False(plan.CanApply);
+    Assert.Contains(plan.Errors, error => error.Contains(
+        "reviewed execution plan has changed",
+        StringComparison.OrdinalIgnoreCase));
+  }
+
+  [Fact]
+  public async Task ActiveExecutionCannotBeHiddenOrReplacedUntilItTerminates()
+  {
+    DeveloperProfile profile = Profile();
+    var events = new TestRunEventSink();
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid())
+    {
+      HoldAfterEvents = true
+    };
+    var main = new MainWindowViewModel(
+        new FixedProfileCatalog(profile),
+        new ResourceGraphBuilder(_ => null),
+        service,
+        events,
+        new LogRedactor(),
+        new RecordingDispatcher());
+    await main.InitializeAsync();
+    await main.ProfileSelection.SelectProfileCommand.ExecuteAsync(null);
+    await ((AsyncRelayCommand)main.ResourceSelection!.StartConfigurationCommand)
+        .ExecuteAsync(null);
+    var plan = Assert.IsType<PlanViewModel>(main.CurrentPage);
+
+    Task applying = plan.ApplyCommand.ExecuteAsync(null);
+    await service.ApplyStarted.Task;
+    var monitor = Assert.IsType<ExecutionMonitorViewModel>(main.CurrentPage);
+
+    Assert.False(main.NavigateToProfilesCommand.CanExecute(null));
+    Assert.False(main.NavigateToResourcesCommand.CanExecute(null));
+    await main.NavigateToProfilesCommand.ExecuteAsync(null);
+    await plan.ApplyCommand.ExecuteAsync(null);
+    Assert.Same(monitor, main.CurrentPage);
+    Assert.Equal(1, service.ApplyCalls);
+
+    service.ReleaseEvents.TrySetResult();
+    await applying;
+
+    Assert.True(main.NavigateToProfilesCommand.CanExecute(null));
+    await main.NavigateToProfilesCommand.ExecuteAsync(null);
+    Assert.Same(main.ProfileSelection, main.CurrentPage);
+  }
+
+  [Fact]
+  public async Task DisposeAsyncWaitsForActiveExecutionCleanupBeforeCompleting()
+  {
+    DeveloperProfile profile = Profile();
+    var events = new TestRunEventSink();
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid())
+    {
+      HoldAfterCancellation = true
+    };
+    var main = new MainWindowViewModel(
+        new FixedProfileCatalog(profile),
+        new ResourceGraphBuilder(_ => null),
+        service,
+        events,
+        new LogRedactor(),
+        new RecordingDispatcher());
+    await main.InitializeAsync();
+    await main.ProfileSelection.SelectProfileCommand.ExecuteAsync(null);
+    await ((AsyncRelayCommand)main.ResourceSelection!.StartConfigurationCommand)
+        .ExecuteAsync(null);
+    var plan = Assert.IsType<PlanViewModel>(main.CurrentPage);
+    Task applying = plan.ApplyCommand.ExecuteAsync(null);
+    await service.ApplyStarted.Task;
+
+    Task disposing = main.DisposeAsync().AsTask();
+    await service.CancellationObserved.Task;
+
+    Assert.False(disposing.IsCompleted);
+    Assert.Equal(1, service.ApplyCalls);
+
+    service.ReleaseTerminalCompletion.TrySetResult();
+    await disposing;
+    await applying;
+    Assert.False(Assert.IsType<ExecutionMonitorViewModel>(main.CurrentPage).IsRunning);
   }
 
   private static ExecutionMonitorViewModel CreateMonitor(
@@ -610,6 +815,17 @@ public sealed class ExecutionMonitorViewModelTests
     }
   }
 
+  private sealed class RejectingDispatcher : IUiDispatcher
+  {
+    public int EnqueueCalls { get; private set; }
+
+    public Task EnqueueAsync(Action action, CancellationToken cancellationToken = default)
+    {
+      EnqueueCalls++;
+      return Task.FromException(new UiDispatcherUnavailableException());
+    }
+  }
+
   private sealed class ControlledDispatcher : IUiDispatcher
   {
     private readonly object _gate = new();
@@ -753,6 +969,7 @@ public sealed class ExecutionMonitorViewModelTests
     public Guid? RetriedRunId { get; private set; }
     public IReadOnlySet<string>? RetriedResourceIds { get; private set; }
     public CancellationToken RetryCancellationToken { get; private set; }
+    public CancellationToken ApplyCancellationToken { get; private set; }
     public bool HoldAfterCancellation { get; init; }
     public bool HoldAfterEvents { get; set; }
     public TaskCompletionSource ApplyStarted { get; } = new(
@@ -779,6 +996,7 @@ public sealed class ExecutionMonitorViewModelTests
         CancellationToken cancellationToken)
     {
       ApplyCalls++;
+      ApplyCancellationToken = cancellationToken;
       AppliedRequest = request;
       events.BindCurrentScopeToRun(runId);
       ApplyStarted.TrySetResult();
@@ -860,6 +1078,9 @@ public sealed class ExecutionMonitorViewModelTests
         Add(observer);
 
     public IDisposable SubscribeRequired(Func<RunEvent, CancellationToken, Task> observer) =>
+        Add(observer);
+
+    public IDisposable SubscribeScoped(Func<RunEvent, CancellationToken, Task> observer) =>
         Add(observer);
 
     public IDisposable SubscribeRequiredScoped(

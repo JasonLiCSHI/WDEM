@@ -423,6 +423,41 @@ public sealed class RunEventHubTests
     await publication.WaitAsync(TimeSpan.FromSeconds(5));
   }
 
+  [Fact]
+  public async Task ScopedOptionalObserverFailureDoesNotFailPublisher()
+  {
+    using var sink = new RunEventHub();
+    var runId = Guid.NewGuid();
+    var deliveries = 0;
+    using var subscription = sink.SubscribeScoped((_, _) =>
+    {
+      deliveries++;
+      return Task.FromException(new InvalidOperationException("UI dispatcher stopped"));
+    });
+    sink.BindCurrentScopeToRun(runId);
+
+    await sink.PublishAsync(Event(1, runId), CancellationToken.None);
+
+    Assert.Equal(1, deliveries);
+  }
+
+  [Fact]
+  public async Task ScopedOptionalObserverCancellationStillCancelsPublisher()
+  {
+    using var sink = new RunEventHub();
+    using var cancellation = new CancellationTokenSource();
+    var runId = Guid.NewGuid();
+    using var subscription = sink.SubscribeScoped((_, cancellationToken) =>
+    {
+      cancellation.Cancel();
+      return Task.FromCanceled(cancellationToken);
+    });
+    sink.BindCurrentScopeToRun(runId);
+
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+        sink.PublishAsync(Event(1, runId), cancellation.Token));
+  }
+
   private static RunEvent Event(long sequence, Guid? runId = null) => new(
       runId ?? Guid.Parse("74ebec79-51ea-4c67-aa4d-71d542dca987"),
       sequence,

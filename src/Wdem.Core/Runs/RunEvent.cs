@@ -1,4 +1,5 @@
 using Wdem.Core.Execution;
+using Wdem.Core.Resources;
 
 namespace Wdem.Core.Runs;
 
@@ -22,4 +23,5 @@ public sealed record RunEvent(
     string Message,
     StructuredError? Error,
     ExecutionState? State = null,
-    ExecutionOutcome? Outcome = null);
+    ExecutionOutcome? Outcome = null,
+    RestartPolicy? RestartRequirement = null);

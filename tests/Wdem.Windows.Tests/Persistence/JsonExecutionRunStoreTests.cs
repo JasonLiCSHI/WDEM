@@ -429,6 +429,27 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task ReadLogPageAsync_AcceptsLegacyEntryWithoutRestartRequirement()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    const string legacyEntry =
+        "{\"sequence\":1,\"timestampUtc\":\"2026-08-30T00:00:00+00:00\"," +
+        "\"level\":\"Info\",\"resourceId\":\"git\",\"stepId\":null," +
+        "\"message\":\"legacy event\"}\n";
+    await File.WriteAllTextAsync(_store.LogPath(run.RunId), legacyEntry);
+
+    var entry = Assert.Single(await _store.ReadLogPageAsync(
+        run.RunId,
+        0,
+        10,
+        CancellationToken.None));
+
+    Assert.Equal("legacy event", entry.Message);
+    Assert.Null(entry.RestartRequirement);
+  }
+
+  [Fact]
   public async Task CreateAsync_RoundTripsRecoveryClaimWithoutWeakeningRedaction()
   {
     var claimId = Guid.NewGuid();
@@ -1131,6 +1152,7 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   [InlineData("kind")]
   [InlineData("state")]
   [InlineData("outcome")]
+  [InlineData("restartRequirement")]
   public async Task AppendLogAsync_RejectsUndefinedEnumsBeforeWriting(string invalidField)
   {
     var run = SampleRun();
@@ -1147,6 +1169,10 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
       "kind" => SampleLog(1) with { Kind = (RunEventKind)999 },
       "state" => SampleLog(1) with { State = (ExecutionState)999 },
       "outcome" => SampleLog(1) with { Outcome = (ExecutionOutcome)999 },
+      "restartRequirement" => SampleLog(1) with
+      {
+        RestartRequirement = (RestartPolicy)999
+      },
       _ => SampleLog(1) with { Level = (ProviderLogLevel)999 }
     };
 

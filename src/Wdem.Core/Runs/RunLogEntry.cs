@@ -1,5 +1,6 @@
 using Wdem.Core.Execution;
 using Wdem.Core.Providers;
+using Wdem.Core.Resources;
 
 namespace Wdem.Core.Runs;
 
@@ -14,7 +15,8 @@ public sealed record RunLogEntry(
     RunEventKind? Kind = null,
     double? Progress = null,
     ExecutionState? State = null,
-    ExecutionOutcome? Outcome = null)
+    ExecutionOutcome? Outcome = null,
+    RestartPolicy? RestartRequirement = null)
 {
   public static RunLogEntry FromEvent(RunEvent runEvent, ProviderLogLevel level)
   {
@@ -30,7 +32,8 @@ public sealed record RunLogEntry(
         runEvent.Kind,
         runEvent.Progress,
         runEvent.State,
-        runEvent.Outcome);
+        runEvent.Outcome,
+        runEvent.RestartRequirement);
   }
 
   public RunEvent ToEvent(Guid runId) => new(
@@ -44,5 +47,6 @@ public sealed record RunLogEntry(
       Message,
       Error,
       State,
-      Outcome);
+      Outcome,
+      RestartRequirement);
 }

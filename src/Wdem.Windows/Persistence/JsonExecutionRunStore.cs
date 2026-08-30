@@ -1510,6 +1510,7 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     ValidateOptionalEnum(entry.Kind, "run event kind");
     ValidateOptionalEnum(entry.State, "execution state");
     ValidateOptionalEnum(entry.Outcome, "execution outcome");
+    ValidateOptionalEnum(entry.RestartRequirement, "restart requirement");
     if (entry.Error is not null)
     {
       ValidateStructuredError(entry.Error);
