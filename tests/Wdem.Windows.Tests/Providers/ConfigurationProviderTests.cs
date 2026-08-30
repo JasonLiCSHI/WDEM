@@ -1415,11 +1415,32 @@ public sealed class ConfigurationProviderTests : IDisposable
     Assert.Equal("csharp-developer", result.Profile!.Id);
     Assert.Equal(["visual-studio", "dotnet-sdk", "git"],
         result.Profile.RequiredResources.Select(resource => resource.Id));
+    Assert.Collection(
+        result.Profile.RequiredResources,
+        visualStudio =>
+        {
+          Assert.Equal(">=18.3 <19.0", visualStudio.VersionConstraint);
+          Assert.Equal("18.3.2", visualStudio.PreferredVersion);
+        },
+        dotnet => Assert.Equal("10.0.x", dotnet.VersionConstraint),
+        git => Assert.Equal(">=2.50", git.VersionConstraint));
+    Assert.Equal("2026.1.x",
+        result.Profile.OptionalResources.Single(resource => resource.Id == "resharper")
+            .VersionConstraint);
+    Assert.Equal("3.2.x",
+        result.Profile.OptionalResources.Single(resource => resource.Id == "company-vs-extension")
+            .VersionConstraint);
     Assert.All(result.Profile.OptionalResources, resource => Assert.False(resource.DefaultSelected));
     Assert.Equal("${WDEM_COMPANY_VSIX_PATH}",
         result.Profile.Resources["company-vs-extension"].Parameters["sourcePath"]);
     Assert.Equal("${WDEM_COMPANY_VSIX_SHA256}",
         result.Profile.Resources["company-vs-extension"].Parameters["expectedSha256"]);
+    Assert.Equal(
+        "https://c2rsetup.officeapps.live.com/c2r/downloadVS.aspx?sku=community&channel=stable&version=VS18&source=WDEM&cid=2500",
+        result.Profile.Resources["visual-studio"].Parameters["bootstrapperUri"]);
+    Assert.Equal(
+        "2D22F8E6B43DD723CC59E37CDE9DD22CAD778178F8C31F0300CE945C5C76A5E1",
+        result.Profile.Resources["visual-studio"].Parameters["bootstrapperSha256"]);
     var visualStudioResources = new[]
     {
       "visual-studio",

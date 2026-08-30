@@ -18,6 +18,8 @@ namespace Wdem.Windows.Composition;
 
 public sealed record WdemWindowsComposition(
     IEnvironmentRunService EnvironmentRuns,
+    ICommandLineEnvironmentRunService CommandLineRuns,
+    IReviewedPlanEnvironmentRunService ReviewedPlanRuns,
     IProfileCatalog Profiles,
     IResourceProviderRegistry Providers,
     IExecutionRunStore RunStore,
@@ -86,7 +88,8 @@ public static class WdemWindowsFactory
     var profiles = new DirectoryProfileCatalog(fullProfilesDirectory, providerRegistry);
     var privilegeBroker = new NamedPipePrivilegeBroker(new ElevatedHostLauncher(
         Path.Combine(AppContext.BaseDirectory, "Wdem.ElevatedHost.exe"),
-        localApplicationData));
+        localApplicationData,
+        applicationRoot));
     var environmentRuns = new EnvironmentRunService(
         profiles,
         new ResourceGraphBuilder(),
@@ -103,6 +106,8 @@ public static class WdemWindowsFactory
         redactor);
 
     return new WdemWindowsComposition(
+        environmentRuns,
+        environmentRuns,
         environmentRuns,
         profiles,
         providerRegistry,

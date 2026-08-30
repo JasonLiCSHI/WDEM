@@ -13,11 +13,15 @@ public static class WdemElevatedHostFactory
 {
   public static WdemElevatedHostComposition Create(
       WdemDataPaths paths,
+      string applicationRoot,
       LogRedactor? redactor = null)
   {
     ArgumentNullException.ThrowIfNull(paths);
+    ArgumentException.ThrowIfNullOrWhiteSpace(applicationRoot);
     redactor ??= new LogRedactor();
-    var providers = WindowsProviderCompositionFactory.Create(logFilePath: null).Providers;
+    var providers = WindowsProviderCompositionFactory.Create(
+        logFilePath: null,
+        Path.GetFullPath(applicationRoot)).Providers;
 
     return new WdemElevatedHostComposition(
         new JsonExecutionRunStore(paths, redactor),

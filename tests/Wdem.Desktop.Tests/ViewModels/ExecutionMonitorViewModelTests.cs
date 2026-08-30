@@ -12,6 +12,27 @@ namespace Wdem.Desktop.Tests.ViewModels;
 
 public sealed class ExecutionMonitorViewModelTests
 {
+  [Theory]
+  [InlineData(null)]
+  [InlineData("")]
+  [InlineData(" ")]
+  public void Constructor_RejectsMissingReviewedPlanFingerprintWithoutApplying(
+      string? reviewedPlanFingerprint)
+  {
+    var events = new TestRunEventSink();
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid());
+
+    Assert.ThrowsAny<ArgumentException>(() => new ExecutionMonitorViewModel(
+        service,
+        events,
+        new LogRedactor(),
+        new RecordingDispatcher(),
+        Request(),
+        reviewedPlanFingerprint!));
+
+    Assert.Equal(0, service.ApplyCalls);
+  }
+
   [Fact]
   public async Task RunEventsAreAppliedOnlyAfterTheUiDispatcherDrains()
   {
@@ -366,7 +387,8 @@ public sealed class ExecutionMonitorViewModelTests
         events,
         new LogRedactor(["top-secret"]),
         new RecordingDispatcher(),
-        Request());
+        Request(),
+        new string('A', 64));
 
     await viewModel.StartAsync();
 
@@ -452,7 +474,11 @@ public sealed class ExecutionMonitorViewModelTests
     {
       InspectResult = InspectRun(executable: false)
     };
-    var viewModel = new PlanViewModel(service, new LogRedactor(), Request(), _ => Task.CompletedTask);
+    var viewModel = new PlanViewModel(
+        service,
+        new LogRedactor(),
+        Request(),
+        (_, _) => Task.CompletedTask);
 
     await viewModel.InitializeAsync();
 
@@ -553,7 +579,65 @@ public sealed class ExecutionMonitorViewModelTests
     Assert.Equal(1, service.ApplyCalls);
     Assert.Equal(
         service.InspectResult.Plan!.Fingerprint,
-        service.AppliedRequest!.ApprovedPlanFingerprint);
+        service.ReviewedPlanFingerprint);
+  }
+
+  [Fact]
+  public async Task DeferredPlanCanBeApprovedOnlyWithItsReviewedFingerprint()
+  {
+    var events = new TestRunEventSink();
+    var inspection = InspectRun(executable: true);
+    var planned = Assert.Single(inspection.Plan!.Resources);
+    var notice = "Plan after dependency re-detection.";
+    inspection = inspection with
+    {
+      Plan = inspection.Plan with
+      {
+        Resources =
+        [
+          planned with
+          {
+            Status = PlannedResourceStatus.Deferred,
+            ResourcePlan = planned.ResourcePlan with { IsExecutable = false },
+            DeferredAuthorization = new DeferredPlanAuthorization
+            {
+              AllowedActions = [PlanAction.Install],
+              MaximumPrivilege = PrivilegeRequirement.Administrator,
+              MaximumRestartPolicy = RestartPolicy.RestartRecommended,
+              MaximumRisk = PlanRisk.Elevated,
+              AllowDestructive = false,
+              DynamicPlanNotice = notice
+            },
+            Reason = notice
+          }
+        ]
+      }
+    };
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid())
+    {
+      InspectResult = inspection
+    };
+    RunRequest? approvedRequest = null;
+    string? approvedFingerprint = null;
+    var request = Request();
+    var viewModel = new PlanViewModel(
+        service,
+        new LogRedactor(),
+        request,
+        (request, fingerprint) =>
+        {
+          approvedRequest = request;
+          approvedFingerprint = fingerprint;
+          return Task.CompletedTask;
+        });
+
+    await viewModel.InitializeAsync();
+    await viewModel.ApplyCommand.ExecuteAsync(null);
+
+    Assert.True(viewModel.CanApply);
+    Assert.Same(request, approvedRequest);
+    Assert.Equal(inspection.Plan.Fingerprint, approvedFingerprint);
+    Assert.False(inspection.Plan.Resources.Single().ResourcePlan.IsExecutable);
   }
 
   [Fact]
@@ -719,14 +803,15 @@ public sealed class ExecutionMonitorViewModelTests
   }
 
   private static ExecutionMonitorViewModel CreateMonitor(
-      IEnvironmentRunService service,
+      IReviewedPlanEnvironmentRunService service,
       IRunEventSink events,
       IUiDispatcher dispatcher) => new(
           service,
           events,
           new LogRedactor(),
           dispatcher,
-          Request());
+          Request(),
+          new string('A', 64));
 
   private static RunRequest Request() => new(
       "profiles/csharp-developer.yaml",
@@ -1030,7 +1115,7 @@ public sealed class ExecutionMonitorViewModelTests
 
   private sealed class FakeEnvironmentRunService(
       IRunEventSink events,
-      Guid runId) : IEnvironmentRunService
+      Guid runId) : IReviewedPlanEnvironmentRunService
   {
     public IReadOnlyList<RunEvent> Events { get; set; } = [];
     public ExecutionRun ApplyResult { get; set; } = CompletedRun();
@@ -1038,6 +1123,7 @@ public sealed class ExecutionMonitorViewModelTests
     public int InspectCalls { get; private set; }
     public int ApplyCalls { get; private set; }
     public RunRequest? AppliedRequest { get; private set; }
+    public string? ReviewedPlanFingerprint { get; private set; }
     public Guid? RetriedRunId { get; private set; }
     public IReadOnlySet<string>? RetriedResourceIds { get; private set; }
     public CancellationToken RetryCancellationToken { get; private set; }
@@ -1113,6 +1199,15 @@ public sealed class ExecutionMonitorViewModelTests
       }
 
       return ApplyResult with { RunId = runId };
+    }
+
+    public Task<ExecutionRun> ApplyAsync(
+        RunRequest request,
+        string reviewedPlanFingerprint,
+        CancellationToken cancellationToken)
+    {
+      ReviewedPlanFingerprint = reviewedPlanFingerprint;
+      return ApplyAsync(request, cancellationToken);
     }
 
     public async Task<ExecutionRun> RetryAsync(

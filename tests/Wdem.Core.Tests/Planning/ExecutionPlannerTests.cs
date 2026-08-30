@@ -457,6 +457,130 @@ public sealed class ExecutionPlannerTests
   }
 
   [Fact]
+  public async Task CreateAsync_DependencyOnlyPlanFailureAfterReadyDependency_IsDeferred()
+  {
+    var provider = new StubProvider(plan: (resource, _) => resource.Id == "runtime"
+        ? ValidPlan(resource, ComplianceStatus.Missing, Step("install-runtime"))
+        : new ResourcePlan
+        {
+          ResourceId = resource.Id,
+          ResourceType = resource.Type,
+          ProviderName = resource.Provider,
+          DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(resource),
+          Compliance = ComplianceStatus.Missing,
+          IsExecutable = false,
+          StructuredErrors =
+          [
+            new StructuredError(
+                WdemErrorCode.DependencyError,
+                "Runtime is not installed yet.",
+                "Install the declared runtime dependency before planning this resource.")
+            {
+              ResourceId = resource.Id
+            }
+          ]
+        });
+    var runtime = Resource("runtime");
+    var tool = Resource("tool", dependencies: ["runtime"]);
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph([runtime], [tool]),
+        States(State("runtime", false), State("tool", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.True(plan.IsExecutable);
+    Assert.Empty(plan.Errors);
+    Assert.Equal(PlannedResourceStatus.Ready, plan.Resources[0].Status);
+    var deferred = plan.Resources[1];
+    Assert.Equal(PlannedResourceStatus.Deferred, deferred.Status);
+    var authorization = Assert.IsType<DeferredPlanAuthorization>(
+        deferred.DeferredAuthorization);
+    Assert.Equal([PlanAction.Install], authorization.AllowedActions);
+    Assert.Equal(PrivilegeRequirement.CurrentUser, authorization.MaximumPrivilege);
+    Assert.Equal(RestartPolicy.NoRestart, authorization.MaximumRestartPolicy);
+    Assert.Equal(PlanRisk.Standard, authorization.MaximumRisk);
+    Assert.False(authorization.AllowDestructive);
+    Assert.Contains("re-detected", authorization.DynamicPlanNotice, StringComparison.OrdinalIgnoreCase);
+    var visibleStep = Assert.Single(deferred.ResourcePlan.Steps);
+    Assert.Equal(PlanAction.Install, visibleStep.Action);
+    Assert.Equal(authorization.MaximumPrivilege, visibleStep.PrivilegeRequirement);
+    Assert.Equal(authorization.MaximumRestartPolicy, visibleStep.RestartPolicy);
+    Assert.Equal(
+        ResourceDefinitionFingerprint.Create(tool),
+        deferred.ResourcePlan.DesiredStateFingerprint);
+  }
+
+  [Fact]
+  public async Task CreateAsync_DependencyOnlyPlanFailureAfterSatisfiedDependency_RemainsInvalid()
+  {
+    var provider = new StubProvider(plan: (resource, _) => resource.Id == "runtime"
+        ? ValidPlan(resource, ComplianceStatus.Satisfied)
+        : new ResourcePlan
+        {
+          ResourceId = resource.Id,
+          ResourceType = resource.Type,
+          ProviderName = resource.Provider,
+          DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(resource),
+          Compliance = ComplianceStatus.Missing,
+          IsExecutable = false,
+          StructuredErrors =
+          [
+            new StructuredError(
+                WdemErrorCode.DependencyError,
+                "Runtime is unavailable.",
+                "The already satisfied dependency cannot make this plan executable.")
+            {
+              ResourceId = resource.Id
+            }
+          ]
+        });
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(
+            [Resource("runtime")],
+            [Resource("tool", dependencies: ["runtime"])]),
+        States(State("runtime", true), State("tool", false)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.False(plan.IsExecutable);
+    Assert.Equal(PlannedResourceStatus.Invalid, plan.Resources[1].Status);
+    Assert.Contains(plan.Errors, error => error.Code == WdemErrorCode.DependencyError);
+  }
+
+  [Fact]
+  public async Task ReplanResourceAsync_ChangedDefinitionFingerprintIsRejectedBeforeProviderCall()
+  {
+    var provider = new StubProvider();
+    var planner = Planner(provider);
+    var approved = Resource("tool", dependencies: ["runtime"]) with
+    {
+      Parameters = new Dictionary<string, string?> { ["channel"] = "stable" }
+    };
+    var changed = approved with
+    {
+      Parameters = new Dictionary<string, string?> { ["channel"] = "preview" }
+    };
+    var resolved = new ResolvedResource(
+        changed,
+        ResourceOrigin.Required,
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+
+    var replanned = await planner.ReplanResourceAsync(
+        resolved,
+        State("tool", false),
+        ResourceDefinitionFingerprint.Create(approved),
+        CancellationToken.None);
+
+    Assert.Equal(PlannedResourceStatus.Invalid, replanned.Status);
+    Assert.Equal(WdemErrorCode.ConfigurationError, Assert.Single(replanned.Diagnostics).Code);
+    Assert.Equal(0, provider.PlanCalls);
+  }
+
+  [Fact]
   public async Task CreateAsync_PreservesGraphLayerOrderAndDeepSnapshotsInputs()
   {
     var dependencies = new List<string> { "runtime" };
@@ -910,39 +1034,38 @@ public sealed class ExecutionPlannerTests
     Assert.Contains(plan.Errors, error => error.Detail == "source unavailable");
   }
 
-  [Fact]
-  public async Task CreateAsync_NoneStepsAndDeclarations_DoNotRaiseRuntimeRisk()
+  [Theory]
+  [InlineData(PrivilegeRequirement.Administrator, RestartPolicy.NoRestart, false)]
+  [InlineData(PrivilegeRequirement.CurrentUser, RestartPolicy.RestartRequired, false)]
+  [InlineData(PrivilegeRequirement.CurrentUser, RestartPolicy.NoRestart, true)]
+  public async Task CreateAsync_RejectsUnsafeNoneStep(
+      PrivilegeRequirement privilegeRequirement,
+      RestartPolicy restartPolicy,
+      bool isDestructive)
   {
-    var resource = Resource("git") with
-    {
-      PrivilegeRequirement = PrivilegeRequirement.Administrator,
-      RestartPolicy = RestartPolicy.RestartRequired
-    };
     var provider = new StubProvider(plan: (definition, _) => ValidPlan(
         definition,
         ComplianceStatus.Satisfied,
         Step("none") with
         {
           Action = PlanAction.None,
-          PrivilegeRequirement = PrivilegeRequirement.Administrator,
-          RestartPolicy = RestartPolicy.RestartRequired,
-          IsDestructive = true
+          PrivilegeRequirement = privilegeRequirement,
+          RestartPolicy = restartPolicy,
+          IsDestructive = isDestructive
         }));
 
     var plan = await Planner(provider).CreateAsync(
-        Graph(resource),
+        Graph(Resource("git")),
         States(State("git", true)),
         "developer",
         "1.0.0",
         CancellationToken.None);
 
-    var item = Assert.Single(plan.Resources);
-    Assert.Equal(PlannedResourceStatus.AlreadySatisfied, item.Status);
-    Assert.False(item.RequiresElevation);
-    Assert.False(item.IsDestructive);
-    Assert.Equal(PlanRisk.None, item.Risk);
-    Assert.Equal(RestartPolicy.NoRestart, item.RestartPolicy);
-    Assert.Equal(PrivilegeRequirement.Administrator, item.Definition.PrivilegeRequirement);
+    Assert.False(plan.IsExecutable);
+    Assert.Equal(PlannedResourceStatus.Invalid, Assert.Single(plan.Resources).Status);
+    var error = Assert.Single(plan.Errors);
+    Assert.Equal(WdemErrorCode.ConfigurationError, error.Code);
+    Assert.Contains("declaration", error.Detail, StringComparison.OrdinalIgnoreCase);
   }
 
   [Fact]

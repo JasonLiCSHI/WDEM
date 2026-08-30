@@ -121,6 +121,7 @@ public sealed class RunReportExporter : IRunReportExporter
       CreateMachine(run.Machine),
       run.Graph is null ? null : CreateGraph(run.Graph),
       run.Plan is null ? null : CreatePlan(run.Plan),
+      run.PlanApproval is null ? null : CreatePlanApproval(run.PlanApproval),
       RedactDictionary(run.ResourceResults, (_, result) => CreateResourceResult(result)),
       run.RestartRequirements,
       run.RestartReasons.Select(Text).ToArray(),
@@ -155,6 +156,23 @@ public sealed class RunReportExporter : IRunReportExporter
       plan.Resources.Select(CreatePlannedResource).ToArray(),
       plan.IsExecutable,
       plan.Errors.Select(CreateError).ToArray());
+
+  private ReportPlanApproval CreatePlanApproval(PlanApproval approval) => new(
+      Text(approval.InitialPlanFingerprint),
+      approval.ConfirmedAtUtc,
+      approval.Source,
+      approval.DeferredAuthorizations.Select(proof => new ReportDeferredAuthorization(
+          Text(proof.ResourceId),
+          Text(proof.ResourceType),
+          Text(proof.ProviderName),
+          Text(proof.DefinitionFingerprint),
+          proof.Origin,
+          proof.Dependencies.Select(Text).ToArray(),
+          proof.AllowedActions,
+          proof.MaximumPrivilege,
+          proof.MaximumRestartPolicy,
+          proof.MaximumRisk,
+          proof.AllowDestructive)).ToArray());
 
   private ReportPlannedResource CreatePlannedResource(PlannedResource resource) => new(
       CreateDefinition(resource.Definition),
@@ -310,6 +328,16 @@ public sealed class RunReportExporter : IRunReportExporter
     Field("Graph layers", run.Graph?.TopologicalLayers.Count.ToString() ?? "Unavailable");
     Field("Plan ID", run.Plan?.PlanId.ToString("D") ?? "Unavailable");
     Field("Plan fingerprint", run.Plan?.Fingerprint ?? "Unavailable");
+    Field(
+        "Approved plan fingerprint",
+        run.PlanApproval?.InitialPlanFingerprint ?? "Unavailable");
+    Field(
+        "Approval confirmed (UTC)",
+        run.PlanApproval?.ConfirmedAtUtc.ToString("O") ?? "Unavailable");
+    Field("Approval source", run.PlanApproval?.Source.ToString() ?? "Unavailable");
+    Field(
+        "Deferred approvals",
+        run.PlanApproval?.DeferredAuthorizations.Count.ToString() ?? "0");
     Field("Plan executable", run.Plan?.IsExecutable.ToString() ?? "Unavailable");
     Field("Planned resources", run.Plan?.Resources.Count.ToString() ?? "Unavailable");
     Field(
@@ -339,6 +367,20 @@ public sealed class RunReportExporter : IRunReportExporter
         AppendErrors(
             $"Resource plan {resource.Definition.Id} errors",
             resource.ResourcePlan.StructuredErrors);
+      }
+    }
+
+    if (run.PlanApproval is not null)
+    {
+      foreach (var proof in run.PlanApproval.DeferredAuthorizations.OrderBy(
+                   proof => proof.ResourceId,
+                   StringComparer.OrdinalIgnoreCase))
+      {
+        Field(
+            $"Deferred approval {proof.ResourceId}",
+            $"actions={string.Join(",", proof.AllowedActions)}; " +
+            $"privilege<={proof.MaximumPrivilege}; restart<={proof.MaximumRestartPolicy}; " +
+            $"risk<={proof.MaximumRisk}; destructive={proof.AllowDestructive}");
       }
     }
 
@@ -652,6 +694,7 @@ public sealed class RunReportExporter : IRunReportExporter
       ReportMachine Machine,
       ReportGraph? Graph,
       ReportPlan? Plan,
+      ReportPlanApproval? PlanApproval,
       IReadOnlyDictionary<string, ReportResourceResult> ResourceResults,
       IReadOnlyList<RestartPolicy> RestartRequirements,
       IReadOnlyList<string> RestartReasons,
@@ -685,6 +728,25 @@ public sealed class RunReportExporter : IRunReportExporter
       IReadOnlyList<ReportPlannedResource> Resources,
       bool IsExecutable,
       IReadOnlyList<ReportStructuredError> Errors);
+
+  private sealed record ReportPlanApproval(
+      string InitialPlanFingerprint,
+      DateTimeOffset ConfirmedAtUtc,
+      PlanApprovalSource Source,
+      IReadOnlyList<ReportDeferredAuthorization> DeferredAuthorizations);
+
+  private sealed record ReportDeferredAuthorization(
+      string ResourceId,
+      string ResourceType,
+      string ProviderName,
+      string DefinitionFingerprint,
+      ResourceOrigin Origin,
+      IReadOnlyList<string> Dependencies,
+      IReadOnlyList<PlanAction> AllowedActions,
+      PrivilegeRequirement MaximumPrivilege,
+      RestartPolicy MaximumRestartPolicy,
+      PlanRisk MaximumRisk,
+      bool AllowDestructive);
 
   private sealed record ReportPlannedResource(
       ReportResourceDefinition Definition,

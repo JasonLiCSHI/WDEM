@@ -13,17 +13,21 @@ public sealed class ElevatedHostLauncher : IElevatedHostLauncher
   private static readonly TimeSpan DefaultConnectionTimeout = TimeSpan.FromMinutes(2);
   private readonly string _hostPath;
   private readonly string _localApplicationData;
+  private readonly string _applicationRoot;
   private readonly TimeSpan _connectionTimeout;
 
   public ElevatedHostLauncher(
       string hostPath,
       string localApplicationData,
+      string applicationRoot,
       TimeSpan? connectionTimeout = null)
   {
     ArgumentException.ThrowIfNullOrWhiteSpace(hostPath);
     ArgumentException.ThrowIfNullOrWhiteSpace(localApplicationData);
+    ArgumentException.ThrowIfNullOrWhiteSpace(applicationRoot);
     _hostPath = Path.GetFullPath(hostPath);
     _localApplicationData = Path.GetFullPath(localApplicationData);
+    _applicationRoot = Path.GetFullPath(applicationRoot);
     _connectionTimeout = connectionTimeout ?? DefaultConnectionTimeout;
     if (_connectionTimeout <= TimeSpan.Zero)
     {
@@ -57,7 +61,8 @@ public sealed class ElevatedHostLauncher : IElevatedHostLauncher
           _hostPath,
           pipeName,
           runId,
-          _localApplicationData)) ?? throw new InvalidOperationException(
+          _localApplicationData,
+          _applicationRoot)) ?? throw new InvalidOperationException(
           "The elevated host process could not be started.");
       job.Track(process);
       using var timeout = new CancellationTokenSource(_connectionTimeout);
@@ -84,7 +89,8 @@ public sealed class ElevatedHostLauncher : IElevatedHostLauncher
       string hostPath,
       string pipeName,
       Guid runId,
-      string localApplicationData)
+      string localApplicationData,
+      string applicationRoot)
   {
     var startInfo = new ProcessStartInfo
     {
@@ -102,6 +108,8 @@ public sealed class ElevatedHostLauncher : IElevatedHostLauncher
     startInfo.ArgumentList.Add(runId.ToString("D"));
     startInfo.ArgumentList.Add("--local-app-data");
     startInfo.ArgumentList.Add(localApplicationData);
+    startInfo.ArgumentList.Add("--application-root");
+    startInfo.ArgumentList.Add(applicationRoot);
     return startInfo;
   }
 

@@ -9,8 +9,20 @@ public sealed record ApprovedResource(
     ResourcePlan Plan,
     string Fingerprint);
 
+public sealed record ApprovedResourceClaim(
+    ResourceDefinition Definition,
+    ResourcePlan Plan,
+    ResourcePlan Segment,
+    string Fingerprint);
+
 public interface IApprovedResourceStore
 {
+  Task<ApprovedResourceClaim?> ClaimApprovedResourceAsync(
+      Guid runId,
+      string resourceId,
+      string planFingerprint,
+      CancellationToken cancellationToken);
+
   Task<ApprovedResource?> GetApprovedResourceAsync(
       Guid runId,
       string resourceId,
@@ -23,7 +35,7 @@ public interface IApprovedResourceProtector
   byte[] Unprotect(byte[] protectedData, byte[] entropy);
 }
 
-internal sealed class ApprovedResourceAccessException(
+internal sealed class ApprovedResourceStoreException(
     StructuredError error,
     Exception innerException) : Exception(error.Summary, innerException)
 {

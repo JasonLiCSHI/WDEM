@@ -45,7 +45,25 @@ public sealed class ResourceScheduler : IResourceScheduler
       int maximumConcurrency,
       CancellationToken cancellationToken,
       Func<ResourceResult, Task>? transitionAsync,
-      CancellationDrainDeadline? cancellationDeadline)
+      CancellationDrainDeadline? cancellationDeadline) => await ExecuteAsync(
+          plan,
+          executeAsync,
+          capabilitiesFor,
+          maximumConcurrency,
+          cancellationToken,
+          transitionAsync,
+          cancellationDeadline,
+          registerUndrainedCompletion: null).ConfigureAwait(false);
+
+  public async Task<SchedulerResult> ExecuteAsync(
+      ExecutionPlan plan,
+      Func<PlannedResource, CancellationToken, Task<ResourceResult>> executeAsync,
+      Func<PlannedResource, ProviderCapabilities> capabilitiesFor,
+      int maximumConcurrency,
+      CancellationToken cancellationToken,
+      Func<ResourceResult, Task>? transitionAsync,
+      CancellationDrainDeadline? cancellationDeadline,
+      Action<Task>? registerUndrainedCompletion)
   {
     ArgumentNullException.ThrowIfNull(plan);
     ArgumentNullException.ThrowIfNull(executeAsync);
@@ -109,6 +127,10 @@ public sealed class ResourceScheduler : IResourceScheduler
         StringComparer.OrdinalIgnoreCase);
     var cancellationSignal = Task.Delay(Timeout.InfiniteTimeSpan, executionToken);
     var semaphoreDisposalDeferred = false;
+    Task undrainedCompletion = Task.CompletedTask;
+    Dictionary<string, Task<CompletedExecution>>? cancellationUndrained = null;
+    Dictionary<string, Task<CompletedExecution>>? cancellationUnpublished = null;
+    Dictionary<string, Task<CompletedExecution>>? completionUnpublished = null;
 
     try
     {
@@ -221,14 +243,39 @@ public sealed class ResourceScheduler : IResourceScheduler
                 providerSemaphores.Values.ToArray());
           }
 
+          cancellationUnpublished = new Dictionary<string, Task<CompletedExecution>>(
+              running,
+              StringComparer.OrdinalIgnoreCase);
+          cancellationUndrained = cancellationUnpublished
+              .Where(pair => !pair.Value.IsCompleted)
+              .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
           foreach (var id in running.Keys.ToArray())
           {
             var execution = running[id];
-            ObserveFault(execution);
-            var result = execution.IsCompletedSuccessfully
-                ? execution.Result.Result
-                : Cancelled(id);
+            ResourceResult result;
+            if (cancellationUndrained.ContainsKey(id))
+            {
+              result = Cancelled(id);
+            }
+            else if (execution.IsCompletedSuccessfully)
+            {
+              result = execution.Result.Result;
+            }
+            else if (execution.IsFaulted)
+            {
+              result = (await execution.ConfigureAwait(false)).Result;
+            }
+            else if (execution.IsCanceled)
+            {
+              result = Cancelled(id, new TaskCanceledException(execution));
+            }
+            else
+            {
+              result = Cancelled(id);
+            }
+
             await NotifyTransitionAsync(transitionAsync, result).ConfigureAwait(false);
+            cancellationUnpublished.Remove(id);
             results[id] = result;
             if (IsBlockingOutcome(result.Outcome))
             {
@@ -236,6 +283,15 @@ public sealed class ResourceScheduler : IResourceScheduler
             }
           }
 
+          if (cancellationUndrained.Count > 0)
+          {
+            undrainedCompletion = CompleteUndrainedAsync(
+                cancellationUndrained,
+                transitionAsync);
+          }
+
+          cancellationUndrained = null;
+          cancellationUnpublished = null;
           running.Clear();
           continue;
         }
@@ -245,24 +301,65 @@ public sealed class ResourceScheduler : IResourceScheduler
             .Select(resource => resource.Definition.Id)
             .Where(id => running.TryGetValue(id, out var execution) && execution.IsCompleted)
             .ToArray();
+        completionUnpublished = new Dictionary<string, Task<CompletedExecution>>(
+            running,
+            StringComparer.OrdinalIgnoreCase);
 
         foreach (var id in completedIds)
         {
           var execution = await running[id].ConfigureAwait(false);
           running.Remove(id);
           await NotifyTransitionAsync(transitionAsync, execution.Result).ConfigureAwait(false);
+          completionUnpublished.Remove(id);
           results[id] = execution.Result;
           if (IsBlockingOutcome(execution.Result.Outcome))
           {
             rootFailures[id] = id;
           }
         }
+
+        completionUnpublished = null;
       }
 
-      return Snapshot(results);
+      return Snapshot(results, undrainedCompletion);
     }
     catch (Exception exception)
     {
+      cancellationDeadline.Start();
+      var finalizationExecutions = new Dictionary<string, Task<CompletedExecution>>(
+          StringComparer.OrdinalIgnoreCase);
+      if (cancellationUndrained is not null || cancellationUnpublished is not null)
+      {
+        if (cancellationUndrained is not null)
+        {
+          foreach (var pair in cancellationUndrained)
+          {
+            finalizationExecutions.TryAdd(pair.Key, pair.Value);
+          }
+        }
+
+        if (cancellationUnpublished is not null)
+        {
+          foreach (var pair in cancellationUnpublished)
+          {
+            finalizationExecutions.TryAdd(pair.Key, pair.Value);
+          }
+        }
+
+        cancellationUndrained = null;
+        cancellationUnpublished = null;
+      }
+
+      if (completionUnpublished is not null)
+      {
+        foreach (var pair in completionUnpublished)
+        {
+          finalizationExecutions.TryAdd(pair.Key, pair.Value);
+        }
+
+        completionUnpublished = null;
+      }
+
       if (!semaphoreDisposalDeferred)
       {
         var runningTasks = running.Values.ToArray();
@@ -278,6 +375,26 @@ public sealed class ResourceScheduler : IResourceScheduler
               globalSemaphore,
               providerSemaphores.Values.ToArray());
         }
+
+        if (finalizationExecutions.Count == 0)
+        {
+          foreach (var pair in running)
+          {
+            finalizationExecutions.TryAdd(pair.Key, pair.Value);
+          }
+        }
+      }
+
+      if (finalizationExecutions.Count > 0)
+      {
+        undrainedCompletion = CompleteUndrainedAsync(
+            finalizationExecutions,
+            transitionAsync);
+      }
+
+      if (!ReferenceEquals(undrainedCompletion, Task.CompletedTask))
+      {
+        registerUndrainedCompletion?.Invoke(undrainedCompletion);
       }
 
       if (exception is TransitionObserverException transitionException)
@@ -522,6 +639,12 @@ public sealed class ResourceScheduler : IResourceScheduler
     {
       throw;
     }
+    catch (ResourceExecutionEvidenceException exception)
+    {
+      await NotifyTransitionAsync(transitionAsync, exception.Evidence).ConfigureAwait(false);
+      ExceptionDispatchInfo.Capture(exception.Cause).Throw();
+      throw;
+    }
     catch (RequiredRunEventDeliveryException)
     {
       throw;
@@ -547,6 +670,16 @@ public sealed class ResourceScheduler : IResourceScheduler
         providerSemaphore.Release();
       }
     }
+  }
+
+  internal sealed class ResourceExecutionEvidenceException(
+      Exception cause,
+      ResourceResult evidence) : Exception(
+        "Resource execution failed after the provider returned applied evidence.",
+        cause)
+  {
+    public Exception Cause { get; } = cause;
+    public ResourceResult Evidence { get; } = evidence;
   }
 
   private static bool IsBlockingOutcome(ExecutionOutcome? outcome) =>
@@ -667,6 +800,52 @@ public sealed class ResourceScheduler : IResourceScheduler
       TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
       TaskScheduler.Default);
 
+  private static async Task CompleteUndrainedAsync(
+      IReadOnlyDictionary<string, Task<CompletedExecution>> running,
+      Func<ResourceResult, Task>? transitionAsync)
+  {
+    var failures = new List<Exception>();
+    foreach (var execution in running.Values)
+    {
+      var observedFailure = await CompleteUndrainedExecutionAsync(execution, transitionAsync)
+          .ConfigureAwait(false);
+      if (observedFailure is not null)
+      {
+        failures.Add(observedFailure);
+      }
+    }
+
+    if (failures is [var failure])
+    {
+      ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
+    if (failures.Count > 1)
+    {
+      throw new AggregateException(failures);
+    }
+  }
+
+  private static async Task<Exception?> CompleteUndrainedExecutionAsync(
+      Task<CompletedExecution> execution,
+      Func<ResourceResult, Task>? transitionAsync)
+  {
+    try
+    {
+      var completed = await execution.ConfigureAwait(false);
+      await NotifyTransitionAsync(transitionAsync, completed.Result).ConfigureAwait(false);
+      return null;
+    }
+    catch (TransitionObserverException exception)
+    {
+      return exception.Cause;
+    }
+    catch (Exception exception)
+    {
+      return exception;
+    }
+  }
+
   private static ResourceResult Blocked(string id, string failedDependency) => new()
   {
     ResourceId = id,
@@ -736,9 +915,11 @@ public sealed class ResourceScheduler : IResourceScheduler
   }
 
   private static SchedulerResult Snapshot(
-      IReadOnlyDictionary<string, ResourceResult> results) => new()
+      IReadOnlyDictionary<string, ResourceResult> results,
+      Task? undrainedCompletion = null) => new()
       {
-        Results = results
+        Results = results,
+        UndrainedCompletion = undrainedCompletion ?? Task.CompletedTask
       };
 
   private sealed record SchedulingMetadata(

@@ -33,7 +33,8 @@ public sealed class ElevatedHostLauncherTests
         @"C:\Program Files\WDEM\Wdem.ElevatedHost.exe",
         "wdem-pipe",
         runId,
-        @"C:\Users\user\AppData\Local");
+        @"C:\Users\user\AppData\Local",
+        @"C:\Program Files\WDEM Workspace");
 
     Assert.True(startInfo.UseShellExecute);
     Assert.Equal("runas", startInfo.Verb);
@@ -42,7 +43,8 @@ public sealed class ElevatedHostLauncherTests
           "--pipe", "wdem-pipe",
           "--job", @"Local\Wdem.ElevatedHost.wdem-pipe",
           "--run-id", runId.ToString("D"),
-          "--local-app-data", @"C:\Users\user\AppData\Local"
+          "--local-app-data", @"C:\Users\user\AppData\Local",
+          "--application-root", @"C:\Program Files\WDEM Workspace"
         ],
         startInfo.ArgumentList);
     Assert.DoesNotContain(
@@ -60,6 +62,7 @@ public sealed class ElevatedHostLauncherTests
       "--job", @"Local\Wdem.ElevatedHost.wdem-pipe",
       "--run-id", runId.ToString("D"),
       "--local-app-data", @"C:\Users\user\AppData\Local",
+      "--application-root", @"C:\Program Files\WDEM Workspace",
       "--command", "powershell.exe"
     };
 
@@ -80,10 +83,12 @@ public sealed class ElevatedHostLauncherTests
       "--pipe", "wdem-pipe",
       "--job", jobName,
       "--run-id", runId.ToString("D"),
-      "--local-app-data", @"C:\Users\user\AppData\Local"
+      "--local-app-data", @"C:\Users\user\AppData\Local",
+      "--application-root", @"C:\Program Files\WDEM Workspace"
     ]);
 
     Assert.Equal(jobName, options.JobName);
+    Assert.Equal(@"C:\Program Files\WDEM Workspace", options.ApplicationRoot);
   }
 
   [Fact]
@@ -96,12 +101,14 @@ public sealed class ElevatedHostLauncherTests
       "--pipe", "wdem-pipe",
       "--job", @"Local\Wdem.ElevatedHost.wdem-pipe",
       "--run-id", runId.ToString("D"),
-      "--local-app-data", @"C:\Users\user\AppData\Local"
+      "--local-app-data", @"C:\Users\user\AppData\Local",
+      "--application-root", @"C:\Program Files\WDEM Workspace"
     ]);
 
     Assert.Equal("wdem-pipe", options.PipeName);
     Assert.Equal(runId, options.RunId);
     Assert.Equal(@"C:\Users\user\AppData\Local", options.LocalApplicationData);
+    Assert.Equal(@"C:\Program Files\WDEM Workspace", options.ApplicationRoot);
     Assert.DoesNotContain(
         typeof(ElevatedHostBootstrapOptions).GetProperties(),
         property => string.Equals(

@@ -54,7 +54,8 @@ internal static class Program
     await pipe.ConnectAsync().ConfigureAwait(false);
 
     var composition = WdemElevatedHostFactory.Create(
-        new WdemDataPaths(options.LocalApplicationData));
+        new WdemDataPaths(options.LocalApplicationData),
+        options.ApplicationRoot);
     var worker = new ElevatedResourceWorker(
         composition.RunStore,
         composition.Providers,

@@ -10,6 +10,7 @@ using Wdem.Core.Planning;
 using Wdem.Core.Providers;
 using Wdem.Core.Resources;
 using Wdem.Core.Runs;
+using Wdem.Windows.Execution;
 using Wdem.Windows.Security;
 
 namespace Wdem.Windows.Persistence;
@@ -122,6 +123,14 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     ArgumentNullException.ThrowIfNull(run);
     ArgumentNullException.ThrowIfNull(approvedResources);
     ValidateRunForPersistence(run);
+    if (run.PlanApproval is { } approval &&
+        !FixedEquals(approval.InitialPlanFingerprint, run.Plan!.Fingerprint))
+    {
+      throw new ArgumentException(
+          "The initial plan approval must match the plan being created.",
+          nameof(run));
+    }
+
     cancellationToken.ThrowIfCancellationRequested();
     await using var runLock = await AcquireRunLockAsync(run.RunId, cancellationToken)
         .ConfigureAwait(false);
@@ -140,7 +149,10 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
           approvedResources,
           cancellationToken)
           .ConfigureAwait(false);
-      await WriteSnapshotAsync(path, Redact(run), cancellationToken).ConfigureAwait(false);
+      await WriteBytesAtomicallyAsync(
+          path,
+          JsonSerializer.SerializeToUtf8Bytes(Redact(run), _snapshotJsonOptions),
+          cancellationToken).ConfigureAwait(false);
     }
     catch
     {
@@ -172,6 +184,150 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     }
 
     return run;
+  }
+
+  public async Task SealApprovedResourceAsync(
+      Guid runId,
+      ApprovedResourceSeal approvedResource,
+      CancellationToken cancellationToken)
+  {
+    if (runId == Guid.Empty)
+    {
+      throw new ArgumentException("An execution run identifier is required.", nameof(runId));
+    }
+
+    ArgumentNullException.ThrowIfNull(approvedResource);
+    cancellationToken.ThrowIfCancellationRequested();
+    ValidateDefinition(approvedResource.Definition);
+    ValidateResourcePlan(approvedResource.Plan);
+    await using var runLock = await AcquireRunLockForExistingSnapshotAsync(
+        runId,
+        cancellationToken).ConfigureAwait(false);
+    var run = await ReadSnapshotAsync(runId, cancellationToken).ConfigureAwait(false) ??
+        throw new KeyNotFoundException($"Execution run '{runId:D}' does not exist.");
+    if (run.Mode != RunMode.Apply || run.State == ExecutionState.Completed || run.Plan is null)
+    {
+      throw new InvalidOperationException(
+          "Approved resources can only be added to an active apply run.");
+    }
+
+    var expectedElevated = run.Plan.Resources.Where(resource =>
+        resource.Status == PlannedResourceStatus.Ready &&
+        resource.RequiresElevation &&
+        resource.ResourcePlan.IsExecutable).ToArray();
+    var expected = expectedElevated.Where(resource =>
+        string.Equals(
+            resource.Definition.Id,
+            approvedResource.Definition.Id,
+            StringComparison.OrdinalIgnoreCase)).ToArray();
+    var definitionFingerprint = ResourceDefinitionFingerprint.Create(
+        approvedResource.Definition);
+    var plan = approvedResource.Plan;
+    if (expected.Length != 1 ||
+        !FixedEquals(expected[0].ResourcePlan.DesiredStateFingerprint, definitionFingerprint) ||
+        !plan.IsExecutable ||
+        !string.Equals(plan.ResourceId, approvedResource.Definition.Id, StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(plan.ResourceType, approvedResource.Definition.Type, StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(plan.ProviderName, approvedResource.Definition.Provider, StringComparison.OrdinalIgnoreCase) ||
+        !FixedEquals(plan.DesiredStateFingerprint, definitionFingerprint) ||
+        !FixedEquals(
+            ApprovedResourceFingerprint.Create(approvedResource.Definition, plan),
+            ApprovedResourceFingerprint.Create(
+                approvedResource.Definition,
+                expected[0].ResourcePlan)) ||
+        !plan.Steps.Any(step =>
+            step.Action != PlanAction.None &&
+            step.PrivilegeRequirement == PrivilegeRequirement.Administrator))
+    {
+      throw new InvalidOperationException(
+          "The deferred approved resource does not match the original execution plan.");
+    }
+
+    var approvedPath = ApprovedResourcesPath(runId);
+    try
+    {
+      var entries = new List<ProtectedApprovedResource>();
+      var expectedExisting = expectedElevated.Where(resource => !string.Equals(
+          resource.Definition.Id,
+          approvedResource.Definition.Id,
+          StringComparison.OrdinalIgnoreCase)).ToArray();
+      if (File.Exists(approvedPath))
+      {
+        await using var stream = new FileStream(
+            approvedPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            4096,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var existing = await JsonSerializer.DeserializeAsync<ApprovedResourceEnvelope>(
+            stream,
+            _snapshotJsonOptions,
+            cancellationToken).ConfigureAwait(false);
+        ValidateApprovedResourceEnvelope(runId, existing, expectedExisting);
+        entries.AddRange(existing!.Resources);
+      }
+      else if (expectedExisting.Length > 0)
+      {
+        throw new InvalidOperationException(
+            "The approved resource snapshot is missing existing elevated resources.");
+      }
+
+      if (entries.Any(entry => string.Equals(
+              entry.ResourceId,
+              approvedResource.Definition.Id,
+              StringComparison.OrdinalIgnoreCase)))
+      {
+        throw new InvalidOperationException(
+            "The deferred resource already has an approved execution seal.");
+      }
+
+      var fingerprint = ApprovedResourceFingerprint.Create(
+          approvedResource.Definition,
+          plan);
+      var approved = new ApprovedResource(
+          approvedResource.Definition,
+          plan,
+          fingerprint);
+      var plaintext = JsonSerializer.SerializeToUtf8Bytes(approved, _snapshotJsonOptions);
+      var protectedData = _approvedResourceProtector.Protect(
+          plaintext,
+          ApprovedResourceEntropy(
+              runId,
+              approvedResource.Definition.Id,
+              fingerprint));
+      entries.Add(new ProtectedApprovedResource(
+          approvedResource.Definition.Id,
+          fingerprint,
+          Convert.ToBase64String(protectedData)));
+      var bytes = JsonSerializer.SerializeToUtf8Bytes(
+          new ApprovedResourceEnvelope(runId, entries),
+          _snapshotJsonOptions);
+      await WriteBytesAtomicallyAsync(approvedPath, bytes, cancellationToken)
+          .ConfigureAwait(false);
+    }
+    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+    {
+      throw ApprovedResourceStorageFailure(
+          runId,
+          approvedResource.Definition.Id,
+          exception,
+          isRetryable: true);
+    }
+    catch (Exception exception) when (
+        exception is CryptographicException
+            or JsonException
+            or FormatException
+            or NotSupportedException
+            or InvalidOperationException
+            or ArgumentException)
+    {
+      throw ApprovedResourceStorageFailure(
+          runId,
+          approvedResource.Definition.Id,
+          exception,
+          isRetryable: false);
+    }
   }
 
   public async Task<IReadOnlyList<ExecutionRun>> ListIncompleteAsync(
@@ -223,7 +379,7 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
       var lease = _recoveryLockOpener(lockPath);
       return Task.FromResult<IAsyncDisposable?>(lease);
     }
-    catch (IOException exception) when (IsRecoveryLockBusy(exception))
+    catch (IOException exception) when (IsLockContention(exception))
     {
       return Task.FromResult<IAsyncDisposable?>(null);
     }
@@ -245,7 +401,7 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     }
   }
 
-  private static bool IsRecoveryLockBusy(IOException exception) =>
+  private static bool IsLockContention(IOException exception) =>
       exception.HResult is SharingViolationHResult or LockViolationHResult;
 
   private static IAsyncDisposable OpenRecoveryLock(string lockPath) =>
@@ -279,8 +435,14 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
           $"Execution run '{run.RunId:D}' revision or recovery claim is stale.");
     }
 
+    EnsurePlanApprovalUnchanged(current.PlanApproval, run.PlanApproval);
+    ValidatePersistenceTransition(current, run);
+
     var saved = run with { Revision = checked(run.Revision + 1) };
-    await WriteSnapshotAsync(path, Redact(saved), cancellationToken).ConfigureAwait(false);
+    await WriteBytesAtomicallyAsync(
+        path,
+        JsonSerializer.SerializeToUtf8Bytes(Redact(saved), _snapshotJsonOptions),
+        cancellationToken).ConfigureAwait(false);
     if (saved.State == ExecutionState.Completed)
     {
       DeleteApprovedResources(saved.RunId);
@@ -322,13 +484,190 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
       return false;
     }
 
-    await WriteSnapshotAsync(path, Redact(run), cancellationToken).ConfigureAwait(false);
+    EnsurePlanApprovalUnchanged(current.PlanApproval, run.PlanApproval);
+    ValidatePersistenceTransition(current, run);
+
+    await WriteBytesAtomicallyAsync(
+        path,
+        JsonSerializer.SerializeToUtf8Bytes(Redact(run), _snapshotJsonOptions),
+        cancellationToken).ConfigureAwait(false);
     if (run.State == ExecutionState.Completed)
     {
       DeleteApprovedResources(run.RunId);
     }
 
     return true;
+  }
+
+  public async Task<ApprovedResourceClaim?> ClaimApprovedResourceAsync(
+      Guid runId,
+      string resourceId,
+      string planFingerprint,
+      CancellationToken cancellationToken)
+  {
+    if (runId == Guid.Empty)
+    {
+      throw new ArgumentException("An execution run identifier is required.", nameof(runId));
+    }
+
+    ArgumentException.ThrowIfNullOrWhiteSpace(resourceId);
+    ArgumentException.ThrowIfNullOrWhiteSpace(planFingerprint);
+    cancellationToken.ThrowIfCancellationRequested();
+    await using var runLock = await AcquireRunLockForExistingSnapshotAsync(
+        runId,
+        cancellationToken).ConfigureAwait(false);
+    var run = await ReadSnapshotAsync(runId, cancellationToken).ConfigureAwait(false);
+    if (run is null || run.Mode != RunMode.Apply || run.State != ExecutionState.Running ||
+        run.Plan is null || !run.Plan.IsExecutable)
+    {
+      return null;
+    }
+
+    var path = ApprovedResourcesPath(runId);
+    if (!File.Exists(path))
+    {
+      return null;
+    }
+
+    try
+    {
+      ApprovedResourceEnvelope? envelope;
+      await using (var stream = new FileStream(
+                       path,
+                       FileMode.Open,
+                       FileAccess.Read,
+                       FileShare.Read,
+                       4096,
+                       FileOptions.Asynchronous | FileOptions.SequentialScan))
+      {
+        envelope = await JsonSerializer.DeserializeAsync<ApprovedResourceEnvelope>(
+            stream,
+            _snapshotJsonOptions,
+            cancellationToken).ConfigureAwait(false);
+      }
+
+      var expectedElevated = run.Plan.Resources.Where(resource =>
+          resource.Status == PlannedResourceStatus.Ready &&
+          resource.RequiresElevation &&
+          resource.ResourcePlan.IsExecutable).ToArray();
+      var approvedById = ValidateApprovedResourceEnvelope(
+          runId,
+          envelope,
+          expectedElevated);
+
+      var plannedMatches = run.Plan.Resources.Where(resource => string.Equals(
+          resource.Definition.Id,
+          resourceId,
+          StringComparison.OrdinalIgnoreCase)).ToArray();
+      if (plannedMatches.Length != 1)
+      {
+        return null;
+      }
+
+      var planned = plannedMatches[0];
+      if (!run.ResourceResults.TryGetValue(planned.Definition.Id, out var persistedResult) ||
+          persistedResult.State != ExecutionState.Running ||
+          persistedResult.Outcome is not null ||
+          planned.Status != PlannedResourceStatus.Ready ||
+          !planned.RequiresElevation ||
+          !planned.ResourcePlan.IsExecutable ||
+          !planned.ResourcePlan.RequiresApply ||
+          !planned.ResourcePlan.Steps.Any(step =>
+              step.Action != PlanAction.None &&
+              step.PrivilegeRequirement == PrivilegeRequirement.Administrator))
+      {
+        return null;
+      }
+
+      var entryIndexes = envelope!.Resources
+          .Select((entry, index) => (entry, index))
+          .Where(candidate => string.Equals(
+              candidate.entry.ResourceId,
+              resourceId,
+              StringComparison.OrdinalIgnoreCase))
+          .ToArray();
+      if (entryIndexes.Length != 1)
+      {
+        throw new InvalidOperationException(
+            "The approved resource snapshot does not contain exactly one matching resource.");
+      }
+
+      var (entry, entryIndex) = entryIndexes[0];
+      var approved = approvedById[entry.ResourceId];
+      if ((entry.ClaimedPlanFingerprints ?? []).Contains(
+              planFingerprint,
+              StringComparer.OrdinalIgnoreCase))
+      {
+        return null;
+      }
+
+      if (!approved.Definition.Dependencies.All(dependency =>
+              run.ResourceResults.TryGetValue(dependency, out var dependencyResult) &&
+              dependencyResult.State == ExecutionState.Completed &&
+              dependencyResult.Outcome is ExecutionOutcome.Succeeded or
+                  ExecutionOutcome.NotRequired))
+      {
+        throw new InvalidOperationException(
+            "The protected approved resource does not match the persisted execution plan.");
+      }
+
+      var segments = PrivilegePlanSegments.Split(approved.Plan)
+          .Where(segment => segment.Steps.Any(step =>
+              step.Action != PlanAction.None &&
+              step.PrivilegeRequirement == PrivilegeRequirement.Administrator))
+          .Where(segment => FixedEquals(
+              planFingerprint,
+              ApprovedResourceFingerprint.Create(approved.Definition, segment)))
+          .ToArray();
+      if (segments.Length != 1)
+      {
+        throw new InvalidOperationException(
+            "The protected approved resource does not contain exactly one matching administrator segment.");
+      }
+
+      var entries = envelope.Resources.ToArray();
+      entries[entryIndex] = entry with
+      {
+        ClaimedPlanFingerprints =
+        [
+          .. entry.ClaimedPlanFingerprints ?? [],
+          planFingerprint
+        ]
+      };
+      await WriteBytesAtomicallyAsync(
+          path,
+          JsonSerializer.SerializeToUtf8Bytes(
+              envelope with { Resources = entries },
+              _snapshotJsonOptions),
+          cancellationToken).ConfigureAwait(false);
+      return new ApprovedResourceClaim(
+          approved.Definition,
+          approved.Plan,
+          segments[0],
+          approved.Fingerprint);
+    }
+    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+    {
+      throw ApprovedResourceStorageFailure(
+          runId,
+          resourceId,
+          exception,
+          isRetryable: true);
+    }
+    catch (Exception exception) when (
+        exception is CryptographicException
+            or JsonException
+            or FormatException
+            or NotSupportedException
+            or InvalidOperationException
+            or ArgumentException)
+    {
+      throw ApprovedResourceStorageFailure(
+          runId,
+          resourceId,
+          exception,
+          isRetryable: false);
+    }
   }
 
   public async Task<ApprovedResource?> GetApprovedResourceAsync(
@@ -346,7 +685,8 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     await using var runLock = await AcquireRunLockForExistingSnapshotAsync(
         runId,
         cancellationToken).ConfigureAwait(false);
-    if (!File.Exists(SnapshotPath(runId)))
+    var run = await ReadSnapshotAsync(runId, cancellationToken).ConfigureAwait(false);
+    if (run is null)
     {
       return null;
     }
@@ -370,37 +710,15 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
           stream,
           _snapshotJsonOptions,
           cancellationToken).ConfigureAwait(false);
-      if (envelope is null || envelope.RunId != runId)
-      {
-        return null;
-      }
-
-      var matches = envelope.Resources.Where(entry => string.Equals(
-          entry.ResourceId,
-          resourceId,
-          StringComparison.OrdinalIgnoreCase)).ToArray();
-      if (matches.Length != 1)
-      {
-        return null;
-      }
-
-      var entry = matches[0];
-      var protectedData = Convert.FromBase64String(entry.ProtectedPayload);
-      var plaintext = _approvedResourceProtector.Unprotect(
-          protectedData,
-          ApprovedResourceEntropy(runId, entry.ResourceId, entry.Fingerprint));
-      var approved = JsonSerializer.Deserialize<ApprovedResource>(
-          plaintext,
-          _snapshotJsonOptions);
-      if (approved is null ||
-          !string.Equals(
-              approved.Definition.Id,
-              entry.ResourceId,
-              StringComparison.OrdinalIgnoreCase) ||
-          !FixedEquals(approved.Fingerprint, entry.Fingerprint) ||
-          !FixedEquals(
-              approved.Fingerprint,
-              ApprovedResourceFingerprint.Create(approved.Definition, approved.Plan)))
+      var expectedElevated = run.Plan?.Resources.Where(resource =>
+          resource.Status == PlannedResourceStatus.Ready &&
+          resource.RequiresElevation &&
+          resource.ResourcePlan.IsExecutable).ToArray() ?? [];
+      var approvedById = ValidateApprovedResourceEnvelope(
+          runId,
+          envelope,
+          expectedElevated);
+      if (!approvedById.TryGetValue(resourceId, out var approved))
       {
         return null;
       }
@@ -409,21 +727,11 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     }
     catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
     {
-      var error = new StructuredError(
-          WdemErrorCode.PermissionError,
-          "Approved resource snapshot is temporarily unavailable.",
-          $"Run '{runId:D}' resource '{resourceId}' could not be authorized because its protected snapshot could not be opened.")
-      {
-        ResourceId = resourceId,
-        IsRetryable = true,
-        UnderlyingException = exception
-      };
-      lock (_diagnosticsGate)
-      {
-        _diagnostics.Add(error);
-      }
-
-      throw new ApprovedResourceAccessException(error, exception);
+      throw ApprovedResourceStorageFailure(
+          runId,
+          resourceId,
+          exception,
+          isRetryable: true);
     }
     catch (Exception exception) when (
         exception is CryptographicException
@@ -433,19 +741,11 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
             or InvalidOperationException
             or ArgumentException)
     {
-      lock (_diagnosticsGate)
-      {
-        _diagnostics.Add(new StructuredError(
-            WdemErrorCode.PermissionError,
-            "Approved resource snapshot could not be opened.",
-            $"Run '{runId:D}' resource '{resourceId}' was not authorized because its protected snapshot is invalid.")
-        {
-          ResourceId = resourceId,
-          IsRetryable = false
-        });
-      }
-
-      return null;
+      throw ApprovedResourceStorageFailure(
+          runId,
+          resourceId,
+          exception,
+          isRetryable: false);
     }
   }
 
@@ -570,7 +870,7 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
             FileOptions.Asynchronous
                 | (deleteOnClose ? FileOptions.DeleteOnClose : FileOptions.None));
       }
-      catch (IOException)
+      catch (IOException exception) when (IsLockContention(exception))
       {
         await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken)
             .ConfigureAwait(false);
@@ -680,13 +980,15 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     }
 
     var entries = new List<ProtectedApprovedResource>();
+    var sealedResourceIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     foreach (var approvedResource in approvedResources)
     {
       var matches = expected.Where(resource => string.Equals(
           resource.Definition.Id,
           approvedResource.Definition.Id,
           StringComparison.OrdinalIgnoreCase)).ToArray();
-      if (matches.Length != 1 ||
+      if (!sealedResourceIds.Add(approvedResource.Definition.Id) ||
+          matches.Length != 1 ||
           !FixedEquals(
               ApprovedResourceFingerprint.Create(
                   approvedResource.Definition,
@@ -734,6 +1036,123 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     return true;
   }
 
+  private IReadOnlyDictionary<string, ApprovedResource> ValidateApprovedResourceEnvelope(
+      Guid runId,
+      ApprovedResourceEnvelope? envelope,
+      IReadOnlyList<PlannedResource> expectedResources)
+  {
+    if (envelope is null || envelope.RunId != runId || envelope.Resources is null ||
+        envelope.Resources.Count != expectedResources.Count)
+    {
+      throw new InvalidOperationException(
+          "The approved resource snapshot does not match the elevated execution plan.");
+    }
+
+    var expectedById = expectedResources.ToDictionary(
+        resource => resource.Definition.Id,
+        StringComparer.OrdinalIgnoreCase);
+    var observedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var approvedById = new Dictionary<string, ApprovedResource>(
+        StringComparer.OrdinalIgnoreCase);
+    foreach (var entry in envelope.Resources)
+    {
+      if (entry is null || string.IsNullOrWhiteSpace(entry.ResourceId) ||
+          !observedIds.Add(entry.ResourceId) ||
+          !expectedById.TryGetValue(entry.ResourceId, out var expected))
+      {
+        throw new InvalidOperationException(
+            "The approved resource snapshot contains a missing, extra, or duplicate resource.");
+      }
+
+      ValidateSha256(entry.Fingerprint, "approved resource fingerprint");
+      var protectedData = Convert.FromBase64String(entry.ProtectedPayload);
+      var plaintext = _approvedResourceProtector.Unprotect(
+          protectedData,
+          ApprovedResourceEntropy(runId, entry.ResourceId, entry.Fingerprint));
+      var approved = JsonSerializer.Deserialize<ApprovedResource>(
+          plaintext,
+          _snapshotJsonOptions);
+      if (approved?.Definition is null || approved.Plan is null)
+      {
+        throw new InvalidOperationException(
+            "A protected approved resource payload is incomplete.");
+      }
+
+      ValidateDefinition(approved.Definition);
+      ValidateResourcePlan(approved.Plan);
+      var expectedFingerprint = ApprovedResourceFingerprint.Create(
+          approved.Definition,
+          expected.ResourcePlan);
+      if (!string.Equals(
+              approved.Definition.Id,
+              entry.ResourceId,
+              StringComparison.OrdinalIgnoreCase) ||
+          !FixedEquals(approved.Fingerprint, entry.Fingerprint) ||
+          !FixedEquals(
+              approved.Fingerprint,
+              ApprovedResourceFingerprint.Create(approved.Definition, approved.Plan)) ||
+          !DependenciesEqual(expected.Dependencies, approved.Definition.Dependencies) ||
+          !FixedEquals(
+              approved.Fingerprint,
+              expectedFingerprint))
+      {
+        throw new InvalidOperationException(
+            "A protected approved resource does not match its snapshot entry.");
+      }
+
+      var administratorSegments = PrivilegePlanSegments.Split(approved.Plan)
+          .Where(segment => segment.Steps.Any(step =>
+              step.Action != PlanAction.None &&
+              step.PrivilegeRequirement == PrivilegeRequirement.Administrator))
+          .Select(segment => ApprovedResourceFingerprint.Create(
+              approved.Definition,
+              segment))
+          .ToHashSet(StringComparer.OrdinalIgnoreCase);
+      var observedClaims = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+      foreach (var claimedFingerprint in entry.ClaimedPlanFingerprints ?? [])
+      {
+        ValidateSha256(claimedFingerprint, "claimed approved plan fingerprint");
+        if (!observedClaims.Add(claimedFingerprint) ||
+            !administratorSegments.Contains(claimedFingerprint))
+        {
+          throw new InvalidOperationException(
+              "The approved resource snapshot contains an invalid or duplicate claim.");
+        }
+      }
+
+      approvedById.Add(entry.ResourceId, approved);
+    }
+
+    return approvedById;
+  }
+
+  private ApprovedResourceStoreException ApprovedResourceStorageFailure(
+      Guid runId,
+      string resourceId,
+      Exception exception,
+      bool isRetryable)
+  {
+    var error = new StructuredError(
+        WdemErrorCode.PermissionError,
+        isRetryable
+            ? "Approved resource snapshot is temporarily unavailable."
+            : "Approved resource snapshot could not be opened.",
+        isRetryable
+            ? $"Run '{runId:D}' resource '{resourceId}' could not be authorized because its protected snapshot could not be opened."
+            : $"Run '{runId:D}' resource '{resourceId}' was not authorized because its protected snapshot is invalid.")
+    {
+      ResourceId = resourceId,
+      IsRetryable = isRetryable,
+      UnderlyingException = exception
+    };
+    lock (_diagnosticsGate)
+    {
+      _diagnostics.Add(error);
+    }
+
+    return new ApprovedResourceStoreException(error, exception);
+  }
+
   private static byte[] ApprovedResourceEntropy(
       Guid runId,
       string resourceId,
@@ -758,6 +1177,73 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
       return false;
     }
   }
+
+  private static bool DependenciesEqual(
+      IReadOnlyList<string> planned,
+      IReadOnlyList<string> approved) =>
+      planned.Count == approved.Count &&
+      planned.SequenceEqual(approved, StringComparer.OrdinalIgnoreCase);
+
+  private void EnsurePlanApprovalUnchanged(PlanApproval? current, PlanApproval? replacement)
+  {
+    var currentBytes = JsonSerializer.SerializeToUtf8Bytes(current, _snapshotJsonOptions);
+    var replacementBytes = JsonSerializer.SerializeToUtf8Bytes(replacement, _snapshotJsonOptions);
+    if (!currentBytes.AsSpan().SequenceEqual(replacementBytes))
+    {
+      throw new InvalidOperationException(
+          "The original plan approval proof is immutable for the lifetime of the run.");
+    }
+  }
+
+  private static void ValidatePersistenceTransition(
+      ExecutionRun current,
+      ExecutionRun replacement)
+  {
+    if (current.State == ExecutionState.Completed &&
+        replacement.State != ExecutionState.Completed)
+    {
+      throw new InvalidOperationException(
+          "A completed execution run cannot return to a non-terminal state.");
+    }
+
+    if (current.State == ExecutionState.Completed &&
+        replacement.State == ExecutionState.Completed &&
+        !IsAllowedTerminalOutcomeTransition(current.Outcome, replacement.Outcome))
+    {
+      throw new InvalidOperationException(
+          "An authoritative terminal execution run outcome cannot be replaced.");
+    }
+
+    foreach (var pair in current.ResourceResults)
+    {
+      if (pair.Value.State is not (ExecutionState.Completed or ExecutionState.Blocked))
+      {
+        continue;
+      }
+
+      if (!replacement.ResourceResults.TryGetValue(pair.Key, out var next) ||
+          next.State is not (ExecutionState.Completed or ExecutionState.Blocked))
+      {
+        throw new InvalidOperationException(
+            $"Terminal resource result '{pair.Key}' cannot return to a non-terminal state.");
+      }
+
+      if (!IsAllowedTerminalOutcomeTransition(pair.Value.Outcome, next.Outcome))
+      {
+        throw new InvalidOperationException(
+            $"Authoritative terminal resource result '{pair.Key}' cannot be replaced.");
+      }
+    }
+  }
+
+  private static bool IsAllowedTerminalOutcomeTransition(
+      ExecutionOutcome? current,
+      ExecutionOutcome? replacement) =>
+      current == replacement ||
+      current == ExecutionOutcome.Cancelled &&
+      replacement is ExecutionOutcome.Succeeded or
+          ExecutionOutcome.NotRequired or
+          ExecutionOutcome.Failed;
 
   private void DeleteApprovedResources(Guid runId)
   {
@@ -795,47 +1281,6 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     var temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
     try
     {
-      await using (var stream = new FileStream(
-          temporaryPath,
-          FileMode.Create,
-          FileAccess.Write,
-          FileShare.None,
-          4096,
-          FileOptions.Asynchronous | FileOptions.WriteThrough))
-      {
-        await stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
-        await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-        stream.Flush(flushToDisk: true);
-      }
-
-      cancellationToken.ThrowIfCancellationRequested();
-      if (File.Exists(path))
-      {
-        File.Replace(temporaryPath, path, destinationBackupFileName: null);
-      }
-      else
-      {
-        File.Move(temporaryPath, path);
-      }
-    }
-    finally
-    {
-      if (File.Exists(temporaryPath))
-      {
-        File.Delete(temporaryPath);
-      }
-    }
-  }
-
-  private async Task WriteSnapshotAsync(
-      string path,
-      ExecutionRun run,
-      CancellationToken cancellationToken)
-  {
-    var temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
-    try
-    {
-      var bytes = JsonSerializer.SerializeToUtf8Bytes(run, _snapshotJsonOptions);
       await using (var stream = new FileStream(
           temporaryPath,
           FileMode.Create,
@@ -1349,6 +1794,8 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
       ValidatePlan(run.Plan);
     }
 
+    ValidatePlanApproval(run);
+
     foreach (var result in run.ResourceResults.Values)
     {
       ValidateResourceResult(result);
@@ -1406,6 +1853,77 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
       ValidateEnum(resource.Status, "planned resource status");
       ValidateEnum(resource.Risk, "plan risk");
       ValidateEnum(resource.RestartPolicy, "planned resource restart policy");
+      if (resource.Status == PlannedResourceStatus.Deferred &&
+          resource.DeferredAuthorization is null)
+      {
+        throw new ArgumentException(
+            "A deferred planned resource requires an authorization boundary.",
+            nameof(plan));
+      }
+
+      if (resource.Status != PlannedResourceStatus.Deferred &&
+          resource.DeferredAuthorization is not null)
+      {
+        throw new ArgumentException(
+            "Only a deferred planned resource may retain an authorization boundary.",
+            nameof(plan));
+      }
+
+      if (resource.DeferredAuthorization is { } authorization &&
+          (authorization.AllowedActions.Count == 0 ||
+              authorization.AllowedActions.Any(action => action == PlanAction.None)))
+      {
+        throw new ArgumentException(
+            "A deferred authorization requires at least one modifying action.",
+            nameof(plan));
+      }
+
+      if (resource.DeferredAuthorization is { } deferredAuthorization)
+      {
+        foreach (var action in deferredAuthorization.AllowedActions)
+        {
+          ValidateEnum(action, "deferred authorization action");
+        }
+
+        ValidateEnum(
+            deferredAuthorization.MaximumPrivilege,
+            "deferred authorization maximum privilege");
+        ValidateEnum(
+            deferredAuthorization.MaximumRestartPolicy,
+            "deferred authorization maximum restart policy");
+        ValidateEnum(
+            deferredAuthorization.MaximumRisk,
+            "deferred authorization maximum risk");
+        if (string.IsNullOrWhiteSpace(deferredAuthorization.DynamicPlanNotice))
+        {
+          throw new ArgumentException(
+              "A deferred authorization requires a dynamic planning notice.",
+              nameof(plan));
+        }
+
+        if (resource.RequiresElevation !=
+                (deferredAuthorization.MaximumPrivilege ==
+                    PrivilegeRequirement.Administrator) ||
+            resource.RestartPolicy != deferredAuthorization.MaximumRestartPolicy ||
+            resource.Risk != deferredAuthorization.MaximumRisk ||
+            resource.IsDestructive != deferredAuthorization.AllowDestructive)
+        {
+          throw new ArgumentException(
+              "A deferred resource summary must match its authorization boundary.",
+              nameof(plan));
+        }
+
+        if (deferredAuthorization.MaximumPrivilege >
+                resource.Definition.PrivilegeRequirement ||
+            deferredAuthorization.MaximumRestartPolicy >
+                resource.Definition.RestartPolicy)
+        {
+          throw new ArgumentException(
+              "A deferred authorization cannot exceed its resource definition.",
+              nameof(plan));
+        }
+      }
+
       ValidateElements(resource.Dependencies, "planned resource dependencies");
       ValidateElements(resource.BlockedBy, "blocking resource identifiers");
       ValidateElements(resource.Diagnostics, "planned resource diagnostics");
@@ -1420,6 +1938,152 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     foreach (var error in plan.Errors)
     {
       ValidateStructuredError(error);
+    }
+  }
+
+  private static void ValidatePlanApproval(ExecutionRun run)
+  {
+    if (run.PlanApproval is null)
+    {
+      if (run.Mode == RunMode.Apply &&
+          run.Plan is { IsExecutable: true } plan &&
+          plan.Resources.Any(resource => resource.Status == PlannedResourceStatus.Deferred))
+      {
+        throw new ArgumentException(
+            "An apply plan with deferred resources requires approval proof.",
+            nameof(run));
+      }
+
+      return;
+    }
+
+    if (run.Mode != RunMode.Apply || run.Plan is null)
+    {
+      throw new ArgumentException(
+          "Plan approval proof is only valid for an apply run with a plan.",
+          nameof(run));
+    }
+
+    var approval = run.PlanApproval;
+    ValidateSha256(approval.InitialPlanFingerprint, "initial approved plan fingerprint");
+    if (approval.ConfirmedAtUtc == default)
+    {
+      throw new ArgumentException(
+          "Plan approval proof requires a confirmation timestamp.",
+          nameof(run));
+    }
+
+    ValidateEnum(approval.Source, "plan approval source");
+    ValidateElements(approval.DeferredAuthorizations, "deferred authorization proofs");
+    var proofIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var proof in approval.DeferredAuthorizations)
+    {
+      ArgumentException.ThrowIfNullOrWhiteSpace(proof.ResourceId);
+      ArgumentException.ThrowIfNullOrWhiteSpace(proof.ResourceType);
+      ArgumentException.ThrowIfNullOrWhiteSpace(proof.ProviderName);
+      ValidateSha256(proof.DefinitionFingerprint, "deferred definition fingerprint");
+      ValidateEnum(proof.Origin, "deferred resource origin");
+      ValidateEnum(proof.MaximumPrivilege, "deferred proof maximum privilege");
+      ValidateEnum(proof.MaximumRestartPolicy, "deferred proof maximum restart policy");
+      ValidateEnum(proof.MaximumRisk, "deferred proof maximum risk");
+      ValidateElements(proof.Dependencies, "deferred proof dependencies");
+      ValidateElements(proof.AllowedActions, "deferred proof actions");
+      if (!proofIds.Add(proof.ResourceId) ||
+          proof.AllowedActions.Count == 0 ||
+          proof.AllowedActions.Any(action => action == PlanAction.None))
+      {
+        throw new ArgumentException(
+            "Deferred authorization proofs require unique resources and modifying actions.",
+            nameof(run));
+      }
+
+      foreach (var action in proof.AllowedActions)
+      {
+        ValidateEnum(action, "deferred proof action");
+      }
+
+      var matches = run.Plan.Resources.Where(resource => string.Equals(
+          resource.Definition.Id,
+          proof.ResourceId,
+          StringComparison.OrdinalIgnoreCase)).ToArray();
+      if (matches.Length != 1 || !IsApprovedRefinement(matches[0], proof))
+      {
+        throw new ArgumentException(
+            "The current plan is not a refinement of its deferred approval proof.",
+            nameof(run));
+      }
+    }
+
+    foreach (var deferred in run.Plan.Resources.Where(resource =>
+                 resource.Status == PlannedResourceStatus.Deferred))
+    {
+      if (!proofIds.Contains(deferred.Definition.Id))
+      {
+        throw new ArgumentException(
+            "Every deferred resource requires persistent approval proof.",
+            nameof(run));
+      }
+    }
+  }
+
+  private static bool IsApprovedRefinement(
+      PlannedResource resource,
+      DeferredAuthorizationProof proof)
+  {
+    if (!string.Equals(resource.Definition.Id, proof.ResourceId, StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(resource.Definition.Type, proof.ResourceType, StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(resource.Definition.Provider, proof.ProviderName, StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(
+            resource.ResourcePlan.DesiredStateFingerprint,
+            proof.DefinitionFingerprint,
+            StringComparison.Ordinal) ||
+        resource.Origin != proof.Origin ||
+        resource.Dependencies.Count != proof.Dependencies.Count ||
+        resource.Dependencies.Any(dependency =>
+            !proof.Dependencies.Contains(dependency, StringComparer.OrdinalIgnoreCase)))
+    {
+      return false;
+    }
+
+    if (resource.Status == PlannedResourceStatus.Deferred)
+    {
+      var authorization = resource.DeferredAuthorization;
+      return authorization is not null &&
+          authorization.AllowedActions.SequenceEqual(proof.AllowedActions) &&
+          authorization.MaximumPrivilege == proof.MaximumPrivilege &&
+          authorization.MaximumRestartPolicy == proof.MaximumRestartPolicy &&
+          authorization.MaximumRisk == proof.MaximumRisk &&
+          authorization.AllowDestructive == proof.AllowDestructive;
+    }
+
+    if (resource.Status is not (PlannedResourceStatus.Ready or
+            PlannedResourceStatus.AlreadySatisfied) ||
+        resource.DeferredAuthorization is not null ||
+        resource.Risk > proof.MaximumRisk ||
+        resource.RequiresElevation &&
+            proof.MaximumPrivilege != PrivilegeRequirement.Administrator ||
+        resource.IsDestructive && !proof.AllowDestructive ||
+        resource.RestartPolicy > proof.MaximumRestartPolicy)
+    {
+      return false;
+    }
+
+    return resource.ResourcePlan.Steps.All(step =>
+        PlanStepAuthorizationPolicy.IsWithinBoundary(
+            step,
+            proof.AllowedActions,
+            proof.MaximumPrivilege,
+            proof.MaximumRestartPolicy,
+            proof.AllowDestructive));
+  }
+
+  private static void ValidateSha256(string value, string field)
+  {
+    if (string.IsNullOrWhiteSpace(value) ||
+        value.Length != 64 ||
+        !value.All(Uri.IsHexDigit))
+    {
+      throw new ArgumentException($"The persisted {field} must be a SHA-256 hexadecimal value.");
     }
   }
 
@@ -1442,6 +2106,12 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
       ValidateEnum(step.Action, "plan action");
       ValidateEnum(step.PrivilegeRequirement, "plan step privilege requirement");
       ValidateEnum(step.RestartPolicy, "plan step restart policy");
+      if (!PlanStepAuthorizationPolicy.IsSafeDeclaration(step))
+      {
+        throw new ArgumentException(
+            "A non-modifying plan step cannot require elevation, restart, or destructive execution.",
+            nameof(plan));
+      }
     }
 
     foreach (var error in plan.StructuredErrors)
@@ -1621,11 +2291,23 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     },
     Graph = run.Graph is null ? null : Redact(run.Graph),
     Plan = run.Plan is null ? null : Redact(run.Plan),
+    PlanApproval = run.PlanApproval is null ? null : Redact(run.PlanApproval),
     ResourceResults = run.ResourceResults.ToDictionary(
         pair => _redactor.Redact(pair.Key),
         pair => Redact(pair.Value),
         StringComparer.OrdinalIgnoreCase),
     RestartReasons = run.RestartReasons.Select(_redactor.Redact).ToArray()
+  };
+
+  private PlanApproval Redact(PlanApproval approval) => approval with
+  {
+    DeferredAuthorizations = approval.DeferredAuthorizations.Select(proof => proof with
+    {
+      ResourceId = _redactor.Redact(proof.ResourceId),
+      ResourceType = _redactor.Redact(proof.ResourceType),
+      ProviderName = _redactor.Redact(proof.ProviderName),
+      Dependencies = proof.Dependencies.Select(_redactor.Redact).ToArray()
+    }).ToArray()
   };
 
   private ResourceResult Redact(ResourceResult result) => result with
@@ -1756,7 +2438,8 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
   private sealed record ProtectedApprovedResource(
       string ResourceId,
       string Fingerprint,
-      string ProtectedPayload);
+      string ProtectedPayload,
+      IReadOnlyList<string>? ClaimedPlanFingerprints = null);
 
   private sealed class ReadOnlyStringSetJsonConverter : JsonConverter<IReadOnlySet<string>>
   {

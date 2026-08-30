@@ -10,11 +10,12 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
   private const int MaximumLogEntries = 5_000;
   private readonly object _eventGate = new();
   private readonly object _operationGate = new();
-  private readonly IEnvironmentRunService _runService;
+  private readonly IReviewedPlanEnvironmentRunService _runService;
   private readonly IRunEventSink _eventSink;
   private readonly LogRedactor _redactor;
   private readonly IUiDispatcher _dispatcher;
   private readonly RunRequest _request;
+  private readonly string _reviewedPlanFingerprint;
   private readonly ExecutionEventProjection _projection = new();
   private IDisposable? _subscription;
   private CancellationTokenSource? _runCancellation;
@@ -36,22 +37,25 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
   private int _dispatcherUnavailable;
 
   public ExecutionMonitorViewModel(
-      IEnvironmentRunService runService,
+      IReviewedPlanEnvironmentRunService runService,
       IRunEventSink eventSink,
       LogRedactor redactor,
       IUiDispatcher dispatcher,
-      RunRequest request)
+      RunRequest request,
+      string reviewedPlanFingerprint)
   {
     ArgumentNullException.ThrowIfNull(runService);
     ArgumentNullException.ThrowIfNull(eventSink);
     ArgumentNullException.ThrowIfNull(redactor);
     ArgumentNullException.ThrowIfNull(dispatcher);
     ArgumentNullException.ThrowIfNull(request);
+    ArgumentException.ThrowIfNullOrWhiteSpace(reviewedPlanFingerprint);
     _runService = runService;
     _eventSink = eventSink;
     _redactor = redactor;
     _dispatcher = dispatcher;
     _request = request;
+    _reviewedPlanFingerprint = reviewedPlanFingerprint;
     Resources = new ObservableCollection<ResourceProgressViewModel>();
     Logs = new BoundedObservableCollection<LogEntryViewModel>(MaximumLogEntries);
     CancelCommand = new AsyncRelayCommand(
@@ -182,7 +186,10 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
 
   public Task StartAsync(CancellationToken cancellationToken = default) =>
       StartOperation(
-          token => _runService.ApplyAsync(_request, token),
+          token => _runService.ApplyAsync(
+              _request,
+              _reviewedPlanFingerprint,
+              token),
           cancellationToken);
 
   public async Task StopAsync()

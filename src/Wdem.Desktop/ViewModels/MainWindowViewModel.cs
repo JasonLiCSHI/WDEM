@@ -10,7 +10,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 {
   private readonly ResourceGraphBuilder _graphBuilder;
   private readonly IProfileCatalog _catalog;
-  private readonly IEnvironmentRunService? _environmentRuns;
+  private readonly IReviewedPlanEnvironmentRunService? _environmentRuns;
   private readonly IRunEventSink? _runEvents;
   private readonly LogRedactor? _redactor;
   private readonly IUiDispatcher? _dispatcher;
@@ -24,7 +24,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
   public MainWindowViewModel(
       IProfileCatalog catalog,
       ResourceGraphBuilder graphBuilder,
-      IEnvironmentRunService? environmentRuns = null,
+      IReviewedPlanEnvironmentRunService? environmentRuns = null,
       IRunEventSink? runEvents = null,
       LogRedactor? redactor = null,
       IUiDispatcher? dispatcher = null,
@@ -170,13 +170,17 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _environmentRuns!,
         _redactor!,
         runRequest,
-        requestToApply => NavigateToExecutionAsync(requestToApply, plan!));
+        (requestToApply, reviewedPlanFingerprint) => NavigateToExecutionAsync(
+            requestToApply,
+            reviewedPlanFingerprint,
+            plan!));
     CurrentPage = plan;
     await plan.InitializeAsync();
   }
 
   private async Task NavigateToExecutionAsync(
       RunRequest request,
+      string reviewedPlanFingerprint,
       PlanViewModel reviewedPlan)
   {
     EnsureExecutionComposition();
@@ -195,9 +199,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     _executionMonitor = new ExecutionMonitorViewModel(
         _environmentRuns!,
         _runEvents!,
-        _redactor!,
-        _dispatcher!,
-        request);
+         _redactor!,
+         _dispatcher!,
+         request,
+         reviewedPlanFingerprint);
     _executionMonitor.PropertyChanged += MonitorPropertyChanged;
     CurrentPage = _executionMonitor;
     Task operation = _executionMonitor.StartAsync();

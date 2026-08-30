@@ -1,6 +1,7 @@
 using System.CommandLine;
 using System.CommandLine.Parsing;
 using Wdem.Core.Execution;
+using Wdem.Core.Runs;
 
 namespace Wdem.Cli;
 

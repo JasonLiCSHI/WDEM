@@ -13,6 +13,11 @@ public interface IExecutionRunStore
       ExecutionRun run,
       IReadOnlyList<ApprovedResourceSeal> approvedResources,
       CancellationToken cancellationToken);
+  Task SealApprovedResourceAsync(
+      Guid runId,
+      ApprovedResourceSeal approvedResource,
+      CancellationToken cancellationToken) => throw new NotSupportedException(
+          "This run store does not support sealing deferred elevated resources.");
   Task<ExecutionRun?> GetAsync(Guid runId, CancellationToken cancellationToken);
   Task<IReadOnlyList<ExecutionRun>> ListAsync(CancellationToken cancellationToken);
   Task<IReadOnlyList<ExecutionRun>> ListIncompleteAsync(CancellationToken cancellationToken);

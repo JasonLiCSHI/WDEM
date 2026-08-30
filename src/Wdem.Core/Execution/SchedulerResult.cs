@@ -21,4 +21,6 @@ public sealed record SchedulerResult
           StringComparer.OrdinalIgnoreCase);
     }
   }
+
+  public Task UndrainedCompletion { get; init; } = Task.CompletedTask;
 }

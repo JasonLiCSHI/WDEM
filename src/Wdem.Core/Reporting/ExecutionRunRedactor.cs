@@ -35,12 +35,24 @@ public sealed class ExecutionRunRedactor
       },
       Graph = run.Graph is null ? null : Redact(run.Graph),
       Plan = run.Plan is null ? null : Redact(run.Plan),
+      PlanApproval = run.PlanApproval is null ? null : Redact(run.PlanApproval),
       ResourceResults = RedactDictionary(run.ResourceResults, (_, result) => Redact(result)),
       RestartReasons = run.RestartReasons.Select(Text).ToArray(),
       AcknowledgedRestartResourceIds = run.AcknowledgedRestartResourceIds.Select(Text)
           .ToHashSet(StringComparer.OrdinalIgnoreCase)
     };
   }
+
+  private PlanApproval Redact(PlanApproval approval) => approval with
+  {
+    DeferredAuthorizations = approval.DeferredAuthorizations.Select(proof => proof with
+    {
+      ResourceId = Text(proof.ResourceId),
+      ResourceType = Text(proof.ResourceType),
+      ProviderName = Text(proof.ProviderName),
+      Dependencies = proof.Dependencies.Select(Text).ToArray()
+    }).ToArray()
+  };
 
   private ResourceResult Redact(ResourceResult result) => result with
   {

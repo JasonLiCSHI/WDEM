@@ -12,7 +12,7 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
 {
   private static readonly TimeSpan DefaultWriteTimeout = TimeSpan.FromSeconds(1);
   private static readonly TimeSpan ReportWriteTimeout = TimeSpan.FromSeconds(30);
-  private readonly IEnvironmentRunService _environmentRuns;
+  private readonly ICommandLineEnvironmentRunService _environmentRuns;
   private readonly IExecutionRunStore _runStore;
   private readonly TextWriter _output;
   private readonly TextWriter _error;
@@ -22,7 +22,7 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
   private readonly IRunReportExporter _reportExporter;
 
   public WdemCommandHandler(
-      IEnvironmentRunService environmentRuns,
+      ICommandLineEnvironmentRunService environmentRuns,
       IExecutionRunStore runStore,
       TextWriter? output,
       TextWriter? error,
@@ -63,7 +63,7 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
         redactor,
         eventSink).ConfigureAwait(false);
     return new WdemCommandHandler(
-        composition.EnvironmentRuns,
+        composition.CommandLineRuns,
         composition.RunStore,
         output,
         error,

@@ -1049,6 +1049,7 @@ public sealed class WdemCliBuilderTests
     Assert.Equal(0, await handler.ListRunsAsync(true, CancellationToken.None));
 
     Assert.Same(request, service.ApplyRequest);
+    Assert.True(service.CommandLineApplyCalled);
     Assert.Equal(priorRunId, service.RetryRunId);
     Assert.Same(resources, service.RetryResourceIds);
     Assert.Equal(priorRunId, service.RecoverRunId);
@@ -1510,7 +1511,7 @@ public sealed class WdemCliBuilderTests
       Path.GetFullPath("developer.yaml"),
       new HashSet<string>(StringComparer.OrdinalIgnoreCase));
 
-  private static WdemCommandHandler Handler(IEnvironmentRunService service) => new(
+  private static WdemCommandHandler Handler(ICommandLineEnvironmentRunService service) => new(
       service,
       new StubExecutionRunStore(),
       new StringWriter(),
@@ -1683,7 +1684,7 @@ public sealed class WdemCliBuilderTests
         Task.FromResult(0);
   }
 
-  private sealed class StubEnvironmentRunService : IEnvironmentRunService
+  private sealed class StubEnvironmentRunService : ICommandLineEnvironmentRunService
   {
     public required ExecutionRun Result { get; init; }
     public Exception? Failure { get; init; }
@@ -1691,6 +1692,7 @@ public sealed class WdemCliBuilderTests
     public IReadOnlyList<RunEvent> Events { get; init; } = [];
     public RunRequest? InspectRequest { get; private set; }
     public RunRequest? ApplyRequest { get; private set; }
+    public bool CommandLineApplyCalled { get; private set; }
     public Guid? RetryRunId { get; private set; }
     public IReadOnlySet<string>? RetryResourceIds { get; private set; }
     public Guid? RecoverRunId { get; private set; }
@@ -1707,9 +1709,23 @@ public sealed class WdemCliBuilderTests
         RunRequest request,
         CancellationToken cancellationToken)
     {
+      CommandLineApplyCalled = true;
       ApplyRequest = request;
       return GetResult();
     }
+
+    public Task<ExecutionRun> ApplyFromCommandLineAsync(
+        RunRequest request,
+        CancellationToken cancellationToken)
+    {
+      CommandLineApplyCalled = true;
+      return ApplyAsync(request, cancellationToken);
+    }
+
+    public Task<ExecutionRun> ApplyReviewedPlanAsync(
+        RunRequest request,
+        string reviewedPlanFingerprint,
+        CancellationToken cancellationToken) => ApplyAsync(request, cancellationToken);
 
     public Task<ExecutionRun> RetryAsync(
         Guid priorRunId,
@@ -1758,7 +1774,7 @@ public sealed class WdemCliBuilderTests
       IRunEventSink eventSink,
       RunEvent runEvent,
       CountdownEvent ready,
-      Task start) : IEnvironmentRunService
+      Task start) : ICommandLineEnvironmentRunService
   {
     public Task<ExecutionRun> InspectAsync(
         RunRequest request,
@@ -1774,6 +1790,15 @@ public sealed class WdemCliBuilderTests
       await eventSink.PublishAsync(runEvent, cancellationToken);
       return result;
     }
+
+    public Task<ExecutionRun> ApplyFromCommandLineAsync(
+        RunRequest request,
+        CancellationToken cancellationToken) => ApplyAsync(request, cancellationToken);
+
+    public Task<ExecutionRun> ApplyReviewedPlanAsync(
+        RunRequest request,
+        string reviewedPlanFingerprint,
+        CancellationToken cancellationToken) => ApplyAsync(request, cancellationToken);
 
     public Task<ExecutionRun> RetryAsync(
         Guid priorRunId,
@@ -1797,7 +1822,7 @@ public sealed class WdemCliBuilderTests
       ExecutionRun result,
       IRunEventSink eventSink,
       TaskCompletionSource published,
-      Task release) : IEnvironmentRunService
+      Task release) : ICommandLineEnvironmentRunService
   {
     public Task<ExecutionRun> InspectAsync(
         RunRequest request,
@@ -1813,6 +1838,15 @@ public sealed class WdemCliBuilderTests
       await release.WaitAsync(cancellationToken);
       return result;
     }
+
+    public Task<ExecutionRun> ApplyFromCommandLineAsync(
+        RunRequest request,
+        CancellationToken cancellationToken) => ApplyAsync(request, cancellationToken);
+
+    public Task<ExecutionRun> ApplyReviewedPlanAsync(
+        RunRequest request,
+        string reviewedPlanFingerprint,
+        CancellationToken cancellationToken) => ApplyAsync(request, cancellationToken);
 
     public Task<ExecutionRun> RetryAsync(
         Guid priorRunId,

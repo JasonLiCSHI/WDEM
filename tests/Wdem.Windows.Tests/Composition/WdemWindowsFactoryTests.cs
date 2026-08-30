@@ -116,7 +116,7 @@ public sealed class WdemWindowsFactoryTests : IDisposable
     Environment.SetEnvironmentVariable("WINHOME_STATE_PATH", legacyStatePath);
     var paths = new WdemDataPaths(_root);
 
-    var composition = WdemElevatedHostFactory.Create(paths);
+    var composition = WdemElevatedHostFactory.Create(paths, _root);
 
     Assert.IsType<JsonExecutionRunStore>(composition.RunStore);
     Assert.IsType<LogRedactor>(composition.Redactor);

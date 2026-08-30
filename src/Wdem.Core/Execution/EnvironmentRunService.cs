@@ -1,4 +1,7 @@
+using System.Collections.Concurrent;
 using System.Collections.Frozen;
+using System.Diagnostics;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using Wdem.Core.Compliance;
@@ -11,12 +14,20 @@ using Wdem.Core.Runs;
 
 namespace Wdem.Core.Execution;
 
-public sealed class EnvironmentRunService : IEnvironmentRunService
+public sealed class EnvironmentRunService :
+    IEnvironmentRunService,
+    IEnvironmentRunFinalizationService,
+    ICommandLineEnvironmentRunService,
+    IReviewedPlanEnvironmentRunService
 {
   private static readonly StringComparer IdComparer = StringComparer.OrdinalIgnoreCase;
   private static readonly TimeSpan DefaultPersistenceTimeout = TimeSpan.FromSeconds(10);
   private static readonly TimeSpan CancellationProgressDrainGrace =
       TimeSpan.FromMilliseconds(200);
+  private const int MaximumRetainedFinalizations = 64;
+  private readonly ConcurrentDictionary<Guid, Task> _runFinalizations = new();
+  private readonly object _runFinalizationsGate = new();
+  private readonly LinkedList<(Guid RunId, Task Finalization)> _runFinalizationOrder = [];
   private readonly IProfileCatalog _profiles;
   private readonly ResourceGraphBuilder _graphBuilder;
   private readonly IResourceProviderRegistry _providers;
@@ -69,13 +80,14 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       RunRequest request,
       CancellationToken cancellationToken)
   {
-    ValidatePublicRequestProvenance(request);
     return ExecuteFreshAsync(
         request,
         RunMode.Inspect,
         resourceFilter: null,
         retriedFromRunId: null,
         recoveredFromRunId: null,
+        approvalSource: null,
+        reviewedPlanFingerprint: null,
         cancellationToken);
   }
 
@@ -83,14 +95,76 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       RunRequest request,
       CancellationToken cancellationToken)
   {
-    ValidatePublicRequestProvenance(request);
     return ExecuteFreshAsync(
         request,
         RunMode.Apply,
         resourceFilter: null,
         retriedFromRunId: null,
         recoveredFromRunId: null,
+        approvalSource: PlanApprovalSource.ExplicitApplyRequest,
+        reviewedPlanFingerprint: null,
         cancellationToken);
+  }
+
+  Task<ExecutionRun> ICommandLineEnvironmentRunService.ApplyAsync(
+      RunRequest request,
+      CancellationToken cancellationToken) => ExecuteFreshAsync(
+        request,
+        RunMode.Apply,
+        resourceFilter: null,
+        retriedFromRunId: null,
+        recoveredFromRunId: null,
+        approvalSource: PlanApprovalSource.CommandLine,
+        reviewedPlanFingerprint: null,
+        cancellationToken);
+
+  Task<ExecutionRun> IReviewedPlanEnvironmentRunService.ApplyAsync(
+      RunRequest request,
+      string reviewedPlanFingerprint,
+      CancellationToken cancellationToken)
+  {
+    ArgumentException.ThrowIfNullOrWhiteSpace(reviewedPlanFingerprint);
+    return ExecuteFreshAsync(
+        request,
+        RunMode.Apply,
+        resourceFilter: null,
+        retriedFromRunId: null,
+        recoveredFromRunId: null,
+        approvalSource: PlanApprovalSource.DesktopReviewedPlan,
+        reviewedPlanFingerprint: reviewedPlanFingerprint,
+        cancellationToken);
+  }
+
+  public async Task<ExecutionRun> WaitForRunFinalizationAsync(
+      Guid runId,
+      CancellationToken cancellationToken)
+  {
+    if (runId == Guid.Empty)
+    {
+      throw new ArgumentException("An execution run identifier is required.", nameof(runId));
+    }
+
+    cancellationToken.ThrowIfCancellationRequested();
+    if (_runFinalizations.TryGetValue(runId, out var finalization))
+    {
+      try
+      {
+        await finalization.WaitAsync(cancellationToken).ConfigureAwait(false);
+        RemoveRunFinalization(runId, finalization);
+      }
+      catch (OperationCanceledException) when (
+          cancellationToken.IsCancellationRequested && !finalization.IsCanceled)
+      {
+        throw;
+      }
+      catch (Exception)
+      {
+        RemoveRunFinalization(runId, finalization);
+        throw;
+      }
+    }
+
+    return await GetRequiredRunAsync(runId, cancellationToken).ConfigureAwait(false);
   }
 
   public async Task<ExecutionRun> RetryAsync(
@@ -100,6 +174,18 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
   {
     ArgumentNullException.ThrowIfNull(resourceIds);
     var prior = await GetRequiredRunAsync(priorRunId, cancellationToken).ConfigureAwait(false);
+    if (prior.Mode != RunMode.Apply)
+    {
+      throw new InvalidOperationException(
+          "Only a previously approved apply run can be retried.");
+    }
+
+    if (!TryCreateRetryApprovalBoundary(prior, out var retryApprovalBoundary))
+    {
+      throw new InvalidOperationException(
+          "The prior apply run does not contain a valid immutable plan approval.");
+    }
+
     var retryable = prior.ResourceResults.Values
         .Where(result => result.Outcome == ExecutionOutcome.Failed ||
             result.State == ExecutionState.Blocked)
@@ -122,7 +208,10 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
             requested,
             prior.RunId,
             recoveredFromRunId: null,
-            cancellationToken)
+            approvalSource: PlanApprovalSource.Retry,
+            reviewedPlanFingerprint: null,
+            cancellationToken,
+            retryApprovalBoundary)
         .ConfigureAwait(false);
   }
 
@@ -245,6 +334,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
               remaining,
               claimed.RunId,
               recoveredFromRunId: claimed.RunId,
+              approvalSource: PlanApprovalSource.Retry,
+              reviewedPlanFingerprint: null,
               cancellationToken).ConfigureAwait(false);
     }
     catch (Exception executionException)
@@ -375,7 +466,10 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       IReadOnlySet<string>? resourceFilter,
       Guid? retriedFromRunId,
       Guid? recoveredFromRunId,
-      CancellationToken cancellationToken)
+      PlanApprovalSource? approvalSource,
+      string? reviewedPlanFingerprint,
+      CancellationToken cancellationToken,
+      RetryApprovalBoundary? retryApprovalBoundary = null)
   {
     ValidateRequest(request);
     cancellationToken.ThrowIfCancellationRequested();
@@ -427,9 +521,15 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           cancellationToken).ConfigureAwait(false);
     }
 
-    var graph = resourceFilter is null
+    var retrySelectionChanged = retryApprovalBoundary is not null &&
+        resourceFilter is not null &&
+        resourceFilter.Any(id => !graphResult.Graph.Nodes.ContainsKey(id));
+    var currentResourceFilter = retrySelectionChanged
+        ? resourceFilter!.Where(graphResult.Graph.Nodes.ContainsKey).ToHashSet(IdComparer)
+        : resourceFilter;
+    var graph = currentResourceFilter is null
         ? graphResult.Graph
-        : FilterGraph(graphResult.Graph, resourceFilter);
+        : FilterGraph(graphResult.Graph, currentResourceFilter);
     var detected = await DetectAsync(graph, cancellationToken).ConfigureAwait(false);
     var compliance = graph.Nodes.ToDictionary(
         pair => pair.Key,
@@ -441,15 +541,25 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         profile.Id,
         profile.Version,
         cancellationToken).ConfigureAwait(false);
-    if (mode == RunMode.Apply &&
-        request.ApprovedPlanFingerprint is { } approvedFingerprint &&
-        !string.Equals(approvedFingerprint, plan.Fingerprint, StringComparison.Ordinal))
+    var reviewedPlanRejected = mode == RunMode.Apply &&
+        reviewedPlanFingerprint is { } approvedFingerprint &&
+        !string.Equals(approvedFingerprint, plan.Fingerprint, StringComparison.Ordinal);
+    var retryPlanRejected = mode == RunMode.Apply &&
+        retryApprovalBoundary is not null &&
+        (retrySelectionChanged || !IsRetryPlanWithinApproval(plan, retryApprovalBoundary));
+    var planApprovalRejected = reviewedPlanRejected || retryPlanRejected;
+    if (planApprovalRejected)
     {
       var approvalError = new StructuredError(
           WdemErrorCode.ConfigurationError,
-          "The reviewed execution plan has changed.",
-          "The environment or configuration changed after plan review, so no resources were " +
-          "executed.")
+          retryPlanRejected
+              ? "The retry execution plan exceeds its prior approval."
+              : "The reviewed execution plan has changed.",
+          retryPlanRejected
+              ? "The retry plan is not a refinement of the prior approved plan, so no resources " +
+                "were executed. Review the refreshed plan before applying it."
+              : "The environment or configuration changed after plan review, so no resources " +
+                "were executed.")
       {
         SuggestedAction = "Review the refreshed plan before applying it.",
         IsRetryable = true
@@ -461,6 +571,12 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           plan.Resources,
           plan.Errors.Append(approvalError).ToArray());
     }
+    var approval = mode == RunMode.Apply && !planApprovalRejected
+        ? CreatePlanApproval(
+            plan,
+            approvalSource ?? throw new InvalidOperationException(
+                "An apply run requires a controlled approval source."))
+        : null;
 
     var initialResults = CreateInitialResults(mode, plan, detected, compliance);
     var run = new ExecutionRun
@@ -478,6 +594,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       Machine = CurrentMachine(),
       Graph = graph,
       Plan = plan,
+      PlanApproval = approval,
       ResourceResults = initialResults
     };
     _eventSink.BindCurrentScopeToRun(run.RunId);
@@ -530,9 +647,16 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       return await CompleteUnexecutableAsync(run, events, cancellationToken).ConfigureAwait(false);
     }
 
+    var maximumPotentialFinalization = plan.Resources
+        .Select(planned => _providers.GetRequired(
+            planned.Definition.Type,
+            planned.Definition.Provider).Capabilities.CancellationFinalizationTimeout)
+        .DefaultIfEmpty(TimeSpan.Zero)
+        .Max();
     using var cancellationDeadline = new CancellationDrainDeadline(
         _cancellationDrainTimeout,
-        cancellationToken);
+        cancellationToken,
+        maximumPotentialFinalization);
     var transitions = new RunTransitions(_runStore, events, run, _persistenceTimeout);
     await transitions.SetRunningAsync(cancellationToken).ConfigureAwait(false);
     var progressPumps = new RunProgressPumpCoordinator();
@@ -542,12 +666,13 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     {
       scheduled = await _scheduler.ExecuteAsync(
           plan,
-          (planned, token) => ExecuteResourceAsync(
+          (planned, token) => ReplanAndExecuteResourceAsync(
               run.RunId,
-              graph.Nodes[planned.Definition.Id].Definition,
+              graph.Nodes[planned.Definition.Id],
               planned,
               detected[planned.Definition.Id],
               compliance[planned.Definition.Id],
+              transitions,
               events,
               progressPumps,
               cancellationDeadline,
@@ -558,7 +683,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           request.MaximumConcurrency,
           cancellationToken,
           transitions.PersistSchedulerTransitionAsync,
-          cancellationDeadline).ConfigureAwait(false);
+          cancellationDeadline,
+          finalization => TrackRunFinalization(run.RunId, finalization)).ConfigureAwait(false);
+      TrackRunFinalization(run.RunId, scheduled.UndrainedCompletion);
     }
     finally
     {
@@ -602,25 +729,343 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       await progressPumps.SealAsync(cancellationDeadline.Remaining).ConfigureAwait(false);
     }
 
-    var completedRun = transitions.Current with
+    var terminalResults = MergeTerminalResults(
+        transitions.Current.ResourceResults,
+        scheduled.Results);
+    var completedRun = WithTerminalResourceResults(transitions.Current with
     {
       State = ExecutionState.Completed,
-      Outcome = RunOutcome(scheduled.Results),
       EndedAtUtc = DateTimeOffset.UtcNow,
-      ResourceResults = scheduled.Results,
-      RestartRequirements = scheduled.Results.Values
-          .Select(result => result.RestartRequirement)
-          .Where(requirement => requirement != RestartPolicy.NoRestart)
-          .Distinct()
-          .OrderBy(requirement => requirement)
-          .ToArray(),
-      RestartReasons = scheduled.Results.Values
-          .Where(result => result.RestartRequirement != RestartPolicy.NoRestart)
-          .Select(result => $"Resource '{result.ResourceId}' requires a restart.")
-          .ToArray()
-    };
-    return await PersistTerminalAsync(completedRun, events, cleanupError).ConfigureAwait(false);
+    }, terminalResults);
+    return await PersistTerminalAsync(
+        completedRun,
+        events,
+        cleanupError,
+        transitions).ConfigureAwait(false);
   }
+
+  private static IReadOnlyDictionary<string, ResourceResult> MergeTerminalResults(
+      IReadOnlyDictionary<string, ResourceResult> persisted,
+      IReadOnlyDictionary<string, ResourceResult> scheduled)
+  {
+    var merged = scheduled.ToDictionary(
+        pair => pair.Key,
+        pair => pair.Value,
+        IdComparer);
+    foreach (var pair in persisted)
+    {
+      if (pair.Value.State == ExecutionState.Completed &&
+          (pair.Value.Outcome == ExecutionOutcome.Failed ||
+           pair.Value.Outcome is ExecutionOutcome.Succeeded or ExecutionOutcome.NotRequired &&
+           merged.TryGetValue(pair.Key, out var provisional) &&
+           provisional.Outcome == ExecutionOutcome.Cancelled))
+      {
+        merged[pair.Key] = pair.Value;
+      }
+    }
+
+    return merged;
+  }
+
+  private static ExecutionRun WithTerminalResourceResults(
+      ExecutionRun run,
+      IReadOnlyDictionary<string, ResourceResult> results) => run with
+      {
+        Outcome = RunOutcome(results),
+        ResourceResults = results,
+        RestartRequirements = results.Values
+            .Select(result => result.RestartRequirement)
+            .Where(requirement => requirement != RestartPolicy.NoRestart)
+            .Distinct()
+            .OrderBy(requirement => requirement)
+            .ToArray(),
+        RestartReasons = results.Values
+            .Where(result => result.RestartRequirement != RestartPolicy.NoRestart)
+            .Select(result => $"Resource '{result.ResourceId}' requires a restart.")
+            .ToArray()
+      };
+
+  private async Task<ResourceResult> ReplanAndExecuteResourceAsync(
+      Guid runId,
+      ResolvedResource resolved,
+      PlannedResource planned,
+      DetectedState detectedBefore,
+      ComplianceResult complianceBefore,
+      RunTransitions transitions,
+      RunEventPublisher events,
+      RunProgressPumpCoordinator progressPumps,
+      CancellationDrainDeadline cancellationDeadline,
+      CancellationToken cancellationToken)
+  {
+    if (planned.Status != PlannedResourceStatus.Deferred)
+    {
+      return await ExecuteResourceAsync(
+          runId,
+          resolved.Definition,
+          planned,
+          detectedBefore,
+          complianceBefore,
+          events,
+          progressPumps,
+          cancellationDeadline,
+          cancellationToken).ConfigureAwait(false);
+    }
+
+    var definition = resolved.Definition;
+    var approvedFingerprint = planned.ResourcePlan.DesiredStateFingerprint;
+    if (!string.Equals(
+            ResourceDefinitionFingerprint.Create(definition),
+            approvedFingerprint,
+            StringComparison.Ordinal))
+    {
+      return DeferredPlanningFailure(
+          definition.Id,
+          detectedBefore,
+          complianceBefore.Status,
+          new StructuredError(
+              WdemErrorCode.ConfigurationError,
+              "The deferred resource definition changed after plan approval.",
+              "The resource must be reviewed again before it can be executed.")
+          {
+            ResourceId = definition.Id,
+            SuggestedAction = "Create and approve a new execution plan."
+          });
+    }
+
+    cancellationToken.ThrowIfCancellationRequested();
+    var provider = _providers.GetRequired(definition.Type, definition.Provider);
+    DetectedState freshDetected;
+    try
+    {
+      freshDetected = await provider.DetectAsync(definition, cancellationToken)
+          .ConfigureAwait(false);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      throw;
+    }
+    catch (Exception exception)
+    {
+      return DeferredPlanningFailure(
+          definition.Id,
+          detectedBefore,
+          ComplianceStatus.DetectionFailed,
+          DeferredPlanningError(definition.Id, exception));
+    }
+
+    ComplianceResult freshCompliance;
+    try
+    {
+      freshCompliance = _complianceEvaluator.Evaluate(definition, freshDetected);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      throw;
+    }
+    catch (Exception exception)
+    {
+      return DeferredPlanningFailure(
+          definition.Id,
+          freshDetected,
+          ComplianceStatus.DetectionFailed,
+          DeferredPlanningError(definition.Id, exception));
+    }
+
+    PlannedResource freshPlan;
+    try
+    {
+      freshPlan = await _planner.ReplanResourceAsync(
+          resolved,
+          freshDetected,
+          approvedFingerprint,
+          cancellationToken).ConfigureAwait(false);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      throw;
+    }
+    catch (Exception exception)
+    {
+      return DeferredPlanningFailure(
+          definition.Id,
+          freshDetected,
+          freshCompliance.Status,
+          DeferredPlanningError(definition.Id, exception));
+    }
+
+    if (freshPlan.Status is not (PlannedResourceStatus.Ready or
+            PlannedResourceStatus.AlreadySatisfied) ||
+        !freshPlan.ResourcePlan.IsExecutable ||
+        !string.Equals(
+            freshPlan.ResourcePlan.DesiredStateFingerprint,
+            approvedFingerprint,
+            StringComparison.Ordinal))
+    {
+      var error = freshPlan.Diagnostics.FirstOrDefault() ?? new StructuredError(
+          WdemErrorCode.DependencyError,
+          "The deferred resource is still unavailable.",
+          "A declared dependency completed, but the provider still could not create an executable plan.")
+      {
+        ResourceId = definition.Id,
+        IsRetryable = true
+      };
+      return DeferredPlanningFailure(
+          definition.Id,
+          freshDetected,
+          freshCompliance.Status,
+          error);
+    }
+
+    var refinementError = ValidateDeferredRefinement(planned, freshPlan);
+    if (refinementError is not null)
+    {
+      return DeferredPlanningFailure(
+          definition.Id,
+          freshDetected,
+          freshCompliance.Status,
+          refinementError);
+    }
+
+    await transitions.ReplacePlannedResourceAsync(
+        planned,
+        freshPlan,
+        cancellationToken).ConfigureAwait(false);
+    try
+    {
+      if (freshPlan.RequiresElevation)
+      {
+        await _runStore.SealApprovedResourceAsync(
+            runId,
+            new ApprovedResourceSeal(definition, freshPlan.ResourcePlan),
+            cancellationToken).ConfigureAwait(false);
+      }
+    }
+    catch (Exception sealException)
+    {
+      var remaining = cancellationDeadline.Remaining;
+      var rollbackBudget = remaining < _persistenceTimeout
+          ? remaining
+          : _persistenceTimeout;
+      using var rollbackTimeout = new CancellationTokenSource(rollbackBudget);
+      try
+      {
+        await transitions.ReplacePlannedResourceAsync(
+            freshPlan,
+            planned,
+            rollbackTimeout.Token).ConfigureAwait(false);
+      }
+      catch (Exception rollbackException)
+      {
+        throw new AggregateException(
+            "Deferred approval sealing failed and its plan rollback could not be persisted.",
+            sealException,
+            rollbackException);
+      }
+
+      throw;
+    }
+
+    return await ExecuteResourceAsync(
+        runId,
+        definition,
+        freshPlan,
+        freshDetected,
+        freshCompliance,
+        events,
+        progressPumps,
+        cancellationDeadline,
+        cancellationToken).ConfigureAwait(false);
+  }
+
+  private static StructuredError DeferredPlanningError(string resourceId, Exception exception) =>
+      new(
+          WdemErrorCode.ProviderError,
+          "Deferred resource planning failed.",
+          "The resource could not be safely replanned after its dependencies completed.")
+      {
+        ResourceId = resourceId,
+        IsRetryable = true,
+        UnderlyingException = exception
+      };
+
+  private static StructuredError? ValidateDeferredRefinement(
+      PlannedResource deferred,
+      PlannedResource fresh)
+  {
+    var authorization = deferred.DeferredAuthorization;
+    var definitionMatches = authorization is not null &&
+        string.Equals(
+            deferred.ResourcePlan.DesiredStateFingerprint,
+            fresh.ResourcePlan.DesiredStateFingerprint,
+            StringComparison.Ordinal) &&
+        string.Equals(deferred.Definition.Id, fresh.Definition.Id, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(deferred.Definition.Type, fresh.Definition.Type, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(deferred.Definition.Provider, fresh.Definition.Provider, StringComparison.OrdinalIgnoreCase) &&
+        deferred.Dependencies.Count == fresh.Dependencies.Count &&
+        deferred.Dependencies.All(dependency =>
+            fresh.Dependencies.Contains(dependency, IdComparer));
+    if (!definitionMatches)
+    {
+      return DeferredAuthorizationError(
+          deferred.Definition.Id,
+          "The concrete plan does not match the approved deferred resource identity.");
+    }
+
+    var exceedsAuthorization = fresh.DeferredAuthorization is not null ||
+        fresh.Origin != deferred.Origin ||
+        RiskRank(fresh.Risk) > RiskRank(authorization!.MaximumRisk) ||
+        fresh.RequiresElevation &&
+            authorization.MaximumPrivilege != PrivilegeRequirement.Administrator ||
+        fresh.IsDestructive && !authorization.AllowDestructive ||
+        fresh.RestartPolicy > authorization.MaximumRestartPolicy ||
+        fresh.ResourcePlan.Steps.Any(step =>
+            !PlanStepAuthorizationPolicy.IsWithinBoundary(
+                step,
+                authorization.AllowedActions,
+                authorization.MaximumPrivilege,
+                authorization.MaximumRestartPolicy,
+                authorization.AllowDestructive));
+    return exceedsAuthorization
+        ? DeferredAuthorizationError(
+            deferred.Definition.Id,
+            "The concrete plan exceeds the approved action, privilege, restart, or risk boundary.")
+        : null;
+  }
+
+  private static int RiskRank(PlanRisk risk) => risk switch
+  {
+    PlanRisk.None => 0,
+    PlanRisk.Standard => 1,
+    PlanRisk.Elevated => 2,
+    PlanRisk.Destructive => 3,
+    _ => int.MaxValue
+  };
+
+  private static StructuredError DeferredAuthorizationError(string resourceId, string detail) =>
+      new(
+          WdemErrorCode.ConfigurationError,
+          "The deferred plan exceeds its reviewed authorization.",
+          detail)
+      {
+        ResourceId = resourceId,
+        SuggestedAction = "Review and approve a new execution plan."
+      };
+
+  private static ResourceResult DeferredPlanningFailure(
+      string resourceId,
+      DetectedState detectedBefore,
+      ComplianceStatus compliance,
+      StructuredError error) => new()
+      {
+        ResourceId = resourceId,
+        State = ExecutionState.Completed,
+        Outcome = ExecutionOutcome.Failed,
+        FinalCompliance = compliance,
+        DetectedBefore = detectedBefore,
+        Progress = 0,
+        EndedAtUtc = DateTimeOffset.UtcNow,
+        Error = error with { ResourceId = resourceId }
+      };
 
   private async Task<ResourceResult> ExecuteResourceAsync(
       Guid runId,
@@ -643,9 +1088,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
 
     var startedAt = DateTimeOffset.UtcNow;
     var provider = _providers.GetRequired(definition.Type, definition.Provider);
-    using var finalizationReservation = cancellationDeadline.RegisterPotentialFinalization(
-        provider.Capabilities.CancellationFinalizationTimeout);
-    ResourceApplyResult applied;
+    ResourceApplyResult? applied = null;
     var progressBuffer = new ProviderProgressBuffer(
         planned.ResourcePlan.Steps.Select(step => step.Id));
     using var progressPersistence = new CancellationTokenSource();
@@ -678,6 +1121,9 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         progressBuffer,
         progressPersistence,
         progressPump);
+    using var applyCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+        cancellationToken);
+    Exception? progressPersistenceFailure = null;
     try
     {
       cancellationToken.ThrowIfCancellationRequested();
@@ -687,13 +1133,47 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           definition,
           planned.ResourcePlan,
           new InlineProgress<ProviderProgress>(progressBuffer.Report),
-          cancellationToken,
+          applyCancellation.Token,
           cancellationDeadline);
       if (!applyTask.IsCompleted)
       {
         var cancellationSignal = Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-        var completion = await Task.WhenAny(applyTask, cancellationSignal)
+        var completion = await Task.WhenAny(applyTask, progressPump, cancellationSignal)
             .ConfigureAwait(false);
+        if (completion == progressPump)
+        {
+          try
+          {
+            await progressPump.ConfigureAwait(false);
+          }
+          catch (Exception exception) when (!progressPersistence.IsCancellationRequested)
+          {
+            progressPersistenceFailure = exception;
+          }
+
+          if (progressPersistenceFailure is not null)
+          {
+            cancellationDeadline.Start();
+            progressBuffer.StopAccepting();
+            ObserveFault(applyCancellation.CancelAsync());
+            try
+            {
+              applied = await applyTask.WaitAsync(cancellationDeadline.Remaining)
+                  .ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+              if (!applyTask.IsCompleted)
+              {
+                ObserveFault(applyTask);
+              }
+
+              ExceptionDispatchInfo.Capture(progressPersistenceFailure).Throw();
+              throw;
+            }
+          }
+        }
+
         if (completion == cancellationSignal)
         {
           progressBuffer.StopAccepting();
@@ -710,7 +1190,15 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         }
       }
 
-      applied = await applyTask.ConfigureAwait(false);
+      if (progressPersistenceFailure is null)
+      {
+        applied = await applyTask.ConfigureAwait(false);
+      }
+    }
+    catch (Exception) when (progressPersistenceFailure is not null)
+    {
+      ExceptionDispatchInfo.Capture(progressPersistenceFailure).Throw();
+      throw;
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
@@ -752,7 +1240,8 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       {
         if (!cancellationToken.IsCancellationRequested)
         {
-          throw new TimeoutException("Timed out while persisting provider progress.");
+          progressPersistenceFailure = new TimeoutException(
+              "Timed out while persisting provider progress.");
         }
       }
       catch (TimeoutException exception)
@@ -761,11 +1250,36 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         ObserveFault(progressPump);
         if (!cancellationToken.IsCancellationRequested)
         {
-          throw new TimeoutException(
+          progressPersistenceFailure = new TimeoutException(
               "Timed out while persisting provider progress.",
               exception);
         }
       }
+      catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+      {
+        progressPersistenceFailure = exception;
+      }
+    }
+
+    if (applied is null)
+    {
+      throw new InvalidOperationException(
+          "The resource apply operation completed without a result.");
+    }
+
+    var stepResults = ToStepResults(planned, applied, startedAt);
+    if (progressPersistenceFailure is not null)
+    {
+      throw new ResourceScheduler.ResourceExecutionEvidenceException(
+          progressPersistenceFailure,
+          AppliedEvidenceFailure(
+              id,
+              detectedBefore,
+              planned,
+              applied,
+              stepResults,
+              startedAt,
+              progressPersistenceFailure));
     }
 
     var cancelled = cancellationToken.IsCancellationRequested;
@@ -773,7 +1287,6 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         ? new CancellationTokenSource(cancellationDeadline.Remaining)
         : null;
     var evidenceToken = evidencePersistence?.Token ?? cancellationToken;
-    var stepResults = ToStepResults(planned, applied, startedAt);
     try
     {
       foreach (var diagnostic in applied.Diagnostics)
@@ -805,6 +1318,23 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         cancelled && evidencePersistence!.IsCancellationRequested)
     {
       // The structured result below remains the durable cancellation evidence.
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      throw;
+    }
+    catch (Exception exception)
+    {
+      throw new ResourceScheduler.ResourceExecutionEvidenceException(
+          exception,
+          AppliedEvidenceFailure(
+              id,
+              detectedBefore,
+              planned,
+              applied,
+              stepResults,
+              startedAt,
+              exception));
     }
 
     if (applied.Outcome == ApplyOutcome.Succeeded)
@@ -1103,10 +1633,13 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
   private async Task<ExecutionRun> PersistTerminalAsync(
       ExecutionRun run,
       RunEventPublisher events,
-      StructuredError? cleanupError = null)
+      StructuredError? cleanupError = null,
+      RunTransitions? transitions = null)
   {
     using var saveTimeout = new CancellationTokenSource(_persistenceTimeout);
-    var saved = await _runStore.SaveAsync(run, saveTimeout.Token).ConfigureAwait(false);
+    var saved = transitions is null
+        ? await _runStore.SaveAsync(run, saveTimeout.Token).ConfigureAwait(false)
+        : await transitions.PersistTerminalAsync(run, saveTimeout.Token).ConfigureAwait(false);
     if (cleanupError is not null)
     {
       try
@@ -1412,16 +1945,212 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     }
   }
 
-  private static void ValidatePublicRequestProvenance(RunRequest request)
+  private PlanApproval CreatePlanApproval(
+      ExecutionPlan plan,
+      PlanApprovalSource source)
   {
-    ArgumentNullException.ThrowIfNull(request);
-    if (request.RetriedFromRunId is not null)
+    return new PlanApproval
     {
-      throw new ArgumentException(
-          "Recovery provenance can only be assigned by retry or recovery operations.",
-          nameof(request));
-    }
+      InitialPlanFingerprint = plan.Fingerprint,
+      ConfirmedAtUtc = _timeProvider.GetUtcNow(),
+      Source = source,
+      DeferredAuthorizations = plan.Resources
+          .Where(resource => resource.Status == PlannedResourceStatus.Deferred)
+          .Select(resource =>
+          {
+            var authorization = resource.DeferredAuthorization ??
+                throw new InvalidOperationException(
+                    "A deferred resource is missing its authorization boundary.");
+            return new DeferredAuthorizationProof
+            {
+              ResourceId = resource.Definition.Id,
+              ResourceType = resource.Definition.Type,
+              ProviderName = resource.Definition.Provider,
+              DefinitionFingerprint = resource.ResourcePlan.DesiredStateFingerprint,
+              Origin = resource.Origin,
+              Dependencies = resource.Dependencies,
+              AllowedActions = authorization.AllowedActions,
+              MaximumPrivilege = authorization.MaximumPrivilege,
+              MaximumRestartPolicy = authorization.MaximumRestartPolicy,
+              MaximumRisk = authorization.MaximumRisk,
+              AllowDestructive = authorization.AllowDestructive
+            };
+          })
+          .ToArray()
+    };
   }
+
+  private static bool TryCreateRetryApprovalBoundary(
+      ExecutionRun prior,
+      out RetryApprovalBoundary? boundary)
+  {
+    boundary = null;
+    var plan = prior.Plan;
+    var approval = prior.PlanApproval;
+    if (plan is null || approval is null ||
+        !IsSha256(approval.InitialPlanFingerprint) ||
+        approval.ConfirmedAtUtc == default ||
+        !Enum.IsDefined(approval.Source))
+    {
+      return false;
+    }
+
+    if (!string.Equals(
+            approval.InitialPlanFingerprint,
+            plan.Fingerprint,
+            StringComparison.OrdinalIgnoreCase) &&
+        approval.DeferredAuthorizations.Count == 0)
+    {
+      return false;
+    }
+
+    var proofIds = new HashSet<string>(IdComparer);
+    foreach (var proof in approval.DeferredAuthorizations)
+    {
+      if (string.IsNullOrWhiteSpace(proof.ResourceId) ||
+          string.IsNullOrWhiteSpace(proof.ResourceType) ||
+          string.IsNullOrWhiteSpace(proof.ProviderName) ||
+          !IsSha256(proof.DefinitionFingerprint) ||
+          !Enum.IsDefined(proof.Origin) ||
+          !Enum.IsDefined(proof.MaximumPrivilege) ||
+          !Enum.IsDefined(proof.MaximumRestartPolicy) ||
+          !Enum.IsDefined(proof.MaximumRisk) ||
+          !proofIds.Add(proof.ResourceId) ||
+          proof.AllowedActions.Count == 0 ||
+          proof.AllowedActions.Any(action =>
+              action == PlanAction.None || !Enum.IsDefined(action)) ||
+          plan.Resources.Count(resource => string.Equals(
+              resource.Definition.Id,
+              proof.ResourceId,
+              StringComparison.OrdinalIgnoreCase)) != 1)
+      {
+        return false;
+      }
+    }
+
+    boundary = new RetryApprovalBoundary(plan, approval);
+    return true;
+  }
+
+  private static bool IsRetryPlanWithinApproval(
+      ExecutionPlan freshPlan,
+      RetryApprovalBoundary boundary)
+  {
+    foreach (var fresh in freshPlan.Resources)
+    {
+      var priorMatches = boundary.Plan.Resources.Where(resource => string.Equals(
+          resource.Definition.Id,
+          fresh.Definition.Id,
+          StringComparison.OrdinalIgnoreCase)).ToArray();
+      if (priorMatches.Length != 1)
+      {
+        return false;
+      }
+
+      var proof = boundary.Approval.DeferredAuthorizations.SingleOrDefault(candidate =>
+          string.Equals(
+              candidate.ResourceId,
+              fresh.Definition.Id,
+              StringComparison.OrdinalIgnoreCase));
+      if (proof is not null)
+      {
+        if (!IsWithinRetryBoundary(
+                fresh,
+                proof.ResourceType,
+                proof.ProviderName,
+                proof.DefinitionFingerprint,
+                proof.Origin,
+                proof.Dependencies,
+                proof.AllowedActions,
+                proof.MaximumPrivilege,
+                proof.MaximumRestartPolicy,
+                proof.MaximumRisk,
+                proof.AllowDestructive))
+        {
+          return false;
+        }
+
+        continue;
+      }
+
+      var prior = priorMatches[0];
+      var allowedActions = prior.ResourcePlan.Steps
+          .Where(step => step.Action != PlanAction.None)
+          .Select(step => step.Action)
+          .Distinct()
+          .ToArray();
+      if (!IsWithinRetryBoundary(
+              fresh,
+              prior.Definition.Type,
+              prior.Definition.Provider,
+              prior.ResourcePlan.DesiredStateFingerprint,
+              prior.Origin,
+              prior.Dependencies,
+              allowedActions,
+              prior.RequiresElevation
+                  ? PrivilegeRequirement.Administrator
+                  : PrivilegeRequirement.CurrentUser,
+              prior.RestartPolicy,
+              prior.Risk,
+              prior.IsDestructive))
+      {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  private static bool IsWithinRetryBoundary(
+      PlannedResource fresh,
+      string resourceType,
+      string providerName,
+      string definitionFingerprint,
+      ResourceOrigin origin,
+      IReadOnlyList<string> dependencies,
+      IReadOnlyList<PlanAction> allowedActions,
+      PrivilegeRequirement maximumPrivilege,
+      RestartPolicy maximumRestartPolicy,
+      PlanRisk maximumRisk,
+      bool allowDestructive)
+  {
+    if (!string.Equals(fresh.Definition.Type, resourceType, StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(fresh.Definition.Provider, providerName, StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(
+            ResourceDefinitionFingerprint.Create(fresh.Definition),
+            definitionFingerprint,
+            StringComparison.Ordinal) ||
+        !string.Equals(
+            fresh.ResourcePlan.DesiredStateFingerprint,
+            definitionFingerprint,
+            StringComparison.Ordinal) ||
+        fresh.Origin != origin ||
+        fresh.Dependencies.Count != dependencies.Count ||
+        fresh.Dependencies.Any(dependency =>
+            !dependencies.Contains(dependency, IdComparer)) ||
+        fresh.Status is not (PlannedResourceStatus.Ready or
+            PlannedResourceStatus.AlreadySatisfied) ||
+        fresh.Risk > maximumRisk ||
+        fresh.RequiresElevation && maximumPrivilege != PrivilegeRequirement.Administrator ||
+        fresh.IsDestructive && !allowDestructive ||
+        fresh.RestartPolicy > maximumRestartPolicy)
+    {
+      return false;
+    }
+
+    return fresh.ResourcePlan.Steps.All(step =>
+        PlanStepAuthorizationPolicy.IsWithinBoundary(
+            step,
+            allowedActions,
+            maximumPrivilege,
+            maximumRestartPolicy,
+            allowDestructive));
+  }
+
+  private static bool IsSha256(string value) =>
+      !string.IsNullOrWhiteSpace(value) &&
+      value.Length == 64 &&
+      value.All(Uri.IsHexDigit);
 
   private static ExecutionOutcome RunOutcome(
       IReadOnlyDictionary<string, ResourceResult> results) =>
@@ -1469,6 +2198,36 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           IsRetryable = true,
           UnderlyingException = exception
         }
+      };
+
+  private static ResourceResult AppliedEvidenceFailure(
+      string id,
+      DetectedState detected,
+      PlannedResource planned,
+      ResourceApplyResult applied,
+      IReadOnlyList<StepResult> stepResults,
+      DateTimeOffset startedAt,
+      Exception exception) => new()
+      {
+        ResourceId = id,
+        State = ExecutionState.Completed,
+        Outcome = ExecutionOutcome.Failed,
+        FinalCompliance = planned.ResourcePlan.Compliance,
+        DetectedBefore = detected,
+        Progress = stepResults.Count == 0 ? 0 : stepResults.Max(step => step.Progress),
+        StartedAtUtc = startedAt,
+        EndedAtUtc = DateTimeOffset.UtcNow,
+        Error = new StructuredError(
+            WdemErrorCode.ProviderError,
+            "Applied resource evidence could not be fully published.",
+            $"The provider returned applied evidence for resource '{id}', but durable event delivery failed.")
+        {
+          ResourceId = id,
+          IsRetryable = true,
+          UnderlyingException = exception
+        },
+        RestartRequirement = applied.RestartRequirement ?? RestartPolicy.NoRestart,
+        StepResults = stepResults
       };
 
   private static IReadOnlyList<StepResult> ToStepResults(
@@ -1562,6 +2321,102 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       CancellationToken.None,
       TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
       TaskScheduler.Default);
+
+  private void TrackRunFinalization(Guid runId, Task finalization)
+  {
+    ArgumentNullException.ThrowIfNull(finalization);
+    if (finalization.IsCompletedSuccessfully)
+    {
+      return;
+    }
+
+    (Guid RunId, Task Finalization)? evicted = null;
+    lock (_runFinalizationsGate)
+    {
+      for (var node = _runFinalizationOrder.First; node is not null;)
+      {
+        var next = node.Next;
+        if (node.Value.Finalization.IsCompletedSuccessfully)
+        {
+          RemoveRunFinalizationCore(node.Value.RunId, node.Value.Finalization);
+          _runFinalizationOrder.Remove(node);
+        }
+
+        node = next;
+      }
+
+      if (_runFinalizations.ContainsKey(runId))
+      {
+        throw new InvalidOperationException(
+            $"Run '{runId:D}' already has a registered finalization.");
+      }
+
+      if (_runFinalizations.Count >= MaximumRetainedFinalizations)
+      {
+        evicted = _runFinalizationOrder.First!.Value;
+        _runFinalizationOrder.RemoveFirst();
+        RemoveRunFinalizationCore(evicted.Value.RunId, evicted.Value.Finalization);
+      }
+
+      if (!_runFinalizations.TryAdd(runId, finalization))
+      {
+        throw new InvalidOperationException(
+            $"Run '{runId:D}' already has a registered finalization.");
+      }
+
+      _runFinalizationOrder.AddLast((runId, finalization));
+    }
+
+    _ = finalization.ContinueWith(
+        static (completed, state) =>
+        {
+          var registration = ((WeakReference<EnvironmentRunService> Service, Guid RunId))state!;
+          if (completed.IsCompletedSuccessfully &&
+              registration.Service.TryGetTarget(out var service))
+          {
+            service.RemoveRunFinalization(registration.RunId, completed);
+          }
+        },
+        (new WeakReference<EnvironmentRunService>(this), runId),
+        CancellationToken.None,
+        TaskContinuationOptions.ExecuteSynchronously,
+        TaskScheduler.Default);
+
+    if (evicted is not null)
+    {
+      ObserveFault(evicted.Value.Finalization);
+      Trace.TraceWarning(
+          "Evicted finalization tracking for run '{0:D}' to preserve the registry bound.",
+          evicted.Value.RunId);
+    }
+  }
+
+  private void RemoveRunFinalization(Guid runId, Task finalization)
+  {
+    lock (_runFinalizationsGate)
+    {
+      RemoveRunFinalizationCore(runId, finalization);
+      for (var node = _runFinalizationOrder.First; node is not null; node = node.Next)
+      {
+        if (node.Value.RunId == runId &&
+            ReferenceEquals(node.Value.Finalization, finalization))
+        {
+          _runFinalizationOrder.Remove(node);
+          break;
+        }
+      }
+    }
+  }
+
+  private void RemoveRunFinalizationCore(Guid runId, Task finalization)
+  {
+    ((ICollection<KeyValuePair<Guid, Task>>)_runFinalizations).Remove(
+        new KeyValuePair<Guid, Task>(runId, finalization));
+  }
+
+  private sealed record RetryApprovalBoundary(
+      ExecutionPlan Plan,
+      PlanApproval Approval);
 
   private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
   {
@@ -2017,9 +2872,63 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           DetectedBefore = result.DetectedBefore ?? previous?.DetectedBefore
         };
         var next = _current with { ResourceResults = results };
+        if (next.State == ExecutionState.Completed)
+        {
+          next = WithTerminalResourceResults(next, results);
+        }
+
         _current = await store.SaveAsync(next, cancellationToken).ConfigureAwait(false);
         await events.PublishResourceAsync(
             _current.ResourceResults[result.ResourceId],
+            cancellationToken).ConfigureAwait(false);
+      }
+      finally
+      {
+        _gate.Release();
+      }
+    }
+
+    public async Task ReplacePlannedResourceAsync(
+        PlannedResource expected,
+        PlannedResource replacement,
+        CancellationToken cancellationToken)
+    {
+      await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+      try
+      {
+        var plan = _current.Plan ?? throw new InvalidOperationException(
+            "The execution run has no plan to update.");
+        var matches = plan.Resources.Where(resource => string.Equals(
+            resource.Definition.Id,
+            expected.Definition.Id,
+            StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (matches.Length != 1 ||
+            matches[0].Status != expected.Status ||
+            !string.Equals(
+                matches[0].ResourcePlan.DesiredStateFingerprint,
+                expected.ResourcePlan.DesiredStateFingerprint,
+                StringComparison.Ordinal))
+        {
+          throw new InvalidOperationException(
+              "The persisted deferred plan changed before it could be updated.");
+        }
+
+        var resources = plan.Resources
+            .Select(resource => string.Equals(
+                resource.Definition.Id,
+                expected.Definition.Id,
+                StringComparison.OrdinalIgnoreCase)
+                    ? replacement
+                    : resource)
+            .ToArray();
+        var updatedPlan = ExecutionPlanner.CreatePlan(
+            plan.ProfileId,
+            plan.ProfileVersion,
+            plan.Layers,
+            resources,
+            plan.Errors);
+        _current = await store.SaveAsync(
+            _current with { Plan = updatedPlan },
             cancellationToken).ConfigureAwait(false);
       }
       finally
@@ -2032,6 +2941,30 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     {
       using var timeout = new CancellationTokenSource(persistenceTimeout);
       await SetResourceAsync(result, timeout.Token).ConfigureAwait(false);
+    }
+
+    public async Task<ExecutionRun> PersistTerminalAsync(
+        ExecutionRun terminal,
+        CancellationToken cancellationToken)
+    {
+      await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+      try
+      {
+        var results = MergeTerminalResults(
+            _current.ResourceResults,
+            terminal.ResourceResults);
+        var next = WithTerminalResourceResults(terminal with
+        {
+          Revision = _current.Revision,
+          RecoveryClaimId = _current.RecoveryClaimId
+        }, results);
+        _current = await store.SaveAsync(next, cancellationToken).ConfigureAwait(false);
+        return _current;
+      }
+      finally
+      {
+        _gate.Release();
+      }
     }
   }
 }

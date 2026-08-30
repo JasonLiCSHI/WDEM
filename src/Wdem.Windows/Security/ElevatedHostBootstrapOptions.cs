@@ -4,16 +4,18 @@ public sealed record ElevatedHostBootstrapOptions(
     string PipeName,
     string JobName,
     Guid RunId,
-    string LocalApplicationData)
+    string LocalApplicationData,
+    string ApplicationRoot)
 {
   public static ElevatedHostBootstrapOptions Parse(IReadOnlyList<string> arguments)
   {
     ArgumentNullException.ThrowIfNull(arguments);
-    if (arguments.Count != 8 ||
+    if (arguments.Count != 10 ||
         !string.Equals(arguments[0], "--pipe", StringComparison.Ordinal) ||
         !string.Equals(arguments[2], "--job", StringComparison.Ordinal) ||
         !string.Equals(arguments[4], "--run-id", StringComparison.Ordinal) ||
-        !string.Equals(arguments[6], "--local-app-data", StringComparison.Ordinal))
+        !string.Equals(arguments[6], "--local-app-data", StringComparison.Ordinal) ||
+        !string.Equals(arguments[8], "--application-root", StringComparison.Ordinal))
     {
       throw new ArgumentException(
           "The elevated host accepts only the required bootstrap arguments.",
@@ -47,10 +49,18 @@ public sealed record ElevatedHostBootstrapOptions(
           nameof(arguments));
     }
 
+    if (string.IsNullOrWhiteSpace(arguments[9]))
+    {
+      throw new ArgumentException(
+          "The application root path is required.",
+          nameof(arguments));
+    }
+
     return new ElevatedHostBootstrapOptions(
         arguments[1],
         arguments[3],
         runId,
-        Path.GetFullPath(arguments[7]));
+        Path.GetFullPath(arguments[7]),
+        Path.GetFullPath(arguments[9]));
   }
 }

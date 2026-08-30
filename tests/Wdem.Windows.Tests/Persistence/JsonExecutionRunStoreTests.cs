@@ -105,6 +105,618 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task CreateAsync_RejectsDuplicateSealIdsThatOmitAnElevatedResource()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ElevatedRunWithSecret("seal-secret");
+    var first = Assert.Single(run.Plan!.Resources);
+    var secondDefinition = first.Definition with { Id = "second-admin-resource" };
+    var secondPlan = first.ResourcePlan with
+    {
+      ResourceId = secondDefinition.Id,
+      DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(secondDefinition)
+    };
+    var second = first with
+    {
+      Definition = secondDefinition,
+      ResourcePlan = secondPlan
+    };
+    run = run with
+    {
+      Plan = run.Plan with
+      {
+        Layers = [new ResourceGraphLayer(0, [first.Definition.Id, secondDefinition.Id])],
+        Resources = [first, second]
+      },
+      ResourceResults = new Dictionary<string, ResourceResult>(
+          run.ResourceResults,
+          StringComparer.OrdinalIgnoreCase)
+      {
+        [secondDefinition.Id] = run.ResourceResults[first.Definition.Id] with
+        {
+          ResourceId = secondDefinition.Id
+        }
+      }
+    };
+    var duplicate = new ApprovedResourceSeal(first.Definition, first.ResourcePlan);
+
+    await Assert.ThrowsAsync<InvalidOperationException>(() => store.CreateAsync(
+        run,
+        [duplicate, duplicate],
+        CancellationToken.None));
+  }
+
+  [Fact]
+  public async Task SealApprovedResourceAsync_ProtectsDeferredPlanAfterSafeReplan()
+  {
+    var protector = new DeterministicApprovedResourceProtector();
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        protector);
+    var run = DeferredElevatedRun("deferred-secret");
+    var deferred = Assert.Single(run.Plan!.Resources);
+    var executablePlan = deferred.ResourcePlan with
+    {
+      IsExecutable = true,
+      Steps =
+      [
+        new PlanStep
+        {
+          Id = "install-deferred",
+          Description = "Install deferred resource",
+          Action = PlanAction.Install,
+          PrivilegeRequirement = PrivilegeRequirement.Administrator,
+          RestartPolicy = RestartPolicy.NoRestart
+        }
+      ]
+    };
+
+    await store.CreateAsync(run, [], CancellationToken.None);
+    await store.SaveAsync(
+        PromoteDeferredRun(run, executablePlan),
+        CancellationToken.None);
+    await store.SealApprovedResourceAsync(
+        run.RunId,
+        new ApprovedResourceSeal(deferred.Definition, executablePlan),
+        CancellationToken.None);
+
+    var approved = await store.GetApprovedResourceAsync(
+        run.RunId,
+        deferred.Definition.Id,
+        CancellationToken.None);
+    Assert.NotNull(approved);
+    Assert.Equal("deferred-secret", approved.Definition.Parameters["password"]);
+    Assert.Equal(executablePlan.ResourceId, approved.Plan.ResourceId);
+    Assert.Equal(executablePlan.DesiredStateFingerprint, approved.Plan.DesiredStateFingerprint);
+    Assert.Equal(executablePlan.Compliance, approved.Plan.Compliance);
+    Assert.Equal(executablePlan.IsExecutable, approved.Plan.IsExecutable);
+    Assert.Equal(executablePlan.Steps.Single(), approved.Plan.Steps.Single());
+    Assert.DoesNotContain(
+        "deferred-secret",
+        await File.ReadAllTextAsync(store.ApprovedResourcesPath(run.RunId)),
+        StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task SealApprovedResourceAsync_RejectsChangedDeferredDefinition()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = DeferredElevatedRun("approved-secret");
+    var deferred = Assert.Single(run.Plan!.Resources);
+    await store.CreateAsync(run, [], CancellationToken.None);
+    var approvedPlan = deferred.ResourcePlan with
+    {
+      IsExecutable = true,
+      Steps =
+      [
+        new PlanStep
+        {
+          Id = "install-deferred",
+          Description = "Install deferred resource",
+          Action = PlanAction.Install,
+          PrivilegeRequirement = PrivilegeRequirement.Administrator,
+          RestartPolicy = RestartPolicy.NoRestart
+        }
+      ]
+    };
+    await store.SaveAsync(
+        PromoteDeferredRun(run, approvedPlan),
+        CancellationToken.None);
+    var changed = deferred.Definition with
+    {
+      Parameters = new Dictionary<string, string?>(deferred.Definition.Parameters)
+      {
+        ["password"] = "changed-secret"
+      }
+    };
+    var changedPlan = deferred.ResourcePlan with
+    {
+      DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(changed),
+      IsExecutable = true,
+      Steps =
+      [
+        new PlanStep
+        {
+          Id = "install-deferred",
+          Description = "Install deferred resource",
+          Action = PlanAction.Install,
+          PrivilegeRequirement = PrivilegeRequirement.Administrator,
+          RestartPolicy = RestartPolicy.NoRestart
+        }
+      ]
+    };
+
+    await Assert.ThrowsAsync<InvalidOperationException>(() => store.SealApprovedResourceAsync(
+        run.RunId,
+        new ApprovedResourceSeal(changed, changedPlan),
+        CancellationToken.None));
+
+    Assert.False(File.Exists(store.ApprovedResourcesPath(run.RunId)));
+  }
+
+  [Theory]
+  [InlineData("duplicate")]
+  [InlineData("missing")]
+  [InlineData("extra")]
+  [InlineData("fingerprint")]
+  [InlineData("run-id")]
+  public async Task SealApprovedResourceAsync_CorruptExistingSealThrowsWithoutRewrite(
+      string corruption)
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = DeferredElevatedRunWithTwoResources();
+    var first = run.Plan!.Resources[0];
+    var second = run.Plan.Resources[1];
+    var firstPlan = ExecutableDeferredPlan(first);
+    var secondPlan = ExecutableDeferredPlan(second);
+
+    await store.CreateAsync(run, [], CancellationToken.None);
+    var firstPromoted = await store.SaveAsync(
+        PromoteDeferredResources(run, (first.Definition.Id, firstPlan)),
+        CancellationToken.None);
+    await store.SealApprovedResourceAsync(
+        run.RunId,
+        new ApprovedResourceSeal(first.Definition, firstPlan),
+        CancellationToken.None);
+    var path = store.ApprovedResourcesPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+    var resources = document["resources"]!.AsArray();
+    switch (corruption)
+    {
+      case "duplicate":
+        resources.Add(resources[0]!.DeepClone());
+        break;
+      case "missing":
+        resources.Clear();
+        break;
+      case "extra":
+        var extra = resources[0]!.DeepClone().AsObject();
+        extra["resourceId"] = "unexpected";
+        resources.Add(extra);
+        break;
+      case "fingerprint":
+        resources[0]!["fingerprint"] = new string('A', 64);
+        break;
+      case "run-id":
+        document["runId"] = Guid.NewGuid();
+        break;
+      default:
+        throw new ArgumentOutOfRangeException(nameof(corruption), corruption, null);
+    }
+    var corruptSidecar = document.ToJsonString();
+    await File.WriteAllTextAsync(path, corruptSidecar);
+    await store.SaveAsync(
+        PromoteDeferredResources(
+            firstPromoted,
+            (first.Definition.Id, firstPlan),
+            (second.Definition.Id, secondPlan)),
+        CancellationToken.None);
+
+    var exception = await Assert.ThrowsAsync<ApprovedResourceStoreException>(() =>
+        store.SealApprovedResourceAsync(
+            run.RunId,
+            new ApprovedResourceSeal(second.Definition, secondPlan),
+            CancellationToken.None));
+
+    Assert.Equal(WdemErrorCode.PermissionError, exception.Error.Code);
+    Assert.False(exception.Error.IsRetryable);
+    Assert.Equal(corruptSidecar, await File.ReadAllTextAsync(path));
+  }
+
+  [Fact]
+  public async Task CreateAsync_RejectsDeferredResourceWithoutAuthorization()
+  {
+    var run = DeferredElevatedRun("deferred-secret");
+    var deferred = Assert.Single(run.Plan!.Resources);
+    run = run with
+    {
+      Plan = run.Plan with
+      {
+        Resources = [deferred with { DeferredAuthorization = null }]
+      }
+    };
+
+    await Assert.ThrowsAsync<ArgumentException>(() =>
+        _store.CreateAsync(run, CancellationToken.None));
+  }
+
+  [Fact]
+  public async Task CreateAsync_RejectsAuthorizationOnConcreteResource()
+  {
+    var run = DeferredElevatedRun("deferred-secret");
+    var deferred = Assert.Single(run.Plan!.Resources);
+    run = run with
+    {
+      Plan = run.Plan with
+      {
+        Resources =
+        [
+          deferred with
+          {
+            Status = PlannedResourceStatus.Ready,
+            ResourcePlan = deferred.ResourcePlan with { IsExecutable = true }
+          }
+        ]
+      }
+    };
+
+    await Assert.ThrowsAsync<ArgumentException>(() =>
+        _store.CreateAsync(run, CancellationToken.None));
+  }
+
+  [Fact]
+  public async Task CreateAsync_RejectsDeferredAuthorizationWithoutModifyingAction()
+  {
+    var run = DeferredElevatedRun("deferred-secret");
+    var deferred = Assert.Single(run.Plan!.Resources);
+    var authorization = Assert.IsType<DeferredPlanAuthorization>(
+        deferred.DeferredAuthorization);
+    run = run with
+    {
+      Plan = run.Plan with
+      {
+        Resources =
+        [
+          deferred with
+          {
+            DeferredAuthorization = authorization with { AllowedActions = [] }
+          }
+        ]
+      }
+    };
+
+    await Assert.ThrowsAsync<ArgumentException>(() =>
+        _store.CreateAsync(run, CancellationToken.None));
+  }
+
+  [Theory]
+  [InlineData("action")]
+  [InlineData("privilege")]
+  [InlineData("restart")]
+  [InlineData("risk")]
+  public async Task CreateAsync_RejectsUndefinedDeferredAuthorizationEnum(string field)
+  {
+    var run = DeferredElevatedRun("deferred-secret");
+    var deferred = Assert.Single(run.Plan!.Resources);
+    var authorization = Assert.IsType<DeferredPlanAuthorization>(
+        deferred.DeferredAuthorization);
+    var invalid = field switch
+    {
+      "action" => authorization with { AllowedActions = [(PlanAction)int.MaxValue] },
+      "privilege" => authorization with
+      {
+        MaximumPrivilege = (PrivilegeRequirement)int.MaxValue
+      },
+      "restart" => authorization with
+      {
+        MaximumRestartPolicy = (RestartPolicy)int.MaxValue
+      },
+      "risk" => authorization with { MaximumRisk = (PlanRisk)int.MaxValue },
+      _ => throw new ArgumentOutOfRangeException(nameof(field))
+    };
+    run = run with
+    {
+      Plan = run.Plan with
+      {
+        Resources = [deferred with { DeferredAuthorization = invalid }]
+      }
+    };
+
+    await Assert.ThrowsAsync<ArgumentException>(() =>
+        _store.CreateAsync(run, CancellationToken.None));
+  }
+
+  [Fact]
+  public async Task CreateAsync_RejectsDeferredAuthorizationWithoutNotice()
+  {
+    var run = DeferredElevatedRun("deferred-secret");
+    var deferred = Assert.Single(run.Plan!.Resources);
+    var authorization = Assert.IsType<DeferredPlanAuthorization>(
+        deferred.DeferredAuthorization);
+    run = run with
+    {
+      Plan = run.Plan with
+      {
+        Resources =
+        [
+          deferred with
+          {
+            DeferredAuthorization = authorization with { DynamicPlanNotice = " " }
+          }
+        ]
+      }
+    };
+
+    await Assert.ThrowsAsync<ArgumentException>(() =>
+        _store.CreateAsync(run, CancellationToken.None));
+  }
+
+  [Theory]
+  [InlineData("privilege")]
+  [InlineData("restart")]
+  [InlineData("risk")]
+  [InlineData("destructive")]
+  public async Task CreateAsync_RejectsDeferredSummaryOutsideAuthorization(string field)
+  {
+    var run = DeferredElevatedRun("deferred-secret");
+    var deferred = Assert.Single(run.Plan!.Resources);
+    var invalid = field switch
+    {
+      "privilege" => deferred with { RequiresElevation = false },
+      "restart" => deferred with { RestartPolicy = RestartPolicy.RestartRecommended },
+      "risk" => deferred with { Risk = PlanRisk.Standard },
+      "destructive" => deferred with { IsDestructive = true },
+      _ => throw new ArgumentOutOfRangeException(nameof(field))
+    };
+    run = run with
+    {
+      Plan = run.Plan with { Resources = [invalid] }
+    };
+
+    await Assert.ThrowsAsync<ArgumentException>(() =>
+        _store.CreateAsync(run, CancellationToken.None));
+  }
+
+  [Theory]
+  [InlineData("privilege")]
+  [InlineData("restart")]
+  public async Task CreateAsync_RejectsDeferredAuthorizationBeyondDefinition(string field)
+  {
+    var run = DeferredElevatedRun("deferred-secret");
+    var deferred = Assert.Single(run.Plan!.Resources);
+    var authorization = Assert.IsType<DeferredPlanAuthorization>(
+        deferred.DeferredAuthorization);
+    var invalid = field switch
+    {
+      "privilege" => deferred with
+      {
+        Definition = deferred.Definition with
+        {
+          PrivilegeRequirement = PrivilegeRequirement.CurrentUser
+        }
+      },
+      "restart" => deferred with
+      {
+        RestartPolicy = RestartPolicy.RestartRecommended,
+        DeferredAuthorization = authorization with
+        {
+          MaximumRestartPolicy = RestartPolicy.RestartRecommended
+        },
+        ResourcePlan = deferred.ResourcePlan with
+        {
+          Steps =
+          [
+            deferred.ResourcePlan.Steps.Single() with
+            {
+              RestartPolicy = RestartPolicy.RestartRecommended
+            }
+          ]
+        }
+      },
+      _ => throw new ArgumentOutOfRangeException(nameof(field))
+    };
+    run = run with
+    {
+      Plan = run.Plan with { Resources = [invalid] }
+    };
+
+    await Assert.ThrowsAsync<ArgumentException>(() =>
+        _store.CreateAsync(run, CancellationToken.None));
+  }
+
+  [Fact]
+  public async Task CreateAndGet_AllowsInspectWithDeferredPlanWithoutApproval()
+  {
+    var run = DeferredElevatedRun("inspect-secret") with
+    {
+      Mode = RunMode.Inspect,
+      PlanApproval = null
+    };
+
+    await _store.CreateAsync(run, CancellationToken.None);
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+
+    Assert.Equal(RunMode.Inspect, restored!.Mode);
+    Assert.Null(restored.PlanApproval);
+    Assert.Equal(PlannedResourceStatus.Deferred, Assert.Single(restored.Plan!.Resources).Status);
+  }
+
+  [Fact]
+  public async Task CreateAndGet_AllowsNonExecutableApplyWithDeferredPlanWithoutApproval()
+  {
+    var run = DeferredElevatedRun("rejected-apply-secret");
+    run = run with
+    {
+      Plan = run.Plan! with
+      {
+        IsExecutable = false,
+        Errors =
+        [
+          new StructuredError(
+              WdemErrorCode.ConfigurationError,
+              "The reviewed execution plan has changed.",
+              "The plan must be reviewed again before applying it.")
+        ]
+      },
+      PlanApproval = null
+    };
+
+    await _store.CreateAsync(run, CancellationToken.None);
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+
+    Assert.Equal(RunMode.Apply, restored!.Mode);
+    Assert.False(restored.Plan!.IsExecutable);
+    Assert.Single(restored.Plan.Errors);
+    Assert.Null(restored.PlanApproval);
+  }
+
+  [Fact]
+  public async Task CreateAsync_RejectsExecutableApplyWithDeferredPlanWithoutApproval()
+  {
+    var run = DeferredElevatedRun("unapproved-apply-secret") with
+    {
+      PlanApproval = null
+    };
+
+    await Assert.ThrowsAsync<ArgumentException>(() =>
+        _store.CreateAsync(run, CancellationToken.None));
+
+    Assert.False(File.Exists(_store.SnapshotPath(run.RunId)));
+  }
+
+  [Fact]
+  public async Task CreateAndGet_PreservesMinimalDeferredApprovalProof()
+  {
+    const string secret = "deferred-profile-secret";
+    var run = DeferredElevatedRun(secret);
+
+    await _store.CreateAsync(run, CancellationToken.None);
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+
+    var approval = Assert.IsType<PlanApproval>(restored!.PlanApproval);
+    Assert.Equal(run.PlanApproval!.InitialPlanFingerprint, approval.InitialPlanFingerprint);
+    Assert.Equal(PlanApprovalSource.DesktopReviewedPlan, approval.Source);
+    var proof = Assert.Single(approval.DeferredAuthorizations);
+    Assert.Equal("git", proof.ResourceId);
+    Assert.Equal(ResourceDefinitionFingerprint.Create(
+        run.Plan!.Resources.Single().Definition), proof.DefinitionFingerprint);
+    Assert.Equal([PlanAction.Install], proof.AllowedActions);
+    Assert.DoesNotContain(
+        secret,
+        await File.ReadAllTextAsync(_store.SnapshotPath(run.RunId)),
+        StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task CreateAsync_RejectsApprovalForDifferentInitialPlanFingerprint()
+  {
+    var run = DeferredElevatedRun("different-plan-secret");
+    run = run with
+    {
+      PlanApproval = run.PlanApproval! with
+      {
+        InitialPlanFingerprint = new string('E', 64)
+      }
+    };
+
+    await Assert.ThrowsAsync<ArgumentException>(() =>
+        _store.CreateAsync(run, CancellationToken.None));
+
+    Assert.False(File.Exists(_store.SnapshotPath(run.RunId)));
+  }
+
+  [Fact]
+  public async Task GetAsync_RejectsTamperedDeferredApprovalProof()
+  {
+    var run = DeferredElevatedRun("deferred-profile-secret");
+    await _store.CreateAsync(run, CancellationToken.None);
+    var path = _store.SnapshotPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+    document["planApproval"]!["deferredAuthorizations"]![0]!["allowedActions"]![0] =
+        "configure";
+    await File.WriteAllTextAsync(path, document.ToJsonString());
+
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+
+    Assert.Null(restored);
+    Assert.False(File.Exists(path));
+    Assert.Single(Directory.GetFiles(
+        Path.GetDirectoryName(path)!, $"{run.RunId:D}.json.corrupted.*"));
+  }
+
+  [Fact]
+  public async Task SaveAsync_RejectsChangedPlanApproval()
+  {
+    var run = DeferredElevatedRun("deferred-profile-secret");
+    await _store.CreateAsync(run, CancellationToken.None);
+    var changed = run with
+    {
+      PlanApproval = run.PlanApproval! with
+      {
+        Source = PlanApprovalSource.CommandLine
+      }
+    };
+
+    await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        _store.SaveAsync(changed, CancellationToken.None));
+
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+    Assert.Equal(PlanApprovalSource.DesktopReviewedPlan, restored!.PlanApproval!.Source);
+  }
+
+  [Theory]
+  [InlineData("privilege")]
+  [InlineData("restart")]
+  [InlineData("destructive")]
+  public async Task SaveAsync_RejectsPromotedDeferredPlanWithUnsafeNoneStep(
+      string unsafeField)
+  {
+    var run = DeferredElevatedRun("deferred-profile-secret");
+    await _store.CreateAsync(run, CancellationToken.None);
+    var deferred = Assert.Single(run.Plan!.Resources);
+    var executablePlan = deferred.ResourcePlan with
+    {
+      IsExecutable = true,
+      Steps =
+      [
+        deferred.ResourcePlan.Steps.Single(),
+        new PlanStep
+        {
+          Id = "unsafe-declaration",
+          Description = "Unsafe declaration",
+          Action = PlanAction.None,
+          PrivilegeRequirement = unsafeField == "privilege"
+              ? PrivilegeRequirement.Administrator
+              : PrivilegeRequirement.CurrentUser,
+          RestartPolicy = unsafeField == "restart"
+              ? RestartPolicy.RestartRequired
+              : RestartPolicy.NoRestart,
+          IsDestructive = unsafeField == "destructive"
+        }
+      ]
+    };
+
+    await Assert.ThrowsAsync<ArgumentException>(() => _store.SaveAsync(
+        PromoteDeferredRun(run, executablePlan),
+        CancellationToken.None));
+
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+    Assert.Equal(
+        PlannedResourceStatus.Deferred,
+        Assert.Single(restored!.Plan!.Resources).Status);
+  }
+
+  [Fact]
   public async Task GetApprovedResourceAsync_TamperedCiphertextIsRejected()
   {
     var store = new JsonExecutionRunStore(
@@ -120,13 +732,535 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
         $"{(payload[0] == 'A' ? 'B' : 'A')}{payload[1..]}";
     await File.WriteAllTextAsync(path, document.ToJsonString());
 
-    var approved = await store.GetApprovedResourceAsync(
+    var exception = await Assert.ThrowsAsync<ApprovedResourceStoreException>(() =>
+        store.GetApprovedResourceAsync(
+            run.RunId,
+            "git",
+            CancellationToken.None));
+
+    Assert.False(exception.Error.IsRetryable);
+    Assert.Contains(store.Diagnostics, error => error.Code == WdemErrorCode.PermissionError);
+  }
+
+  [Theory]
+  [InlineData("run-id")]
+  [InlineData("null-envelope")]
+  [InlineData("duplicate-entry")]
+  [InlineData("invalid-payload")]
+  public async Task GetApprovedResourceAsync_CorruptEnvelopeThrowsStoreException(
+      string corruption)
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ElevatedRunWithSecret("get-corrupt-envelope-secret");
+    await CreateWithApprovedResourceAsync(store, run);
+    var path = store.ApprovedResourcesPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+    var resources = document["resources"]!.AsArray();
+    switch (corruption)
+    {
+      case "run-id":
+        document["runId"] = Guid.NewGuid();
+        break;
+      case "null-envelope":
+        await File.WriteAllTextAsync(path, "null");
+        break;
+      case "duplicate-entry":
+        resources.Add(resources[0]!.DeepClone());
+        break;
+      case "invalid-payload":
+        resources[0]!["protectedPayload"] = "not-base64";
+        break;
+      default:
+        throw new ArgumentOutOfRangeException(nameof(corruption), corruption, null);
+    }
+
+    if (corruption != "null-envelope")
+    {
+      await File.WriteAllTextAsync(path, document.ToJsonString());
+    }
+
+    var exception = await Assert.ThrowsAsync<ApprovedResourceStoreException>(() =>
+        store.GetApprovedResourceAsync(
+            run.RunId,
+            "git",
+            CancellationToken.None));
+
+    Assert.False(exception.Error.IsRetryable);
+  }
+
+  [Theory]
+  [InlineData("extra-entry")]
+  [InlineData("missing-unrelated-entry")]
+  [InlineData("duplicate-unrelated-entry")]
+  [InlineData("corrupt-unrelated-payload")]
+  [InlineData("malformed-unrelated-claims")]
+  public async Task GetApprovedResourceAsync_ValidatesEntireEnvelopeBeforeAbsentTarget(
+      string corruption)
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = await CreateWithTwoApprovedResourcesAsync(store);
+    var path = store.ApprovedResourcesPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+    var resources = document["resources"]!.AsArray();
+    var unrelated = resources.Single(node =>
+        node!["resourceId"]!.GetValue<string>() == "node")!;
+    switch (corruption)
+    {
+      case "extra-entry":
+        var extra = unrelated.DeepClone().AsObject();
+        extra["resourceId"] = "unexpected";
+        resources.Add(extra);
+        break;
+      case "missing-unrelated-entry":
+        resources.Remove(unrelated);
+        break;
+      case "duplicate-unrelated-entry":
+        resources.Add(unrelated.DeepClone());
+        break;
+      case "corrupt-unrelated-payload":
+        unrelated["protectedPayload"] = "not-base64";
+        break;
+      case "malformed-unrelated-claims":
+        unrelated["claimedPlanFingerprints"] = new JsonArray("not-a-fingerprint");
+        break;
+      default:
+        throw new ArgumentOutOfRangeException(nameof(corruption), corruption, null);
+    }
+
+    await File.WriteAllTextAsync(path, document.ToJsonString());
+
+    var exception = await Assert.ThrowsAsync<ApprovedResourceStoreException>(() =>
+        store.GetApprovedResourceAsync(
+            run.RunId,
+            "absent-resource",
+            CancellationToken.None));
+
+    Assert.False(exception.Error.IsRetryable);
+  }
+
+  [Fact]
+  public async Task ClaimApprovedResourceAsync_MalformedSidecarThrowsStoreException()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ElevatedRunWithSecret("malformed-sidecar-secret");
+    await CreateWithApprovedResourceAsync(store, run);
+    await File.WriteAllTextAsync(store.ApprovedResourcesPath(run.RunId), "{");
+    var planned = Assert.Single(run.Plan!.Resources);
+
+    var exception = await Assert.ThrowsAsync<ApprovedResourceStoreException>(() =>
+        store.ClaimApprovedResourceAsync(
+            run.RunId,
+            planned.Definition.Id,
+            ApprovedResourceFingerprint.Create(planned.Definition, planned.ResourcePlan),
+            CancellationToken.None));
+
+    Assert.Equal(WdemErrorCode.PermissionError, exception.Error.Code);
+    Assert.False(exception.Error.IsRetryable);
+  }
+
+  [Theory]
+  [InlineData("run-id")]
+  [InlineData("missing-entry")]
+  [InlineData("duplicate-entry")]
+  [InlineData("entry-fingerprint")]
+  [InlineData("protected-payload")]
+  public async Task ClaimApprovedResourceAsync_CorruptEnvelopeThrowsStoreException(
+      string corruption)
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ElevatedRunWithSecret("wrong-envelope-run-secret");
+    await CreateWithApprovedResourceAsync(store, run);
+    var path = store.ApprovedResourcesPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+    var resources = document["resources"]!.AsArray();
+    switch (corruption)
+    {
+      case "run-id":
+        document["runId"] = Guid.NewGuid();
+        break;
+      case "missing-entry":
+        resources.Clear();
+        break;
+      case "duplicate-entry":
+        resources.Add(resources[0]!.DeepClone());
+        break;
+      case "entry-fingerprint":
+        resources[0]!["fingerprint"] = new string('A', 64);
+        break;
+      case "protected-payload":
+        resources[0]!["protectedPayload"] = "not-base64";
+        break;
+      default:
+        throw new ArgumentOutOfRangeException(nameof(corruption), corruption, null);
+    }
+
+    await File.WriteAllTextAsync(path, document.ToJsonString());
+    var planned = Assert.Single(run.Plan!.Resources);
+
+    var exception = await Assert.ThrowsAsync<ApprovedResourceStoreException>(() =>
+        store.ClaimApprovedResourceAsync(
+            run.RunId,
+            planned.Definition.Id,
+            ApprovedResourceFingerprint.Create(planned.Definition, planned.ResourcePlan),
+            CancellationToken.None));
+
+    Assert.Equal(WdemErrorCode.PermissionError, exception.Error.Code);
+    Assert.False(exception.Error.IsRetryable);
+  }
+
+  [Fact]
+  public async Task ClaimApprovedResourceAsync_NullResourceEntryThrowsStoreException()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ElevatedRunWithSecret("null-resource-entry-secret");
+    await CreateWithApprovedResourceAsync(store, run);
+    var path = store.ApprovedResourcesPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+    document["resources"] = new JsonArray((JsonNode?)null);
+    await File.WriteAllTextAsync(path, document.ToJsonString());
+    var planned = Assert.Single(run.Plan!.Resources);
+
+    var exception = await Assert.ThrowsAsync<ApprovedResourceStoreException>(() =>
+        store.ClaimApprovedResourceAsync(
+            run.RunId,
+            planned.Definition.Id,
+            ApprovedResourceFingerprint.Create(planned.Definition, planned.ResourcePlan),
+            CancellationToken.None));
+
+    Assert.False(exception.Error.IsRetryable);
+  }
+
+  [Theory]
+  [InlineData("extra-entry")]
+  [InlineData("duplicate-unrelated-entry")]
+  [InlineData("corrupt-unrelated-payload")]
+  [InlineData("malformed-unrelated-claims")]
+  public async Task ClaimApprovedResourceAsync_ValidatesEntireMultiResourceEnvelopeBeforeClaim(
+      string corruption)
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = await CreateWithTwoApprovedResourcesAsync(store);
+    var path = store.ApprovedResourcesPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+    var resources = document["resources"]!.AsArray();
+    var unrelated = resources.Single(node =>
+        node!["resourceId"]!.GetValue<string>() == "node")!;
+    switch (corruption)
+    {
+      case "extra-entry":
+        var extra = unrelated.DeepClone().AsObject();
+        extra["resourceId"] = "unexpected";
+        resources.Add(extra);
+        break;
+      case "duplicate-unrelated-entry":
+        resources.Add(unrelated.DeepClone());
+        break;
+      case "corrupt-unrelated-payload":
+        unrelated["protectedPayload"] = "not-base64";
+        break;
+      case "malformed-unrelated-claims":
+        unrelated["claimedPlanFingerprints"] = new JsonArray("not-a-fingerprint");
+        break;
+      default:
+        throw new ArgumentOutOfRangeException(nameof(corruption), corruption, null);
+    }
+
+    var corruptSidecar = document.ToJsonString();
+    await File.WriteAllTextAsync(path, corruptSidecar);
+    var requested = run.Plan!.Resources.Single(resource =>
+        resource.Definition.Id == "git");
+
+    var exception = await Assert.ThrowsAsync<ApprovedResourceStoreException>(() =>
+        store.ClaimApprovedResourceAsync(
+            run.RunId,
+            requested.Definition.Id,
+            ApprovedResourceFingerprint.Create(
+                requested.Definition,
+                requested.ResourcePlan),
+            CancellationToken.None));
+
+    Assert.False(exception.Error.IsRetryable);
+    Assert.Equal(corruptSidecar, await File.ReadAllTextAsync(path));
+  }
+
+  [Fact]
+  public async Task ClaimApprovedResourceAsync_ValidatesEntireEnvelopeBeforeAbsentTarget()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = await CreateWithTwoApprovedResourcesAsync(store);
+    var path = store.ApprovedResourcesPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+    var unrelated = document["resources"]!.AsArray().Single(node =>
+        node!["resourceId"]!.GetValue<string>() == "node")!;
+    unrelated["protectedPayload"] = "not-base64";
+    await File.WriteAllTextAsync(path, document.ToJsonString());
+
+    var exception = await Assert.ThrowsAsync<ApprovedResourceStoreException>(() =>
+        store.ClaimApprovedResourceAsync(
+            run.RunId,
+            "absent-resource",
+            new string('A', 64),
+            CancellationToken.None));
+
+    Assert.False(exception.Error.IsRetryable);
+  }
+
+  [Fact]
+  public async Task ClaimApprovedResourceAsync_ValidatesEntireEnvelopeBeforeReplayDecision()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = await CreateWithTwoApprovedResourcesAsync(store);
+    var requested = run.Plan!.Resources.Single(resource =>
+        resource.Definition.Id == "git");
+    var fingerprint = ApprovedResourceFingerprint.Create(
+        requested.Definition,
+        requested.ResourcePlan);
+    var first = await store.ClaimApprovedResourceAsync(
         run.RunId,
-        "git",
+        requested.Definition.Id,
+        fingerprint,
+        CancellationToken.None);
+    Assert.NotNull(first);
+    var path = store.ApprovedResourcesPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+    var unrelated = document["resources"]!.AsArray().Single(node =>
+        node!["resourceId"]!.GetValue<string>() == "node")!;
+    unrelated["protectedPayload"] = "not-base64";
+    await File.WriteAllTextAsync(path, document.ToJsonString());
+
+    var exception = await Assert.ThrowsAsync<ApprovedResourceStoreException>(() =>
+        store.ClaimApprovedResourceAsync(
+            run.RunId,
+            requested.Definition.Id,
+            fingerprint,
+            CancellationToken.None));
+
+    Assert.False(exception.Error.IsRetryable);
+  }
+
+  [Fact]
+  public async Task ClaimApprovedResourceAsync_UnrelatedResourceRevisionAdvanceDoesNotRejectTarget()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var observed = await CreateWithTwoApprovedResourcesAsync(store);
+    var target = observed.Plan!.Resources.Single(resource =>
+        resource.Definition.Id == "git");
+    var unrelated = observed.ResourceResults["node"] with
+    {
+      State = ExecutionState.Completed,
+      Outcome = ExecutionOutcome.Succeeded,
+      EndedAtUtc = DateTimeOffset.UtcNow
+    };
+    var advanced = await store.SaveAsync(observed with
+    {
+      ResourceResults = new Dictionary<string, ResourceResult>(
+          observed.ResourceResults,
+          StringComparer.OrdinalIgnoreCase)
+      {
+        ["node"] = unrelated
+      }
+    }, CancellationToken.None);
+    Assert.True(advanced.Revision > observed.Revision);
+
+    var claim = await store.ClaimApprovedResourceAsync(
+        observed.RunId,
+        target.Definition.Id,
+        ApprovedResourceFingerprint.Create(target.Definition, target.ResourcePlan),
         CancellationToken.None);
 
-    Assert.Null(approved);
-    Assert.Contains(store.Diagnostics, error => error.Code == WdemErrorCode.PermissionError);
+    Assert.NotNull(claim);
+    Assert.Equal(target.Definition.Id, claim.Definition.Id);
+  }
+
+  [Fact]
+  public async Task ClaimApprovedResourceAsync_ProtectedDefinitionMismatchThrowsStoreException()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new PassThroughApprovedResourceProtector());
+    var run = ElevatedRunWithSecret("protected-definition-mismatch-secret");
+    await CreateWithApprovedResourceAsync(store, run);
+    var path = store.ApprovedResourcesPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+    var entry = document["resources"]![0]!.AsObject();
+    var payload = JsonNode.Parse(Convert.FromBase64String(
+        entry["protectedPayload"]!.GetValue<string>()))!.AsObject();
+    payload["definition"]!["id"] = "different-resource";
+    entry["protectedPayload"] = Convert.ToBase64String(
+        System.Text.Encoding.UTF8.GetBytes(payload.ToJsonString()));
+    await File.WriteAllTextAsync(path, document.ToJsonString());
+    var planned = Assert.Single(run.Plan!.Resources);
+
+    var exception = await Assert.ThrowsAsync<ApprovedResourceStoreException>(() =>
+        store.ClaimApprovedResourceAsync(
+            run.RunId,
+            planned.Definition.Id,
+            ApprovedResourceFingerprint.Create(planned.Definition, planned.ResourcePlan),
+            CancellationToken.None));
+
+    Assert.False(exception.Error.IsRetryable);
+  }
+
+  [Fact]
+  public async Task ClaimApprovedResourceAsync_PersistedPlanMismatchThrowsStoreException()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ElevatedRunWithSecret("persisted-plan-mismatch-secret");
+    await CreateWithApprovedResourceAsync(store, run);
+    var planned = Assert.Single(run.Plan!.Resources);
+    var changedPlan = planned.ResourcePlan with
+    {
+      Steps =
+      [
+        planned.ResourcePlan.Steps.Single() with
+        {
+          Id = "changed-after-approval"
+        }
+      ]
+    };
+    var saved = await store.SaveAsync(
+        run with
+        {
+          Plan = run.Plan with
+          {
+            Resources = [planned with { ResourcePlan = changedPlan }]
+          }
+        },
+        CancellationToken.None);
+
+    var exception = await Assert.ThrowsAsync<ApprovedResourceStoreException>(() =>
+        store.ClaimApprovedResourceAsync(
+            run.RunId,
+            planned.Definition.Id,
+            ApprovedResourceFingerprint.Create(planned.Definition, changedPlan),
+            CancellationToken.None));
+
+    Assert.False(exception.Error.IsRetryable);
+  }
+
+  [Fact]
+  public async Task ClaimApprovedResourceAsync_DependencyMismatchThrowsStoreException()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ElevatedRunWithSecret("dependency-mismatch-secret");
+    var planned = Assert.Single(run.Plan!.Resources);
+    run = run with
+    {
+      Plan = run.Plan with
+      {
+        Resources = [planned with { Dependencies = ["dependency"] }]
+      },
+      ResourceResults = new Dictionary<string, ResourceResult>(
+          run.ResourceResults,
+          StringComparer.OrdinalIgnoreCase)
+      {
+        ["dependency"] = new ResourceResult
+        {
+          ResourceId = "dependency",
+          State = ExecutionState.Completed,
+          Outcome = ExecutionOutcome.Succeeded
+        }
+      }
+    };
+    await CreateWithApprovedResourceAsync(store, run);
+
+    var exception = await Assert.ThrowsAsync<ApprovedResourceStoreException>(() =>
+        store.ClaimApprovedResourceAsync(
+            run.RunId,
+            planned.Definition.Id,
+            ApprovedResourceFingerprint.Create(planned.Definition, planned.ResourcePlan),
+            CancellationToken.None));
+
+    Assert.False(exception.Error.IsRetryable);
+  }
+
+  [Fact]
+  public async Task ClaimApprovedResourceAsync_MissingAdministratorSegmentThrowsStoreException()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ElevatedRunWithSecret("missing-segment-secret");
+    await CreateWithApprovedResourceAsync(store, run);
+    var planned = Assert.Single(run.Plan!.Resources);
+
+    var exception = await Assert.ThrowsAsync<ApprovedResourceStoreException>(() =>
+        store.ClaimApprovedResourceAsync(
+            run.RunId,
+            planned.Definition.Id,
+            new string('A', 64),
+            CancellationToken.None));
+
+    Assert.False(exception.Error.IsRetryable);
+  }
+
+  [Fact]
+  public async Task ElevatedWorker_CorruptApprovalSidecarReturnsPermissionFailureWithoutApplying()
+  {
+    var paths = new WdemDataPaths(_directory);
+    var store = new JsonExecutionRunStore(
+        paths,
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ElevatedRunWithSecret("worker-corrupt-sidecar-secret");
+    await CreateWithApprovedResourceAsync(store, run);
+    var path = store.ApprovedResourcesPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+    document["runId"] = Guid.NewGuid();
+    await File.WriteAllTextAsync(path, document.ToJsonString());
+    var provider = new OriginalValueRecordingProvider();
+    var worker = new ElevatedResourceWorker(
+        store,
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+    var planned = Assert.Single(run.Plan!.Resources);
+
+    var result = await worker.ApplyAsync(
+        new ElevatedResourceRequest(
+            run.RunId,
+            planned.Definition.Id,
+            ApprovedResourceFingerprint.Create(planned.Definition, planned.ResourcePlan)),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(WdemErrorCode.PermissionError, result.Error!.Code);
+    Assert.Equal(0, provider.ApplyCalls);
   }
 
   [Fact]
@@ -144,12 +1278,13 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
         new LogRedactor(),
         new DeterministicApprovedResourceProtector("second-user"));
 
-    var approved = await otherUser.GetApprovedResourceAsync(
-        run.RunId,
-        "git",
-        CancellationToken.None);
+    var exception = await Assert.ThrowsAsync<ApprovedResourceStoreException>(() =>
+        otherUser.GetApprovedResourceAsync(
+            run.RunId,
+            "git",
+            CancellationToken.None));
 
-    Assert.Null(approved);
+    Assert.False(exception.Error.IsRetryable);
   }
 
   [Fact]
@@ -249,6 +1384,188 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
 
     Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
     Assert.Equal("worker-secret", provider.AppliedResource!.Parameters["password"]);
+  }
+
+  [Fact]
+  public async Task ElevatedWorker_ReopenedStoreCannotReplayApprovedSegment()
+  {
+    var paths = new WdemDataPaths(_directory);
+    var run = ElevatedRunWithSecret("one-time-secret");
+    var creator = new JsonExecutionRunStore(
+        paths,
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    await CreateWithApprovedResourceAsync(creator, run);
+    var planned = Assert.Single(run.Plan!.Resources);
+    var request = new ElevatedResourceRequest(
+        run.RunId,
+        planned.Definition.Id,
+        ApprovedResourceFingerprint.Create(planned.Definition, planned.ResourcePlan));
+    var firstProvider = new OriginalValueRecordingProvider();
+    var firstWorker = new ElevatedResourceWorker(
+        new JsonExecutionRunStore(
+            paths,
+            new LogRedactor(),
+            new DeterministicApprovedResourceProtector()),
+        new ResourceProviderRegistry([firstProvider]),
+        new LogRedactor());
+
+    var first = await firstWorker.ApplyAsync(request, null, CancellationToken.None);
+
+    var replayProvider = new OriginalValueRecordingProvider();
+    var reopenedWorker = new ElevatedResourceWorker(
+        new JsonExecutionRunStore(
+            paths,
+            new LogRedactor(),
+            new DeterministicApprovedResourceProtector()),
+        new ResourceProviderRegistry([replayProvider]),
+        new LogRedactor());
+    var replay = await reopenedWorker.ApplyAsync(request, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, first.Outcome);
+    Assert.Equal(ApplyOutcome.Failed, replay.Outcome);
+    Assert.Equal(1, firstProvider.ApplyCalls);
+    Assert.Equal(0, replayProvider.ApplyCalls);
+  }
+
+  [Fact]
+  public async Task ElevatedWorker_ConcurrentStoresHaveSingleApprovedSegmentWinner()
+  {
+    var paths = new WdemDataPaths(_directory);
+    var run = ElevatedRunWithSecret("concurrent-secret");
+    var creator = new JsonExecutionRunStore(
+        paths,
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    await CreateWithApprovedResourceAsync(creator, run);
+    var planned = Assert.Single(run.Plan!.Resources);
+    var request = new ElevatedResourceRequest(
+        run.RunId,
+        planned.Definition.Id,
+        ApprovedResourceFingerprint.Create(planned.Definition, planned.ResourcePlan));
+    var providers = new[]
+    {
+      new OriginalValueRecordingProvider(),
+      new OriginalValueRecordingProvider()
+    };
+    var workers = providers.Select(provider => new ElevatedResourceWorker(
+        new JsonExecutionRunStore(
+            paths,
+            new LogRedactor(),
+            new DeterministicApprovedResourceProtector()),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor())).ToArray();
+
+    var results = await Task.WhenAll(workers.Select(worker =>
+        worker.ApplyAsync(request, null, CancellationToken.None)));
+
+    Assert.Single(results, result => result.Outcome == ApplyOutcome.Succeeded);
+    Assert.Single(results, result => result.Outcome == ApplyOutcome.Failed);
+    Assert.Equal(1, providers.Sum(provider => provider.ApplyCalls));
+  }
+
+  [Fact]
+  public async Task ElevatedWorker_StaleTargetStateCannotConsumeApprovedSegment()
+  {
+    var paths = new WdemDataPaths(_directory);
+    var run = ElevatedRunWithSecret("stale-revision-secret");
+    var creator = new JsonExecutionRunStore(
+        paths,
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    await CreateWithApprovedResourceAsync(creator, run);
+    var staleHostStore = new JsonExecutionRunStore(
+        paths,
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var observed = Assert.IsType<ExecutionRun>(
+        await staleHostStore.GetAsync(run.RunId, CancellationToken.None));
+    var advancingStore = new JsonExecutionRunStore(
+        paths,
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var planned = Assert.Single(run.Plan!.Resources);
+    var advanced = await advancingStore.SaveAsync(observed with
+    {
+      ResourceResults = new Dictionary<string, ResourceResult>(
+          observed.ResourceResults,
+          StringComparer.OrdinalIgnoreCase)
+      {
+        [planned.Definition.Id] = observed.ResourceResults[planned.Definition.Id] with
+        {
+          State = ExecutionState.Completed,
+          Outcome = ExecutionOutcome.Succeeded,
+          EndedAtUtc = DateTimeOffset.UtcNow
+        }
+      }
+    }, CancellationToken.None);
+    Assert.True(advanced.Revision > observed.Revision);
+    var fingerprint = ApprovedResourceFingerprint.Create(
+        planned.Definition,
+        planned.ResourcePlan);
+
+    var staleClaim = await staleHostStore.ClaimApprovedResourceAsync(
+        run.RunId,
+        planned.Definition.Id,
+        fingerprint,
+        CancellationToken.None);
+
+    Assert.Null(staleClaim);
+    var provider = new OriginalValueRecordingProvider();
+    var freshWorker = new ElevatedResourceWorker(
+        new JsonExecutionRunStore(
+            paths,
+            new LogRedactor(),
+            new DeterministicApprovedResourceProtector()),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+    var result = await freshWorker.ApplyAsync(
+        new ElevatedResourceRequest(run.RunId, planned.Definition.Id, fingerprint),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(0, provider.ApplyCalls);
+  }
+
+  [Fact]
+  public async Task ElevatedWorker_TerminalRunCannotClaimApprovedSegment()
+  {
+    var paths = new WdemDataPaths(_directory);
+    var run = ElevatedRunWithSecret("terminal-race-secret");
+    var creator = new JsonExecutionRunStore(
+        paths,
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    await CreateWithApprovedResourceAsync(creator, run);
+    await creator.SaveAsync(
+        run with
+        {
+          State = ExecutionState.Completed,
+          Outcome = ExecutionOutcome.Cancelled,
+          EndedAtUtc = DateTimeOffset.UtcNow
+        },
+        CancellationToken.None);
+    var planned = Assert.Single(run.Plan!.Resources);
+    var provider = new OriginalValueRecordingProvider();
+    var worker = new ElevatedResourceWorker(
+        new JsonExecutionRunStore(
+            paths,
+            new LogRedactor(),
+            new DeterministicApprovedResourceProtector()),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+
+    var result = await worker.ApplyAsync(
+        new ElevatedResourceRequest(
+            run.RunId,
+            planned.Definition.Id,
+            ApprovedResourceFingerprint.Create(planned.Definition, planned.ResourcePlan)),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Equal(0, provider.ApplyCalls);
   }
 
   [Fact]
@@ -900,6 +2217,374 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task SaveAsync_RejectsCompletedRunRegression()
+  {
+    var completed = SampleRun() with
+    {
+      State = ExecutionState.Completed,
+      Outcome = ExecutionOutcome.Succeeded,
+      EndedAtUtc = DateTimeOffset.UtcNow,
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = SampleResourceResult() with
+        {
+          State = ExecutionState.Completed,
+          Outcome = ExecutionOutcome.Succeeded,
+          EndedAtUtc = DateTimeOffset.UtcNow
+        }
+      }
+    };
+    await _store.CreateAsync(completed, CancellationToken.None);
+
+    await Assert.ThrowsAsync<InvalidOperationException>(() => _store.SaveAsync(
+        completed with
+        {
+          State = ExecutionState.Running,
+          Outcome = null,
+          EndedAtUtc = null
+        },
+        CancellationToken.None));
+
+    var restored = await _store.GetAsync(completed.RunId, CancellationToken.None);
+    Assert.Equal(ExecutionState.Completed, restored!.State);
+    Assert.Equal(ExecutionOutcome.Succeeded, restored.Outcome);
+  }
+
+  [Fact]
+  public async Task TrySaveAsync_RejectsTerminalResourceRegression()
+  {
+    var terminalResource = SampleResourceResult() with
+    {
+      State = ExecutionState.Completed,
+      Outcome = ExecutionOutcome.Succeeded,
+      EndedAtUtc = DateTimeOffset.UtcNow
+    };
+    var run = SampleRun() with
+    {
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = terminalResource
+      }
+    };
+    await _store.CreateAsync(run, CancellationToken.None);
+    var replacement = run with
+    {
+      Revision = 1,
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = terminalResource with
+        {
+          State = ExecutionState.Running,
+          Outcome = null,
+          EndedAtUtc = null
+        }
+      }
+    };
+
+    await Assert.ThrowsAsync<InvalidOperationException>(() => _store.TrySaveAsync(
+        replacement,
+        expectedRevision: 0,
+        expectedRecoveryClaimId: null,
+        CancellationToken.None));
+
+    var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+    Assert.Equal(ExecutionState.Completed, restored!.ResourceResults["git"].State);
+    Assert.Equal(ExecutionOutcome.Succeeded, restored.ResourceResults["git"].Outcome);
+  }
+
+  public static TheoryData<ExecutionOutcome?, ExecutionOutcome?, bool>
+      TerminalResourceOutcomeTransitions
+  {
+    get
+    {
+      ExecutionOutcome?[] outcomes =
+      [
+        null,
+        ExecutionOutcome.Succeeded,
+        ExecutionOutcome.NotRequired,
+        ExecutionOutcome.Failed,
+        ExecutionOutcome.Skipped,
+        ExecutionOutcome.Cancelled
+      ];
+      var data = new TheoryData<ExecutionOutcome?, ExecutionOutcome?, bool>();
+      foreach (var current in outcomes)
+      {
+        foreach (var replacement in outcomes)
+        {
+          data.Add(current, replacement, IsAllowedTerminalTransition(current, replacement));
+        }
+      }
+
+      return data;
+    }
+  }
+
+  public static TheoryData<ExecutionOutcome?, ExecutionOutcome?, bool>
+      TerminalRunOutcomeTransitions
+  {
+    get
+    {
+      ExecutionOutcome[] currentOutcomes =
+      [
+        ExecutionOutcome.Succeeded,
+        ExecutionOutcome.NotRequired,
+        ExecutionOutcome.Failed,
+        ExecutionOutcome.Skipped,
+        ExecutionOutcome.Cancelled
+      ];
+      ExecutionOutcome?[] replacementOutcomes =
+      [
+        null,
+        ExecutionOutcome.Succeeded,
+        ExecutionOutcome.NotRequired,
+        ExecutionOutcome.Failed,
+        ExecutionOutcome.Skipped,
+        ExecutionOutcome.Cancelled
+      ];
+      var data = new TheoryData<ExecutionOutcome?, ExecutionOutcome?, bool>();
+      foreach (var current in currentOutcomes)
+      {
+        foreach (var replacement in replacementOutcomes)
+        {
+          data.Add(current, replacement, IsAllowedTerminalTransition(current, replacement));
+        }
+      }
+
+      return data;
+    }
+  }
+
+  [Theory]
+  [MemberData(nameof(TerminalResourceOutcomeTransitions))]
+  public async Task SaveAsync_EnforcesMonotonicTerminalResourceOutcome(
+      ExecutionOutcome? currentOutcome,
+      ExecutionOutcome? replacementOutcome,
+      bool allowed)
+  {
+    var endedAt = DateTimeOffset.UtcNow;
+    var currentResource = SampleResourceResult() with
+    {
+      State = ExecutionState.Completed,
+      Outcome = currentOutcome,
+      EndedAtUtc = endedAt
+    };
+    var run = SampleRun() with
+    {
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = currentResource
+      }
+    };
+    await _store.CreateAsync(run, CancellationToken.None);
+    var replacement = run with
+    {
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = currentResource with { Outcome = replacementOutcome }
+      }
+    };
+
+    if (allowed)
+    {
+      var saved = await _store.SaveAsync(replacement, CancellationToken.None);
+      Assert.Equal(replacementOutcome, saved.ResourceResults["git"].Outcome);
+    }
+    else
+    {
+      var snapshotPath = _store.SnapshotPath(run.RunId);
+      var before = await File.ReadAllBytesAsync(snapshotPath);
+      await Assert.ThrowsAsync<InvalidOperationException>(() =>
+          _store.SaveAsync(replacement, CancellationToken.None));
+      var after = await File.ReadAllBytesAsync(snapshotPath);
+      var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+      Assert.Equal(before, after);
+      Assert.Equal(currentOutcome, restored!.ResourceResults["git"].Outcome);
+    }
+  }
+
+  [Theory]
+  [MemberData(nameof(TerminalRunOutcomeTransitions))]
+  public async Task SaveAsync_EnforcesMonotonicTerminalRunOutcome(
+      ExecutionOutcome? currentOutcome,
+      ExecutionOutcome? replacementOutcome,
+      bool allowed)
+  {
+    var endedAt = DateTimeOffset.UtcNow;
+    var terminalResource = SampleResourceResult() with
+    {
+      State = ExecutionState.Completed,
+      Outcome = ExecutionOutcome.Succeeded,
+      EndedAtUtc = endedAt
+    };
+    var run = SampleRun() with
+    {
+      State = ExecutionState.Completed,
+      Outcome = currentOutcome,
+      EndedAtUtc = endedAt,
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = terminalResource
+      }
+    };
+    await _store.CreateAsync(run, CancellationToken.None);
+    var replacement = run with { Outcome = replacementOutcome };
+
+    if (allowed)
+    {
+      var saved = await _store.SaveAsync(replacement, CancellationToken.None);
+      Assert.Equal(replacementOutcome, saved.Outcome);
+    }
+    else if (replacementOutcome is null)
+    {
+      var snapshotPath = _store.SnapshotPath(run.RunId);
+      var before = await File.ReadAllBytesAsync(snapshotPath);
+      await Assert.ThrowsAsync<ArgumentException>(() =>
+          _store.SaveAsync(replacement, CancellationToken.None));
+      var after = await File.ReadAllBytesAsync(snapshotPath);
+      var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+      Assert.Equal(before, after);
+      Assert.Equal(currentOutcome, restored!.Outcome);
+    }
+    else
+    {
+      var snapshotPath = _store.SnapshotPath(run.RunId);
+      var before = await File.ReadAllBytesAsync(snapshotPath);
+      await Assert.ThrowsAsync<InvalidOperationException>(() =>
+          _store.SaveAsync(replacement, CancellationToken.None));
+      var after = await File.ReadAllBytesAsync(snapshotPath);
+      var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+      Assert.Equal(before, after);
+      Assert.Equal(currentOutcome, restored!.Outcome);
+    }
+  }
+
+  [Theory]
+  [MemberData(nameof(TerminalResourceOutcomeTransitions))]
+  public async Task TrySaveAsync_EnforcesMonotonicTerminalResourceOutcome(
+      ExecutionOutcome? currentOutcome,
+      ExecutionOutcome? replacementOutcome,
+      bool allowed)
+  {
+    var endedAt = DateTimeOffset.UtcNow;
+    var currentResource = SampleResourceResult() with
+    {
+      State = ExecutionState.Completed,
+      Outcome = currentOutcome,
+      EndedAtUtc = endedAt
+    };
+    var run = SampleRun() with
+    {
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = currentResource
+      }
+    };
+    await _store.CreateAsync(run, CancellationToken.None);
+    var replacement = run with
+    {
+      Revision = 1,
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = currentResource with { Outcome = replacementOutcome }
+      }
+    };
+
+    if (allowed)
+    {
+      Assert.True(await _store.TrySaveAsync(
+          replacement,
+          expectedRevision: 0,
+          expectedRecoveryClaimId: null,
+          CancellationToken.None));
+      var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+      Assert.Equal(replacementOutcome, restored!.ResourceResults["git"].Outcome);
+    }
+    else
+    {
+      var snapshotPath = _store.SnapshotPath(run.RunId);
+      var before = await File.ReadAllBytesAsync(snapshotPath);
+      await Assert.ThrowsAsync<InvalidOperationException>(() => _store.TrySaveAsync(
+          replacement,
+          expectedRevision: 0,
+          expectedRecoveryClaimId: null,
+          CancellationToken.None));
+      var after = await File.ReadAllBytesAsync(snapshotPath);
+      var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+      Assert.Equal(before, after);
+      Assert.Equal(currentOutcome, restored!.ResourceResults["git"].Outcome);
+    }
+  }
+
+  [Theory]
+  [MemberData(nameof(TerminalRunOutcomeTransitions))]
+  public async Task TrySaveAsync_EnforcesMonotonicTerminalRunOutcome(
+      ExecutionOutcome? currentOutcome,
+      ExecutionOutcome? replacementOutcome,
+      bool allowed)
+  {
+    var endedAt = DateTimeOffset.UtcNow;
+    var terminalResource = SampleResourceResult() with
+    {
+      State = ExecutionState.Completed,
+      Outcome = ExecutionOutcome.Succeeded,
+      EndedAtUtc = endedAt
+    };
+    var run = SampleRun() with
+    {
+      State = ExecutionState.Completed,
+      Outcome = currentOutcome,
+      EndedAtUtc = endedAt,
+      ResourceResults = new Dictionary<string, ResourceResult>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = terminalResource
+      }
+    };
+    await _store.CreateAsync(run, CancellationToken.None);
+    var replacement = run with { Revision = 1, Outcome = replacementOutcome };
+
+    if (allowed)
+    {
+      Assert.True(await _store.TrySaveAsync(
+          replacement,
+          expectedRevision: 0,
+          expectedRecoveryClaimId: null,
+          CancellationToken.None));
+      var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+      Assert.Equal(replacementOutcome, restored!.Outcome);
+    }
+    else if (replacementOutcome is null)
+    {
+      var snapshotPath = _store.SnapshotPath(run.RunId);
+      var before = await File.ReadAllBytesAsync(snapshotPath);
+      await Assert.ThrowsAsync<ArgumentException>(() => _store.TrySaveAsync(
+          replacement,
+          expectedRevision: 0,
+          expectedRecoveryClaimId: null,
+          CancellationToken.None));
+      var after = await File.ReadAllBytesAsync(snapshotPath);
+      Assert.Equal(before, after);
+    }
+    else
+    {
+      var snapshotPath = _store.SnapshotPath(run.RunId);
+      var before = await File.ReadAllBytesAsync(snapshotPath);
+      await Assert.ThrowsAsync<InvalidOperationException>(() => _store.TrySaveAsync(
+          replacement,
+          expectedRevision: 0,
+          expectedRecoveryClaimId: null,
+          CancellationToken.None));
+      var after = await File.ReadAllBytesAsync(snapshotPath);
+      Assert.Equal(before, after);
+    }
+
+    if (!allowed)
+    {
+      var restored = await _store.GetAsync(run.RunId, CancellationToken.None);
+      Assert.Equal(currentOutcome, restored!.Outcome);
+    }
+  }
+
+  [Fact]
   public async Task CreateAsync_RedactsAcknowledgedRestartResourceIds()
   {
     var run = SampleRun() with
@@ -1447,6 +3132,18 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public void AtomicPersistence_UsesOneSharedDurableByteWriter()
+  {
+    var privateMethods = typeof(JsonExecutionRunStore).GetMethods(
+        System.Reflection.BindingFlags.NonPublic |
+        System.Reflection.BindingFlags.Static |
+        System.Reflection.BindingFlags.Instance);
+
+    Assert.DoesNotContain(privateMethods, method => method.Name == "WriteSnapshotAsync");
+    Assert.Single(privateMethods, method => method.Name == "WriteBytesAtomicallyAsync");
+  }
+
+  [Fact]
   public async Task ListIncompleteAsync_PreservesMalformedSnapshotAndExposesDiagnostic()
   {
     Directory.CreateDirectory(new WdemDataPaths(_directory).RunsDirectory);
@@ -1670,6 +3367,15 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     Assert.Equal("test-user", machine.UserName);
   }
 
+  private static bool IsAllowedTerminalTransition(
+      ExecutionOutcome? current,
+      ExecutionOutcome? replacement) =>
+      current == replacement ||
+      current == ExecutionOutcome.Cancelled &&
+      replacement is ExecutionOutcome.Succeeded or
+          ExecutionOutcome.NotRequired or
+          ExecutionOutcome.Failed;
+
   public void Dispose()
   {
     if (Directory.Exists(_directory))
@@ -1708,6 +3414,66 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
         run,
         [new ApprovedResourceSeal(planned.Definition, planned.ResourcePlan)],
         CancellationToken.None);
+  }
+
+  private static async Task<ExecutionRun> CreateWithTwoApprovedResourcesAsync(
+      JsonExecutionRunStore store)
+  {
+    var run = ElevatedRunWithSecret("first-approved-secret");
+    var first = Assert.Single(run.Plan!.Resources);
+    var secondDefinition = first.Definition with
+    {
+      Id = "node",
+      Parameters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["password"] = "second-approved-secret"
+      }
+    };
+    var secondPlan = first.ResourcePlan with
+    {
+      ResourceId = secondDefinition.Id,
+      DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(secondDefinition)
+    };
+    var second = first with
+    {
+      Definition = secondDefinition,
+      ResourcePlan = secondPlan
+    };
+    run = run with
+    {
+      Graph = new ResourceGraph(
+          new Dictionary<string, ResolvedResource>(StringComparer.OrdinalIgnoreCase)
+          {
+            [first.Definition.Id] = run.Graph!.Nodes[first.Definition.Id],
+            [secondDefinition.Id] = new(
+                secondDefinition,
+                ResourceOrigin.Required,
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase))
+          },
+          [new ResourceGraphLayer(0, [first.Definition.Id, secondDefinition.Id])]),
+      Plan = run.Plan with
+      {
+        Layers = [new ResourceGraphLayer(0, [first.Definition.Id, secondDefinition.Id])],
+        Resources = [first, second]
+      },
+      ResourceResults = new Dictionary<string, ResourceResult>(
+          run.ResourceResults,
+          StringComparer.OrdinalIgnoreCase)
+      {
+        [secondDefinition.Id] = run.ResourceResults[first.Definition.Id] with
+        {
+          ResourceId = secondDefinition.Id
+        }
+      }
+    };
+    await store.CreateAsync(
+        run,
+        [
+          new ApprovedResourceSeal(first.Definition, first.ResourcePlan),
+          new ApprovedResourceSeal(second.Definition, second.ResourcePlan)
+        ],
+        CancellationToken.None);
+    return run;
   }
 
   private static ExecutionRun ElevatedRunWithSecret(string secret)
@@ -1750,6 +3516,230 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
       }
     };
   }
+
+  private static ExecutionRun DeferredElevatedRun(string secret)
+  {
+    var run = SampleRun();
+    var planned = run.Plan!.Resources.Single();
+    var definition = planned.Definition with
+    {
+      PrivilegeRequirement = PrivilegeRequirement.Administrator,
+      Parameters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["password"] = secret
+      }
+    };
+    var placeholder = planned.ResourcePlan with
+    {
+      DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(definition),
+      Compliance = ComplianceStatus.Missing,
+      IsExecutable = false,
+      Steps =
+      [
+        new PlanStep
+        {
+          Id = "deferred-refinement",
+          Description = "Authorize deferred install after dependency re-detection.",
+          Action = PlanAction.Install,
+          PrivilegeRequirement = PrivilegeRequirement.Administrator,
+          RestartPolicy = RestartPolicy.NoRestart,
+          Reason = "Plan after dependency re-detection."
+        }
+      ]
+    };
+    var initialPlanFingerprint = new string('D', 64);
+    return run with
+    {
+      Graph = new ResourceGraph(
+          new Dictionary<string, ResolvedResource>(StringComparer.OrdinalIgnoreCase)
+          {
+            [definition.Id] = new(
+                definition,
+                ResourceOrigin.Required,
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase))
+          },
+          [new ResourceGraphLayer(0, [definition.Id])]),
+      Plan = run.Plan with
+      {
+        Fingerprint = initialPlanFingerprint,
+        Resources =
+        [
+          planned with
+          {
+            Definition = definition,
+            ResourcePlan = placeholder,
+            Status = PlannedResourceStatus.Deferred,
+            RequiresElevation = true,
+            Risk = PlanRisk.Elevated,
+            DeferredAuthorization = new DeferredPlanAuthorization
+            {
+              AllowedActions = [PlanAction.Install],
+              MaximumPrivilege = PrivilegeRequirement.Administrator,
+              MaximumRestartPolicy = RestartPolicy.NoRestart,
+              MaximumRisk = PlanRisk.Elevated,
+              AllowDestructive = false,
+              DynamicPlanNotice = "Plan after dependency re-detection."
+            }
+          }
+        ]
+      },
+      PlanApproval = new PlanApproval
+      {
+        InitialPlanFingerprint = initialPlanFingerprint,
+        ConfirmedAtUtc = DateTimeOffset.Parse("2026-08-30T00:00:00Z"),
+        Source = PlanApprovalSource.DesktopReviewedPlan,
+        DeferredAuthorizations =
+        [
+          new DeferredAuthorizationProof
+          {
+            ResourceId = definition.Id,
+            ResourceType = definition.Type,
+            ProviderName = definition.Provider,
+            DefinitionFingerprint = placeholder.DesiredStateFingerprint,
+            Origin = ResourceOrigin.Required,
+            Dependencies = [],
+            AllowedActions = [PlanAction.Install],
+            MaximumPrivilege = PrivilegeRequirement.Administrator,
+            MaximumRestartPolicy = RestartPolicy.NoRestart,
+            MaximumRisk = PlanRisk.Elevated,
+            AllowDestructive = false
+          }
+        ]
+      }
+    };
+  }
+
+  private static ExecutionRun PromoteDeferredRun(
+      ExecutionRun run,
+      ResourcePlan executablePlan)
+  {
+    var deferred = Assert.Single(run.Plan!.Resources);
+    return run with
+    {
+      Plan = run.Plan with
+      {
+        Resources =
+        [
+          deferred with
+          {
+            ResourcePlan = executablePlan,
+            Status = PlannedResourceStatus.Ready,
+            Risk = PlanRisk.Elevated,
+            RequiresElevation = true,
+            DeferredAuthorization = null
+          }
+        ]
+      }
+    };
+  }
+
+  private static ExecutionRun DeferredElevatedRunWithTwoResources()
+  {
+    var run = DeferredElevatedRun("first-deferred-secret");
+    var first = Assert.Single(run.Plan!.Resources);
+    var firstResolved = run.Graph!.Nodes[first.Definition.Id];
+    var firstProof = Assert.Single(run.PlanApproval!.DeferredAuthorizations);
+    var secondDefinition = first.Definition with
+    {
+      Id = "node",
+      Parameters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["password"] = "second-deferred-secret"
+      }
+    };
+    var secondPlan = first.ResourcePlan with
+    {
+      ResourceId = secondDefinition.Id,
+      DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(secondDefinition)
+    };
+    var second = first with
+    {
+      Definition = secondDefinition,
+      ResourcePlan = secondPlan
+    };
+    return run with
+    {
+      Graph = new ResourceGraph(
+          new Dictionary<string, ResolvedResource>(StringComparer.OrdinalIgnoreCase)
+          {
+            [first.Definition.Id] = firstResolved,
+            [secondDefinition.Id] = new(
+                secondDefinition,
+                ResourceOrigin.Required,
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase))
+          },
+          [new ResourceGraphLayer(0, [first.Definition.Id, secondDefinition.Id])]),
+      Plan = run.Plan with
+      {
+        Layers = [new ResourceGraphLayer(0, [first.Definition.Id, secondDefinition.Id])],
+        Resources = [first, second]
+      },
+      PlanApproval = run.PlanApproval with
+      {
+        DeferredAuthorizations =
+        [
+          firstProof,
+          firstProof with
+          {
+            ResourceId = secondDefinition.Id,
+            DefinitionFingerprint = secondPlan.DesiredStateFingerprint
+          }
+        ]
+      },
+      ResourceResults = new Dictionary<string, ResourceResult>(
+          run.ResourceResults,
+          StringComparer.OrdinalIgnoreCase)
+      {
+        [secondDefinition.Id] = run.ResourceResults[first.Definition.Id] with
+        {
+          ResourceId = secondDefinition.Id
+        }
+      }
+    };
+  }
+
+  private static ResourcePlan ExecutableDeferredPlan(PlannedResource resource) =>
+      resource.ResourcePlan with
+      {
+        IsExecutable = true,
+        Steps =
+        [
+          new PlanStep
+          {
+            Id = $"install-{resource.Definition.Id}",
+            Description = $"Install deferred resource '{resource.Definition.Id}'",
+            Action = PlanAction.Install,
+            PrivilegeRequirement = PrivilegeRequirement.Administrator,
+            RestartPolicy = RestartPolicy.NoRestart
+          }
+        ]
+      };
+
+  private static ExecutionRun PromoteDeferredResources(
+      ExecutionRun run,
+      params (string ResourceId, ResourcePlan Plan)[] promotions) => run with
+      {
+        Plan = run.Plan! with
+        {
+          Resources = run.Plan.Resources.Select(resource =>
+          {
+            var promotion = promotions.SingleOrDefault(candidate => string.Equals(
+                candidate.ResourceId,
+                resource.Definition.Id,
+                StringComparison.OrdinalIgnoreCase));
+            return promotion.Plan is null
+                ? resource
+                : resource with
+                {
+                  ResourcePlan = promotion.Plan,
+                  Status = PlannedResourceStatus.Ready,
+                  Risk = PlanRisk.Elevated,
+                  RequiresElevation = true,
+                  DeferredAuthorization = null
+                };
+          }).ToArray()
+        }
+      };
 
   private static ResourceResult SampleResourceResult() => new()
   {
@@ -1952,6 +3942,13 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
           entropy);
       return plaintext;
     }
+  }
+
+  private sealed class PassThroughApprovedResourceProtector : IApprovedResourceProtector
+  {
+    public byte[] Protect(byte[] plaintext, byte[] entropy) => plaintext;
+
+    public byte[] Unprotect(byte[] protectedData, byte[] entropy) => protectedData;
   }
 
   private sealed class OriginalValueRecordingProvider : IResourceProvider

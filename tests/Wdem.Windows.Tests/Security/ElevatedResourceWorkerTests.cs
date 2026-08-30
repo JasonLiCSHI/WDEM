@@ -5,6 +5,7 @@ using Wdem.Core.Planning;
 using Wdem.Core.Providers;
 using Wdem.Core.Resources;
 using Wdem.Core.Runs;
+using Wdem.Windows.Execution;
 using Wdem.Windows.Security;
 using Xunit;
 
@@ -517,7 +518,7 @@ public sealed class ElevatedResourceWorkerTests
         new StubApprovedResourceStore(new ApprovedResource(
             original,
             approvedPlan,
-            fingerprint)),
+            fingerprint), tampered),
         new ResourceProviderRegistry([provider]),
         new LogRedactor());
 
@@ -591,7 +592,7 @@ public sealed class ElevatedResourceWorkerTests
         approvedFingerprint);
     var worker = new ElevatedResourceWorker(
         new StubRunStore(tampered),
-        new StubApprovedResourceStore(sealedResource),
+        new StubApprovedResourceStore(sealedResource, tampered),
         new ResourceProviderRegistry([provider]),
         new LogRedactor());
 
@@ -643,7 +644,7 @@ public sealed class ElevatedResourceWorkerTests
         new StubApprovedResourceStore(new ApprovedResource(
             planned.Definition,
             approvedPlan,
-            fingerprint)),
+            fingerprint), tamperedRun),
         new ResourceProviderRegistry([provider]),
         new LogRedactor());
 
@@ -711,6 +712,138 @@ public sealed class ElevatedResourceWorkerTests
         CancellationToken.None);
 
     Assert.Equal(ApplyOutcome.Succeeded, applied.Outcome);
+    Assert.Equal(1, provider.ApplyCalls);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_PersistedAdministratorRefinementOfDeferredAuthorization_IsAccepted()
+  {
+    var provider = new RecordingProvider();
+    var concreteRun = ApprovedRun(provider, out var fingerprint);
+    var concrete = Assert.Single(concreteRun.Plan!.Resources);
+    var reviewedDeferred = concrete with
+    {
+      Status = PlannedResourceStatus.Deferred,
+      ResourcePlan = concrete.ResourcePlan with
+      {
+        IsExecutable = false,
+        Steps =
+        [
+          concrete.ResourcePlan.Steps.Single() with
+          {
+            Id = "deferred-refinement",
+            Description = "Authorize deferred configure after dependency re-detection."
+          }
+        ]
+      },
+      DeferredAuthorization = new DeferredPlanAuthorization
+      {
+        AllowedActions = [PlanAction.Configure],
+        MaximumPrivilege = PrivilegeRequirement.Administrator,
+        MaximumRestartPolicy = RestartPolicy.NoRestart,
+        MaximumRisk = PlanRisk.Elevated,
+        AllowDestructive = false,
+        DynamicPlanNotice = "Re-detect after dependencies succeed."
+      }
+    };
+    Assert.Equal(PlannedResourceStatus.Deferred, reviewedDeferred.Status);
+    var persistedRun = concreteRun with
+    {
+      Plan = concreteRun.Plan with { Resources = [concrete] }
+    };
+    var worker = new ElevatedResourceWorker(
+        new StubRunStore(persistedRun),
+        new StubApprovedResourceStore(new ApprovedResource(
+            concrete.Definition,
+            concrete.ResourcePlan,
+            fingerprint)),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+
+    var result = await worker.ApplyAsync(
+        new ElevatedResourceRequest(
+            persistedRun.RunId,
+            concrete.Definition.Id,
+            fingerprint),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
+    Assert.Equal(1, provider.ApplyCalls);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_AtomicClaimOverridesStaleTargetSnapshot()
+  {
+    var provider = new RecordingProvider();
+    var current = ApprovedRun(provider, out var fingerprint);
+    var planned = Assert.Single(current.Plan!.Resources);
+    var stale = current with
+    {
+      Plan = current.Plan with { Resources = [] },
+      ResourceResults = new Dictionary<string, ResourceResult>(
+          StringComparer.OrdinalIgnoreCase)
+    };
+    var worker = new ElevatedResourceWorker(
+        new StubRunStore(stale),
+        new StubApprovedResourceStore(new ApprovedResource(
+            planned.Definition,
+            planned.ResourcePlan,
+            fingerprint)),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+
+    var result = await worker.ApplyAsync(
+        new ElevatedResourceRequest(current.RunId, planned.Definition.Id, fingerprint),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
+    Assert.Equal(1, provider.ApplyCalls);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_ClaimRevalidationOverridesStaleDependencyObservation()
+  {
+    var provider = new RecordingProvider();
+    var run = ApprovedRun(provider, out _);
+    var planned = Assert.Single(run.Plan!.Resources);
+    var definition = planned.Definition with { Dependencies = ["dependency"] };
+    planned = planned with
+    {
+      Definition = definition,
+      Dependencies = ["dependency"]
+    };
+    var fingerprint = ApprovedResourceFingerprint.Create(definition, planned.ResourcePlan);
+    run = run with
+    {
+      Plan = run.Plan with { Resources = [planned] },
+      ResourceResults = new Dictionary<string, ResourceResult>(
+          run.ResourceResults,
+          StringComparer.OrdinalIgnoreCase)
+      {
+        ["dependency"] = new ResourceResult
+        {
+          ResourceId = "dependency",
+          State = ExecutionState.Running
+        }
+      }
+    };
+    var worker = new ElevatedResourceWorker(
+        new StubRunStore(run),
+        new StubApprovedResourceStore(new ApprovedResource(
+            definition,
+            planned.ResourcePlan,
+            fingerprint)),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+
+    var result = await worker.ApplyAsync(
+        new ElevatedResourceRequest(run.RunId, definition.Id, fingerprint),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
     Assert.Equal(1, provider.ApplyCalls);
   }
 
@@ -805,6 +938,7 @@ public sealed class ElevatedResourceWorkerTests
       IExecutionRunStore,
       IApprovedResourceStore
   {
+    private readonly HashSet<string> _claims = new(StringComparer.OrdinalIgnoreCase);
     public IReadOnlyList<StructuredError> Diagnostics => [];
 
     public Task<ExecutionRun?> GetAsync(Guid runId, CancellationToken cancellationToken) =>
@@ -829,6 +963,68 @@ public sealed class ElevatedResourceWorkerTests
               ApprovedResourceFingerprint.Create(
                   planned.Definition,
                   planned.ResourcePlan)));
+    }
+
+    public async Task<ApprovedResourceClaim?> ClaimApprovedResourceAsync(
+        Guid runId,
+        string resourceId,
+        string planFingerprint,
+        CancellationToken cancellationToken)
+    {
+      if (runId != run.RunId ||
+          run.Mode != RunMode.Apply ||
+          run.State != ExecutionState.Running ||
+          run.Plan is null ||
+          !run.Plan.IsExecutable)
+      {
+        return null;
+      }
+
+      var plannedMatches = run.Plan.Resources.Where(resource => string.Equals(
+          resource.Definition.Id,
+          resourceId,
+          StringComparison.OrdinalIgnoreCase)).ToArray();
+      if (plannedMatches.Length != 1)
+      {
+        return null;
+      }
+
+      var planned = plannedMatches[0];
+      if (!run.ResourceResults.TryGetValue(resourceId, out var persistedResult) ||
+          persistedResult.State != ExecutionState.Running ||
+          persistedResult.Outcome is not null ||
+          planned.Status != PlannedResourceStatus.Ready ||
+          !planned.RequiresElevation ||
+          !planned.ResourcePlan.IsExecutable ||
+          !planned.ResourcePlan.RequiresApply ||
+          !planned.Dependencies.All(dependency =>
+              run.ResourceResults.TryGetValue(dependency, out var dependencyResult) &&
+              dependencyResult.State == ExecutionState.Completed &&
+              dependencyResult.Outcome is ExecutionOutcome.Succeeded or
+                  ExecutionOutcome.NotRequired))
+      {
+        return null;
+      }
+
+      var approved = await GetApprovedResourceAsync(runId, resourceId, cancellationToken);
+      if (approved is null)
+      {
+        return null;
+      }
+
+      var segment = PrivilegePlanSegments.Split(approved.Plan).SingleOrDefault(candidate =>
+          string.Equals(
+              ApprovedResourceFingerprint.Create(approved.Definition, candidate),
+              planFingerprint,
+              StringComparison.OrdinalIgnoreCase));
+      var claim = $"{runId:N}\0{resourceId}\0{planFingerprint}";
+      return segment is null || !_claims.Add(claim)
+          ? null
+          : new ApprovedResourceClaim(
+              approved.Definition,
+              approved.Plan,
+              segment,
+              approved.Fingerprint);
     }
 
     public Task CreateAsync(ExecutionRun value, CancellationToken cancellationToken) =>
@@ -936,13 +1132,74 @@ public sealed class ElevatedResourceWorkerTests
         CancellationToken cancellationToken) => throw new NotSupportedException();
   }
 
-  private sealed class StubApprovedResourceStore(ApprovedResource approved) :
-      IApprovedResourceStore
+  private sealed class StubApprovedResourceStore : IApprovedResourceStore
   {
+    private readonly ApprovedResource _approved;
+    private readonly ExecutionRun? _authorizationSnapshot;
+    private readonly HashSet<string> _claims = new(StringComparer.OrdinalIgnoreCase);
+
+    public StubApprovedResourceStore(
+        ApprovedResource approved,
+        ExecutionRun? authorizationSnapshot = null)
+    {
+      _approved = approved;
+      _authorizationSnapshot = authorizationSnapshot;
+    }
+
+    public Task<ApprovedResourceClaim?> ClaimApprovedResourceAsync(
+        Guid runId,
+        string resourceId,
+        string planFingerprint,
+        CancellationToken cancellationToken)
+    {
+      if (_authorizationSnapshot is not null &&
+          !MatchesAuthorizationSnapshot(_authorizationSnapshot, resourceId))
+      {
+        return Task.FromResult<ApprovedResourceClaim?>(null);
+      }
+
+      var segment = PrivilegePlanSegments.Split(_approved.Plan).SingleOrDefault(candidate =>
+          string.Equals(
+              ApprovedResourceFingerprint.Create(_approved.Definition, candidate),
+              planFingerprint,
+              StringComparison.OrdinalIgnoreCase));
+      var claim = $"{runId:N}\0{resourceId}\0{planFingerprint}";
+      return Task.FromResult<ApprovedResourceClaim?>(segment is null || !_claims.Add(claim)
+          ? null
+          : new ApprovedResourceClaim(
+              _approved.Definition,
+              _approved.Plan,
+              segment,
+              _approved.Fingerprint));
+    }
+
     public Task<ApprovedResource?> GetApprovedResourceAsync(
         Guid runId,
         string resourceId,
-        CancellationToken cancellationToken) => Task.FromResult<ApprovedResource?>(approved);
+        CancellationToken cancellationToken) => Task.FromResult<ApprovedResource?>(_approved);
+
+    private bool MatchesAuthorizationSnapshot(ExecutionRun run, string resourceId)
+    {
+      var matches = run.Plan?.Resources.Where(resource => string.Equals(
+          resource.Definition.Id,
+          resourceId,
+          StringComparison.OrdinalIgnoreCase)).ToArray() ?? [];
+      if (matches.Length != 1)
+      {
+        return false;
+      }
+
+      var planned = matches[0];
+      return string.Equals(
+              ApprovedResourceFingerprint.Create(
+                  planned.Definition,
+                  planned.ResourcePlan),
+              _approved.Fingerprint,
+              StringComparison.OrdinalIgnoreCase) &&
+          planned.Dependencies.Count == _approved.Definition.Dependencies.Count &&
+          planned.Dependencies.Zip(_approved.Definition.Dependencies).All(pair =>
+              string.Equals(pair.First, pair.Second, StringComparison.OrdinalIgnoreCase));
+    }
   }
 
   private sealed class RecordingProgress : IProgress<ProviderProgress>

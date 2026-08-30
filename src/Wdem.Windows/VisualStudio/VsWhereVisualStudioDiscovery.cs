@@ -34,6 +34,11 @@ public sealed class VsWhereVisualStudioDiscovery : IVisualStudioDiscovery
             ["-products", "*", "-format", "json", "-utf8", "-prerelease"]),
         null,
         cancellationToken).ConfigureAwait(false);
+    if (!result.Started && result.Error is null)
+    {
+      return Array.Empty<VisualStudioInstance>();
+    }
+
     EnsureSuccessful(result, "Visual Studio instance query");
 
     var records = Deserialize(result);

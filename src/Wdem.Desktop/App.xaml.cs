@@ -26,7 +26,7 @@ public partial class App : Application
       var window = new MainWindow(() => new MainWindowViewModel(
           _composition.Profiles,
           new ResourceGraphBuilder(),
-          _composition.EnvironmentRuns,
+          _composition.ReviewedPlanRuns,
           _composition.RunEvents,
           _composition.Redactor,
           new DispatcherQueueUiDispatcher(

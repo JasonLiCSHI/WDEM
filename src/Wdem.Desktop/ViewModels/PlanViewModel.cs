@@ -10,7 +10,7 @@ public sealed class PlanViewModel : ObservableObject
   private readonly IEnvironmentRunService _runService;
   private readonly LogRedactor _redactor;
   private readonly RunRequest _request;
-  private readonly Func<RunRequest, Task> _startExecution;
+  private readonly Func<RunRequest, string, Task> _startExecution;
   private bool _isLoading;
   private bool _canApply;
   private string? _approvedPlanFingerprint;
@@ -20,7 +20,7 @@ public sealed class PlanViewModel : ObservableObject
       IEnvironmentRunService runService,
       LogRedactor redactor,
       RunRequest request,
-      Func<RunRequest, Task> startExecution)
+      Func<RunRequest, string, Task> startExecution)
   {
     ArgumentNullException.ThrowIfNull(runService);
     ArgumentNullException.ThrowIfNull(redactor);
@@ -135,10 +135,10 @@ public sealed class PlanViewModel : ObservableObject
       return Task.CompletedTask;
     }
 
-    return _startExecution(_request with
-    {
-      ApprovedPlanFingerprint = _approvedPlanFingerprint
-    });
+    return _startExecution(
+        _request,
+        _approvedPlanFingerprint ?? throw new InvalidOperationException(
+            "The reviewed plan fingerprint is unavailable."));
   }
 
   private void Present(ExecutionPlan plan)
@@ -168,7 +168,9 @@ public sealed class PlanViewModel : ObservableObject
 
     CanApply = plan.IsExecutable &&
         Errors.Count == 0 &&
-        plan.Resources.All(resource => resource.ResourcePlan.IsExecutable);
+        plan.Resources.All(resource =>
+            resource.Status == PlannedResourceStatus.Deferred ||
+            resource.ResourcePlan.IsExecutable);
     _approvedPlanFingerprint = CanApply ? plan.Fingerprint : null;
   }
 

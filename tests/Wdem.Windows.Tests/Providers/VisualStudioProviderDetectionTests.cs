@@ -353,7 +353,7 @@ public sealed class VisualStudioProviderDetectionTests
   }
 
   [Fact]
-  public async Task DetectAsync_VsWhereDoesNotStart_ReturnsStructuredDetectionError()
+  public async Task DetectAsync_VsWhereIsNotInstalled_ReturnsMissingVisualStudio()
   {
     var discovery = new VsWhereVisualStudioDiscovery(
         new SingleResultProcessExecutor(
@@ -363,10 +363,9 @@ public sealed class VisualStudioProviderDetectionTests
 
     var state = await provider.DetectAsync(VisualStudioResource(), CancellationToken.None);
 
-    Assert.Equal(DetectionOutcome.Failed, state.Outcome);
-    Assert.Equal(WdemErrorCode.DetectionError, state.StructuredError!.Code);
-    Assert.Contains("vswhere", state.StructuredError.Detail, StringComparison.OrdinalIgnoreCase);
-    Assert.IsType<InvalidOperationException>(state.StructuredError.UnderlyingException);
+    Assert.Equal(DetectionOutcome.Succeeded, state.Outcome);
+    Assert.False(state.Exists);
+    Assert.Null(state.StructuredError);
   }
 
   private static ResourceDefinition VisualStudioResource(

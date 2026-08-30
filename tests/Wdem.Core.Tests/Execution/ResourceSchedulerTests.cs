@@ -125,7 +125,7 @@ public sealed class ResourceSchedulerTests
   }
 
   [Fact]
-  public void CancellationDrainDeadline_RegisteringSmallerReservationAfterStartDoesNotShrinkDeadline()
+  public void CancellationDrainDeadline_RejectsSmallerReservationAfterStart()
   {
     using var cancellation = new CancellationTokenSource();
     using var deadline = new CancellationDrainDeadline(
@@ -135,28 +135,61 @@ public sealed class ResourceSchedulerTests
     cancellation.Cancel();
     var before = deadline.Remaining;
 
-    using var smaller = deadline.RegisterPotentialFinalization(TimeSpan.FromMilliseconds(500));
+    Assert.Throws<InvalidOperationException>(() =>
+        deadline.RegisterPotentialFinalization(TimeSpan.FromMilliseconds(500)));
     larger.Dispose();
 
     Assert.InRange(deadline.Remaining, TimeSpan.FromSeconds(1), before);
   }
 
   [Fact]
-  public void CancellationDrainDeadline_RegisteringLargerReservationAfterStartExtendsDeadlineForward()
+  public void CancellationDrainDeadline_RejectsLargerReservationAfterStart()
   {
     using var cancellation = new CancellationTokenSource();
     using var deadline = new CancellationDrainDeadline(
         TimeSpan.FromMilliseconds(25),
         cancellation.Token);
+    var existing = deadline.RegisterPotentialFinalization(TimeSpan.FromSeconds(1));
     cancellation.Cancel();
     var before = deadline.Remaining;
 
-    var larger = deadline.RegisterPotentialFinalization(TimeSpan.FromSeconds(2));
-    var extended = deadline.Remaining;
-    larger.Dispose();
+    Assert.Throws<InvalidOperationException>(() =>
+        deadline.RegisterPotentialFinalization(TimeSpan.FromSeconds(2)));
+    existing.Dispose();
 
-    Assert.True(extended > before + TimeSpan.FromSeconds(1));
+    Assert.InRange(deadline.Remaining, TimeSpan.FromMilliseconds(500), before);
+  }
+
+  [Fact]
+  public void CancellationDrainDeadline_RejectsReservationAfterStartWithoutExtendingDeadline()
+  {
+    using var cancellation = new CancellationTokenSource();
+    using var deadline = new CancellationDrainDeadline(
+        TimeSpan.FromSeconds(1),
+        cancellation.Token);
+    cancellation.Cancel();
+    var before = deadline.Remaining;
+
+    Assert.Throws<InvalidOperationException>(() =>
+        deadline.RegisterPotentialFinalization(TimeSpan.FromSeconds(2)));
+
+    Assert.InRange(deadline.Remaining, TimeSpan.Zero, before);
+  }
+
+  [Fact]
+  public void CancellationDrainDeadline_InstallsInitialReservationBeforeStarting()
+  {
+    using var cancellation = new CancellationTokenSource();
+    cancellation.Cancel();
+
+    using var deadline = new CancellationDrainDeadline(
+        TimeSpan.FromMilliseconds(25),
+        cancellation.Token,
+        TimeSpan.FromSeconds(2));
+
     Assert.True(deadline.Remaining > TimeSpan.FromSeconds(1));
+    Assert.Throws<InvalidOperationException>(() =>
+        deadline.RegisterPotentialFinalization(TimeSpan.FromMilliseconds(1)));
   }
 
   [Fact]
@@ -210,11 +243,11 @@ public sealed class ResourceSchedulerTests
   }
 
   [Fact]
-  public void CancellationDrainDeadline_ConcurrentRegistrationAndReleaseAfterStartRetainsMaximum()
+  public void CancellationDrainDeadline_ConcurrentRegistrationAfterStartIsRejected()
   {
     using var cancellation = new CancellationTokenSource();
     using var deadline = new CancellationDrainDeadline(
-        TimeSpan.FromMilliseconds(25),
+        TimeSpan.FromSeconds(1),
         cancellation.Token);
     var durations = Enumerable.Range(1, 128)
         .Select(index => TimeSpan.FromMilliseconds(index * 10))
@@ -223,16 +256,18 @@ public sealed class ResourceSchedulerTests
 
     Parallel.For(0, durations.Length, index =>
     {
-      var reservation = deadline.RegisterPotentialFinalization(durations[index]);
-      reservation.Dispose();
-      reservation.Dispose();
+      Assert.Throws<InvalidOperationException>(() =>
+          deadline.RegisterPotentialFinalization(durations[index]));
     });
 
-    Assert.True(deadline.Remaining > TimeSpan.FromSeconds(1));
+    Assert.InRange(
+        deadline.Remaining,
+        TimeSpan.FromMilliseconds(500),
+        TimeSpan.FromSeconds(1));
   }
 
   [Fact]
-  public void CancellationDrainDeadline_AcceptsReservationAfterCancellationStarts()
+  public void CancellationDrainDeadline_RejectsReservationAfterCancellationStarts()
   {
     using var cancellation = new CancellationTokenSource();
     using var deadline = new CancellationDrainDeadline(
@@ -241,9 +276,8 @@ public sealed class ResourceSchedulerTests
 
     cancellation.Cancel();
 
-    using var reservation = deadline.RegisterPotentialFinalization(
-        TimeSpan.FromMilliseconds(300));
-    Assert.True(deadline.Remaining > TimeSpan.FromMilliseconds(200));
+    Assert.Throws<InvalidOperationException>(() =>
+        deadline.RegisterPotentialFinalization(TimeSpan.FromMilliseconds(300)));
   }
 
   [Theory]
@@ -425,6 +459,314 @@ public sealed class ResourceSchedulerTests
   }
 
   [Fact]
+  public async Task ExecuteAsync_ObserverFailureRegistersUndrainedCompletionBeforeRethrowing()
+  {
+    var scheduler = new ResourceScheduler(TimeSpan.FromMilliseconds(50));
+    using var cancellationDeadline = new CancellationDrainDeadline(
+        TimeSpan.FromMilliseconds(50),
+        CancellationToken.None);
+    var runningStarted = NewGate();
+    var releaseRunning = new TaskCompletionSource<ResourceResult>(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var lateSuccessObserved = NewGate();
+    Task? registeredFinalization = null;
+    var observerFailure = new IOException("required transition persistence failed");
+    var execution = scheduler.ExecuteAsync(
+        IndependentPlan("a", "b"),
+        async (resource, _) =>
+        {
+          if (resource.Definition.Id == "a")
+          {
+            runningStarted.TrySetResult();
+            return await releaseRunning.Task;
+          }
+
+          return Result(resource.Definition.Id, ExecutionOutcome.Succeeded);
+        },
+        _ => new ProviderCapabilities { MaxConcurrentOperations = 2 },
+        maximumConcurrency: 2,
+        CancellationToken.None,
+        transition =>
+        {
+          if (transition.ResourceId == "a" &&
+              transition.Outcome == ExecutionOutcome.Succeeded)
+          {
+            lateSuccessObserved.TrySetResult();
+          }
+
+          return transition.ResourceId == "b" &&
+              transition.State == ExecutionState.Ready
+              ? Task.FromException(observerFailure)
+              : Task.CompletedTask;
+        },
+        cancellationDeadline,
+        undrainedCompletion => registeredFinalization = undrainedCompletion);
+
+    try
+    {
+      await runningStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+
+      var actual = await Assert.ThrowsAsync<IOException>(
+          () => execution.WaitAsync(TimeSpan.FromSeconds(1)));
+
+      Assert.Same(observerFailure, actual);
+      Assert.True(cancellationDeadline.IsStarted);
+      var finalization = Assert.IsAssignableFrom<Task>(registeredFinalization);
+      Assert.False(finalization.IsCompleted);
+      releaseRunning.TrySetResult(Result("a", ExecutionOutcome.Succeeded));
+      await finalization.WaitAsync(TimeSpan.FromSeconds(1));
+      await lateSuccessObserved.Task.WaitAsync(TimeSpan.FromSeconds(1));
+    }
+    finally
+    {
+      releaseRunning.TrySetResult(Result("a", ExecutionOutcome.Succeeded));
+    }
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_TerminalObserverFailureFinalizesEveryUnpublishedCompletedResult()
+  {
+    var scheduler = new ResourceScheduler(TimeSpan.FromMilliseconds(50));
+    var allStarted = NewGate();
+    var releases = new Dictionary<string, TaskCompletionSource>(StringComparer.OrdinalIgnoreCase)
+    {
+      ["a"] = NewGate(),
+      ["b"] = NewGate(),
+      ["c"] = NewGate()
+    };
+    var completions = new Dictionary<string, TaskCompletionSource>(
+        StringComparer.OrdinalIgnoreCase)
+    {
+      ["a"] = NewGate(),
+      ["b"] = NewGate(),
+      ["c"] = NewGate()
+    };
+    var started = 0;
+    var failedFirstTerminal = 0;
+    var observationGate = new object();
+    var completionOrder = new List<string>();
+    var publishedTerminals = new List<string>();
+    Task? registeredFinalization = null;
+    var observerFailure = new IOException("first terminal persistence failed");
+    var execution = scheduler.ExecuteAsync(
+        IndependentPlan("a", "b", "c"),
+        async (resource, _) =>
+        {
+          if (Interlocked.Increment(ref started) == 3)
+          {
+            allStarted.TrySetResult();
+          }
+
+          var id = resource.Definition.Id;
+          await releases[id].Task;
+          lock (observationGate)
+          {
+            completionOrder.Add(id);
+          }
+
+          completions[id].TrySetResult();
+          return Result(id, ExecutionOutcome.Succeeded);
+        },
+        _ => new ProviderCapabilities { MaxConcurrentOperations = 3 },
+        maximumConcurrency: 3,
+        CancellationToken.None,
+        async transition =>
+        {
+          if (transition.State != ExecutionState.Completed)
+          {
+            return;
+          }
+
+          if (transition.ResourceId == "c" &&
+              Interlocked.Exchange(ref failedFirstTerminal, 1) == 0)
+          {
+            throw observerFailure;
+          }
+
+          await Task.Delay(transition.ResourceId switch
+          {
+            "a" => TimeSpan.FromMilliseconds(50),
+            "c" => TimeSpan.FromMilliseconds(200),
+            _ => TimeSpan.Zero
+          });
+          lock (observationGate)
+          {
+            publishedTerminals.Add(transition.ResourceId);
+          }
+        },
+        cancellationDeadline: null,
+        registerUndrainedCompletion:
+            undrainedCompletion => registeredFinalization = undrainedCompletion);
+
+    await allStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+    releases["c"].TrySetResult();
+    await completions["c"].Task.WaitAsync(TimeSpan.FromSeconds(1));
+
+    var actual = await Assert.ThrowsAsync<IOException>(
+        () => execution.WaitAsync(TimeSpan.FromSeconds(1)));
+
+    Assert.Same(observerFailure, actual);
+    var finalization = Assert.IsAssignableFrom<Task>(registeredFinalization);
+    releases["b"].TrySetResult();
+    await completions["b"].Task.WaitAsync(TimeSpan.FromSeconds(1));
+    releases["a"].TrySetResult();
+    await finalization.WaitAsync(TimeSpan.FromSeconds(2));
+
+    lock (observationGate)
+    {
+      Assert.Equal(["c", "b", "a"], completionOrder);
+      Assert.Equal(["a", "b", "c"], publishedTerminals);
+    }
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_ProvisionalCancellationObserverFailureRegistersLateCompletion()
+  {
+    var scheduler = new ResourceScheduler(TimeSpan.FromMilliseconds(50));
+    using var cancellation = new CancellationTokenSource();
+    using var cancellationDeadline = new CancellationDrainDeadline(
+        TimeSpan.FromMilliseconds(50),
+        cancellation.Token);
+    var runningStarted = NewGate();
+    var releaseRunning = new TaskCompletionSource<ResourceResult>(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var lateSuccessObserved = NewGate();
+    Task? registeredFinalization = null;
+    var observerFailure = new IOException("provisional cancellation persistence failed");
+    var execution = scheduler.ExecuteAsync(
+        IndependentPlan("a"),
+        async (_, _) =>
+        {
+          runningStarted.TrySetResult();
+          return await releaseRunning.Task;
+        },
+        _ => new ProviderCapabilities(),
+        maximumConcurrency: 1,
+        cancellation.Token,
+        transition =>
+        {
+          if (transition.Outcome == ExecutionOutcome.Succeeded)
+          {
+            lateSuccessObserved.TrySetResult();
+          }
+
+          return transition.Outcome == ExecutionOutcome.Cancelled
+              ? Task.FromException(observerFailure)
+              : Task.CompletedTask;
+        },
+        cancellationDeadline,
+        undrainedCompletion => registeredFinalization = undrainedCompletion);
+
+    try
+    {
+      await runningStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+      await cancellation.CancelAsync();
+
+      var actual = await Assert.ThrowsAsync<IOException>(
+          () => execution.WaitAsync(TimeSpan.FromSeconds(1)));
+
+      Assert.Same(observerFailure, actual);
+      var finalization = Assert.IsAssignableFrom<Task>(registeredFinalization);
+      Assert.False(finalization.IsCompleted);
+      releaseRunning.TrySetResult(Result("a", ExecutionOutcome.Succeeded));
+      await finalization.WaitAsync(TimeSpan.FromSeconds(1));
+      await lateSuccessObserved.Task.WaitAsync(TimeSpan.FromSeconds(1));
+    }
+    finally
+    {
+      releaseRunning.TrySetResult(Result("a", ExecutionOutcome.Succeeded));
+    }
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_CancellationObserverFailureFinalizesCompletedUnpublishedExecution()
+  {
+    var scheduler = new ResourceScheduler(TimeSpan.FromMilliseconds(100));
+    using var cancellation = new CancellationTokenSource();
+    using var cancellationDeadline = new CancellationDrainDeadline(
+        TimeSpan.FromMilliseconds(100),
+        cancellation.Token);
+    var runningCount = 0;
+    var bothRunning = NewGate();
+    var releaseA = new TaskCompletionSource<ResourceResult>(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var bCompleted = NewGate();
+    var lateAObserved = NewGate();
+    var completedBObserved = NewGate();
+    Task? registeredFinalization = null;
+    var observerFailure = new IOException("provisional cancellation persistence failed");
+    var execution = scheduler.ExecuteAsync(
+        IndependentPlan("a", "b"),
+        async (resource, token) =>
+        {
+          if (Interlocked.Increment(ref runningCount) == 2)
+          {
+            bothRunning.TrySetResult();
+          }
+
+          if (resource.Definition.Id == "a")
+          {
+            return await releaseA.Task;
+          }
+
+          var cancellationObserved = NewGate();
+          using var registration = token.Register(cancellationObserved.SetResult);
+          await cancellationObserved.Task;
+          await Task.Delay(TimeSpan.FromMilliseconds(10));
+          bCompleted.TrySetResult();
+          return Result("b", ExecutionOutcome.Succeeded);
+        },
+        _ => new ProviderCapabilities { MaxConcurrentOperations = 2 },
+        maximumConcurrency: 2,
+        cancellation.Token,
+        transition =>
+        {
+          if (transition.ResourceId == "a" &&
+              transition.Outcome == ExecutionOutcome.Cancelled)
+          {
+            Assert.True(bCompleted.Task.IsCompletedSuccessfully);
+            return Task.FromException(observerFailure);
+          }
+
+          if (transition.ResourceId == "a" &&
+              transition.Outcome == ExecutionOutcome.Succeeded)
+          {
+            lateAObserved.TrySetResult();
+          }
+
+          if (transition.ResourceId == "b" &&
+              transition.Outcome == ExecutionOutcome.Succeeded)
+          {
+            completedBObserved.TrySetResult();
+          }
+
+          return Task.CompletedTask;
+        },
+        cancellationDeadline,
+        undrainedCompletion => registeredFinalization = undrainedCompletion);
+
+    try
+    {
+      await bothRunning.Task.WaitAsync(TimeSpan.FromSeconds(1));
+      await cancellation.CancelAsync();
+
+      var actual = await Assert.ThrowsAsync<IOException>(
+          () => execution.WaitAsync(TimeSpan.FromSeconds(1)));
+
+      Assert.Same(observerFailure, actual);
+      var finalization = Assert.IsAssignableFrom<Task>(registeredFinalization);
+      releaseA.TrySetResult(Result("a", ExecutionOutcome.Succeeded));
+      await finalization.WaitAsync(TimeSpan.FromSeconds(1));
+      Assert.True(lateAObserved.Task.IsCompletedSuccessfully);
+      Assert.True(completedBObserved.Task.IsCompletedSuccessfully);
+    }
+    finally
+    {
+      releaseA.TrySetResult(Result("a", ExecutionOutcome.Succeeded));
+    }
+  }
+
+  [Fact]
   public async Task ExecuteAsync_CancelledDuringRunningTransitionDoesNotInvokeDelegate()
   {
     using var cancellation = new CancellationTokenSource();
@@ -476,6 +818,7 @@ public sealed class ResourceSchedulerTests
     var started = NewGate();
     var release = new TaskCompletionSource<ResourceResult>(
         TaskCreationOptions.RunContinuationsAsynchronously);
+    var lateFailureObserved = NewGate();
     var transitions = new List<ResourceResult>();
     var execution = scheduler.ExecuteAsync(
         IndependentPlan("a"),
@@ -490,6 +833,11 @@ public sealed class ResourceSchedulerTests
         transition =>
         {
           transitions.Add(transition);
+          if (transition.Outcome == ExecutionOutcome.Failed)
+          {
+            lateFailureObserved.TrySetResult();
+          }
+
           return Task.CompletedTask;
         });
     await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -505,11 +853,204 @@ public sealed class ResourceSchedulerTests
           transition.ResourceId == "a" &&
           transition.State == ExecutionState.Completed &&
           transition.Outcome == ExecutionOutcome.Cancelled);
+      release.TrySetException(new InvalidOperationException("late provider failure"));
+      await lateFailureObserved.Task.WaitAsync(TimeSpan.FromMilliseconds(500));
+      Assert.Contains(transitions, transition =>
+          transition.ResourceId == "a" &&
+          transition.State == ExecutionState.Completed &&
+          transition.Outcome == ExecutionOutcome.Failed);
     }
     finally
     {
       release.TrySetException(new InvalidOperationException("late provider failure"));
     }
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_UndrainedTransitionFailureRemainsObservable()
+  {
+    var scheduler = new ResourceScheduler(TimeSpan.FromMilliseconds(50));
+    using var cancellation = new CancellationTokenSource();
+    var started = NewGate();
+    var release = new TaskCompletionSource<ResourceResult>(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var persistenceFailure = new IOException("late transition persistence failed");
+    var execution = scheduler.ExecuteAsync(
+        IndependentPlan("a"),
+        async (_, _) =>
+        {
+          started.TrySetResult();
+          return await release.Task;
+        },
+        _ => new ProviderCapabilities(),
+        maximumConcurrency: 1,
+        cancellation.Token,
+        transition => transition.Outcome == ExecutionOutcome.Failed
+            ? Task.FromException(persistenceFailure)
+            : Task.CompletedTask);
+    await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    try
+    {
+      await cancellation.CancelAsync();
+      var result = await execution.WaitAsync(TimeSpan.FromSeconds(1));
+      release.TrySetException(new InvalidOperationException("late provider failure"));
+
+      var actual = await Assert.ThrowsAsync<IOException>(
+          () => result.UndrainedCompletion);
+
+      Assert.Same(persistenceFailure, actual);
+    }
+    finally
+    {
+      release.TrySetException(new InvalidOperationException("late provider failure"));
+    }
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_UndrainedResourcesPublishInPlanOrderAndPreserveFailure()
+  {
+    var scheduler = new ResourceScheduler(TimeSpan.FromMilliseconds(50));
+    using var cancellation = new CancellationTokenSource();
+    var firstStarted = NewGate();
+    var secondStarted = NewGate();
+    var releaseFirst = new TaskCompletionSource<ResourceResult>(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var releaseSecond = new TaskCompletionSource<ResourceResult>(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var secondFailureObserved = NewGate();
+    var persistenceFailure = new IOException("late transition persistence failed");
+    var execution = scheduler.ExecuteAsync(
+        IndependentPlan("a", "b"),
+        async (resource, _) =>
+        {
+          if (resource.Definition.Id == "a")
+          {
+            firstStarted.TrySetResult();
+            return await releaseFirst.Task;
+          }
+
+          secondStarted.TrySetResult();
+          return await releaseSecond.Task;
+        },
+        _ => new ProviderCapabilities { MaxConcurrentOperations = 2 },
+        maximumConcurrency: 2,
+        cancellation.Token,
+        transition =>
+        {
+          if (transition.ResourceId == "b" &&
+              transition.Outcome == ExecutionOutcome.Failed)
+          {
+            secondFailureObserved.TrySetResult();
+            return Task.FromException(persistenceFailure);
+          }
+
+          return Task.CompletedTask;
+        });
+    await Task.WhenAll(firstStarted.Task, secondStarted.Task)
+        .WaitAsync(TimeSpan.FromSeconds(5));
+    SchedulerResult? result = null;
+
+    try
+    {
+      await cancellation.CancelAsync();
+      result = await execution.WaitAsync(TimeSpan.FromSeconds(1));
+      releaseSecond.TrySetException(new InvalidOperationException("late provider failure"));
+      releaseFirst.TrySetResult(Result("a", ExecutionOutcome.Succeeded));
+      await secondFailureObserved.Task.WaitAsync(TimeSpan.FromMilliseconds(500));
+      var actual = await Assert.ThrowsAsync<IOException>(
+          () => result.UndrainedCompletion);
+
+      Assert.Same(persistenceFailure, actual);
+    }
+    finally
+    {
+      releaseFirst.TrySetResult(Result("a", ExecutionOutcome.Succeeded));
+      releaseSecond.TrySetException(new InvalidOperationException("late provider failure"));
+      if (result is not null)
+      {
+        try
+        {
+          await result.UndrainedCompletion;
+        }
+        catch (Exception)
+        {
+          // The persistence failure is the behavior under test.
+        }
+      }
+    }
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_UndrainedHostFaultRemainsObservable()
+  {
+    var scheduler = new ResourceScheduler(TimeSpan.FromMilliseconds(50));
+    using var cancellation = new CancellationTokenSource();
+    var started = NewGate();
+    var release = NewGate();
+    var hostFailure = new InvalidOperationException("required host delivery failed");
+    var execution = scheduler.ExecuteAsync(
+        IndependentPlan("a"),
+        async (_, _) =>
+        {
+          started.TrySetResult();
+          await release.Task;
+          throw new RequiredRunEventDeliveryException(hostFailure);
+        },
+        _ => new ProviderCapabilities(),
+        maximumConcurrency: 1,
+        cancellation.Token);
+    await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    try
+    {
+      await cancellation.CancelAsync();
+      var result = await execution.WaitAsync(TimeSpan.FromSeconds(1));
+      release.TrySetResult();
+
+      var exception = await Assert.ThrowsAsync<RequiredRunEventDeliveryException>(
+          () => result.UndrainedCompletion);
+
+      Assert.Same(hostFailure, exception.Cause);
+    }
+    finally
+    {
+      release.TrySetResult();
+    }
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_HostFaultDuringCancellationIsNotReclassifiedAsCancelled()
+  {
+    using var cancellation = new CancellationTokenSource();
+    var started = NewGate();
+    var hostFailure = new InvalidOperationException("required host delivery failed");
+    var execution = _scheduler.ExecuteAsync(
+        IndependentPlan("a"),
+        async (_, token) =>
+        {
+          started.TrySetResult();
+          try
+          {
+            await Task.Delay(Timeout.InfiniteTimeSpan, token);
+          }
+          catch (OperationCanceledException) when (token.IsCancellationRequested)
+          {
+            throw new RequiredRunEventDeliveryException(hostFailure);
+          }
+
+          throw new InvalidOperationException("Unreachable.");
+        },
+        _ => new ProviderCapabilities(),
+        maximumConcurrency: 1,
+        cancellation.Token);
+    await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    await cancellation.CancelAsync();
+    var exception = await Assert.ThrowsAsync<RequiredRunEventDeliveryException>(
+        () => execution.WaitAsync(TimeSpan.FromSeconds(5)));
+
+    Assert.Same(hostFailure, exception.Cause);
   }
 
   [Fact]

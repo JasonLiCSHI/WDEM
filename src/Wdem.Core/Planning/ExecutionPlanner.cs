@@ -132,9 +132,46 @@ public sealed partial class ExecutionPlanner(
             detectedStateSnapshot,
             cancellationToken).ConfigureAwait(false);
 
+        if (CanDeferUntilDependenciesComplete(item, plannedById))
+        {
+          var authorization = CreateDeferredAuthorization(item);
+          var expectedAction = authorization.AllowedActions.Single();
+          item = item with
+          {
+            Status = PlannedResourceStatus.Deferred,
+            Risk = authorization.MaximumRisk,
+            RequiresElevation = authorization.MaximumPrivilege ==
+                PrivilegeRequirement.Administrator,
+            IsDestructive = authorization.AllowDestructive,
+            RestartPolicy = authorization.MaximumRestartPolicy,
+            Reason = authorization.DynamicPlanNotice,
+            DeferredAuthorization = authorization,
+            Diagnostics = ReadOnly(Array.Empty<StructuredError>()),
+            ResourcePlan = item.ResourcePlan with
+            {
+              Error = null,
+              StructuredErrors = ReadOnly(Array.Empty<StructuredError>()),
+              Steps =
+              [
+                new PlanStep
+                {
+                  Id = "deferred-refinement",
+                  Description = $"Authorize deferred {expectedAction.ToString().ToLowerInvariant()} after dependency re-detection.",
+                  Action = expectedAction,
+                  PrivilegeRequirement = authorization.MaximumPrivilege,
+                  RestartPolicy = authorization.MaximumRestartPolicy,
+                  IsDestructive = authorization.AllowDestructive,
+                  Reason = authorization.DynamicPlanNotice
+                }
+              ]
+            }
+          };
+        }
+
         var blockedBy = item.Dependencies
             .Where(dependencyId => plannedById.TryGetValue(dependencyId, out var dependency) &&
                 dependency.Status is not PlannedResourceStatus.Ready and
+                    not PlannedResourceStatus.Deferred and
                     not PlannedResourceStatus.AlreadySatisfied)
             .Order(IdComparer)
             .ThenBy(id => id, StringComparer.Ordinal)
@@ -192,6 +229,69 @@ public sealed partial class ExecutionPlanner(
         canonicalLayers,
         ReadOnly(planned),
         ReadOnly(errors));
+  }
+
+  public async Task<PlannedResource> ReplanResourceAsync(
+      ResolvedResource resource,
+      DetectedState detectedState,
+      string approvedDefinitionFingerprint,
+      CancellationToken cancellationToken)
+  {
+    ArgumentNullException.ThrowIfNull(resource);
+    ArgumentNullException.ThrowIfNull(detectedState);
+    ArgumentException.ThrowIfNullOrWhiteSpace(approvedDefinitionFingerprint);
+    cancellationToken.ThrowIfCancellationRequested();
+
+    var externalTextBytes = 0;
+    var sourceGraph = new ResourceGraph(
+        new Dictionary<string, ResolvedResource>(IdComparer)
+        {
+          [resource.Definition.Id] = resource
+        },
+        [new ResourceGraphLayer(0, [resource.Definition.Id])]);
+    if (!TrySnapshotGraph(
+            sourceGraph,
+            ref externalTextBytes,
+            out var graphSnapshot,
+            out var graphError))
+    {
+      throw new ArgumentException(graphError!.Detail, nameof(resource));
+    }
+
+    if (!TrySnapshotDetectedStates(
+            new Dictionary<string, DetectedState>(IdComparer)
+            {
+              [detectedState.ResourceId] = detectedState
+            },
+            ref externalTextBytes,
+            out var statesSnapshot,
+            out var stateError))
+    {
+      throw new ArgumentException(stateError!.Detail, nameof(detectedState));
+    }
+
+    var snapshot = graphSnapshot.Nodes[resource.Definition.Id];
+    var actualFingerprint = ResourceDefinitionFingerprint.Create(snapshot.Definition);
+    if (!string.Equals(
+            actualFingerprint,
+            approvedDefinitionFingerprint,
+            StringComparison.Ordinal))
+    {
+      return Failure(
+          snapshot,
+          snapshot.Definition,
+          new StructuredError(
+              WdemErrorCode.ConfigurationError,
+              "The deferred resource definition changed after plan approval.",
+              "The resource must be reviewed again before it can be replanned.")
+          {
+            ResourceId = NormalizeResourceId(snapshot.Definition.Id),
+            SuggestedAction = "Create and approve a new execution plan."
+          });
+    }
+
+    return await PlanResourceAsync(snapshot, statesSnapshot, cancellationToken)
+        .ConfigureAwait(false);
   }
 
   private async Task<PlannedResource> PlanResourceAsync(
@@ -461,6 +561,10 @@ public sealed partial class ExecutionPlanner(
          resourcePlan.Compliance is not ComplianceStatus.DetectionFailed and
              not ComplianceStatus.Unsupported))
     {
+      var dependencyDeferredCandidate = !resourcePlan.IsExecutable &&
+          resourcePlan.Compliance is ComplianceStatus.Missing or
+              ComplianceStatus.VersionMismatch or ComplianceStatus.ConfigurationMismatch &&
+          reportedDiagnostics.All(error => error.Code == WdemErrorCode.DependencyError);
       if (resourcePlan.IsExecutable)
       {
         var malformedError = ProviderError(
@@ -477,11 +581,14 @@ public sealed partial class ExecutionPlanner(
         }
       }
 
-      return Failure(
-          resolved,
-          definition,
-          reportedDiagnostics,
-          PlannedResourceStatus.Invalid);
+      if (!dependencyDeferredCandidate)
+      {
+        return Failure(
+            resolved,
+            definition,
+            reportedDiagnostics,
+            PlannedResourceStatus.Invalid);
+      }
     }
 
     var planDiagnostics = ReadOnly(reportedDiagnostics);
@@ -521,29 +628,63 @@ public sealed partial class ExecutionPlanner(
     return item;
   }
 
+  private static bool CanDeferUntilDependenciesComplete(
+      PlannedResource item,
+      IReadOnlyDictionary<string, PlannedResource> plannedById)
+  {
+    if (item.Status != PlannedResourceStatus.Invalid ||
+        item.ResourcePlan.IsExecutable ||
+        item.ResourcePlan.Compliance is not (ComplianceStatus.Missing or
+            ComplianceStatus.VersionMismatch or ComplianceStatus.ConfigurationMismatch) ||
+        item.Diagnostics.Count == 0 ||
+        item.Diagnostics.Any(error => error.Code != WdemErrorCode.DependencyError) ||
+        item.Dependencies.Count == 0)
+    {
+      return false;
+    }
+
+    var dependencies = item.Dependencies
+        .Select(id => plannedById.GetValueOrDefault(id))
+        .ToArray();
+    return dependencies.All(dependency => dependency?.Status is PlannedResourceStatus.Ready or
+            PlannedResourceStatus.Deferred or PlannedResourceStatus.AlreadySatisfied) &&
+        dependencies.Any(dependency => dependency?.Status is PlannedResourceStatus.Ready or
+            PlannedResourceStatus.Deferred);
+  }
+
+  private static DeferredPlanAuthorization CreateDeferredAuthorization(PlannedResource item)
+  {
+    var action = item.ResourcePlan.Compliance switch
+    {
+      ComplianceStatus.Missing when item.Definition.Type.EndsWith(
+          "settings",
+          StringComparison.OrdinalIgnoreCase) => PlanAction.Configure,
+      ComplianceStatus.Missing => PlanAction.Install,
+      ComplianceStatus.VersionMismatch => PlanAction.Upgrade,
+      _ => PlanAction.Configure
+    };
+    var maximumPrivilege = item.Definition.PrivilegeRequirement;
+    return new DeferredPlanAuthorization
+    {
+      AllowedActions = [action],
+      MaximumPrivilege = maximumPrivilege,
+      MaximumRestartPolicy = item.Definition.RestartPolicy,
+      MaximumRisk = maximumPrivilege == PrivilegeRequirement.Administrator
+          ? PlanRisk.Elevated
+          : PlanRisk.Standard,
+      AllowDestructive = false,
+      DynamicPlanNotice =
+          "This resource will be re-detected after its declared dependencies succeed; " +
+          "the resulting plan must remain within this displayed authorization."
+    };
+  }
+
   private static PlannedResource CreatePlannedResource(
       ResolvedResource resolved,
       ResourceDefinition definition,
       ResourcePlan plan)
   {
-    var modifyingSteps = plan.Steps
-        .Where(step => step.Action != PlanAction.None)
-        .ToArray();
-    var requiresElevation = modifyingSteps.Any(
-        step => step.PrivilegeRequirement == PrivilegeRequirement.Administrator);
-    var isDestructive = modifyingSteps.Any(step => step.IsDestructive);
-    var restartPolicy = modifyingSteps
-        .Select(step => step.RestartPolicy)
-        .Append(RestartPolicy.NoRestart)
-        .Max();
-    var reason = modifyingSteps
-        .Select(step => step.Reason)
-        .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
-    var risk = isDestructive
-        ? PlanRisk.Destructive
-        : requiresElevation
-            ? PlanRisk.Elevated
-            : plan.RequiresApply ? PlanRisk.Standard : PlanRisk.None;
+    var executionSummary = PlanStepAuthorizationPolicy.Summarize(plan.Steps);
 
     return new PlannedResource
     {
@@ -552,11 +693,11 @@ public sealed partial class ExecutionPlanner(
       Dependencies = ReadOnly(definition.Dependencies),
       ResourcePlan = plan,
       Status = PlannedResourceStatus.Ready,
-      Risk = risk,
-      RequiresElevation = requiresElevation,
-      IsDestructive = isDestructive,
-      RestartPolicy = restartPolicy,
-      Reason = reason,
+      Risk = executionSummary.Risk,
+      RequiresElevation = executionSummary.RequiresElevation,
+      IsDestructive = executionSummary.IsDestructive,
+      RestartPolicy = executionSummary.RestartPolicy,
+      Reason = executionSummary.Reason,
       BlockedBy = ReadOnly(Array.Empty<string>()),
       Diagnostics = ReadOnly(plan.StructuredErrors)
     };
@@ -650,6 +791,7 @@ public sealed partial class ExecutionPlanner(
   {
     var executable = layers.Count > 0 && resources.Count > 0 && errors.Count == 0 &&
         resources.All(resource => resource.Status is PlannedResourceStatus.Ready or
+            PlannedResourceStatus.Deferred or
             PlannedResourceStatus.AlreadySatisfied);
     var fingerprint = CreateFingerprint(profileId, profileVersion, layers, resources, errors);
     return new ExecutionPlan
@@ -694,6 +836,19 @@ public sealed partial class ExecutionPlanner(
       Append(canonical, resource.IsDestructive.ToString());
       Append(canonical, resource.RestartPolicy.ToString());
       Append(canonical, resource.Reason);
+      Append(canonical, resource.DeferredAuthorization is null ? null : "deferred");
+      if (resource.DeferredAuthorization is { } authorization)
+      {
+        foreach (var action in authorization.AllowedActions)
+        {
+          Append(canonical, action.ToString());
+        }
+        Append(canonical, authorization.MaximumPrivilege.ToString());
+        Append(canonical, authorization.MaximumRestartPolicy.ToString());
+        Append(canonical, authorization.MaximumRisk.ToString());
+        Append(canonical, authorization.AllowDestructive.ToString());
+        Append(canonical, authorization.DynamicPlanNotice);
+      }
       foreach (var dependency in resource.Dependencies)
       {
         Append(canonical, dependency);

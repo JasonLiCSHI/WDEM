@@ -76,6 +76,23 @@ public sealed partial class ExecutionPlanner
             $"Step '{SanitizeVisible(step.Id)}' uses an undefined action, privilege, or restart value.");
       }
 
+      var authorizationViolation =
+          PlanStepAuthorizationPolicy.GetDeclarationViolation(step);
+      if (authorizationViolation != PlanStepAuthorizationViolation.None)
+      {
+        return new StructuredError(
+            WdemErrorCode.ConfigurationError,
+            "Provider plan exceeds the authorization policy.",
+            SanitizeVisible(
+                $"Declaration step '{step.Id}' declares privilege, restart, or destructive " +
+                $"requirements without a modifying action ({authorizationViolation})."))
+        {
+          ResourceId = NormalizeResourceId(definition.Id),
+          StepId = SanitizeVisible(step.Id),
+          SuggestedAction = "Review the provider plan before applying it."
+        };
+      }
+
       if (Utf8ByteCount(step.Description) > MaxTextFieldByteCount ||
           Utf8ByteCount(sanitizedDescription) > MaxTextFieldByteCount ||
           step.Reason is not null && Utf8ByteCount(step.Reason) > MaxTextFieldByteCount ||
@@ -115,8 +132,8 @@ public sealed partial class ExecutionPlanner
 
     var remediable = plan.Compliance is ComplianceStatus.Missing or
         ComplianceStatus.VersionMismatch or ComplianceStatus.ConfigurationMismatch;
-    var modifyingSteps = plan.Steps.Where(step => step.Action != PlanAction.None).ToArray();
-    if (!remediable && modifyingSteps.Length > 0)
+    var executionSummary = PlanStepAuthorizationPolicy.Summarize(plan.Steps);
+    if (!remediable && executionSummary.RequiresApply)
     {
       return ProviderError(
           definition.Id,
@@ -124,7 +141,7 @@ public sealed partial class ExecutionPlanner
           $"Compliance status '{plan.Compliance}' cannot contain modifying steps.");
     }
 
-    if (remediable && plan.IsExecutable && modifyingSteps.Length == 0)
+    if (remediable && plan.IsExecutable && !executionSummary.RequiresApply)
     {
       return ProviderError(
           definition.Id,

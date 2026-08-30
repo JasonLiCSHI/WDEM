@@ -490,7 +490,7 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
   }
 
   [Fact]
-  public async Task ApplyAsync_InternalProgressDrainTimeoutReturnsExecutionFailureNotCancellation()
+  public async Task ApplyAsync_InternalProgressDrainTimeoutIsHostFailureWithDurableEvidence()
   {
     var provider = new SuccessfulProvider("progress-timeout-secret");
     var profile = Profile() with
@@ -539,10 +539,14 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
         CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
 
     var run = Assert.Single(await store.ListAsync(CancellationToken.None));
-    Assert.Equal(3, exitCode);
-    Assert.Equal(ExecutionOutcome.Failed, run.Outcome);
+    Assert.Equal(1, exitCode);
+    Assert.Equal(ExecutionState.Running, run.State);
+    Assert.Null(run.Outcome);
     Assert.Equal(ExecutionOutcome.Failed, run.ResourceResults["git"].Outcome);
     Assert.NotEqual(WdemErrorCode.CancellationError, run.ResourceResults["git"].Error?.Code);
+    Assert.Equal(
+        "Applied resource evidence could not be fully published.",
+        run.ResourceResults["git"].Error?.Summary);
   }
 
   [Theory]
@@ -606,8 +610,15 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
 
     var run = Assert.Single(await store.ListAsync(CancellationToken.None));
     Assert.Equal(1, exitCode);
-    Assert.DoesNotContain(run.ResourceResults.Values, result =>
-        result.State == ExecutionState.Blocked || result.Outcome == ExecutionOutcome.Failed);
+    Assert.Equal(ExecutionState.Running, run.State);
+    Assert.Null(run.Outcome);
+    var evidence = run.ResourceResults["git"];
+    Assert.Equal(ExecutionState.Completed, evidence.State);
+    Assert.Equal(ExecutionOutcome.Failed, evidence.Outcome);
+    Assert.Equal(
+        "Applied resource evidence could not be fully published.",
+        evidence.Error?.Summary);
+    Assert.Equal(ExecutionState.Pending, run.ResourceResults["dependent"].State);
   }
 
   [Fact]
@@ -1304,7 +1315,7 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
   private sealed class UnrelatedPublishingRecoveryService(
       ExecutionRun run,
       Guid unrelatedRunId,
-      IRunEventSink sink) : IEnvironmentRunService
+      IRunEventSink sink) : ICommandLineEnvironmentRunService
   {
     public Task<ExecutionRun> InspectAsync(
         RunRequest request,
@@ -1312,6 +1323,15 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
 
     public Task<ExecutionRun> ApplyAsync(
         RunRequest request,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+
+    public Task<ExecutionRun> ApplyFromCommandLineAsync(
+        RunRequest request,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+
+    public Task<ExecutionRun> ApplyReviewedPlanAsync(
+        RunRequest request,
+        string reviewedPlanFingerprint,
         CancellationToken cancellationToken) => throw new NotSupportedException();
 
     public Task<ExecutionRun> RetryAsync(

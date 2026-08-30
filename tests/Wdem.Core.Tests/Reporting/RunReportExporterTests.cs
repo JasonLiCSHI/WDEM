@@ -50,6 +50,89 @@ public sealed class RunReportExporterTests
   }
 
   [Fact]
+  public void ReportsIncludeInitialApprovalFingerprintAndDeferredSummary()
+  {
+    var fingerprint = new string('E', 64);
+    var run = CreateTerminalRun("safe") with
+    {
+      PlanApproval = new PlanApproval
+      {
+        InitialPlanFingerprint = fingerprint,
+        ConfirmedAtUtc = DateTimeOffset.Parse("2026-08-30T08:00:00Z"),
+        Source = PlanApprovalSource.DesktopReviewedPlan,
+        DeferredAuthorizations =
+        [
+          new DeferredAuthorizationProof
+          {
+            ResourceId = "dynamic-tool",
+            ResourceType = "package",
+            ProviderName = "fake",
+            DefinitionFingerprint = new string('F', 64),
+            Origin = ResourceOrigin.Required,
+            Dependencies = ["runtime"],
+            AllowedActions = [PlanAction.Install],
+            MaximumPrivilege = PrivilegeRequirement.Administrator,
+            MaximumRestartPolicy = RestartPolicy.NoRestart,
+            MaximumRisk = PlanRisk.Elevated,
+            AllowDestructive = false
+          }
+        ]
+      }
+    };
+    var exporter = new RunReportExporter(new LogRedactor());
+
+    var markdown = exporter.ExportMarkdown(run);
+    using var json = JsonDocument.Parse(exporter.ExportJson(run));
+
+    Assert.Contains($"Approved plan fingerprint: {fingerprint}", markdown, StringComparison.Ordinal);
+    Assert.Contains("Deferred approvals: 1", markdown, StringComparison.Ordinal);
+    Assert.Contains("dynamic-tool", markdown, StringComparison.Ordinal);
+    var approval = json.RootElement.GetProperty("planApproval");
+    Assert.Equal(fingerprint, approval.GetProperty("initialPlanFingerprint").GetString());
+    Assert.Equal(1, approval.GetProperty("deferredAuthorizations").GetArrayLength());
+  }
+
+  [Fact]
+  public void ExecutionRunRedactor_RedactsDeferredApprovalIdentities()
+  {
+    const string secret = "approval-identity-secret";
+    var run = CreateTerminalRun("safe") with
+    {
+      PlanApproval = new PlanApproval
+      {
+        InitialPlanFingerprint = new string('E', 64),
+        ConfirmedAtUtc = DateTimeOffset.Parse("2026-08-30T08:00:00Z"),
+        Source = PlanApprovalSource.DesktopReviewedPlan,
+        DeferredAuthorizations =
+        [
+          new DeferredAuthorizationProof
+          {
+            ResourceId = secret,
+            ResourceType = secret,
+            ProviderName = secret,
+            DefinitionFingerprint = new string('F', 64),
+            Origin = ResourceOrigin.Required,
+            Dependencies = [secret],
+            AllowedActions = [PlanAction.Install],
+            MaximumPrivilege = PrivilegeRequirement.Administrator,
+            MaximumRestartPolicy = RestartPolicy.NoRestart,
+            MaximumRisk = PlanRisk.Elevated,
+            AllowDestructive = false
+          }
+        ]
+      }
+    };
+
+    var redacted = new ExecutionRunRedactor(new LogRedactor([secret])).Redact(run);
+    var proof = Assert.Single(redacted.PlanApproval!.DeferredAuthorizations);
+
+    Assert.DoesNotContain(secret, proof.ResourceId, StringComparison.Ordinal);
+    Assert.DoesNotContain(secret, proof.ResourceType, StringComparison.Ordinal);
+    Assert.DoesNotContain(secret, proof.ProviderName, StringComparison.Ordinal);
+    Assert.DoesNotContain(secret, Assert.Single(proof.Dependencies), StringComparison.Ordinal);
+  }
+
+  [Fact]
   public void ExportJson_PreservesEveryDictionaryEntryWhenRedactedKeysCollide()
   {
     const string firstSecret = "alpha-secret";
@@ -171,7 +254,7 @@ public sealed class RunReportExporterTests
     AssertPropertyNames(root,
         "runId", "mode", "profileSourcePath", "profileId", "profileVersion",
         "selectedOptionalResourceIds", "startedAtUtc", "endedAtUtc", "state", "outcome",
-        "retriedFromRunId", "recoveredFromRunId", "machine", "graph", "plan",
+        "retriedFromRunId", "recoveredFromRunId", "machine", "graph", "plan", "planApproval",
         "resourceResults", "restartRequirements", "restartReasons",
         "acknowledgedRestartResourceIds", "blockedResourceIds", "unexecutedResourceIds");
     AssertPropertyNames(root.GetProperty("machine"),

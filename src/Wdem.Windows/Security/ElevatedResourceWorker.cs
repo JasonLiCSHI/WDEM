@@ -10,12 +10,9 @@ namespace Wdem.Windows.Security;
 
 public sealed class ElevatedResourceWorker
 {
-  private readonly IExecutionRunStore _runStore;
   private readonly IApprovedResourceStore _approvedResources;
   private readonly IResourceProviderRegistry _providers;
   private readonly LogRedactor _redactor;
-  private readonly object _claimsGate = new();
-  private readonly HashSet<string> _claimedResources = new(StringComparer.OrdinalIgnoreCase);
 
   public ElevatedResourceWorker(
       IExecutionRunStore runStore,
@@ -37,7 +34,7 @@ public sealed class ElevatedResourceWorker
       IResourceProviderRegistry providers,
       LogRedactor redactor)
   {
-    _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
+    ArgumentNullException.ThrowIfNull(runStore);
     _approvedResources = approvedResources ??
         throw new ArgumentNullException(nameof(approvedResources));
     _providers = providers ?? throw new ArgumentNullException(nameof(providers));
@@ -51,52 +48,17 @@ public sealed class ElevatedResourceWorker
   {
     ArgumentNullException.ThrowIfNull(request);
     cancellationToken.ThrowIfCancellationRequested();
-    var run = await _runStore.GetAsync(request.RunId, cancellationToken).ConfigureAwait(false);
-    if (run is null || run.Mode != RunMode.Apply || run.State != ExecutionState.Running ||
-        run.Plan is null || !run.Plan.IsExecutable)
-    {
-      return Refused(request.ResourceId, "The execution run is not approved for elevated work.");
-    }
 
-    var matches = run.Plan.Resources
-        .Where(resource => string.Equals(
-            resource.Definition.Id,
-            request.ResourceId,
-            StringComparison.OrdinalIgnoreCase))
-        .ToArray();
-    if (matches.Length != 1)
-    {
-      return Refused(request.ResourceId, "The resource is not uniquely approved by the run plan.");
-    }
-
-    var planned = matches[0];
-    if (!run.ResourceResults.TryGetValue(request.ResourceId, out var persistedResult) ||
-        persistedResult.State != ExecutionState.Running ||
-        persistedResult.Outcome is not null)
-    {
-      return Refused(request.ResourceId, "The resource is not running in the persisted run state.");
-    }
-
-    if (planned.Status != PlannedResourceStatus.Ready ||
-        !planned.RequiresElevation ||
-        !planned.ResourcePlan.IsExecutable ||
-        !planned.ResourcePlan.RequiresApply ||
-        !planned.ResourcePlan.Steps.Any(step =>
-            step.Action != PlanAction.None &&
-            step.PrivilegeRequirement == PrivilegeRequirement.Administrator))
-    {
-      return Refused(request.ResourceId, "The resource has no approved administrator action.");
-    }
-
-    ApprovedResource? approved;
+    ApprovedResourceClaim? approved;
     try
     {
-      approved = await _approvedResources.GetApprovedResourceAsync(
+      approved = await _approvedResources.ClaimApprovedResourceAsync(
           request.RunId,
           request.ResourceId,
+          request.PlanFingerprint,
           cancellationToken).ConfigureAwait(false);
     }
-    catch (ApprovedResourceAccessException exception)
+    catch (ApprovedResourceStoreException exception)
     {
       return new ResourceApplyResult
       {
@@ -112,60 +74,23 @@ public sealed class ElevatedResourceWorker
     if (approved is null ||
         !FixedEquals(
             approved.Fingerprint,
-            ApprovedResourceFingerprint.Create(approved.Definition, approved.Plan)) ||
-        !FixedEquals(
-            approved.Fingerprint,
-            ApprovedResourceFingerprint.Create(approved.Definition, planned.ResourcePlan)))
+            ApprovedResourceFingerprint.Create(approved.Definition, approved.Plan)))
     {
       return Refused(request.ResourceId, "The approved resource fingerprint does not match.");
     }
 
-    var approvedSegments = PrivilegePlanSegments.Split(approved.Plan)
-        .Where(segment => segment.Steps.Any(step =>
-            step.Action != PlanAction.None &&
-            step.PrivilegeRequirement == PrivilegeRequirement.Administrator))
-        .Where(segment => FixedEquals(
+    if (!FixedEquals(
             request.PlanFingerprint,
-            ApprovedResourceFingerprint.Create(approved.Definition, segment)))
-        .ToArray();
-    if (approvedSegments.Length != 1)
+            ApprovedResourceFingerprint.Create(approved.Definition, approved.Segment)))
     {
       return Refused(request.ResourceId, "The approved administrator segment does not match.");
     }
 
-    var approvedSegment = approvedSegments[0];
-
-    if (!DependenciesEqual(planned.Dependencies, approved.Definition.Dependencies))
-    {
-      return Refused(
-          request.ResourceId,
-          "The persisted resource dependencies do not match the protected approval.");
-    }
-
-    if (!approved.Definition.Dependencies.All(dependency =>
-            run.ResourceResults.TryGetValue(dependency, out var dependencyResult) &&
-            dependencyResult.State == ExecutionState.Completed &&
-            dependencyResult.Outcome is ExecutionOutcome.Succeeded or
-                ExecutionOutcome.NotRequired))
-    {
-      return Refused(request.ResourceId, "The resource dependencies have not succeeded.");
-    }
+    var approvedSegment = approved.Segment;
 
     if (!string.Equals(
             approved.Definition.Id,
             request.ResourceId,
-            StringComparison.OrdinalIgnoreCase) ||
-        !string.Equals(
-            planned.Definition.Id,
-            approved.Definition.Id,
-            StringComparison.OrdinalIgnoreCase) ||
-        !string.Equals(
-            planned.Definition.Type,
-            approved.Definition.Type,
-            StringComparison.OrdinalIgnoreCase) ||
-        !string.Equals(
-            planned.Definition.Provider,
-            approved.Definition.Provider,
             StringComparison.OrdinalIgnoreCase) ||
         !string.Equals(
             approved.Plan.ResourceId,
@@ -186,15 +111,6 @@ public sealed class ElevatedResourceWorker
         provider is null)
     {
       return Refused(request.ResourceId, "The approved provider identity is unavailable.");
-    }
-
-    var claim = $"{request.RunId:N}\0{approved.Definition.Id}\0{request.PlanFingerprint}";
-    lock (_claimsGate)
-    {
-      if (!_claimedResources.Add(claim))
-      {
-        return Refused(request.ResourceId, "The approved resource request has already been used.");
-      }
     }
 
     _redactor.RegisterSensitiveParameters(approved.Definition.Parameters);
@@ -316,15 +232,6 @@ public sealed class ElevatedResourceWorker
       return false;
     }
   }
-
-  private static bool DependenciesEqual(
-      IReadOnlyList<string> persisted,
-      IReadOnlyList<string> approved) =>
-      persisted.Count == approved.Count &&
-      persisted.Zip(approved).All(pair => string.Equals(
-          pair.First,
-          pair.Second,
-          StringComparison.OrdinalIgnoreCase));
 
   private static ResourceApplyResult Refused(string resourceId, string detail) => new()
   {

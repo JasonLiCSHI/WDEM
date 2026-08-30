@@ -6,14 +6,20 @@ profile:
   description: Standard C# and .NET development environment
   requiredResources:
     - id: visual-studio
+      versionConstraint: ">=18.3 <19.0"
+      preferredVersion: "18.3.2"
     - id: dotnet-sdk
+      versionConstraint: "10.0.x"
     - id: git
+      versionConstraint: ">=2.50"
   optionalResources:
     - id: resharper
+      versionConstraint: "2026.1.x"
       defaultSelected: false
     - id: resharper-settings
       defaultSelected: false
     - id: company-vs-extension
+      versionConstraint: "3.2.x"
       defaultSelected: false
     - id: visual-studio-settings
       defaultSelected: false
@@ -29,6 +35,8 @@ resources:
       components: Microsoft.VisualStudio.Component.CoreEditor,Microsoft.VisualStudio.Component.Roslyn.Compiler,Microsoft.Net.Component.4.8.1.TargetingPack
       vsconfigPath: profiles/assets/csharp-developer.vsconfig
       expectedSha256: 8026BB860A0B8A31979F7706601CD23D0F3265A42D39EAAD023AA701A1CC5894
+      bootstrapperUri: https://c2rsetup.officeapps.live.com/c2r/downloadVS.aspx?sku=community&channel=stable&version=VS18&source=WDEM&cid=2500
+      bootstrapperSha256: 2D22F8E6B43DD723CC59E37CDE9DD22CAD778178F8C31F0300CE945C5C76A5E1
   dotnet-sdk:
     type: dotnet-sdk
     provider: winget

@@ -11,4 +11,11 @@ public interface IExecutionPlanner
       string profileId,
       string profileVersion,
       CancellationToken cancellationToken);
+
+  Task<PlannedResource> ReplanResourceAsync(
+      ResolvedResource resource,
+      DetectedState detectedState,
+      string approvedDefinitionFingerprint,
+      CancellationToken cancellationToken) => throw new NotSupportedException(
+          "This execution planner does not support deferred resource replanning.");
 }

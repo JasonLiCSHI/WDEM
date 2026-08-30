@@ -19,6 +19,14 @@ public sealed class CancellationDrainDeadline : IDisposable
   private int _disposeState;
 
   public CancellationDrainDeadline(TimeSpan budget, CancellationToken cancellationToken)
+      : this(budget, cancellationToken, TimeSpan.Zero)
+  {
+  }
+
+  public CancellationDrainDeadline(
+      TimeSpan budget,
+      CancellationToken cancellationToken,
+      TimeSpan maximumPotentialFinalization)
   {
     if (budget <= TimeSpan.Zero || budget > MaximumTimerDuration)
     {
@@ -28,8 +36,22 @@ public sealed class CancellationDrainDeadline : IDisposable
           $"The budget must be positive and no greater than {MaximumTimerDuration}.");
     }
 
+    if (maximumPotentialFinalization < TimeSpan.Zero ||
+        maximumPotentialFinalization > MaximumTimerDuration - budget)
+    {
+      throw new ArgumentOutOfRangeException(
+          nameof(maximumPotentialFinalization),
+          maximumPotentialFinalization,
+          "The finalization reservation must fit within the platform timer limit.");
+    }
+
     _baseBudgetTicks = budget.Ticks;
     _cancellationToken = cancellationToken;
+    if (maximumPotentialFinalization > TimeSpan.Zero)
+    {
+      _finalizationReservations.Add(maximumPotentialFinalization.Ticks, 1);
+    }
+
     _registration = cancellationToken.UnsafeRegister(
         static state => ((CancellationDrainDeadline)state!).Start(),
         this);
@@ -75,6 +97,12 @@ public sealed class CancellationDrainDeadline : IDisposable
       ObjectDisposedException.ThrowIf(
           _disposeState != 0,
           this);
+      if (_startedTimestamp != long.MinValue)
+      {
+        throw new InvalidOperationException(
+            "Finalization reservations must be registered before the cancellation deadline starts.");
+      }
+
       if (duration == TimeSpan.Zero)
       {
         return EmptyReservation.Instance;
@@ -89,11 +117,6 @@ public sealed class CancellationDrainDeadline : IDisposable
         _finalizationReservations.Add(duration.Ticks, 1);
       }
 
-      if (_startedTimestamp != long.MinValue &&
-          duration.Ticks > _startedMaximumReservationTicks)
-      {
-        _startedMaximumReservationTicks = duration.Ticks;
-      }
     }
 
     return new FinalizationReservation(this, duration.Ticks);
@@ -211,4 +234,21 @@ public interface IResourceScheduler
           maximumConcurrency,
           cancellationToken,
           transitionAsync);
+
+  Task<SchedulerResult> ExecuteAsync(
+      ExecutionPlan plan,
+      Func<PlannedResource, CancellationToken, Task<ResourceResult>> executeAsync,
+      Func<PlannedResource, ProviderCapabilities> capabilitiesFor,
+      int maximumConcurrency,
+      CancellationToken cancellationToken,
+      Func<ResourceResult, Task>? transitionAsync,
+      CancellationDrainDeadline? cancellationDeadline,
+      Action<Task>? registerUndrainedCompletion) => ExecuteAsync(
+          plan,
+          executeAsync,
+          capabilitiesFor,
+          maximumConcurrency,
+          cancellationToken,
+          transitionAsync,
+          cancellationDeadline);
 }
