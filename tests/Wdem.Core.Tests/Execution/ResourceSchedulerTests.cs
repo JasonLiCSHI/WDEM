@@ -92,6 +92,39 @@ public sealed class ResourceSchedulerTests
   }
 
   [Fact]
+  public async Task CancellationDrainDeadline_ReleaseAfterCancellationRequestBeforeCallbackRetainsCleanupBudget()
+  {
+    using var cancellation = new CancellationTokenSource();
+    using var deadline = new CancellationDrainDeadline(
+        TimeSpan.FromMilliseconds(25),
+        cancellation.Token);
+    using var reservation = deadline.RegisterPotentialFinalization(TimeSpan.FromSeconds(2));
+    var coordinationGate = typeof(CancellationDrainDeadline)
+        .GetField("_gate", System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.NonPublic)?
+        .GetValue(deadline) ?? throw new InvalidOperationException("Coordination gate not found.");
+    Task cancellationTask;
+
+    Monitor.Enter(coordinationGate);
+    try
+    {
+      cancellationTask = Task.Run(cancellation.Cancel);
+      Assert.True(SpinWait.SpinUntil(
+          () => cancellation.IsCancellationRequested,
+          TimeSpan.FromSeconds(5)));
+
+      reservation.Dispose();
+    }
+    finally
+    {
+      Monitor.Exit(coordinationGate);
+    }
+
+    await cancellationTask.WaitAsync(TimeSpan.FromSeconds(5));
+    Assert.True(deadline.Remaining > TimeSpan.FromSeconds(1));
+  }
+
+  [Fact]
   public void CancellationDrainDeadline_RegisteringSmallerReservationAfterStartDoesNotShrinkDeadline()
   {
     using var cancellation = new CancellationTokenSource();

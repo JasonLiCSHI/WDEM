@@ -11,6 +11,7 @@ public sealed class CancellationDrainDeadline : IDisposable
       TimeSpan.FromMilliseconds(uint.MaxValue - 1d);
   private readonly object _gate = new();
   private readonly long _baseBudgetTicks;
+  private readonly CancellationToken _cancellationToken;
   private readonly Dictionary<long, int> _finalizationReservations = [];
   private readonly CancellationTokenRegistration _registration;
   private long _startedTimestamp = long.MinValue;
@@ -28,6 +29,7 @@ public sealed class CancellationDrainDeadline : IDisposable
     }
 
     _baseBudgetTicks = budget.Ticks;
+    _cancellationToken = cancellationToken;
     _registration = cancellationToken.UnsafeRegister(
         static state => ((CancellationDrainDeadline)state!).Start(),
         this);
@@ -116,11 +118,16 @@ public sealed class CancellationDrainDeadline : IDisposable
   {
     lock (_gate)
     {
-      if (_startedTimestamp == long.MinValue)
-      {
-        _startedMaximumReservationTicks = CurrentMaximumReservationTicks();
-        _startedTimestamp = Stopwatch.GetTimestamp();
-      }
+      StartUnderLock();
+    }
+  }
+
+  private void StartUnderLock()
+  {
+    if (_startedTimestamp == long.MinValue)
+    {
+      _startedMaximumReservationTicks = CurrentMaximumReservationTicks();
+      _startedTimestamp = Stopwatch.GetTimestamp();
     }
   }
 
@@ -132,6 +139,11 @@ public sealed class CancellationDrainDeadline : IDisposable
   {
     lock (_gate)
     {
+      if (_cancellationToken.IsCancellationRequested)
+      {
+        StartUnderLock();
+      }
+
       if (!_finalizationReservations.TryGetValue(durationTicks, out var count))
       {
         return;
