@@ -171,6 +171,80 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task ApplyAsync_UsesAuthoritativeProviderFinalVerificationWithoutSecondVerify()
+  {
+    using var cancellation = new CancellationTokenSource();
+    var detectedAfter = Satisfied("git", "2.52.1");
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyOperation = _ =>
+      {
+        cancellation.Cancel();
+        return ValueTask.FromResult(new ResourceApplyResult
+        {
+          ResourceId = "git",
+          Outcome = ApplyOutcome.Succeeded,
+          FinalizeAfterCancellation = true,
+          FinalVerification = new VerificationResult
+          {
+            ResourceId = "git",
+            Compliance = ComplianceStatus.Satisfied,
+            DetectedState = detectedAfter
+          }
+        });
+      },
+      VerificationOperation = _ => throw new InvalidOperationException(
+          "A second verification would escape the provider finalization deadline.")
+    };
+    var (service, store) = CreateService(provider);
+
+    var run = await service.ApplyAsync(Request(), cancellation.Token);
+    var persisted = await store.GetAsync(run.RunId, CancellationToken.None);
+
+    var resource = run.ResourceResults["git"];
+    Assert.Equal(ExecutionOutcome.Succeeded, run.Outcome);
+    Assert.Equal(ExecutionOutcome.Succeeded, resource.Outcome);
+    Assert.Equal(detectedAfter, resource.DetectedAfter);
+    Assert.Equal(resource, persisted!.ResourceResults["git"]);
+    Assert.Equal(1, provider.ApplyCalls);
+    Assert.Equal(0, provider.VerifyCalls);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_UntrustedProviderFinalVerificationFallsBackToVerify()
+  {
+    var detectedAfter = Satisfied("git", "2.52.1");
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyResult = new ResourceApplyResult
+      {
+        ResourceId = "git",
+        Outcome = ApplyOutcome.Succeeded,
+        FinalizeAfterCancellation = true,
+        FinalVerification = new VerificationResult
+        {
+          ResourceId = "different-resource",
+          Compliance = ComplianceStatus.Satisfied,
+          DetectedState = detectedAfter
+        }
+      },
+      VerificationResult = new VerificationResult
+      {
+        ResourceId = "git",
+        Compliance = ComplianceStatus.Satisfied,
+        DetectedState = detectedAfter
+      }
+    };
+    var (service, _) = CreateService(provider);
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.Succeeded, run.Outcome);
+    Assert.Equal(detectedAfter, run.ResourceResults["git"].DetectedAfter);
+    Assert.Equal(1, provider.VerifyCalls);
+  }
+
+  [Fact]
   public async Task ApplyAsync_UnflaggedLateCancellationCancelsFinalVerification()
   {
     using var cancellation = new CancellationTokenSource();

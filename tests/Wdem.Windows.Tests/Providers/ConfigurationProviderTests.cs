@@ -218,6 +218,11 @@ public sealed class ConfigurationProviderTests : IDisposable
 
     Assert.Equal(ApplyOutcome.Succeeded, applied.Outcome);
     Assert.True(applied.FinalizeAfterCancellation);
+    Assert.True(provider.Capabilities.CancellationFinalizationTimeout > TimeSpan.Zero);
+    var finalVerification = Assert.IsType<VerificationResult>(applied.FinalVerification);
+    Assert.Equal(ComplianceStatus.Satisfied, finalVerification.Compliance);
+    Assert.Equal(resource.Id, finalVerification.ResourceId);
+    Assert.Equal(resource.Id, finalVerification.DetectedState.ResourceId);
     Assert.Equal(source, await File.ReadAllBytesAsync(destinationPath));
   }
 
@@ -979,11 +984,17 @@ public sealed class ConfigurationProviderTests : IDisposable
     await File.WriteAllBytesAsync(sourcePath, source);
     var sourceHash = Convert.ToHexString(SHA256.HashData(source));
     var instance = VisualStudioInstance();
-    var process = new RecordingProcessExecutor();
+    var processStarted = false;
+    var process = new DelegatingProcessExecutor((request, _) =>
+    {
+      processStarted = true;
+      request.OnStarted?.Invoke();
+      return Task.FromResult(new Wdem.Core.Processes.ProcessExecutionResult(true, 0, [], []));
+    });
     var provider = new VisualStudioSettingsProvider(
         new ConfigurationSourceResolver(_root, profiles),
         new ConfigurationImporter(),
-        new FixedVisualStudioDiscovery(instance),
+        new RejectingPostLaunchVisualStudioDiscovery(instance, () => processStarted),
         process,
         new ComplianceEvaluator(),
         _ => settingsRoot);
@@ -1013,7 +1024,7 @@ public sealed class ConfigurationProviderTests : IDisposable
     Assert.Equal(
         Wdem.Core.Processes.ProcessExecutionRequest.DefaultTimeout,
         request.Timeout);
-    Assert.Equal(request.Timeout, provider.Capabilities.CancellationFinalizationTimeout);
+    Assert.True(provider.Capabilities.CancellationFinalizationTimeout > request.Timeout!.Value);
     Assert.NotNull(launchProgress);
     Assert.Equal(
         ["/ResetSettings", request.Arguments[1], "/Command", "Exit"],
@@ -1206,6 +1217,10 @@ public sealed class ConfigurationProviderTests : IDisposable
 
     Assert.Equal(ApplyOutcome.Succeeded, applied.Outcome);
     Assert.True(applied.FinalizeAfterCancellation);
+    var finalVerification = Assert.IsType<VerificationResult>(applied.FinalVerification);
+    Assert.Equal(ComplianceStatus.Satisfied, finalVerification.Compliance);
+    Assert.Equal(resource.Id, finalVerification.ResourceId);
+    Assert.Equal(resource.Id, finalVerification.DetectedState.ResourceId);
     Assert.Equal(0, Assert.Single(applied.StepResults).ProcessExitCode);
     Assert.Equal(source, await File.ReadAllBytesAsync(settingsStorePath));
     Assert.Equal([settingsStorePath], Directory.GetFiles(settingsRoot));
@@ -1699,6 +1714,25 @@ public sealed class ConfigurationProviderTests : IDisposable
         IReadOnlyList<string> requiredComponents,
         CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<Wdem.Windows.VisualStudio.VisualStudioInstance>>([instance]);
+  }
+
+  private sealed class RejectingPostLaunchVisualStudioDiscovery(
+      Wdem.Windows.VisualStudio.VisualStudioInstance instance,
+      Func<bool> processStarted) : Wdem.Windows.VisualStudio.IVisualStudioDiscovery
+  {
+    public Task<IReadOnlyList<Wdem.Windows.VisualStudio.VisualStudioInstance>> DiscoverAsync(
+        IReadOnlyList<string> requiredWorkloads,
+        IReadOnlyList<string> requiredComponents,
+        CancellationToken cancellationToken)
+    {
+      if (processStarted())
+      {
+        throw new InvalidOperationException(
+            "Post-launch discovery would exceed the reserved finalization deadline.");
+      }
+
+      return Task.FromResult<IReadOnlyList<Wdem.Windows.VisualStudio.VisualStudioInstance>>([instance]);
+    }
   }
 
   private sealed class MutableVisualStudioDiscovery(

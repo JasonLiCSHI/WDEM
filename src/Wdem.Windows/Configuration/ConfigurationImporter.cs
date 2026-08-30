@@ -310,14 +310,14 @@ public sealed class ConfigurationImporter
         backupPath = Path.Combine(
             directory,
             $".{Path.GetFileName(fullDestination)}.{Guid.NewGuid():N}.backup");
-        File.Copy(fullDestination, backupPath, overwrite: false);
+        await CopyFileAsync(fullDestination, backupPath, cancellationToken).ConfigureAwait(false);
       }
 
       _beforeDestinationPreconditionCheck?.Invoke(fullDestination);
       if (!await MatchesDestinationPreconditionAsync(
               fullDestination,
               snapshot.DestinationPrecondition,
-              CancellationToken.None).ConfigureAwait(false))
+              cancellationToken).ConfigureAwait(false))
       {
         return Failure("The configuration destination changed after planning; the approved plan is stale.");
       }
@@ -329,7 +329,8 @@ public sealed class ConfigurationImporter
       destinationCommitted = true;
       _afterDestinationMove?.Invoke(fullDestination);
 
-      var finalHash = await HashFileAsync(fullDestination, CancellationToken.None).ConfigureAwait(false);
+      var finalHash = await HashFileAsync(fullDestination, cancellationToken).ConfigureAwait(false);
+      cancellationToken.ThrowIfCancellationRequested();
       if (!string.Equals(finalHash, snapshot.Sha256, StringComparison.OrdinalIgnoreCase))
       {
         var restoreError = RestoreDestination(fullDestination, backupPath);
@@ -349,6 +350,22 @@ public sealed class ConfigurationImporter
       _afterCommitVerified?.Invoke(fullDestination);
       destinationCommitted = false;
       return new ConfigurationImportResult(true, fullDestination, finalHash, null);
+    }
+    catch (OperationCanceledException exception) when (
+        cancellationToken.IsCancellationRequested && destinationCommitted)
+    {
+      var restoreError = RestoreDestination(Path.GetFullPath(destinationPath), backupPath);
+      destinationCommitted = false;
+      if (restoreError is not null)
+      {
+        backupPath = null;
+      }
+
+      return Failure(
+          restoreError is null
+              ? "The configuration commit was cancelled during final destination verification; the prior destination was restored."
+              : "The configuration commit was cancelled during final destination verification and the prior destination could not be restored.",
+          restoreError is null ? exception : new AggregateException(exception, restoreError));
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
@@ -426,6 +443,29 @@ public sealed class ConfigurationImporter
         bufferSize: 81920,
         FileOptions.Asynchronous | FileOptions.SequentialScan);
     return Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false));
+  }
+
+  private static async Task CopyFileAsync(
+      string sourcePath,
+      string destinationPath,
+      CancellationToken cancellationToken)
+  {
+    await using var source = new FileStream(
+        sourcePath,
+        FileMode.Open,
+        FileAccess.Read,
+        FileShare.Read,
+        bufferSize: 81920,
+        FileOptions.Asynchronous | FileOptions.SequentialScan);
+    await using var destination = new FileStream(
+        destinationPath,
+        FileMode.CreateNew,
+        FileAccess.Write,
+        FileShare.None,
+        bufferSize: 81920,
+        FileOptions.Asynchronous | FileOptions.WriteThrough);
+    await source.CopyToAsync(destination, cancellationToken).ConfigureAwait(false);
+    await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
   }
 
   private static async Task<ConfigurationDestinationPrecondition> CaptureDestinationPreconditionAsync(

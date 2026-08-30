@@ -399,6 +399,31 @@ public sealed class ConfigurationSourceResolverTests : IDisposable
     Assert.Equal("original destination", await File.ReadAllTextAsync(destination));
   }
 
+  [Fact]
+  public async Task CopyAtomicallyAsync_CancellationAfterDestinationMoveRestoresPreviousDestination()
+  {
+    Directory.CreateDirectory(_root);
+    var destination = Path.Combine(_root, "destination.DotSettings");
+    await File.WriteAllTextAsync(destination, "original destination");
+    var contents = Encoding.UTF8.GetBytes("verified replacement");
+    var source = new ResolvedConfigurationSource(
+        Path.Combine(_root, "source.DotSettings"),
+        Convert.ToHexString(SHA256.HashData(contents)),
+        contents);
+    using var cancellation = new CancellationTokenSource();
+    var importer = new ConfigurationImporter(_ => cancellation.Cancel());
+
+    var result = await importer.CopyAtomicallyAsync(
+        source,
+        destination,
+        cancellation.Token);
+
+    Assert.False(result.Succeeded);
+    Assert.NotNull(result.Error);
+    Assert.Equal("original destination", await File.ReadAllTextAsync(destination));
+    Assert.Equal([destination], Directory.GetFiles(_root));
+  }
+
   public void Dispose()
   {
     if (Directory.Exists(_root))

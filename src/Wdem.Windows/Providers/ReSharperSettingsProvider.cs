@@ -10,6 +10,9 @@ namespace Wdem.Windows.Providers;
 
 public sealed class ReSharperSettingsProvider : IResourceProvider
 {
+  private const long MaxSettingsBytes = 64L * 1024 * 1024;
+  private static readonly TimeSpan FinalizationTimeout = TimeSpan.FromMinutes(2);
+  private static readonly TimeSpan FinalizationReservationMargin = TimeSpan.FromSeconds(30);
   public const string SourcePathParameter = "sourcePath";
   public const string ExpectedSha256Parameter = "expectedSha256";
   public const string DestinationPathParameter = "destinationPath";
@@ -46,7 +49,8 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
   public ProviderCapabilities Capabilities { get; } = new()
   {
     SupportsSource = true,
-    SupportsInProgressCancellation = true
+    SupportsInProgressCancellation = true,
+    CancellationFinalizationTimeout = FinalizationTimeout + FinalizationReservationMargin
   };
 
   public ValueTask<ProviderValidationResult> ValidateAsync(
@@ -147,6 +151,14 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
             resource,
             WdemErrorCode.ConfigurationError,
             "The ReSharper settings destination is not a regular file."));
+      }
+
+      if (new FileInfo(destination).Length > MaxSettingsBytes)
+      {
+        return DetectionFailure(resource, Error(
+            resource,
+            WdemErrorCode.ConfigurationError,
+            "The ReSharper settings destination exceeds the 64 MiB size limit."));
       }
 
       var hash = await ConfigurationImporter.HashFileAsync(destination, cancellationToken)
@@ -324,22 +336,58 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
             "The ReSharper settings destination changed after planning; the approved plan is stale."));
       }
 
-      // The directory hierarchy is leased through commit and verification. A non-cooperating
-      // writer can still race the file-level comparison in the final nanoseconds before replace.
-      var imported = await _importer.CommitStagedAsync(
-          snapshot, destination, cancellationToken).ConfigureAwait(false);
-      if (!imported.Succeeded)
+      cancellationToken.ThrowIfCancellationRequested();
+      progress?.Report(new ProviderProgress(
+          "Finalize",
+          0.8,
+          "Finalizing the ReSharper settings import.",
+          plan.Steps[0].Id)
       {
-        return Failed(resource, imported.Error! with { ResourceId = resource.Id });
-      }
+        BeginsCancellationFinalization = true
+      });
+      using var finalization = new CancellationTokenSource(FinalizationTimeout);
+      try
+      {
+        // The directory hierarchy is leased through commit and verification. A non-cooperating
+        // writer can still race the file-level comparison in the final nanoseconds before replace.
+        var imported = await _importer.CommitStagedAsync(
+            snapshot, destination, finalization.Token).ConfigureAwait(false);
+        if (!imported.Succeeded)
+        {
+          return Failed(
+              resource,
+              imported.Error! with { ResourceId = resource.Id },
+              plan.Steps[0],
+              finalizeAfterCancellation: true);
+        }
 
-      var verification = await VerifyAsync(resource, CancellationToken.None).ConfigureAwait(false);
-      if (verification.Compliance != ComplianceStatus.Satisfied)
+        var verification = await VerifyAsync(resource, finalization.Token).ConfigureAwait(false);
+        if (verification.Compliance != ComplianceStatus.Satisfied)
+        {
+          var error = verification.DetectedState.StructuredError ?? Error(
+                  resource,
+                  WdemErrorCode.VerificationError,
+                  "The imported ReSharper settings did not verify.");
+          return Failed(
+              resource,
+              error,
+              plan.Steps[0],
+              finalizeAfterCancellation: true,
+              finalVerification: verification);
+        }
+
+        return Succeeded(resource, plan.Steps[0], finalizeAfterCancellation: true) with
+        {
+          FinalVerification = verification
+        };
+      }
+      catch (OperationCanceledException) when (finalization.IsCancellationRequested)
       {
-        var error = verification.DetectedState.StructuredError ?? Error(
-                resource,
-                WdemErrorCode.VerificationError,
-                "The imported ReSharper settings did not verify.");
+        var error = Error(
+            resource,
+            WdemErrorCode.VerificationError,
+            "ReSharper settings finalization exceeded its time limit.");
+        var verification = VerificationFailure(resource, error);
         return Failed(
             resource,
             error,
@@ -347,8 +395,6 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
             finalizeAfterCancellation: true,
             finalVerification: verification);
       }
-
-      return Succeeded(resource, plan.Steps[0], finalizeAfterCancellation: true);
     }
     finally
     {
@@ -378,6 +424,20 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
       Compliance = compliance.Status,
       DetectedState = state,
       Message = compliance.Status == ComplianceStatus.Satisfied ? null : compliance.Summary
+    };
+  }
+
+  private static VerificationResult VerificationFailure(
+      ResourceDefinition resource,
+      StructuredError error)
+  {
+    var state = DetectionFailure(resource, error);
+    return new VerificationResult
+    {
+      ResourceId = resource.Id,
+      Compliance = ComplianceStatus.DetectionFailed,
+      DetectedState = state,
+      Message = error.Detail
     };
   }
 

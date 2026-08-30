@@ -847,8 +847,12 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
   {
     try
     {
-      var verification = await provider.VerifyAsync(definition, cancellationToken)
-          .ConfigureAwait(false);
+      var verification = TryGetAuthoritativeFinalVerification(
+          definition,
+          applied,
+          out var suppliedVerification)
+              ? suppliedVerification
+              : await provider.VerifyAsync(definition, cancellationToken).ConfigureAwait(false);
       var evaluated = _complianceEvaluator.Evaluate(definition, verification.DetectedState);
       var verified = verification.Compliance == ComplianceStatus.Satisfied &&
           evaluated.Status == ComplianceStatus.Satisfied;
@@ -928,6 +932,34 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         StepResults = stepResults
       };
     }
+  }
+
+  private bool TryGetAuthoritativeFinalVerification(
+      ResourceDefinition definition,
+      ResourceApplyResult applied,
+      out VerificationResult verification)
+  {
+    verification = null!;
+    var candidate = applied.FinalVerification;
+    if (!applied.FinalizeAfterCancellation ||
+        candidate is null ||
+        candidate.Compliance != ComplianceStatus.Satisfied ||
+        candidate.DetectedState.Outcome != DetectionOutcome.Succeeded ||
+        candidate.DetectedState.StructuredError is not null ||
+        !string.Equals(applied.ResourceId, definition.Id, StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(candidate.ResourceId, definition.Id, StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(
+            candidate.DetectedState.ResourceId,
+            definition.Id,
+            StringComparison.OrdinalIgnoreCase) ||
+        _complianceEvaluator.Evaluate(definition, candidate.DetectedState).Status !=
+            ComplianceStatus.Satisfied)
+    {
+      return false;
+    }
+
+    verification = candidate;
+    return true;
   }
 
   private async Task<IReadOnlyDictionary<string, DetectedState>> DetectAsync(

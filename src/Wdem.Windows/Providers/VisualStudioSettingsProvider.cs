@@ -13,6 +13,10 @@ namespace Wdem.Windows.Providers;
 
 public sealed class VisualStudioSettingsProvider : IResourceProvider
 {
+  private const long MaxSettingsStoreBytes = 64L * 1024 * 1024;
+  private static readonly TimeSpan ProcessOutputDrainAllowance = TimeSpan.FromSeconds(5);
+  private static readonly TimeSpan PostLaunchFinalizationTimeout = TimeSpan.FromMinutes(2);
+  private static readonly TimeSpan FinalizationReservationMargin = TimeSpan.FromSeconds(55);
   private static readonly string[] InstancePreconditionEvidenceKeys =
   [
     "visualStudioInstanceId",
@@ -67,7 +71,9 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
   {
     SupportsSource = true,
     SupportsInProgressCancellation = true,
-    CancellationFinalizationTimeout = ProcessExecutionRequest.DefaultTimeout,
+    CancellationFinalizationTimeout = ProcessExecutionRequest.DefaultTimeout +
+        ProcessOutputDrainAllowance + PostLaunchFinalizationTimeout +
+        FinalizationReservationMargin,
     ConcurrencyGroup = "visual-studio-installer"
   };
 
@@ -199,42 +205,12 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
       return ConfigurationProviderSupport.DetectionFailure(resource, pathError);
     }
 
-    if (ConfigurationImporter.ContainsReparsePoint(Path.GetDirectoryName(settingsStorePath)!))
-    {
-      return ConfigurationProviderSupport.DetectionFailure(resource,
-          ConfigurationProviderSupport.Error(resource, WdemErrorCode.ConfigurationError,
-              "The Visual Studio settings snapshot path contains an unsafe reparse point."));
-    }
-
-    if (!File.Exists(settingsStorePath))
-    {
-      return Missing(resource, selection.Instance, settingsStorePath, source.Source!.Sha256);
-    }
-
-    try
-    {
-      var attributes = File.GetAttributes(settingsStorePath);
-      if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
-      {
-        return ConfigurationProviderSupport.DetectionFailure(resource,
-            ConfigurationProviderSupport.Error(resource, WdemErrorCode.ConfigurationError,
-                "The Visual Studio settings snapshot is not a regular file."));
-      }
-
-      var hash = await ConfigurationImporter.HashFileAsync(settingsStorePath, cancellationToken)
-          .ConfigureAwait(false);
-      return State(resource, selection.Instance, settingsStorePath, hash, source.Source!.Sha256);
-    }
-    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-    {
-      throw;
-    }
-    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or SecurityException)
-    {
-      return ConfigurationProviderSupport.DetectionFailure(resource,
-          ConfigurationProviderSupport.Error(resource, WdemErrorCode.DetectionError,
-              "The Visual Studio settings snapshot could not be safely read.", exception));
-    }
+    return await DetectBoundInstanceAsync(
+        resource,
+        selection.Instance,
+        settingsStorePath,
+        source.Source!.Sha256,
+        cancellationToken).ConfigureAwait(false);
   }
 
   public async ValueTask<ResourcePlan> PlanAsync(
@@ -466,45 +442,85 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
             finalizeAfterCancellation: process.Started);
       }
 
-      var destinationBeforeCommit = await DetectAsync(resource, CancellationToken.None)
-          .ConfigureAwait(false);
-      if (!MatchesExecutionPrecondition(plan, destinationBeforeCommit))
+      using var finalization = new CancellationTokenSource(PostLaunchFinalizationTimeout);
+      try
+      {
+        var destinationBeforeCommit = await DetectBoundInstanceAsync(
+            resource,
+            selection.Instance,
+            settingsStorePath,
+            source.Source!.Sha256,
+            finalization.Token).ConfigureAwait(false);
+        if (!MatchesExecutionPrecondition(plan, destinationBeforeCommit))
+        {
+          var error = ConfigurationProviderSupport.Error(
+                  resource,
+                  WdemErrorCode.ConfigurationError,
+                  "The Visual Studio settings destination changed after planning; the approved plan is stale.");
+          return ConfigurationProviderSupport.Failed(
+              resource,
+              error,
+              plan.Steps[0],
+              process.ExitCode,
+              finalizeAfterCancellation: true);
+        }
+
+        // The hierarchy lease closes the directory redirection window. File-level CAS cannot
+        // eliminate a final nanosecond race from a non-cooperating writer on Windows.
+        var imported = await _importer.CommitStagedAsync(
+            snapshot,
+            settingsStorePath,
+            finalization.Token).ConfigureAwait(false);
+        if (!imported.Succeeded)
+        {
+          return ConfigurationProviderSupport.Failed(
+              resource,
+              imported.Error! with { ResourceId = resource.Id },
+              plan.Steps[0],
+              process.ExitCode,
+              finalizeAfterCancellation: true);
+        }
+
+        var finalState = await DetectBoundInstanceAsync(
+            resource,
+            selection.Instance,
+            settingsStorePath,
+            source.Source!.Sha256,
+            finalization.Token).ConfigureAwait(false);
+        var verification = CreateVerification(resource, finalState);
+        if (verification.Compliance != ComplianceStatus.Satisfied)
+        {
+          var error = verification.DetectedState.StructuredError ?? ConfigurationProviderSupport.Error(
+                  resource,
+                  WdemErrorCode.ConfigurationError,
+                  $"The imported Visual Studio settings final verification returned {verification.Compliance}.");
+          return ConfigurationProviderSupport.Failed(
+              resource,
+              error,
+              plan.Steps[0],
+              process.ExitCode,
+              finalizeAfterCancellation: true,
+              finalVerification: verification);
+        }
+
+        return ConfigurationProviderSupport.Succeeded(
+            resource,
+            plan.Steps[0],
+            processExitCode: process.ExitCode,
+            finalizeAfterCancellation: true) with
+        {
+          FinalVerification = verification
+        };
+      }
+      catch (OperationCanceledException) when (finalization.IsCancellationRequested)
       {
         var error = ConfigurationProviderSupport.Error(
-                resource,
-                WdemErrorCode.ConfigurationError,
-                "The Visual Studio settings destination changed after planning; the approved plan is stale.");
-        return ConfigurationProviderSupport.Failed(
             resource,
-            error,
-            plan.Steps[0],
-            process.ExitCode,
-            finalizeAfterCancellation: true);
-      }
-
-      // The hierarchy lease closes the directory redirection window. File-level CAS cannot
-      // eliminate a final nanosecond race from a non-cooperating writer on Windows.
-      var imported = await _importer.CommitStagedAsync(
-          snapshot,
-          settingsStorePath,
-          CancellationToken.None).ConfigureAwait(false);
-      if (!imported.Succeeded)
-      {
-        return ConfigurationProviderSupport.Failed(
+            WdemErrorCode.VerificationError,
+            "Visual Studio settings finalization exceeded its time limit.");
+        var verification = CreateVerification(
             resource,
-            imported.Error! with { ResourceId = resource.Id },
-            plan.Steps[0],
-            process.ExitCode,
-            finalizeAfterCancellation: true);
-      }
-
-      var verification = await VerifyAsync(resource, CancellationToken.None).ConfigureAwait(false);
-      if (verification.Compliance != ComplianceStatus.Satisfied)
-      {
-        var error = verification.DetectedState.StructuredError ?? ConfigurationProviderSupport.Error(
-                resource,
-                WdemErrorCode.ConfigurationError,
-                $"The imported Visual Studio settings final verification returned {verification.Compliance}.");
+            ConfigurationProviderSupport.DetectionFailure(resource, error));
         return ConfigurationProviderSupport.Failed(
             resource,
             error,
@@ -513,12 +529,6 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
             finalizeAfterCancellation: true,
             finalVerification: verification);
       }
-
-      return ConfigurationProviderSupport.Succeeded(
-          resource,
-          plan.Steps[0],
-          processExitCode: process.ExitCode,
-          finalizeAfterCancellation: true);
     }
     finally
     {
@@ -532,6 +542,13 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
       CancellationToken cancellationToken)
   {
     var state = await DetectAsync(resource, cancellationToken).ConfigureAwait(false);
+    return CreateVerification(resource, state);
+  }
+
+  private VerificationResult CreateVerification(
+      ResourceDefinition resource,
+      DetectedState state)
+  {
     var compliance = Evaluate(resource, state);
     if (compliance.Error is { } complianceError && state.StructuredError is null)
     {
@@ -549,6 +566,59 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
       DetectedState = state,
       Message = compliance.Status == ComplianceStatus.Satisfied ? null : compliance.Summary
     };
+  }
+
+  private static async Task<DetectedState> DetectBoundInstanceAsync(
+      ResourceDefinition resource,
+      VisualStudioInstance instance,
+      string settingsStorePath,
+      string sourceHash,
+      CancellationToken cancellationToken)
+  {
+    cancellationToken.ThrowIfCancellationRequested();
+    if (ConfigurationImporter.ContainsReparsePoint(Path.GetDirectoryName(settingsStorePath)!))
+    {
+      return ConfigurationProviderSupport.DetectionFailure(resource,
+          ConfigurationProviderSupport.Error(resource, WdemErrorCode.ConfigurationError,
+              "The Visual Studio settings snapshot path contains an unsafe reparse point."));
+    }
+
+    if (!File.Exists(settingsStorePath))
+    {
+      return Missing(resource, instance, settingsStorePath, sourceHash);
+    }
+
+    try
+    {
+      var attributes = File.GetAttributes(settingsStorePath);
+      if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+      {
+        return ConfigurationProviderSupport.DetectionFailure(resource,
+            ConfigurationProviderSupport.Error(resource, WdemErrorCode.ConfigurationError,
+                "The Visual Studio settings snapshot is not a regular file."));
+      }
+
+      if (new FileInfo(settingsStorePath).Length > MaxSettingsStoreBytes)
+      {
+        return ConfigurationProviderSupport.DetectionFailure(resource,
+            ConfigurationProviderSupport.Error(resource, WdemErrorCode.ConfigurationError,
+                "The Visual Studio settings snapshot exceeds the 64 MiB size limit."));
+      }
+
+      var hash = await ConfigurationImporter.HashFileAsync(settingsStorePath, cancellationToken)
+          .ConfigureAwait(false);
+      return State(resource, instance, settingsStorePath, hash, sourceHash);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      throw;
+    }
+    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or SecurityException)
+    {
+      return ConfigurationProviderSupport.DetectionFailure(resource,
+          ConfigurationProviderSupport.Error(resource, WdemErrorCode.DetectionError,
+              "The Visual Studio settings snapshot could not be safely read.", exception));
+    }
   }
 
   private async Task<InstanceSelection> SelectInstanceAsync(
