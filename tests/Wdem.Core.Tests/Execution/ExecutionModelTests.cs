@@ -48,11 +48,25 @@ public sealed class ExecutionModelTests
     Assert.Equal(ProviderLogLevel.Info, existingProgressCall.LogLevel);
     Assert.Equal("git:configure", detailedProgress.StepId);
     Assert.Equal(ProviderLogLevel.Warning, detailedProgress.LogLevel);
+    Assert.Empty(capabilities.AcquisitionOnlyParameters);
 
     var (stage, percent, message) = existingProgressCall;
     Assert.Equal("Apply", stage);
     Assert.Equal(0.5, percent);
     Assert.Equal("Installing", message);
+  }
+
+  [Fact]
+  public void ProviderCapabilities_AcquisitionOnlyParameters_AreCaseInsensitiveSnapshot()
+  {
+    var source = new HashSet<string>(StringComparer.Ordinal) { "expectedSha256" };
+    var capabilities = new ProviderCapabilities { AcquisitionOnlyParameters = source };
+
+    source.Clear();
+
+    Assert.Contains("EXPECTEDSHA256", capabilities.AcquisitionOnlyParameters);
+    var mutable = Assert.IsAssignableFrom<ISet<string>>(capabilities.AcquisitionOnlyParameters);
+    Assert.Throws<NotSupportedException>(() => mutable.Add("sourcePath"));
   }
 
   [Fact]

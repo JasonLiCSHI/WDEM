@@ -84,6 +84,50 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task ApplyAsync_AcquisitionOnlyHash_DoesNotInvalidateSatisfiedVerification()
+  {
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      Capabilities = new ProviderCapabilities
+      {
+        AcquisitionOnlyParameters = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+          "expectedSha256"
+        }
+      },
+      VerificationResult = new VerificationResult
+      {
+        ResourceId = "git",
+        Compliance = ComplianceStatus.Satisfied,
+        DetectedState = Satisfied("git", "2.52.1")
+      }
+    };
+    var profile = Profile() with
+    {
+      Resources = new Dictionary<string, ResourceDefinition>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = Profile().Resources["git"] with
+        {
+          Parameters = new Dictionary<string, string?>
+          {
+            ["expectedSha256"] = new string('A', 64)
+          }
+        }
+      }
+    };
+    var (service, _) = CreateService(provider, profile: profile);
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    var result = run.ResourceResults["git"];
+    Assert.Equal(ExecutionOutcome.Succeeded, result.Outcome);
+    Assert.Equal(ComplianceStatus.Satisfied, result.FinalCompliance);
+    Assert.Null(result.DetectedAfter!.ConfigurationHash);
+    Assert.Equal(1, provider.ApplyCalls);
+    Assert.Equal(1, provider.VerifyCalls);
+  }
+
+  [Fact]
   public async Task ApplyAsync_RecordsReviewedInitialPlanApproval()
   {
     var provider = new ScriptedProvider(Missing("git"));

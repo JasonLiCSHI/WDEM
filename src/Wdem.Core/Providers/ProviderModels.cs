@@ -43,6 +43,9 @@ public enum ApplyOutcome
 
 public sealed record ProviderCapabilities
 {
+  private IReadOnlySet<string> _acquisitionOnlyParameters =
+      Array.Empty<string>().ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
   public bool SupportsSource { get; init; }
   public bool SupportsVersionConstraints { get; init; }
   public bool SupportsInstallerParameters { get; init; }
@@ -50,6 +53,22 @@ public sealed record ProviderCapabilities
   public TimeSpan CancellationFinalizationTimeout { get; init; }
   public int MaxConcurrentOperations { get; init; } = 1;
   public string? ConcurrencyGroup { get; init; }
+  public IReadOnlySet<string> AcquisitionOnlyParameters
+  {
+    get => _acquisitionOnlyParameters;
+    init
+    {
+      ArgumentNullException.ThrowIfNull(value);
+      if (value.Any(parameter => parameter is null))
+      {
+        throw new ArgumentException(
+            "Acquisition-only parameters cannot contain null values.",
+            nameof(value));
+      }
+
+      _acquisitionOnlyParameters = value.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+    }
+  }
 }
 
 public sealed record ProviderValidationResult

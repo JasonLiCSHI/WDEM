@@ -394,7 +394,9 @@ public sealed partial class ExecutionPlanner(
     ComplianceResult compliance;
     try
     {
-      compliance = _complianceEvaluator.Evaluate(definition, detectedState);
+      compliance = _complianceEvaluator.Evaluate(
+          ProviderResourceProjection.ForCompliance(definition, provider.Capabilities),
+          detectedState);
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {

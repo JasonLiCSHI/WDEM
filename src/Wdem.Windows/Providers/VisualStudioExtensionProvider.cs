@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text.Json;
 using Wdem.Core.Compliance;
 using Wdem.Core.Execution;
 using Wdem.Core.Processes;
@@ -26,9 +28,8 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
   private readonly IVsixManifestReader _manifestReader;
   private readonly IProcessExecutor _processExecutor;
   private readonly IComplianceEvaluator _complianceEvaluator;
-  private readonly IVsixPlanArtifactStore _planArtifactStore;
+  private readonly ISecureArtifactStager _artifactStager;
   private readonly HttpClient _httpClient;
-  private readonly ITrustedFileVerifier _trustedFileVerifier;
 
   public VisualStudioExtensionProvider(
       IVisualStudioDiscovery discovery,
@@ -38,27 +39,6 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
       ISecureArtifactStager? artifactStager = null,
       HttpClient? httpClient = null,
       ITrustedFileVerifier? trustedFileVerifier = null)
-      : this(
-          discovery,
-          manifestReader,
-          processExecutor,
-          complianceEvaluator,
-          artifactStager,
-          httpClient,
-          trustedFileVerifier,
-          planArtifactStore: null)
-  {
-  }
-
-  internal VisualStudioExtensionProvider(
-      IVisualStudioDiscovery discovery,
-      IVsixManifestReader manifestReader,
-      IProcessExecutor processExecutor,
-      IComplianceEvaluator complianceEvaluator,
-      ISecureArtifactStager? artifactStager,
-      HttpClient? httpClient,
-      ITrustedFileVerifier? trustedFileVerifier,
-      IVsixPlanArtifactStore? planArtifactStore)
   {
     _discovery = discovery ?? throw new ArgumentNullException(nameof(discovery));
     _manifestReader = manifestReader ?? throw new ArgumentNullException(nameof(manifestReader));
@@ -66,14 +46,8 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
     _complianceEvaluator = complianceEvaluator ??
         throw new ArgumentNullException(nameof(complianceEvaluator));
     _httpClient = httpClient ?? new HttpClient();
-    _trustedFileVerifier = trustedFileVerifier ?? new TrustedFileVerifier();
-    var stager = artifactStager ?? new SecureArtifactStager(
-        new WindowsPlanArtifactDirectoryPolicy(),
-        _trustedFileVerifier);
-    _planArtifactStore = planArtifactStore ?? new VsixPlanArtifactStore(
-        stager,
-        _trustedFileVerifier,
-        _manifestReader);
+    var verifier = trustedFileVerifier ?? new TrustedFileVerifier();
+    _artifactStager = artifactStager ?? new SecureArtifactStager(verifier: verifier);
   }
 
   public string ResourceType => "visual-studio-extension";
@@ -83,7 +57,11 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
     SupportsSource = true,
     SupportsVersionConstraints = true,
     SupportsInProgressCancellation = true,
-    ConcurrencyGroup = "visual-studio-installer"
+    ConcurrencyGroup = "visual-studio-installer",
+    AcquisitionOnlyParameters = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+      ExpectedSha256Parameter
+    }
   };
 
   public ValueTask<ProviderValidationResult> ValidateAsync(
@@ -291,11 +269,6 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
     }
 
     var compliance = Evaluate(resource, currentState);
-    if (compliance.Status == ComplianceStatus.Satisfied)
-    {
-      return CreatePlan(resource, compliance.Status, true);
-    }
-
     if (compliance.Status is ComplianceStatus.DetectionFailed or ComplianceStatus.Unsupported)
     {
       return CreatePlan(resource, compliance.Status, false) with
@@ -305,32 +278,29 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
       };
     }
 
-    var prepared = await PreparePlanArtifactAsync(resource, cancellationToken).ConfigureAwait(false);
-    if (prepared.Error is not null || prepared.StepEvidence is null)
+    var instance = await SelectInstanceAsync(resource, cancellationToken).ConfigureAwait(false);
+    if (instance.Instance is null)
     {
+      var error = instance.Error ?? new StructuredError(
+          WdemErrorCode.DependencyError,
+          "Visual Studio instance is unavailable.",
+          "The selected Visual Studio instance was not found.")
+      {
+        ResourceId = resource.Id
+      };
       return CreatePlan(resource, compliance.Status, false) with
       {
-        Error = prepared.Error?.Detail,
-        StructuredErrors = prepared.Error is null ? [] : [prepared.Error]
+        Error = error.Detail,
+        StructuredErrors = [error]
       };
     }
 
-    return CreatePlan(resource, compliance.Status, true) with
+    if (compliance.Status == ComplianceStatus.Satisfied)
     {
-      Steps =
-      [
-        new PlanStep
-        {
-          Id = prepared.StepEvidence,
-          Description = $"Install {resource.DisplayName ?? resource.Id} with VSIXInstaller.",
-          Action = compliance.Status == ComplianceStatus.Missing
-              ? PlanAction.Install
-              : PlanAction.Upgrade,
-          PrivilegeRequirement = PrivilegeRequirement.Administrator,
-          RestartPolicy = resource.RestartPolicy
-        }
-      ]
-    };
+      return CreateSatisfiedPlan(resource, instance.Instance);
+    }
+
+    return CreateExecutablePlan(resource, compliance.Status, instance.Instance);
   }
 
   public async ValueTask<ResourceApplyResult> ApplyAsync(
@@ -339,193 +309,196 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
       IProgress<ProviderProgress>? progress,
       CancellationToken cancellationToken)
   {
+    cancellationToken.ThrowIfCancellationRequested();
     ArgumentNullException.ThrowIfNull(resource);
     ArgumentNullException.ThrowIfNull(plan);
-    var artifactsToAbandon = GetPlanArtifactsToAbandon(resource, plan);
-    ClaimedVsixPlanArtifact? approvedArtifact = null;
-    try
+    var validation = await ValidateAsync(resource, cancellationToken).ConfigureAwait(false);
+    var invalidResource = ProviderLifecycleSupport.RejectInvalidResource(resource, validation);
+    if (invalidResource is not null)
     {
-      foreach (var artifact in artifactsToAbandon)
-      {
-        try
-        {
-          await _planArtifactStore.BeginClaimAsync(
-              artifact.ResourceId,
-              artifact.StepId,
-              CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (Exception exception) when (exception is ArgumentException or IOException or
-            UnauthorizedAccessException or InvalidDataException or InvalidOperationException or
-            FormatException or System.Text.Json.JsonException or
-            System.Security.SecurityException)
-        {
-          var failedStep = plan.Steps.First(candidate => string.Equals(
-              candidate.Id,
-              artifact.StepId,
-              StringComparison.Ordinal));
-          return ProviderLifecycleSupport.Failure(
-              resource,
-              failedStep,
-              ConfigurationError(
-                  resource,
-                  "The approved VSIX artifact could not be securely claimed.",
-                  exception),
-              null,
-              0);
-        }
-      }
+      return invalidResource;
+    }
 
-      cancellationToken.ThrowIfCancellationRequested();
-      var validation = await ValidateAsync(resource, cancellationToken).ConfigureAwait(false);
-      var invalidResource = ProviderLifecycleSupport.RejectInvalidResource(resource, validation);
-      if (invalidResource is not null)
-      {
-        return invalidResource;
-      }
+    var invalidPlan = ProviderLifecycleSupport.RejectInvalidPlan(
+        resource,
+        plan,
+        ResourceType,
+        ProviderName,
+        static (_, step) => HasValidStepId(step.Id));
+    if (invalidPlan is not null)
+    {
+      return invalidPlan;
+    }
 
-      var invalidPlan = ProviderLifecycleSupport.RejectInvalidPlan(
+    var currentState = await DetectAsync(resource, cancellationToken).ConfigureAwait(false);
+    var expectedCurrentPlan = await PlanAsync(
+        resource,
+        currentState,
+        cancellationToken).ConfigureAwait(false);
+    if (!MatchesExpectedPlan(plan, expectedCurrentPlan))
+    {
+      return PlanMismatchFailure(resource, plan.Steps.FirstOrDefault());
+    }
+
+    if (!plan.RequiresApply)
+    {
+      return new ResourceApplyResult { ResourceId = resource.Id, Outcome = ApplyOutcome.NotRequired };
+    }
+
+    var step = plan.Steps[0];
+    var instance = await SelectInstanceAsync(resource, cancellationToken).ConfigureAwait(false);
+    if (instance.Instance is null)
+    {
+      return ProviderLifecycleSupport.Failure(
           resource,
-          plan,
-          ResourceType,
-          ProviderName,
-          static (definition, step) => VsixPlanArtifactStore.HasValidStepEvidence(
-              definition.Id,
-              step.Id));
-      if (invalidPlan is not null)
-      {
-        return invalidPlan;
-      }
-
-      if (!plan.RequiresApply)
-      {
-        return new ResourceApplyResult { ResourceId = resource.Id, Outcome = ApplyOutcome.NotRequired };
-      }
-
-      var step = plan.Steps[0];
-      var instance = await SelectInstanceAsync(resource, cancellationToken).ConfigureAwait(false);
-      if (instance.Instance is null)
-      {
-        return ProviderLifecycleSupport.Failure(
-            resource,
-            step,
-            instance.Error ?? new StructuredError(
-                WdemErrorCode.DependencyError,
-                "Visual Studio instance is unavailable.",
-                "The selected Visual Studio instance was not found."),
-            null,
-            0);
-      }
-
-      progress?.Report(new ProviderProgress("Apply", 0.25, "Validating the approved VSIX artifact.", step.Id));
-      var claim = await _planArtifactStore.ClaimAsync(
-          resource.Id,
-          step.Id,
-          GetParameter(resource, ExpectedSha256Parameter)!,
-          VsixPlanVisualStudioIdentity.FromInstance(instance.Instance),
-          cancellationToken).ConfigureAwait(false);
-      approvedArtifact = claim.Artifact;
-      if (approvedArtifact is null)
-      {
-        return ProviderLifecycleSupport.Failure(
-            resource,
-            step,
-            (claim.Error ?? ConfigurationError(resource, "The approved VSIX artifact is invalid.")) with
-            {
-              ResourceId = resource.Id
-            },
-            null,
-            0.25);
-      }
-
-      if (!SourceManifestMatches(resource, approvedArtifact.Manifest, instance.Instance))
-      {
-        return ProviderLifecycleSupport.Failure(
-            resource,
-            step,
-            new StructuredError(
-                WdemErrorCode.VersionError,
-                "VSIX source does not match the requested extension.",
-                "The verified VSIX manifest identity or version does not match the resource.")
-            {
-              ResourceId = resource.Id,
-              StepId = step.Id
-            },
-            null,
-            0.25);
-      }
-
-      var installerPath = Path.GetFullPath(Path.Combine(
-          instance.Instance.InstallationPath,
-          "Common7",
-          "IDE",
-          "VSIXInstaller.exe"));
-      progress?.Report(new ProviderProgress("Apply", 0.5, "Installing the verified VSIX artifact.", step.Id));
-      var process = await _processExecutor.ExecuteAsync(
-          new ProcessExecutionRequest(
-              installerPath,
-              ["/quiet", "/admin", approvedArtifact.Path]),
-          null,
-          cancellationToken).ConfigureAwait(false);
-      progress?.Report(new ProviderProgress("Verify", 0.75, "Verifying the installed VSIX manifest.", step.Id));
-      var verification = await VerifyAsync(resource, cancellationToken).ConfigureAwait(false);
-      var processError = ProcessError(resource, step, process);
-      if (processError is not null)
-      {
-        return ProviderLifecycleSupport.Failure(
-            resource,
-            step,
-            processError,
-            process.ExitCode,
-            0.75);
-      }
-
-      if (verification.Compliance == ComplianceStatus.Satisfied)
-      {
-        return new ResourceApplyResult
-        {
-          ResourceId = resource.Id,
-          Outcome = ApplyOutcome.Succeeded,
-          StepResults =
-          [
-            new ProviderStepResult
-            {
-              StepId = step.Id,
-              Action = step.Action,
-              Progress = 1,
-              ProcessExitCode = process.ExitCode
-            }
-          ]
-        };
-      }
-
-      var error = Evaluate(resource, verification.DetectedState).Error ??
-          new StructuredError(
-              WdemErrorCode.VerificationError,
-              "VSIX installation verification failed.",
-              "The extension did not reach the requested state.")
+          step,
+          instance.Error ?? new StructuredError(
+              WdemErrorCode.DependencyError,
+              "Visual Studio instance changed after planning.",
+              "The selected Visual Studio instance is missing or no longer matches the approved plan.")
           {
             ResourceId = resource.Id,
             StepId = step.Id
-          };
-      return ProviderLifecycleSupport.Failure(resource, step, error, process.ExitCode, 0.75);
+          },
+          null,
+          0);
     }
-    finally
+
+    var expectedPlan = CreateExecutablePlan(resource, plan.Compliance, instance.Instance);
+    if (!MatchesExpectedPlan(plan, expectedPlan))
     {
-      if (approvedArtifact is not null)
-      {
-        await approvedArtifact.DisposeAsync().ConfigureAwait(false);
-      }
-      else
-      {
-        foreach (var artifact in artifactsToAbandon)
-        {
-          await _planArtifactStore.AbandonAsync(
-              artifact.ResourceId,
-              artifact.StepId,
-              CancellationToken.None).ConfigureAwait(false);
-        }
-      }
+      return PlanMismatchFailure(resource, step);
     }
+
+    progress?.Report(new ProviderProgress("Apply", 0.25, "Acquiring and validating the VSIX artifact.", step.Id));
+    var staged = await StageApplySourceAsync(resource, cancellationToken).ConfigureAwait(false);
+    if (staged.Artifact is null)
+    {
+      return ProviderLifecycleSupport.Failure(
+          resource,
+          step,
+          (staged.Error ?? ConfigurationError(resource, "The VSIX source could not be staged.")) with
+          {
+            ResourceId = resource.Id,
+            StepId = step.Id
+          },
+          null,
+          0.25);
+    }
+
+    await using var approvedArtifact = staged.Artifact;
+    VsixManifestReadResult sourceManifest;
+    try
+    {
+      sourceManifest = await _manifestReader.ReadSourceAsync(
+          approvedArtifact.Path,
+          instance.Instance.InstanceId,
+          cancellationToken).ConfigureAwait(false);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+      throw;
+    }
+    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+        InvalidDataException)
+    {
+      var sourceReadError = new StructuredError(
+          WdemErrorCode.ConfigurationError,
+          "VSIX source manifest is invalid.",
+          "The verified staged VSIX manifest could not be safely read.")
+      {
+        ResourceId = resource.Id,
+        StepId = step.Id,
+        UnderlyingException = exception
+      };
+      return ProviderLifecycleSupport.Failure(resource, step, sourceReadError, null, 0.25);
+    }
+
+    if (sourceManifest.Manifest is null || sourceManifest.Error is not null)
+    {
+      return ProviderLifecycleSupport.Failure(
+          resource,
+          step,
+          (sourceManifest.Error ?? ConfigurationError(resource, "The staged VSIX manifest is invalid.")) with
+          {
+            ResourceId = resource.Id,
+            StepId = step.Id
+          },
+          null,
+          0.25);
+    }
+
+    if (!SourceManifestMatches(resource, sourceManifest.Manifest, instance.Instance))
+    {
+      return ProviderLifecycleSupport.Failure(
+          resource,
+          step,
+          new StructuredError(
+              WdemErrorCode.VersionError,
+              "VSIX source does not match the requested extension.",
+              "The verified VSIX manifest identity, version, or installation target does not match the approved resource.")
+          {
+            ResourceId = resource.Id,
+            StepId = step.Id
+          },
+          null,
+          0.25);
+    }
+
+    var installerPath = Path.GetFullPath(Path.Combine(
+        instance.Instance.InstallationPath,
+        "Common7",
+        "IDE",
+        "VSIXInstaller.exe"));
+    progress?.Report(new ProviderProgress("Apply", 0.5, "Installing the verified VSIX artifact.", step.Id));
+    var process = await _processExecutor.ExecuteAsync(
+        new ProcessExecutionRequest(
+            installerPath,
+            ["/quiet", "/admin", approvedArtifact.Path]),
+        null,
+        cancellationToken).ConfigureAwait(false);
+    progress?.Report(new ProviderProgress("Verify", 0.75, "Verifying the installed VSIX manifest.", step.Id));
+    var verification = await VerifyAsync(resource, cancellationToken).ConfigureAwait(false);
+    var processError = ProcessError(resource, step, process);
+    if (processError is not null)
+    {
+      return ProviderLifecycleSupport.Failure(
+          resource,
+          step,
+          processError,
+          process.ExitCode,
+          0.75);
+    }
+
+    if (verification.Compliance == ComplianceStatus.Satisfied)
+    {
+      return new ResourceApplyResult
+      {
+        ResourceId = resource.Id,
+        Outcome = ApplyOutcome.Succeeded,
+        StepResults =
+        [
+          new ProviderStepResult
+          {
+            StepId = step.Id,
+            Action = step.Action,
+            Progress = 1,
+            ProcessExitCode = process.ExitCode
+          }
+        ]
+      };
+    }
+
+    var error = Evaluate(resource, verification.DetectedState).Error ??
+        new StructuredError(
+            WdemErrorCode.VerificationError,
+            "VSIX installation verification failed.",
+            "The extension did not reach the requested state.")
+        {
+          ResourceId = resource.Id,
+          StepId = step.Id
+        };
+    return ProviderLifecycleSupport.Failure(resource, step, error, process.ExitCode, 0.75);
   }
 
   public async ValueTask<VerificationResult> VerifyAsync(
@@ -594,9 +567,8 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
     }
   }
 
-  private async Task<VsixPlanArtifactStageResult> StagePlanSourceAsync(
+  private async Task<SecureArtifactStageResult> StageApplySourceAsync(
       ResourceDefinition resource,
-      VsixPlanVisualStudioIdentity visualStudioIdentity,
       CancellationToken cancellationToken)
   {
     var source = GetParameter(resource, SourcePathParameter)!;
@@ -605,26 +577,15 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
     {
       try
       {
-        var localPath = Path.GetFullPath(source);
-        if (!File.Exists(localPath))
-        {
-          return new VsixPlanArtifactStageResult(null, null, new StructuredError(
-                WdemErrorCode.DownloadError,
-                "VSIX source is unavailable.",
-                "The configured local VSIX source does not exist."));
-        }
-
-        return await _planArtifactStore.StageAsync(
-            resource.Id,
-            localPath,
+        return await _artifactStager.StageVerifiedAsync(
+            Path.GetFullPath(source),
             expectedSha256,
-            visualStudioIdentity,
+            SecureArtifactKind.VisualStudioExtension,
             cancellationToken).ConfigureAwait(false);
       }
       catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
       {
-        return new VsixPlanArtifactStageResult(
-            null,
+        return new SecureArtifactStageResult(
             null,
             ConfigurationError(resource, "The VSIX source path is invalid.", exception));
       }
@@ -651,104 +612,41 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
 
       await using var sourceStream = await response.Content.ReadAsStreamAsync(cancellationToken)
           .ConfigureAwait(false);
-      return await _planArtifactStore.StageAsync(
-          resource.Id,
+      return await _artifactStager.StageVerifiedAsync(
           sourceStream,
           expectedSha256,
-          visualStudioIdentity,
+          SecureArtifactKind.VisualStudioExtension,
           cancellationToken).ConfigureAwait(false);
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
       throw;
     }
-    catch (Exception exception) when (exception is HttpRequestException or IOException or
-        UnauthorizedAccessException or OverflowException)
+    catch (OperationCanceledException exception)
     {
-      return new VsixPlanArtifactStageResult(null, null, new StructuredError(
+      return DownloadFailure(exception);
+    }
+    catch (Exception exception) when (exception is HttpRequestException or InvalidDataException or
+        IOException or UnauthorizedAccessException or OverflowException)
+    {
+      return DownloadFailure(exception);
+    }
+  }
+
+  private static SecureArtifactStageResult DownloadFailure(Exception exception) => new(
+      null,
+      new StructuredError(
           WdemErrorCode.DownloadError,
           "VSIX download failed.",
           "The VSIX artifact could not be safely downloaded.")
       {
         UnderlyingException = exception
       });
-    }
-  }
-
-  private async Task<PreparedPlanArtifact> PreparePlanArtifactAsync(
-      ResourceDefinition resource,
-      CancellationToken cancellationToken)
-  {
-    var instance = await SelectInstanceAsync(resource, cancellationToken).ConfigureAwait(false);
-    if (instance.Error is not null)
-    {
-      return new PreparedPlanArtifact(null, instance.Error);
-    }
-
-    if (instance.Instance is null)
-    {
-      return new PreparedPlanArtifact(null, new StructuredError(
-          WdemErrorCode.DependencyError,
-          "Visual Studio instance is unavailable.",
-          "The selected Visual Studio instance was not found.")
-      {
-        ResourceId = resource.Id
-      });
-    }
-
-    var staged = await StagePlanSourceAsync(
-        resource,
-        VsixPlanVisualStudioIdentity.FromInstance(instance.Instance),
-        cancellationToken).ConfigureAwait(false);
-    if (staged.Error is not null || staged.Manifest is null || staged.StepEvidence is null)
-    {
-      return new PreparedPlanArtifact(
-          null,
-          (staged.Error ?? ConfigurationError(resource, "The VSIX source could not be staged.")) with
-          {
-            ResourceId = resource.Id
-          });
-    }
-
-    if (SourceManifestMatches(resource, staged.Manifest, instance.Instance))
-    {
-      return new PreparedPlanArtifact(staged.StepEvidence, null);
-    }
-
-    await DiscardPreparedArtifactAsync(
-        resource,
-        staged.StepEvidence,
-        cancellationToken)
-        .ConfigureAwait(false);
-    return new PreparedPlanArtifact(null, new StructuredError(
-            WdemErrorCode.ConfigurationError,
-            "VSIX source is incompatible.",
-            "The verified VSIX identity, version, or Visual Studio installation target does not match the resource.")
-    {
-      ResourceId = resource.Id
-    });
-  }
-
-  private async Task DiscardPreparedArtifactAsync(
-      ResourceDefinition resource,
-      string stepEvidence,
-      CancellationToken cancellationToken)
-  {
-    await _planArtifactStore.DiscardAsync(
-        resource.Id,
-        stepEvidence,
-        cancellationToken).ConfigureAwait(false);
-  }
 
   private Wdem.Core.Compliance.ComplianceResult Evaluate(
       ResourceDefinition resource,
       DetectedState state) => _complianceEvaluator.Evaluate(
-          resource with
-          {
-            Parameters = resource.Parameters
-                .Where(pair => !Matches(pair.Key, ExpectedSha256Parameter))
-                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase)
-          },
+          ProviderResourceProjection.ForCompliance(resource, Capabilities),
           state);
 
   private static bool VersionMatches(ResourceDefinition resource, string version)
@@ -775,6 +673,190 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
       Matches(manifest.Id, GetParameter(resource, ExtensionIdParameter)!) &&
       VersionMatches(resource, manifest.Version) &&
       VsixInstallationTargetCompatibility.IsCompatible(manifest.Targets, instance);
+
+  private static ResourcePlan CreateExecutablePlan(
+      ResourceDefinition resource,
+      ComplianceStatus compliance,
+      VisualStudioInstance instance)
+  {
+    var action = compliance == ComplianceStatus.Missing
+        ? PlanAction.Install
+        : PlanAction.Upgrade;
+    var description = $"Install {resource.DisplayName ?? resource.Id} with VSIXInstaller.";
+    var reason = compliance == ComplianceStatus.Missing
+        ? "The extension is not installed in the selected Visual Studio instance."
+        : "The installed extension version does not satisfy the requested version.";
+    var privilegeRequirement = resource.PrivilegeRequirement;
+    var restartPolicy = resource.RestartPolicy;
+    const bool isDestructive = false;
+    var definitionFingerprint = ResourceDefinitionFingerprint.Create(resource);
+    var evidence = CreateCanonicalPlanEvidence(
+        resource,
+        definitionFingerprint,
+        compliance,
+        true,
+        1,
+        description,
+        action,
+        privilegeRequirement,
+        restartPolicy,
+        isDestructive,
+        reason,
+        instance);
+    var evidenceHash = CreateCanonicalEvidenceHash(evidence);
+    var stepId = "vsix:install:" + evidenceHash;
+    return CreatePlan(resource, compliance, true) with
+    {
+      ExecutionPreconditionFingerprint = evidenceHash,
+      Steps =
+      [
+        new PlanStep
+        {
+          Id = stepId,
+          Description = description,
+          Action = action,
+          PrivilegeRequirement = privilegeRequirement,
+          RestartPolicy = restartPolicy,
+          IsDestructive = isDestructive,
+          Reason = reason
+        }
+      ]
+    };
+  }
+
+  private static ResourcePlan CreateSatisfiedPlan(
+      ResourceDefinition resource,
+      VisualStudioInstance instance)
+  {
+    var definitionFingerprint = ResourceDefinitionFingerprint.Create(resource);
+    var evidence = CreateCanonicalPlanEvidence(
+        resource,
+        definitionFingerprint,
+        ComplianceStatus.Satisfied,
+        true,
+        0,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        instance);
+    return CreatePlan(resource, ComplianceStatus.Satisfied, true) with
+    {
+      ExecutionPreconditionFingerprint = CreateCanonicalEvidenceHash(evidence)
+    };
+  }
+
+  private static CanonicalPlanEvidence CreateCanonicalPlanEvidence(
+      ResourceDefinition resource,
+      string definitionFingerprint,
+      ComplianceStatus compliance,
+      bool isExecutable,
+      int stepCount,
+      string? description,
+      PlanAction? action,
+      PrivilegeRequirement? privilegeRequirement,
+      RestartPolicy? restartPolicy,
+      bool? isDestructive,
+      string? reason,
+      VisualStudioInstance instance) => new(
+        resource.Id,
+        resource.Type,
+        resource.Provider,
+        definitionFingerprint,
+        definitionFingerprint,
+        null,
+        compliance,
+        isExecutable,
+        stepCount,
+        description,
+        action,
+        privilegeRequirement,
+        restartPolicy,
+        isDestructive,
+        reason,
+        new InstanceEvidence(
+            instance.InstanceId,
+            instance.ProductId,
+            instance.InstallationPath,
+            instance.ProductPath,
+            instance.InstallationVersion));
+
+  private static string CreateCanonicalEvidenceHash(CanonicalPlanEvidence evidence) =>
+      Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(evidence)));
+
+  private static bool MatchesExpectedPlan(ResourcePlan actual, ResourcePlan expected)
+  {
+    if (!string.Equals(actual.ResourceId, expected.ResourceId, StringComparison.Ordinal) ||
+        !string.Equals(actual.ResourceType, expected.ResourceType, StringComparison.Ordinal) ||
+        !string.Equals(actual.ProviderName, expected.ProviderName, StringComparison.Ordinal) ||
+        !string.Equals(
+            actual.DesiredStateFingerprint,
+            expected.DesiredStateFingerprint,
+            StringComparison.Ordinal) ||
+        !string.Equals(
+            actual.ExecutionPreconditionFingerprint,
+            expected.ExecutionPreconditionFingerprint,
+            StringComparison.Ordinal) ||
+        actual.Compliance != expected.Compliance ||
+        actual.IsExecutable != expected.IsExecutable ||
+        !string.Equals(actual.Error, expected.Error, StringComparison.Ordinal) ||
+        actual.StructuredErrors.Count != expected.StructuredErrors.Count ||
+        actual.Steps.Count != expected.Steps.Count)
+    {
+      return false;
+    }
+
+    if (actual.Steps.Count == 0)
+    {
+      return true;
+    }
+
+    var actualStep = actual.Steps[0];
+    var expectedStep = expected.Steps[0];
+    return string.Equals(actualStep.Id, expectedStep.Id, StringComparison.Ordinal) &&
+        string.Equals(actualStep.Description, expectedStep.Description, StringComparison.Ordinal) &&
+        actualStep.Action == expectedStep.Action &&
+        actualStep.PrivilegeRequirement == expectedStep.PrivilegeRequirement &&
+        actualStep.RestartPolicy == expectedStep.RestartPolicy &&
+        actualStep.IsDestructive == expectedStep.IsDestructive &&
+        string.Equals(actualStep.Reason, expectedStep.Reason, StringComparison.Ordinal);
+  }
+
+  private static ResourceApplyResult PlanMismatchFailure(
+      ResourceDefinition resource,
+      PlanStep? step)
+  {
+    var error = new StructuredError(
+        WdemErrorCode.ProviderError,
+        "Resource plan cannot be applied.",
+        "The approved Visual Studio extension plan was modified or is stale.")
+    {
+      ResourceId = resource.Id,
+      StepId = step?.Id
+    };
+    if (step is not null)
+    {
+      return ProviderLifecycleSupport.Failure(resource, step, error, null, 0);
+    }
+
+    return new ResourceApplyResult
+    {
+      ResourceId = resource.Id,
+      Outcome = ApplyOutcome.Failed,
+      Error = error,
+      Diagnostics = [error]
+    };
+  }
+
+  private static bool HasValidStepId(string stepId)
+  {
+    const string prefix = "vsix:install:";
+    return stepId.Length == prefix.Length + 64 &&
+        stepId.StartsWith(prefix, StringComparison.Ordinal) &&
+        stepId[prefix.Length..].All(Uri.IsHexDigit);
+  }
 
   private static DetectedState CreateDetectedState(
       ResourceDefinition resource,
@@ -957,22 +1039,6 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
   private static bool Matches(string? left, string? right) =>
       string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
 
-  private static IReadOnlyList<PlanArtifactReference> GetPlanArtifactsToAbandon(
-      ResourceDefinition resource,
-      ResourcePlan plan)
-  {
-    if (!string.Equals(resource.Id, plan.ResourceId, StringComparison.Ordinal))
-    {
-      return [];
-    }
-
-    return plan.Steps
-        .Where(step => VsixPlanArtifactStore.IsPlanArtifactStep(resource.Id, step.Id))
-        .Select(step => new PlanArtifactReference(resource.Id, step.Id))
-        .Distinct()
-        .ToArray();
-  }
-
   private static StructuredError ConfigurationError(
       ResourceDefinition? resource,
       string detail,
@@ -1007,6 +1073,28 @@ public sealed class VisualStudioExtensionProvider : IResourceProvider
   }
 
   private sealed record InstanceSelection(VisualStudioInstance? Instance, StructuredError? Error);
-  private sealed record PreparedPlanArtifact(string? StepEvidence, StructuredError? Error);
-  private sealed record PlanArtifactReference(string ResourceId, string StepId);
+  private sealed record CanonicalPlanEvidence(
+      string ResourceId,
+      string ResourceType,
+      string ProviderName,
+      string DesiredStateFingerprint,
+      string DefinitionFingerprint,
+      string? ExecutionPreconditionFingerprint,
+      ComplianceStatus Compliance,
+      bool IsExecutable,
+      int StepCount,
+      string? Description,
+      PlanAction? Action,
+      PrivilegeRequirement? PrivilegeRequirement,
+      RestartPolicy? RestartPolicy,
+      bool? IsDestructive,
+      string? Reason,
+      InstanceEvidence VisualStudioIdentity);
+
+  private sealed record InstanceEvidence(
+      string InstanceId,
+      string ProductId,
+      string InstallationPath,
+      string ProductPath,
+      string InstallationVersion);
 }

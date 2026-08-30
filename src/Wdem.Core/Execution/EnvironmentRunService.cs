@@ -533,7 +533,7 @@ public sealed class EnvironmentRunService :
     var detected = await DetectAsync(graph, cancellationToken).ConfigureAwait(false);
     var compliance = graph.Nodes.ToDictionary(
         pair => pair.Key,
-        pair => _complianceEvaluator.Evaluate(pair.Value.Definition, detected[pair.Key]),
+        pair => EvaluateCompliance(pair.Value.Definition, detected[pair.Key]),
         IdComparer);
     var plan = await _planner.CreateAsync(
         graph,
@@ -856,7 +856,7 @@ public sealed class EnvironmentRunService :
     ComplianceResult freshCompliance;
     try
     {
-      freshCompliance = _complianceEvaluator.Evaluate(definition, freshDetected);
+      freshCompliance = EvaluateCompliance(provider, definition, freshDetected);
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
@@ -1401,12 +1401,13 @@ public sealed class EnvironmentRunService :
     try
     {
       var verification = TryGetAuthoritativeFinalVerification(
+          provider,
           definition,
           applied,
           out var suppliedVerification)
               ? suppliedVerification
               : await provider.VerifyAsync(definition, cancellationToken).ConfigureAwait(false);
-      var evaluated = _complianceEvaluator.Evaluate(definition, verification.DetectedState);
+      var evaluated = EvaluateCompliance(provider, definition, verification.DetectedState);
       var verified = verification.Compliance == ComplianceStatus.Satisfied &&
           evaluated.Status == ComplianceStatus.Satisfied;
       var processStep = stepResults.LastOrDefault(step => step.ProcessExitCode is not null);
@@ -1488,6 +1489,7 @@ public sealed class EnvironmentRunService :
   }
 
   private bool TryGetAuthoritativeFinalVerification(
+      IResourceProvider provider,
       ResourceDefinition definition,
       ResourceApplyResult applied,
       out VerificationResult verification)
@@ -1506,7 +1508,7 @@ public sealed class EnvironmentRunService :
             candidate.DetectedState.ResourceId,
             definition.Id,
             StringComparison.OrdinalIgnoreCase) ||
-        _complianceEvaluator.Evaluate(definition, candidate.DetectedState).Status !=
+        EvaluateCompliance(provider, definition, candidate.DetectedState).Status !=
             ComplianceStatus.Satisfied)
     {
       return false;
@@ -1515,6 +1517,20 @@ public sealed class EnvironmentRunService :
     verification = candidate;
     return true;
   }
+
+  private ComplianceResult EvaluateCompliance(
+      ResourceDefinition definition,
+      DetectedState state) => EvaluateCompliance(
+          _providers.GetRequired(definition.Type, definition.Provider),
+          definition,
+          state);
+
+  private ComplianceResult EvaluateCompliance(
+      IResourceProvider provider,
+      ResourceDefinition definition,
+      DetectedState state) => _complianceEvaluator.Evaluate(
+          ProviderResourceProjection.ForCompliance(definition, provider.Capabilities),
+          state);
 
   private async Task<IReadOnlyDictionary<string, DetectedState>> DetectAsync(
       ResourceGraph graph,

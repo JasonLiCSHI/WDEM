@@ -1395,6 +1395,66 @@ public sealed class ExecutionPlannerTests
   }
 
   [Fact]
+  public async Task CreateAsync_DeclaredAcquisitionOnlyParameter_IsExcludedFromCompliance()
+  {
+    var resource = Resource("git") with
+    {
+      Parameters = new Dictionary<string, string?>
+      {
+        ["expectedSha256"] = new string('a', 64)
+      }
+    };
+    var provider = new StubProvider(
+        plan: (definition, _) => ValidPlan(definition, ComplianceStatus.Satisfied),
+        capabilities: new ProviderCapabilities
+        {
+          AcquisitionOnlyParameters = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+          {
+            "expectedSha256"
+          }
+        });
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(resource),
+        States(State("git", true)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    Assert.True(plan.IsExecutable);
+    Assert.Equal(PlannedResourceStatus.AlreadySatisfied, Assert.Single(plan.Resources).Status);
+  }
+
+  [Fact]
+  public async Task CreateAsync_UndeclaredAcquisitionParameter_RemainsConfigurationMismatch()
+  {
+    var resource = Resource("git") with
+    {
+      Parameters = new Dictionary<string, string?>
+      {
+        ["expectedSha256"] = new string('a', 64)
+      }
+    };
+    var provider = new StubProvider(plan: (definition, _) =>
+        ValidPlan(definition, ComplianceStatus.Satisfied));
+
+    var plan = await Planner(provider).CreateAsync(
+        Graph(resource),
+        States(State("git", true)),
+        "developer",
+        "1.0.0",
+        CancellationToken.None);
+
+    var planned = Assert.Single(plan.Resources);
+    Assert.False(plan.IsExecutable);
+    Assert.Equal(PlannedResourceStatus.Invalid, planned.Status);
+    Assert.Contains(plan.Errors, error =>
+        error.Detail.Contains(
+            ComplianceStatus.ConfigurationMismatch.ToString(),
+            StringComparison.Ordinal));
+  }
+
+  [Fact]
   public async Task CreateAsync_UsesInjectedComplianceEvaluatorAsAuthority()
   {
     var evaluator = new StubComplianceEvaluator(new ComplianceResult(
@@ -2067,11 +2127,12 @@ public sealed class ExecutionPlannerTests
       Func<ResourceDefinition, ProviderValidationResult>? validation = null,
       Func<ResourceDefinition, DetectedState, ResourcePlan>? plan = null,
       string resourceType = "package",
-      string providerName = "test") : IResourceProvider
+      string providerName = "test",
+      ProviderCapabilities? capabilities = null) : IResourceProvider
   {
     public string ResourceType => resourceType;
     public string ProviderName => providerName;
-    public ProviderCapabilities Capabilities { get; } = new();
+    public ProviderCapabilities Capabilities { get; } = capabilities ?? new();
     public int ValidationCalls { get; private set; }
     public int PlanCalls { get; private set; }
 
