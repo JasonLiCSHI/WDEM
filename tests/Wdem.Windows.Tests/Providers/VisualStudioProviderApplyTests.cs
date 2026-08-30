@@ -147,7 +147,8 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
           "Microsoft.NetCore.Component.Runtime.10.0",
           "Microsoft.VisualStudio.Component.Git"
         ]);
-    var discovery = new SequenceDiscovery([[Instance("17.0_a")], [compliant]]);
+    var discovery = new SequenceDiscovery(
+        [[Instance("17.0_a")], [Instance("17.0_a")], [compliant]]);
     var installer = new RecordingInstallerClient();
     var provider = Provider(discovery, installer, applicationRoot: _root);
     var resource = Resource(relativePath, hash);
@@ -163,7 +164,7 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   }
 
   [Fact]
-  public void Constructors_PreserveOriginalOverloadsAlongsideApplicationRootOverloads()
+  public void Constructors_PreserveOriginalPublicOverloads()
   {
     var parameterCounts = typeof(VisualStudioProvider)
         .GetConstructors()
@@ -171,9 +172,9 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
         .ToArray();
 
     Assert.Contains(2, parameterCounts);
-    Assert.Contains(3, parameterCounts);
     Assert.Contains(5, parameterCounts);
-    Assert.Contains(6, parameterCounts);
+    Assert.DoesNotContain(3, parameterCounts);
+    Assert.DoesNotContain(6, parameterCounts);
   }
 
   [Fact]
@@ -272,7 +273,11 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   [Fact]
   public async Task PlanAndApplyAsync_ExecutableOperationsRequireAdministratorAndNoOpReturnsNotRequired()
   {
-    var discovery = new SequenceDiscovery([]);
+    var compliant = Instance(
+        "17.0_a",
+        workloads: ["Microsoft.VisualStudio.Workload.ManagedDesktop"],
+        components: ["Microsoft.NetCore.Component.Runtime.10.0"]);
+    var discovery = new SequenceDiscovery([[compliant]]);
     var installer = new RecordingInstallerClient();
     var provider = Provider(discovery, installer);
     var resource = Resource();
@@ -284,10 +289,7 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
         CancellationToken.None);
     var satisfied = await provider.PlanAsync(
         resource,
-        State(Instance(
-            "17.0_a",
-            workloads: ["Microsoft.VisualStudio.Workload.ManagedDesktop"],
-            components: ["Microsoft.NetCore.Component.Runtime.10.0"])),
+        State(compliant),
         CancellationToken.None);
     var noOpResult = await provider.ApplyAsync(
         resource,
@@ -303,7 +305,35 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
     Assert.Empty(satisfied.Steps);
     Assert.Equal(ApplyOutcome.NotRequired, noOpResult.Outcome);
     Assert.Empty(installer.Operations);
-    Assert.Equal(0, discovery.AttemptCount);
+    Assert.Equal(1, discovery.AttemptCount);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_NoOpRejectsChangedDetectedInstanceConfiguration()
+  {
+    var planned = Instance(
+        "17.0_a",
+        workloads: ["Microsoft.VisualStudio.Workload.ManagedDesktop"],
+        components: ["Microsoft.NetCore.Component.Runtime.10.0"]);
+    var changed = planned with
+    {
+      InstallationVersion = "18.3.2.1",
+      Workloads = new HashSet<string>(
+          ["Microsoft.VisualStudio.Workload.ManagedDesktop", "Other.Workload"],
+          StringComparer.OrdinalIgnoreCase)
+    };
+    var discovery = new SequenceDiscovery([[changed]]);
+    var installer = new RecordingInstallerClient();
+    var provider = Provider(discovery, installer);
+    var resource = Resource();
+    var plan = await provider.PlanAsync(resource, State(planned), CancellationToken.None);
+
+    var result = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    Assert.Contains("changed after planning", result.Error!.Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.Empty(installer.Operations);
+    Assert.Equal(1, discovery.AttemptCount);
   }
 
   [Fact]
@@ -654,10 +684,14 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
       IsRetryable = true
     };
     var evaluator = new FinalErrorComplianceEvaluator(suppliedError);
-    var discovery = new SequenceDiscovery([[Instance(
-        "17.0_a",
-        workloads: ["Microsoft.VisualStudio.Workload.ManagedDesktop"],
-        components: ["Microsoft.NetCore.Component.Runtime.10.0"])]]);
+    var discovery = new SequenceDiscovery(
+    [
+      [Instance("17.0_a")],
+      [Instance(
+          "17.0_a",
+          workloads: ["Microsoft.VisualStudio.Workload.ManagedDesktop"],
+          components: ["Microsoft.NetCore.Component.Runtime.10.0"])]
+    ]);
     var installer = new RecordingInstallerClient
     {
       Result = new VisualStudioInstallerResult(

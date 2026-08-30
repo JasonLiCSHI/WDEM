@@ -137,6 +137,7 @@ internal static class ConfigurationProviderSupport
   internal static ResourceApplyResult Succeeded(
       ResourceDefinition resource,
       PlanStep step,
+      int? processExitCode = null,
       bool finalizeAfterCancellation = false) => new()
       {
         ResourceId = resource.Id,
@@ -149,6 +150,7 @@ internal static class ConfigurationProviderSupport
             StepId = step.Id,
             Action = step.Action,
             Progress = 1,
+            ProcessExitCode = processExitCode,
             Succeeded = true
           }
         ]

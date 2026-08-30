@@ -279,25 +279,53 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
     }
 
     progress?.Report(new ProviderProgress("Apply", 0.6, "Importing ReSharper settings.", plan.Steps[0].Id));
-    var imported = await _importer.CopyAtomicallyAsync(
-        source.Source!,
-        ResolveDestination(Get(resource, DestinationPathParameter)!),
-        cancellationToken).ConfigureAwait(false);
-    if (!imported.Succeeded)
+    var destination = ResolveDestination(Get(resource, DestinationPathParameter)!);
+    var staged = await _importer.StageAsync(
+        source.Source!, destination, cancellationToken).ConfigureAwait(false);
+    if (!staged.Succeeded)
     {
-      return Failed(resource, imported.Error! with { ResourceId = resource.Id });
+      return Failed(resource, staged.Error! with { ResourceId = resource.Id });
     }
 
-    var verification = await VerifyAsync(resource, cancellationToken).ConfigureAwait(false);
-    if (verification.Compliance != ComplianceStatus.Satisfied)
+    try
     {
-      return Failed(resource, verification.DetectedState.StructuredError ?? Error(
-          resource,
-          WdemErrorCode.VerificationError,
-          "The imported ReSharper settings did not verify."));
-    }
+      var destinationBeforeCommit = await DetectAsync(resource, cancellationToken).ConfigureAwait(false);
+      if (!ConfigurationExecutionPrecondition.Matches(
+              plan,
+              destinationBeforeCommit,
+              "destinationPath"))
+      {
+        return Failed(resource, Error(
+            resource,
+            WdemErrorCode.ConfigurationError,
+            "The ReSharper settings destination changed after planning; the approved plan is stale."));
+      }
 
-    return Succeeded(resource, plan.Steps[0]);
+      // The directory hierarchy is leased through commit and verification. A non-cooperating
+      // writer can still race the file-level comparison in the final nanoseconds before replace.
+      var imported = await _importer.CommitStagedAsync(
+          staged.Snapshot!, destination, cancellationToken).ConfigureAwait(false);
+      if (!imported.Succeeded)
+      {
+        return Failed(resource, imported.Error! with { ResourceId = resource.Id });
+      }
+
+      var verification = await VerifyAsync(resource, CancellationToken.None).ConfigureAwait(false);
+      if (verification.Compliance != ComplianceStatus.Satisfied)
+      {
+        return Failed(resource, verification.DetectedState.StructuredError ?? Error(
+            resource,
+            WdemErrorCode.VerificationError,
+            "The imported ReSharper settings did not verify."));
+      }
+
+      return Succeeded(resource, plan.Steps[0], finalizeAfterCancellation: true);
+    }
+    finally
+    {
+      ConfigurationImporter.DeleteStagingSnapshot(staged.Snapshot!.Path);
+      staged.Snapshot.Dispose();
+    }
   }
 
   public async ValueTask<VerificationResult> VerifyAsync(

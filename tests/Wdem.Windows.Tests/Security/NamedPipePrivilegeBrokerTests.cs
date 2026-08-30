@@ -663,6 +663,36 @@ public sealed class NamedPipePrivilegeBrokerTests
   }
 
   [Fact]
+  public async Task ApplyAsync_MixedPrivilegePlan_CombinesFinalizationOptInAcrossSegments()
+  {
+    var provider = new RecordingProvider { FinalizeAfterCancellation = true };
+    var broker = new RecordingPrivilegeBroker();
+    var dispatcher = new PrivilegeAwareResourceApplyDispatcher(
+        new DirectResourceApplyDispatcher(),
+        broker);
+    var resource = Resource(PrivilegeRequirement.Administrator);
+    var plan = Plan(resource, PrivilegeRequirement.CurrentUser) with
+    {
+      Steps =
+      [
+        Step("current", PrivilegeRequirement.CurrentUser),
+        Step("administrator", PrivilegeRequirement.Administrator)
+      ]
+    };
+    broker.Result = SuccessfulResult(resource.Id, [plan.Steps[1]]);
+
+    var result = await dispatcher.ApplyAsync(
+        Guid.NewGuid(),
+        provider,
+        resource,
+        plan,
+        null,
+        CancellationToken.None);
+
+    Assert.True(result.FinalizeAfterCancellation);
+  }
+
+  [Fact]
   public async Task ApplyAsync_MixedPrivilegeFailurePreservesStrongestRestartEvidence()
   {
     var provider = new RecordingProvider
@@ -932,6 +962,7 @@ public sealed class NamedPipePrivilegeBrokerTests
     public int ApplyCalls { get; private set; }
     public Action<ResourcePlan>? Applied { get; init; }
     public RestartPolicy? RestartRequirement { get; init; }
+    public bool FinalizeAfterCancellation { get; init; }
     public List<ResourcePlan> AppliedPlans { get; } = [];
 
     public ValueTask<ResourceApplyResult> ApplyAsync(
@@ -945,7 +976,8 @@ public sealed class NamedPipePrivilegeBrokerTests
       Applied?.Invoke(plan);
       return ValueTask.FromResult(SuccessfulResult(resource.Id, plan.Steps) with
       {
-        RestartRequirement = RestartRequirement
+        RestartRequirement = RestartRequirement,
+        FinalizeAfterCancellation = FinalizeAfterCancellation
       });
     }
 

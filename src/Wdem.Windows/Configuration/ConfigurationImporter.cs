@@ -10,7 +10,17 @@ public sealed record ConfigurationImportResult(
     string? Sha256,
     StructuredError? Error);
 
-internal sealed record StagedConfigurationSnapshot(string Path, string Sha256);
+internal sealed class StagedConfigurationSnapshot(
+    string path,
+    string sha256,
+    ConfigurationDirectoryLease directoryLease) : IDisposable
+{
+  internal string Path { get; } = path;
+  internal string Sha256 { get; } = sha256;
+  internal ConfigurationDirectoryLease DirectoryLease { get; } = directoryLease;
+
+  public void Dispose() => DirectoryLease.Dispose();
+}
 
 internal sealed record ConfigurationStagingResult(
     StagedConfigurationSnapshot? Snapshot,
@@ -22,15 +32,23 @@ internal sealed record ConfigurationStagingResult(
 public sealed class ConfigurationImporter
 {
   private readonly Action<string>? _afterDestinationMove;
+  private readonly Action<string>? _afterDestinationDirectoryLeased;
 
   public ConfigurationImporter()
   {
   }
 
   internal ConfigurationImporter(Action<string> afterDestinationMove)
+      : this(afterDestinationMove, afterDestinationDirectoryLeased: null)
   {
-    ArgumentNullException.ThrowIfNull(afterDestinationMove);
+  }
+
+  internal ConfigurationImporter(
+      Action<string>? afterDestinationMove,
+      Action<string>? afterDestinationDirectoryLeased)
+  {
     _afterDestinationMove = afterDestinationMove;
+    _afterDestinationDirectoryLeased = afterDestinationDirectoryLeased;
   }
 
   public async Task<ConfigurationImportResult> CopyAtomicallyAsync(
@@ -54,6 +72,7 @@ public sealed class ConfigurationImporter
     finally
     {
       DeleteStagingSnapshot(staged.Snapshot!.Path);
+      staged.Snapshot.Dispose();
     }
   }
 
@@ -65,17 +84,28 @@ public sealed class ConfigurationImporter
     ArgumentNullException.ThrowIfNull(source);
     cancellationToken.ThrowIfCancellationRequested();
     string? stagingPath = null;
+    ConfigurationDirectoryLease? directoryLease = null;
     try
     {
-      var validationError = ValidateDestination(destinationPath, out _, out var directory);
+      var validationError = NormalizeDestination(destinationPath, out _, out var directory);
       if (validationError is not null)
       {
         return StagingFailure(validationError);
       }
 
+      directoryLease = ConfigurationDirectoryLease.Acquire(directory);
+      _afterDestinationDirectoryLeased?.Invoke(directory);
+      validationError = ValidateDestinationFile(destinationPath);
+      if (validationError is not null)
+      {
+        return StagingFailure(validationError);
+      }
+
+      var extension = Path.GetExtension(destinationPath);
+      var baseName = Path.GetFileNameWithoutExtension(destinationPath);
       stagingPath = Path.Combine(
           directory,
-          $".{Path.GetFileName(destinationPath)}.{Guid.NewGuid():N}.staging");
+          $".{baseName}.wdem-{Guid.NewGuid():N}.staging{extension}");
       await using (var stream = new FileStream(
                        stagingPath,
                        FileMode.CreateNew,
@@ -95,13 +125,18 @@ public sealed class ConfigurationImporter
         return StagingFailure("The staged snapshot does not match the verified source SHA-256.");
       }
 
-      var snapshot = new StagedConfigurationSnapshot(stagingPath, stagingHash);
+      var snapshot = new StagedConfigurationSnapshot(stagingPath, stagingHash, directoryLease);
       stagingPath = null;
+      directoryLease = null;
       return new ConfigurationStagingResult(snapshot, null);
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
       throw;
+    }
+    catch (UnsafeConfigurationDirectoryException exception)
+    {
+      return StagingFailure(exception.Message, exception);
     }
     catch (Exception exception) when (exception is ArgumentException or IOException or
         NotSupportedException or UnauthorizedAccessException or SecurityException)
@@ -114,6 +149,8 @@ public sealed class ConfigurationImporter
       {
         DeleteStagingSnapshot(stagingPath);
       }
+
+      directoryLease?.Dispose();
     }
   }
 
@@ -128,10 +165,24 @@ public sealed class ConfigurationImporter
     var destinationCommitted = false;
     try
     {
-      var validationError = ValidateDestination(
+      var validationError = NormalizeDestination(
           destinationPath,
           out var fullDestination,
           out var directory);
+      if (validationError is not null)
+      {
+        return Failure(validationError);
+      }
+
+      if (!string.Equals(
+              snapshot.DirectoryLease.DirectoryPath,
+              directory,
+              StringComparison.OrdinalIgnoreCase))
+      {
+        return Failure("The configuration staging snapshot is not leased for this destination.");
+      }
+
+      validationError = ValidateDestinationFile(fullDestination);
       if (validationError is not null)
       {
         return Failure(validationError);
@@ -283,7 +334,7 @@ public sealed class ConfigurationImporter
     return false;
   }
 
-  private static string? ValidateDestination(
+  private static string? NormalizeDestination(
       string destinationPath,
       out string fullDestination,
       out string directory)
@@ -307,17 +358,11 @@ public sealed class ConfigurationImporter
       return "The configuration destination directory is invalid.";
     }
 
-    if (ContainsReparsePointBeforeDirectoryCreation(directory))
-    {
-      return "The configuration destination directory contains an unsafe reparse point.";
-    }
+    return null;
+  }
 
-    Directory.CreateDirectory(directory);
-    if (ContainsReparsePoint(directory))
-    {
-      return "The configuration destination directory contains an unsafe reparse point.";
-    }
-
+  private static string? ValidateDestinationFile(string fullDestination)
+  {
     if (Path.Exists(fullDestination))
     {
       var attributes = File.GetAttributes(fullDestination);
@@ -328,43 +373,6 @@ public sealed class ConfigurationImporter
     }
 
     return null;
-  }
-
-  private static bool ContainsReparsePointBeforeDirectoryCreation(string directory)
-  {
-    var missingSegments = new Stack<string>();
-    var nearestExisting = new DirectoryInfo(Path.GetFullPath(directory));
-    while (!nearestExisting.Exists)
-    {
-      missingSegments.Push(nearestExisting.Name);
-      nearestExisting = nearestExisting.Parent ?? nearestExisting;
-      if (nearestExisting.Parent is null && !nearestExisting.Exists)
-      {
-        return true;
-      }
-    }
-
-    if (ContainsReparsePoint(nearestExisting.FullName))
-    {
-      return true;
-    }
-
-    var current = nearestExisting.FullName;
-    while (missingSegments.Count > 0)
-    {
-      current = Path.Combine(current, missingSegments.Pop());
-      if (!Path.Exists(current))
-      {
-        continue;
-      }
-
-      if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
-      {
-        return true;
-      }
-    }
-
-    return false;
   }
 
   private static ConfigurationStagingResult StagingFailure(

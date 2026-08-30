@@ -391,12 +391,26 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     {
       progress?.Report(new ProviderProgress("Apply", 0.7,
           "Importing Visual Studio settings.", plan.Steps[0].Id));
+      var destinationBeforeLaunch = await DetectAsync(resource, cancellationToken).ConfigureAwait(false);
+      if (!ConfigurationExecutionPrecondition.Matches(
+              plan,
+              destinationBeforeLaunch,
+              "settingsStorePath"))
+      {
+        return ConfigurationProviderSupport.Failed(resource,
+            ConfigurationProviderSupport.Error(
+                resource,
+                WdemErrorCode.ConfigurationError,
+                "The Visual Studio settings destination changed after planning; the approved plan is stale."));
+      }
+
+      cancellationToken.ThrowIfCancellationRequested();
       var process = await _processExecutor.ExecuteAsync(
           new ProcessExecutionRequest(
               selection.Instance.ProductPath,
               ["/ResetSettings", staged.Snapshot!.Path, "/Command", "Exit"]),
           null,
-          cancellationToken).ConfigureAwait(false);
+          CancellationToken.None).ConfigureAwait(false);
       if (!process.Started || process.ExitCode != 0 || process.Error is not null)
       {
         return ConfigurationProviderSupport.Failed(resource, (process.Error ??
@@ -408,6 +422,22 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
         });
       }
 
+      var destinationBeforeCommit = await DetectAsync(resource, CancellationToken.None)
+          .ConfigureAwait(false);
+      if (!ConfigurationExecutionPrecondition.Matches(
+              plan,
+              destinationBeforeCommit,
+              "settingsStorePath"))
+      {
+        return ConfigurationProviderSupport.Failed(resource,
+            ConfigurationProviderSupport.Error(
+                resource,
+                WdemErrorCode.ConfigurationError,
+                "The Visual Studio settings destination changed after planning; the approved plan is stale."));
+      }
+
+      // The hierarchy lease closes the directory redirection window. File-level CAS cannot
+      // eliminate a final nanosecond race from a non-cooperating writer on Windows.
       var imported = await _importer.CommitStagedAsync(
           staged.Snapshot,
           settingsStorePath,
@@ -433,11 +463,13 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
       return ConfigurationProviderSupport.Succeeded(
           resource,
           plan.Steps[0],
+          processExitCode: process.ExitCode,
           finalizeAfterCancellation: true);
     }
     finally
     {
       ConfigurationImporter.DeleteStagingSnapshot(staged.Snapshot!.Path);
+      staged.Snapshot.Dispose();
     }
   }
 
@@ -447,6 +479,15 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
   {
     var state = await DetectAsync(resource, cancellationToken).ConfigureAwait(false);
     var compliance = Evaluate(resource, state);
+    if (compliance.Error is { } complianceError && state.StructuredError is null)
+    {
+      state = state with
+      {
+        Error = complianceError.Detail,
+        StructuredError = complianceError
+      };
+    }
+
     return new VerificationResult
     {
       ResourceId = resource.Id,

@@ -117,6 +117,74 @@ public sealed class ConfigurationProviderTests : IDisposable
   }
 
   [Fact]
+  public async Task ApplyAsync_DotSettingsRejectsDestinationChangedBeforeAtomicCommit()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var destinationRoot = Path.Combine(_root, "user");
+    var sourcePath = Path.Combine(profiles, "team.DotSettings");
+    var destinationPath = Path.Combine(destinationRoot, "team.DotSettings");
+    Directory.CreateDirectory(profiles);
+    Directory.CreateDirectory(destinationRoot);
+    var source = Encoding.UTF8.GetBytes("new settings");
+    var previous = Encoding.UTF8.GetBytes("planned settings");
+    var external = Encoding.UTF8.GetBytes("external writer");
+    await File.WriteAllBytesAsync(sourcePath, source);
+    await File.WriteAllBytesAsync(destinationPath, previous);
+    var provider = new ReSharperSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        new ComplianceEvaluator(),
+        destinationRoot);
+    var resource = ReSharperSettingsResource(
+        Convert.ToHexString(SHA256.HashData(source)),
+        destinationPath);
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
+    var progress = new InlineProgress(update =>
+    {
+      if (update.Stage == "Apply")
+      {
+        File.WriteAllBytes(destinationPath, external);
+      }
+    });
+
+    var applied = await provider.ApplyAsync(resource, plan, progress, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, applied.Outcome);
+    Assert.Contains("stale", applied.Error!.Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.Equal(external, await File.ReadAllBytesAsync(destinationPath));
+  }
+
+  [Fact]
+  public async Task ApplyAsync_DotSettingsCancellationAfterCommitFinalizesSuccess()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var destinationRoot = Path.Combine(_root, "user");
+    var sourcePath = Path.Combine(profiles, "team.DotSettings");
+    var destinationPath = Path.Combine(destinationRoot, "team.DotSettings");
+    Directory.CreateDirectory(profiles);
+    var source = Encoding.UTF8.GetBytes("new settings");
+    await File.WriteAllBytesAsync(sourcePath, source);
+    using var cancellation = new CancellationTokenSource();
+    var provider = new ReSharperSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(_ => cancellation.Cancel()),
+        new ComplianceEvaluator(),
+        destinationRoot);
+    var resource = ReSharperSettingsResource(
+        Convert.ToHexString(SHA256.HashData(source)),
+        destinationPath);
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
+
+    var applied = await provider.ApplyAsync(resource, plan, null, cancellation.Token);
+
+    Assert.Equal(ApplyOutcome.Succeeded, applied.Outcome);
+    Assert.True(applied.FinalizeAfterCancellation);
+    Assert.Equal(source, await File.ReadAllBytesAsync(destinationPath));
+  }
+
+  [Fact]
   public async Task ApplyAsync_VsSettingsRejectsDestinationCreatedAfterPlanning()
   {
     var profiles = Path.Combine(_root, "profiles");
@@ -146,6 +214,89 @@ public sealed class ConfigurationProviderTests : IDisposable
     Assert.Equal(ApplyOutcome.Failed, applied.Outcome);
     Assert.Contains("stale", applied.Error!.Detail, StringComparison.OrdinalIgnoreCase);
     Assert.Empty(process.Requests);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_VsSettingsRejectsDestinationChangedImmediatelyBeforeLaunch()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var settingsRoot = Path.Combine(_root, "Visual Studio 18");
+    var sourcePath = Path.Combine(profiles, "team.vssettings");
+    var settingsStorePath = Path.Combine(settingsRoot, "team.vssettings");
+    Directory.CreateDirectory(profiles);
+    Directory.CreateDirectory(settingsRoot);
+    var source = Encoding.UTF8.GetBytes("source settings");
+    var previous = Encoding.UTF8.GetBytes("planned settings");
+    var external = Encoding.UTF8.GetBytes("external writer");
+    await File.WriteAllBytesAsync(sourcePath, source);
+    await File.WriteAllBytesAsync(settingsStorePath, previous);
+    var process = new RecordingProcessExecutor();
+    var provider = new VisualStudioSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        new FixedVisualStudioDiscovery(VisualStudioInstance()),
+        process,
+        new ComplianceEvaluator(),
+        _ => settingsRoot);
+    var resource = VisualStudioSettingsResource(
+        Convert.ToHexString(SHA256.HashData(source)),
+        settingsStorePath);
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
+    var progress = new InlineProgress(update =>
+    {
+      if (update.Stage == "Apply")
+      {
+        File.WriteAllBytes(settingsStorePath, external);
+      }
+    });
+
+    var applied = await provider.ApplyAsync(resource, plan, progress, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, applied.Outcome);
+    Assert.Contains("stale", applied.Error!.Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.Equal(external, await File.ReadAllBytesAsync(settingsStorePath));
+    Assert.Empty(process.Requests);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_VsSettingsRejectsDestinationChangedAfterLaunchBeforeCommit()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var settingsRoot = Path.Combine(_root, "Visual Studio 18");
+    var sourcePath = Path.Combine(profiles, "team.vssettings");
+    var settingsStorePath = Path.Combine(settingsRoot, "team.vssettings");
+    Directory.CreateDirectory(profiles);
+    Directory.CreateDirectory(settingsRoot);
+    var source = Encoding.UTF8.GetBytes("source settings");
+    var previous = Encoding.UTF8.GetBytes("planned settings");
+    var external = Encoding.UTF8.GetBytes("external writer");
+    await File.WriteAllBytesAsync(sourcePath, source);
+    await File.WriteAllBytesAsync(settingsStorePath, previous);
+    var process = new DelegatingProcessExecutor((_, _) =>
+    {
+      File.WriteAllBytes(settingsStorePath, external);
+      return Task.FromResult(new Wdem.Core.Processes.ProcessExecutionResult(true, 0, [], []));
+    });
+    var provider = new VisualStudioSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        new FixedVisualStudioDiscovery(VisualStudioInstance()),
+        process,
+        new ComplianceEvaluator(),
+        _ => settingsRoot);
+    var resource = VisualStudioSettingsResource(
+        Convert.ToHexString(SHA256.HashData(source)),
+        settingsStorePath);
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
+
+    var applied = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, applied.Outcome);
+    Assert.Contains("stale", applied.Error!.Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.Equal(external, await File.ReadAllBytesAsync(settingsStorePath));
+    Assert.Single(process.Requests);
   }
 
   [Fact]
@@ -389,8 +540,9 @@ public sealed class ConfigurationProviderTests : IDisposable
     var verification = await provider.VerifyAsync(resource, CancellationToken.None);
 
     Assert.Equal(ComplianceStatus.ConfigurationMismatch, verification.Compliance);
-    Assert.Equal(WdemErrorCode.ConfigurationError,
-        verification.DetectedState.StructuredError?.Code ?? WdemErrorCode.ConfigurationError);
+    var structuredError = Assert.IsType<StructuredError>(
+        verification.DetectedState.StructuredError);
+    Assert.Equal(WdemErrorCode.ConfigurationError, structuredError.Code);
   }
 
   [Fact]
@@ -426,7 +578,8 @@ public sealed class ConfigurationProviderTests : IDisposable
     var applied = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
 
     Assert.Equal(ApplyOutcome.Failed, applied.Outcome);
-    Assert.Contains("ConfigurationMismatch", applied.Error!.Detail, StringComparison.Ordinal);
+    var error = Assert.IsType<StructuredError>(applied.Error);
+    Assert.Equal(WdemErrorCode.ConfigurationError, error.Code);
   }
 
   [Fact]
@@ -580,10 +733,12 @@ public sealed class ConfigurationProviderTests : IDisposable
     await File.WriteAllBytesAsync(settingsStorePath, previous);
     var sourceHash = Convert.ToHexString(SHA256.HashData(source));
     using var cancellation = new CancellationTokenSource();
-    var process = new DelegatingProcessExecutor((request, _) =>
+    var process = new DelegatingProcessExecutor((request, processToken) =>
     {
       Assert.NotEqual(settingsStorePath, request.Arguments[1]);
       Assert.True(File.Exists(request.Arguments[1]));
+      Assert.EndsWith(".vssettings", request.Arguments[1], StringComparison.OrdinalIgnoreCase);
+      Assert.False(processToken.CanBeCanceled);
       cancellation.Cancel();
       return Task.FromResult(new Wdem.Core.Processes.ProcessExecutionResult(true, 0, [], []));
     });
@@ -602,6 +757,7 @@ public sealed class ConfigurationProviderTests : IDisposable
 
     Assert.Equal(ApplyOutcome.Succeeded, applied.Outcome);
     Assert.True(applied.FinalizeAfterCancellation);
+    Assert.Equal(0, Assert.Single(applied.StepResults).ProcessExitCode);
     Assert.Equal(source, await File.ReadAllBytesAsync(settingsStorePath));
     Assert.Equal([settingsStorePath], Directory.GetFiles(settingsRoot));
     Assert.Single(process.Requests);
@@ -1083,6 +1239,11 @@ public sealed class ConfigurationProviderTests : IDisposable
       Requests.Add(request);
       return handler(request, cancellationToken);
     }
+  }
+
+  private sealed class InlineProgress(Action<ProviderProgress> handler) : IProgress<ProviderProgress>
+  {
+    public void Report(ProviderProgress value) => handler(value);
   }
 
   private sealed class AcceptingProvider(string resourceType, string providerName) : IResourceProvider

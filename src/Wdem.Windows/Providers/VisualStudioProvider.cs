@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Wdem.Core.Compliance;
 using Wdem.Core.Execution;
@@ -27,7 +28,7 @@ public sealed class VisualStudioProvider : IResourceProvider
   {
   }
 
-  public VisualStudioProvider(
+  internal VisualStudioProvider(
       IVisualStudioDiscovery discovery,
       IComplianceEvaluator complianceEvaluator,
       string? applicationRoot)
@@ -57,7 +58,7 @@ public sealed class VisualStudioProvider : IResourceProvider
   {
   }
 
-  public VisualStudioProvider(
+  internal VisualStudioProvider(
       IVisualStudioDiscovery discovery,
       IVisualStudioInstallerClient installer,
       ITrustedFileVerifier trustedFileVerifier,
@@ -73,7 +74,7 @@ public sealed class VisualStudioProvider : IResourceProvider
   {
   }
 
-  public VisualStudioProvider(
+  internal VisualStudioProvider(
       IVisualStudioDiscovery discovery,
       IVisualStudioInstallerClient installer,
       ITrustedFileVerifier trustedFileVerifier,
@@ -333,11 +334,7 @@ public sealed class VisualStudioProvider : IResourceProvider
 
     var plan = BasePlan(resource, compliance.Status, isExecutable: true) with
     {
-      ExecutionPreconditionFingerprint = resolved.VerifiedPath is null || resolved.Sha256 is null
-          ? null
-          : ConfigurationExecutionPrecondition.FromPathAndHash(
-              resolved.VerifiedPath,
-              resolved.Sha256)
+      ExecutionPreconditionFingerprint = CreateExecutionPrecondition(currentState, resolved)
     };
     if (compliance.Status == ComplianceStatus.Satisfied)
     {
@@ -434,27 +431,52 @@ public sealed class VisualStudioProvider : IResourceProvider
           0);
     }
 
-    var currentPrecondition = resolved.VerifiedPath is null || resolved.Sha256 is null
-        ? null
-        : ConfigurationExecutionPrecondition.FromPathAndHash(
+    options = resolved.Options;
+    var currentInstances = await _discovery.DiscoverAsync(
+        options.Workloads,
+        options.Components,
+        cancellationToken).ConfigureAwait(false);
+    var currentInstance = SelectInstance(currentInstances, options, out var currentAmbiguousIds);
+    if (currentAmbiguousIds.Length > 0)
+    {
+      var error = new StructuredError(
+          WdemErrorCode.DetectionError,
+          "Multiple Visual Studio instances match.",
+          $"Set parameter 'instanceId' to one of: {string.Join(", ", currentAmbiguousIds)}.")
+      {
+        ResourceId = resource.Id,
+        StepId = plan.Steps.FirstOrDefault()?.Id
+      };
+      return ApplyFailure(resource, plan.Steps.FirstOrDefault(), error, null, 0.05);
+    }
+
+    var currentState = currentInstance is null
+        ? new DetectedState
+        {
+          ResourceId = resource.Id,
+          Outcome = DetectionOutcome.Succeeded,
+          Exists = false
+        }
+        : VisualStudioStateMapper.Create(
+            resource.Id,
+            currentInstance,
             resolved.VerifiedPath,
             resolved.Sha256);
+    var currentPrecondition = CreateExecutionPrecondition(currentState, resolved);
     if (!string.Equals(
             plan.ExecutionPreconditionFingerprint,
             currentPrecondition,
             StringComparison.OrdinalIgnoreCase))
     {
       var error = new StructuredError(
-          WdemErrorCode.ConfigurationError,
-          "Visual Studio configuration source changed after planning.",
-          "The canonical .vsconfig path or SHA-256 no longer matches the approved plan.")
+          WdemErrorCode.DetectionError,
+          "Visual Studio state changed after planning.",
+          "The selected Visual Studio instance, installed configuration, or canonical .vsconfig source changed after planning. Run detect and plan again before applying changes.")
       {
         ResourceId = resource.Id
       };
       return ApplyFailure(resource, plan.Steps.FirstOrDefault(), error, null, 0);
     }
-
-    options = resolved.Options;
 
     if (!plan.RequiresApply)
     {
@@ -529,33 +551,12 @@ public sealed class VisualStudioProvider : IResourceProvider
     VisualStudioInstance? plannedInstance = null;
     if (approvedAction == PlanAction.Install)
     {
-      var currentInstances = await _discovery.DiscoverAsync(
-          options.Workloads,
-          options.Components,
-          cancellationToken).ConfigureAwait(false);
-      var existingInstance = SelectInstance(
-          currentInstances,
-          options,
-          out var ambiguousCandidateIds);
-      if (ambiguousCandidateIds.Length > 0)
-      {
-        var error = new StructuredError(
-            WdemErrorCode.DetectionError,
-            "Multiple Visual Studio instances match.",
-            $"Set parameter 'instanceId' to one of: {string.Join(", ", ambiguousCandidateIds)}.")
-        {
-          ResourceId = resource.Id,
-          StepId = step.Id
-        };
-        return ApplyFailure(resource, step, error, null, 0.05);
-      }
-
-      if (existingInstance is not null)
+      if (currentInstance is not null)
       {
         var error = new StructuredError(
             WdemErrorCode.DetectionError,
             "Visual Studio state changed after planning.",
-            $"Visual Studio instance '{existingInstance.InstanceId}' now matches the planned installation. Run detect and plan again before applying changes.")
+            $"Visual Studio instance '{currentInstance.InstanceId}' now matches the planned installation. Run detect and plan again before applying changes.")
         {
           ResourceId = resource.Id,
           StepId = step.Id
@@ -565,11 +566,7 @@ public sealed class VisualStudioProvider : IResourceProvider
     }
     else
     {
-      var currentInstances = await _discovery.DiscoverAsync(
-          options.Workloads,
-          options.Components,
-          cancellationToken).ConfigureAwait(false);
-      plannedInstance = SelectInstance(currentInstances, options);
+      plannedInstance = currentInstance;
       var operation = approvedAction == PlanAction.Upgrade ? "update" : "modify";
       if (plannedInstance is null || !string.Equals(
               step.Id,
@@ -1053,6 +1050,71 @@ public sealed class VisualStudioProvider : IResourceProvider
     return $"{resource.Id}:{operation}:{Convert.ToHexString(SHA256.HashData(bytes))}";
   }
 
+  private static string? CreateExecutionPrecondition(
+      DetectedState state,
+      ResolvedVisualStudioOptions resolved)
+  {
+    if (state.Outcome != DetectionOutcome.Succeeded)
+    {
+      return null;
+    }
+
+    try
+    {
+      var canonical = new List<string>
+      {
+        state.Exists ? "exists" : "missing"
+      };
+      if (state.Exists)
+      {
+        foreach (var key in new[]
+                 {
+                   "instanceId",
+                   "productId",
+                   "installationPath",
+                   "productPath",
+                   "installationVersion"
+                 })
+        {
+          if (!state.Evidence.TryGetValue(key, out var value) ||
+              string.IsNullOrWhiteSpace(value))
+          {
+            return null;
+          }
+
+          canonical.Add(key is "installationPath" or "productPath"
+              ? Path.GetFullPath(value).ToUpperInvariant()
+              : value.Trim().ToUpperInvariant());
+        }
+      }
+
+      canonical.Add(NormalizeDetectedIds(state, "workloads"));
+      canonical.Add(NormalizeDetectedIds(state, "components"));
+      canonical.Add(resolved.VerifiedPath is null
+          ? "NO-VSCONFIG"
+          : Path.GetFullPath(resolved.VerifiedPath).ToUpperInvariant());
+      canonical.Add(resolved.Sha256?.ToUpperInvariant() ?? "NO-VSCONFIG-HASH");
+      return Convert.ToHexString(SHA256.HashData(
+          Encoding.UTF8.GetBytes(string.Join('\0', canonical))));
+    }
+    catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
+    {
+      return null;
+    }
+  }
+
+  private static string NormalizeDetectedIds(DetectedState state, string key) =>
+      state.Evidence.TryGetValue(key, out var value)
+          ? string.Join(
+              ';',
+              value.Split(
+                      ';',
+                      StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                  .Distinct(StringComparer.OrdinalIgnoreCase)
+                  .Order(StringComparer.OrdinalIgnoreCase)
+                  .Select(id => id.ToUpperInvariant()))
+          : string.Empty;
+
   private static bool TryGetPlanIdentity(
       DetectedState state,
       out VisualStudioPlanIdentity identity)
@@ -1289,7 +1351,8 @@ public sealed class VisualStudioProvider : IResourceProvider
   {
     SupportsVersionConstraints = true,
     SupportsInstallerParameters = supportsInstallerParameters,
-    SupportsInProgressCancellation = true
+    SupportsInProgressCancellation = true,
+    ConcurrencyGroup = "visual-studio-installer"
   };
 
   private static ResourcePlan BasePlan(

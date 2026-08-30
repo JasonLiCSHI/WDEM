@@ -6,6 +6,7 @@ using Wdem.Core.Resources;
 using Wdem.Windows.Composition;
 using Wdem.Windows.Persistence;
 using Wdem.Windows.Providers;
+using Wdem.Windows.Security;
 using Wdem.Windows.VisualStudio;
 using Xunit;
 
@@ -13,6 +14,28 @@ namespace Wdem.Windows.Tests.Providers;
 
 public sealed class VisualStudioProviderDetectionTests
 {
+  [Fact]
+  public void Capabilities_SerializeInstallerOperationsWithSettingsImports()
+  {
+    var provider = new VisualStudioProvider(
+        new StubVisualStudioDiscovery(),
+        new ComplianceEvaluator());
+
+    Assert.Equal("visual-studio-installer", provider.Capabilities.ConcurrencyGroup);
+  }
+
+  [Fact]
+  public void PublicConstructors_PreserveOnlyLegacyTwoAndFiveParameterSurface()
+  {
+    var constructors = typeof(VisualStudioProvider).GetConstructors();
+
+    Assert.Equal([2, 5], constructors.Select(constructor => constructor.GetParameters().Length));
+    Assert.Equal(
+        typeof(ISecureArtifactStager),
+        constructors.Single(constructor => constructor.GetParameters().Length == 5)
+            .GetParameters()[4].ParameterType);
+  }
+
   [Fact]
   public async Task Factory_RegistersVisualStudioProvider()
   {
@@ -102,6 +125,40 @@ public sealed class VisualStudioProviderDetectionTests
     Assert.Equal(component, state.Evidence["components"]);
     Assert.Equal([workload], discovery.RequestedWorkloads);
     Assert.Equal([component], discovery.RequestedComponents);
+  }
+
+  [Fact]
+  public async Task PlanAsync_PreconditionBindsDetectedInstanceConfiguration()
+  {
+    var provider = new VisualStudioProvider(
+        new StubVisualStudioDiscovery(),
+        new ComplianceEvaluator());
+    var resource = VisualStudioResource();
+    var first = VisualStudioStateMapper.Create(
+        resource.Id,
+        Instance(
+            "17.0_abc",
+            "18.3.2",
+            "Community",
+            "VisualStudio.18.Release",
+            workloads: new HashSet<string>(
+                ["Microsoft.VisualStudio.Workload.ManagedDesktop"],
+                StringComparer.OrdinalIgnoreCase)));
+    var changed = first with
+    {
+      Evidence = new Dictionary<string, string>(first.Evidence, StringComparer.OrdinalIgnoreCase)
+      {
+        ["workloads"] = "Microsoft.VisualStudio.Workload.ManagedDesktop;Other.Workload"
+      }
+    };
+
+    var firstPlan = await provider.PlanAsync(resource, first, CancellationToken.None);
+    var changedPlan = await provider.PlanAsync(resource, changed, CancellationToken.None);
+
+    Assert.NotNull(firstPlan.ExecutionPreconditionFingerprint);
+    Assert.NotEqual(
+        firstPlan.ExecutionPreconditionFingerprint,
+        changedPlan.ExecutionPreconditionFingerprint);
   }
 
   [Fact]

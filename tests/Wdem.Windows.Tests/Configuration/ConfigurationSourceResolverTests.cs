@@ -154,6 +154,67 @@ public sealed class ConfigurationSourceResolverTests : IDisposable
   }
 
   [Fact]
+  public async Task CopyAtomicallyAsync_HoldsDestinationHierarchyAgainstJunctionSwap()
+  {
+    var destinationDirectory = Path.Combine(_root, "trusted", "nested");
+    var movedDirectory = Path.Combine(_root, "moved");
+    var outside = Path.Combine(_root, "outside");
+    Directory.CreateDirectory(destinationDirectory);
+    Directory.CreateDirectory(outside);
+    var destination = Path.Combine(destinationDirectory, "settings.DotSettings");
+    var outsideDestination = Path.Combine(outside, "settings.DotSettings");
+    var contents = Encoding.UTF8.GetBytes("verified replacement");
+    var source = new ResolvedConfigurationSource(
+        Path.Combine(_root, "source.DotSettings"),
+        Convert.ToHexString(SHA256.HashData(contents)),
+        contents);
+    var swapRejected = false;
+    var importer = new ConfigurationImporter(
+        afterDestinationMove: null,
+        afterDestinationDirectoryLeased: directory =>
+        {
+          try
+          {
+            Directory.Move(directory, movedDirectory);
+            CreateJunction(directory, outside);
+          }
+          catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+          {
+            swapRejected = true;
+          }
+        });
+
+    var result = await importer.CopyAtomicallyAsync(
+        source,
+        destination,
+        CancellationToken.None);
+
+    Assert.True(result.Succeeded, result.Error?.UnderlyingException?.ToString() ?? result.Error?.Detail);
+    Assert.True(swapRejected);
+    Assert.Equal(contents, await File.ReadAllBytesAsync(destination));
+    Assert.False(File.Exists(outsideDestination));
+  }
+
+  [Fact]
+  public async Task CopyAtomicallyAsync_NonAsciiDestinationUsesUtf16DirectoryLease()
+  {
+    var destination = Path.Combine(_root, "trusted-测试-δ", "settings.DotSettings");
+    var contents = Encoding.UTF8.GetBytes("verified replacement");
+    var source = new ResolvedConfigurationSource(
+        Path.Combine(_root, "source.DotSettings"),
+        Convert.ToHexString(SHA256.HashData(contents)),
+        contents);
+
+    var result = await new ConfigurationImporter().CopyAtomicallyAsync(
+        source,
+        destination,
+        CancellationToken.None);
+
+    Assert.True(result.Succeeded, result.Error?.Detail);
+    Assert.Equal(contents, await File.ReadAllBytesAsync(destination));
+  }
+
+  [Fact]
   public async Task CopyAtomicallyAsync_FinalDestinationHashMismatchRestoresPreviousDestination()
   {
     Directory.CreateDirectory(_root);

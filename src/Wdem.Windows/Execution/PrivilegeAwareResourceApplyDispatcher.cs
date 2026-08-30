@@ -70,6 +70,7 @@ public sealed class PrivilegeAwareResourceApplyDispatcher(
     var stepResults = new List<ProviderStepResult>();
     var diagnostics = new List<StructuredError>();
     RestartPolicy? restartRequirement = null;
+    var finalizeAfterCancellation = false;
     foreach (var segment in segments)
     {
       cancellationToken.ThrowIfCancellationRequested();
@@ -99,6 +100,7 @@ public sealed class PrivilegeAwareResourceApplyDispatcher(
               cancellationDeadline).ConfigureAwait(false);
       stepResults.AddRange(result.StepResults);
       diagnostics.AddRange(result.Diagnostics);
+      finalizeAfterCancellation |= result.FinalizeAfterCancellation;
       if (result.RestartRequirement is { } actualRestart)
       {
         restartRequirement = restartRequirement is { } accumulatedRestart
@@ -110,6 +112,7 @@ public sealed class PrivilegeAwareResourceApplyDispatcher(
         return result with
         {
           RestartRequirement = restartRequirement,
+          FinalizeAfterCancellation = finalizeAfterCancellation,
           StepResults = stepResults,
           Diagnostics = diagnostics
         };
@@ -120,6 +123,7 @@ public sealed class PrivilegeAwareResourceApplyDispatcher(
     {
       ResourceId = resource.Id,
       Outcome = ApplyOutcome.Succeeded,
+      FinalizeAfterCancellation = finalizeAfterCancellation,
       RestartRequirement = restartRequirement,
       StepResults = stepResults,
       Diagnostics = diagnostics

@@ -69,6 +69,24 @@ public sealed class ElevatedResourceWorkerTests
   }
 
   [Fact]
+  public async Task ApplyAsync_ApprovedSnapshot_PreservesFinalizationOptIn()
+  {
+    var provider = new RecordingProvider { FinalizeAfterCancellation = true };
+    var run = ApprovedRun(provider, out var approvedFingerprint);
+    var worker = new ElevatedResourceWorker(
+        new StubRunStore(run),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+
+    var result = await worker.ApplyAsync(
+        new ElevatedResourceRequest(run.RunId, "admin-resource", approvedFingerprint),
+        null,
+        CancellationToken.None);
+
+    Assert.True(result.FinalizeAfterCancellation);
+  }
+
+  [Fact]
   public async Task ApplyAsync_FailedApprovedProviderPreservesRestartEvidenceThroughRedaction()
   {
     var provider = new RecordingProvider
@@ -744,6 +762,7 @@ public sealed class ElevatedResourceWorkerTests
     public RestartPolicy? RestartRequirement { get; init; }
     public int ProcessExitCode { get; init; } = 23;
     public bool? StepSucceeded { get; init; }
+    public bool FinalizeAfterCancellation { get; init; }
 
     public ValueTask<ResourceApplyResult> ApplyAsync(
         ResourceDefinition resource,
@@ -759,6 +778,7 @@ public sealed class ElevatedResourceWorkerTests
       {
         ResourceId = resource.Id,
         Outcome = Outcome,
+        FinalizeAfterCancellation = FinalizeAfterCancellation,
         RestartRequirement = RestartRequirement,
         StepResults =
         [

@@ -254,6 +254,7 @@ public sealed class ElevatedResourceWorker
     {
       ResourceId = _redactor.Redact(resourceId),
       Outcome = result.Outcome,
+      FinalizeAfterCancellation = result.FinalizeAfterCancellation,
       RestartRequirement = result.RestartRequirement,
       Error = result.Error is null ? null : _redactor.Redact(result.Error),
       StepResults = result.StepResults.Select(step => new ProviderStepResult
