@@ -441,6 +441,27 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         profile.Id,
         profile.Version,
         cancellationToken).ConfigureAwait(false);
+    if (mode == RunMode.Apply &&
+        request.ApprovedPlanFingerprint is { } approvedFingerprint &&
+        !string.Equals(approvedFingerprint, plan.Fingerprint, StringComparison.Ordinal))
+    {
+      var approvalError = new StructuredError(
+          WdemErrorCode.ConfigurationError,
+          "The reviewed execution plan has changed.",
+          "The environment or configuration changed after plan review, so no resources were " +
+          "executed.")
+      {
+        SuggestedAction = "Review the refreshed plan before applying it.",
+        IsRetryable = true
+      };
+      plan = ExecutionPlanner.CreatePlan(
+          profile.Id,
+          profile.Version,
+          plan.Layers,
+          plan.Resources,
+          plan.Errors.Append(approvalError).ToArray());
+    }
+
     var initialResults = CreateInitialResults(mode, plan, detected, compliance);
     var run = new ExecutionRun
     {

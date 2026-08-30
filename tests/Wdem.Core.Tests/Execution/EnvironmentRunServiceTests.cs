@@ -15,6 +15,46 @@ namespace Wdem.Core.Tests.Execution;
 public sealed class EnvironmentRunServiceTests
 {
   [Fact]
+  public async Task ApplyAsync_ChangedReviewedPlanReturnsNonExecutableRunWithoutApplying()
+  {
+    var provider = new ScriptedProvider(
+        Missing("git"),
+        Satisfied("git", "2.52.1"));
+    var (service, _) = CreateService(provider);
+    var inspection = await service.InspectAsync(Request(), CancellationToken.None);
+    var approvedRequest = Request() with
+    {
+      ApprovedPlanFingerprint = inspection.Plan!.Fingerprint
+    };
+
+    var run = await service.ApplyAsync(approvedRequest, CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.Failed, run.Outcome);
+    Assert.False(run.Plan!.IsExecutable);
+    var error = Assert.Single(run.Plan.Errors);
+    Assert.Equal(WdemErrorCode.ConfigurationError, error.Code);
+    Assert.Contains("changed", error.Summary, StringComparison.OrdinalIgnoreCase);
+    Assert.Equal(0, provider.ApplyCalls);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_MatchingReviewedPlanAppliesExactlyOnce()
+  {
+    var provider = new ScriptedProvider(Missing("git"));
+    var (service, _) = CreateService(provider);
+    var inspection = await service.InspectAsync(Request(), CancellationToken.None);
+    var approvedRequest = Request() with
+    {
+      ApprovedPlanFingerprint = inspection.Plan!.Fingerprint
+    };
+
+    var run = await service.ApplyAsync(approvedRequest, CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.Succeeded, run.Outcome);
+    Assert.Equal(1, provider.ApplyCalls);
+  }
+
+  [Fact]
   public async Task ApplyAsync_AbsentActualRestartEvidenceRetainsPlannedRestartPolicy()
   {
     var provider = new ScriptedProvider(Missing("git"))

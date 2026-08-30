@@ -4,4 +4,5 @@ public sealed record RunRequest(
     string ProfilePath,
     IReadOnlySet<string> SelectedOptionalResourceIds,
     int MaximumConcurrency = 4,
-    Guid? RetriedFromRunId = null);
+    Guid? RetriedFromRunId = null,
+    string? ApprovedPlanFingerprint = null);

@@ -436,6 +436,9 @@ public sealed class ExecutionMonitorViewModelTests
 
     Assert.IsType<ExecutionMonitorViewModel>(main.CurrentPage);
     Assert.Equal(1, service.ApplyCalls);
+    Assert.Equal(
+        service.InspectResult.Plan!.Fingerprint,
+        service.AppliedRequest!.ApprovedPlanFingerprint);
   }
 
   private static ExecutionMonitorViewModel CreateMonitor(
@@ -746,6 +749,7 @@ public sealed class ExecutionMonitorViewModelTests
     public ExecutionRun InspectResult { get; set; } = InspectRun(executable: true);
     public int InspectCalls { get; private set; }
     public int ApplyCalls { get; private set; }
+    public RunRequest? AppliedRequest { get; private set; }
     public Guid? RetriedRunId { get; private set; }
     public IReadOnlySet<string>? RetriedResourceIds { get; private set; }
     public CancellationToken RetryCancellationToken { get; private set; }
@@ -775,6 +779,7 @@ public sealed class ExecutionMonitorViewModelTests
         CancellationToken cancellationToken)
     {
       ApplyCalls++;
+      AppliedRequest = request;
       events.BindCurrentScopeToRun(runId);
       ApplyStarted.TrySetResult();
       foreach (RunEvent runEvent in Events)

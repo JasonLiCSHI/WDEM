@@ -13,6 +13,7 @@ public sealed class PlanViewModel : ObservableObject
   private readonly Func<RunRequest, Task> _startExecution;
   private bool _isLoading;
   private bool _canApply;
+  private string? _approvedPlanFingerprint;
   private string? _errorMessage;
 
   public PlanViewModel(
@@ -88,6 +89,7 @@ public sealed class PlanViewModel : ObservableObject
     ErrorMessage = null;
     IsLoading = true;
     CanApply = false;
+    _approvedPlanFingerprint = null;
     try
     {
       ExecutionRun inspection = await _runService.InspectAsync(
@@ -110,7 +112,10 @@ public sealed class PlanViewModel : ObservableObject
       return Task.CompletedTask;
     }
 
-    return _startExecution(_request);
+    return _startExecution(_request with
+    {
+      ApprovedPlanFingerprint = _approvedPlanFingerprint
+    });
   }
 
   private void Present(ExecutionPlan plan)
@@ -141,6 +146,7 @@ public sealed class PlanViewModel : ObservableObject
     CanApply = plan.IsExecutable &&
         Errors.Count == 0 &&
         plan.Resources.All(resource => resource.ResourcePlan.IsExecutable);
+    _approvedPlanFingerprint = CanApply ? plan.Fingerprint : null;
   }
 
   private void ReportError(Exception exception)
