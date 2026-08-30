@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using Wdem.Core.Execution;
+using Wdem.Core.Reporting;
 using Wdem.Core.Runs;
 using Wdem.Windows.Composition;
 using Wdem.Windows.Persistence;
@@ -17,6 +18,7 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
   private readonly LogRedactor _redactor;
   private readonly IRunEventSink _eventSink;
   private readonly TimeSpan _writeTimeout;
+  private readonly IRunReportExporter _reportExporter;
 
   public WdemCommandHandler(
       IEnvironmentRunService environmentRuns,
@@ -25,7 +27,8 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
       TextWriter? error,
       LogRedactor redactor,
       IRunEventSink eventSink,
-      TimeSpan? writeTimeout = null)
+      TimeSpan? writeTimeout = null,
+      IRunReportExporter? reportExporter = null)
   {
     _environmentRuns = environmentRuns ?? throw new ArgumentNullException(nameof(environmentRuns));
     _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
@@ -33,6 +36,7 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
     _error = error ?? Console.Error;
     _redactor = redactor ?? throw new ArgumentNullException(nameof(redactor));
     _eventSink = eventSink ?? throw new ArgumentNullException(nameof(eventSink));
+    _reportExporter = reportExporter ?? new RunReportExporter(redactor);
     _writeTimeout = writeTimeout ?? DefaultWriteTimeout;
     if (_writeTimeout <= TimeSpan.Zero)
     {
@@ -72,7 +76,18 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
       CancellationToken cancellationToken) => await ExecuteRunAsync(
           () => _environmentRuns.InspectAsync(request, cancellationToken),
           json,
+          reportFile: null,
           cancellationToken).ConfigureAwait(false);
+
+  public Task<int> InspectAsync(
+      RunRequest request,
+      bool json,
+      string? reportFile,
+      CancellationToken cancellationToken) => ExecuteRunAsync(
+          () => _environmentRuns.InspectAsync(request, cancellationToken),
+          json,
+          reportFile,
+          cancellationToken);
 
   public Task<int> ApplyAsync(
       RunRequest request,
@@ -80,6 +95,17 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
       CancellationToken cancellationToken) => ExecuteRunAsync(
           () => _environmentRuns.ApplyAsync(request, cancellationToken),
           json,
+          reportFile: null,
+          cancellationToken);
+
+  public Task<int> ApplyAsync(
+      RunRequest request,
+      bool json,
+      string? reportFile,
+      CancellationToken cancellationToken) => ExecuteRunAsync(
+          () => _environmentRuns.ApplyAsync(request, cancellationToken),
+          json,
+          reportFile,
           cancellationToken);
 
   public Task<int> RetryAsync(
@@ -89,6 +115,18 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
       CancellationToken cancellationToken) => ExecuteRunAsync(
           () => _environmentRuns.RetryAsync(runId, resourceIds, cancellationToken),
           json,
+          reportFile: null,
+          cancellationToken);
+
+  public Task<int> RetryAsync(
+      Guid runId,
+      IReadOnlySet<string> resourceIds,
+      bool json,
+      string? reportFile,
+      CancellationToken cancellationToken) => ExecuteRunAsync(
+          () => _environmentRuns.RetryAsync(runId, resourceIds, cancellationToken),
+          json,
+          reportFile,
           cancellationToken);
 
   public Task<int> ResumeAsync(
@@ -97,6 +135,18 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
       CancellationToken cancellationToken) => ExecuteRunAsync(
           () => _environmentRuns.RecoverAsync(runId, cancellationToken),
           json,
+          reportFile: null,
+          cancellationToken,
+          replayPersistedEventsWhenSilent: true);
+
+  public Task<int> ResumeAsync(
+      Guid runId,
+      bool json,
+      string? reportFile,
+      CancellationToken cancellationToken) => ExecuteRunAsync(
+          () => _environmentRuns.RecoverAsync(runId, cancellationToken),
+          json,
+          reportFile,
           cancellationToken,
           replayPersistedEventsWhenSilent: true);
 
@@ -154,6 +204,7 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
   private async Task<int> ExecuteRunAsync(
       Func<Task<ExecutionRun>> operation,
       bool json,
+      string? reportFile,
       CancellationToken cancellationToken,
       bool replayPersistedEventsWhenSilent = false)
   {
@@ -173,6 +224,12 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
       if (replayPersistedEventsWhenSilent && !observedRunIds.ContainsKey(run.RunId))
       {
         await ReplayPersistedEventsAsync(run.RunId, json, cancellationToken)
+            .ConfigureAwait(false);
+      }
+
+      if (reportFile is not null)
+      {
+        await _reportExporter.ExportAsync(run, reportFile, cancellationToken)
             .ConfigureAwait(false);
       }
 

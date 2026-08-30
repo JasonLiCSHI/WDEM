@@ -526,7 +526,7 @@ public sealed class ExecutionMonitorViewModelTests
   }
 
   [Fact]
-  public async Task ExecutablePlanApplyNavigatesToMonitorAndRunsExactlyOnce()
+  public async Task ExecutablePlanApplyNavigatesThroughMonitorToCompletionAndRunsExactlyOnce()
   {
     DeveloperProfile profile = Profile();
     var events = new TestRunEventSink();
@@ -547,7 +547,9 @@ public sealed class ExecutionMonitorViewModelTests
 
     await plan.ApplyCommand.ExecuteAsync(null);
 
-    Assert.IsType<ExecutionMonitorViewModel>(main.CurrentPage);
+    CompletionViewModel completion = Assert.IsType<CompletionViewModel>(main.CurrentPage);
+    Assert.NotEqual(Guid.Empty, completion.Run.RunId);
+    Assert.Equal(service.ApplyResult.ProfileId, completion.Run.ProfileId);
     Assert.Equal(1, service.ApplyCalls);
     Assert.Equal(
         service.InspectResult.Plan!.Fingerprint,

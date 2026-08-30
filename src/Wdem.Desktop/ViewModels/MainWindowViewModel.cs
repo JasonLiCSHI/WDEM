@@ -1,6 +1,7 @@
 using Wdem.Core.Graph;
 using Wdem.Core.Execution;
 using Wdem.Core.Profiles;
+using Wdem.Core.Reporting;
 using Wdem.Core.Runs;
 
 namespace Wdem.Desktop.ViewModels;
@@ -13,6 +14,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
   private readonly IRunEventSink? _runEvents;
   private readonly LogRedactor? _redactor;
   private readonly IUiDispatcher? _dispatcher;
+  private readonly IRunReportExporter? _reportExporter;
   private object _currentPage;
   private ResourceSelectionViewModel? _resourceSelection;
   private ExecutionMonitorViewModel? _executionMonitor;
@@ -25,7 +27,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
       IEnvironmentRunService? environmentRuns = null,
       IRunEventSink? runEvents = null,
       LogRedactor? redactor = null,
-      IUiDispatcher? dispatcher = null)
+      IUiDispatcher? dispatcher = null,
+      IRunReportExporter? reportExporter = null)
   {
     ArgumentNullException.ThrowIfNull(catalog);
     ArgumentNullException.ThrowIfNull(graphBuilder);
@@ -35,6 +38,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     _runEvents = runEvents;
     _redactor = redactor;
     _dispatcher = dispatcher;
+    _reportExporter = reportExporter ?? (redactor is null ? null : new RunReportExporter(redactor));
     ProfileSelection = new ProfileSelectionViewModel(
         catalog,
         SelectProfile,
@@ -205,6 +209,26 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     {
       CurrentPage = reviewedPlan;
     }
+    else if (_executionMonitor.Run is { } terminalRun && !_isDisposed)
+    {
+      CurrentPage = new CompletionViewModel(
+          terminalRun,
+          _reportExporter!,
+          _redactor,
+          () => NavigateToReviewedPlanAsync(reviewedPlan),
+          NavigateToProfilesAsync);
+    }
+  }
+
+  private Task NavigateToReviewedPlanAsync(PlanViewModel reviewedPlan)
+  {
+    if (!HasActiveExecution && !_isDisposed)
+    {
+      ClearErrors();
+      CurrentPage = reviewedPlan;
+    }
+
+    return Task.CompletedTask;
   }
 
   private bool HasActiveExecution => _executionMonitor?.IsRunning == true;
@@ -228,7 +252,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     if (_environmentRuns is null ||
         _runEvents is null ||
         _redactor is null ||
-        _dispatcher is null)
+        _dispatcher is null ||
+        _reportExporter is null)
     {
       throw new InvalidOperationException("桌面执行服务尚未初始化。");
     }

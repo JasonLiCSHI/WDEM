@@ -4,6 +4,7 @@ using System.Text.Json.Serialization;
 using Wdem.Cli;
 using Wdem.Core.Execution;
 using Wdem.Core.Planning;
+using Wdem.Core.Reporting;
 using Wdem.Core.Resources;
 using Wdem.Core.Runs;
 using Xunit;
@@ -128,6 +129,29 @@ public sealed class WdemCliBuilderTests
         handler.Request!.ProfilePath);
     Assert.Contains("resharper", handler.Request!.SelectedOptionalResourceIds);
     Assert.True(handler.Json);
+  }
+
+  [Theory]
+  [InlineData("inspect")]
+  [InlineData("apply")]
+  [InlineData("retry")]
+  [InlineData("resume")]
+  public async Task RunCommands_BindReportFile(string commandName)
+  {
+    var handler = new CapturingHandler();
+    string runId = "7530dd5c-70bd-47a6-a353-e612ceb6c32c";
+    string[] arguments = commandName switch
+    {
+      "inspect" => ["inspect", "--profile", "developer.yaml", "--report", "result.json"],
+      "apply" => ["apply", "--profile", "developer.yaml", "--report", "result.json"],
+      "retry" => ["retry", "--run", runId, "--resource", "git", "--report", "result.json"],
+      _ => ["resume", "--run", runId, "--report", "result.json"]
+    };
+
+    int exitCode = await WdemCliBuilder.Build(handler).Parse(arguments).InvokeAsync();
+
+    Assert.Equal(0, exitCode);
+    Assert.Equal(Path.GetFullPath("result.json"), handler.ReportFile);
   }
 
   [Fact]
@@ -460,6 +484,43 @@ public sealed class WdemCliBuilderTests
     {
       release.SetResult();
       Assert.Equal(0, await execution.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+  }
+
+  [Fact]
+  public async Task CommandHandler_ApplyWritesRequestedReport()
+  {
+    var run = CompletedRun(ExecutionOutcome.Succeeded);
+    using var sink = new RunEventHub();
+    var service = new StubEnvironmentRunService { Result = run };
+    var redactor = new LogRedactor();
+    string directory = Path.Combine(Path.GetTempPath(), $"wdem-cli-report-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(directory);
+    string reportPath = Path.Combine(directory, "result.json");
+    try
+    {
+      var handler = new WdemCommandHandler(
+          service,
+          new StubExecutionRunStore(),
+          new StringWriter(),
+          new StringWriter(),
+          redactor,
+          sink,
+          reportExporter: new RunReportExporter(redactor));
+
+      int exitCode = await handler.ApplyAsync(
+          Request(),
+          json: false,
+          reportPath,
+          CancellationToken.None);
+
+      Assert.Equal(0, exitCode);
+      using JsonDocument report = JsonDocument.Parse(await File.ReadAllTextAsync(reportPath));
+      Assert.Equal(run.RunId, report.RootElement.GetProperty("runId").GetGuid());
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
     }
   }
 
@@ -1156,6 +1217,48 @@ public sealed class WdemCliBuilderTests
     public bool Json { get; private set; }
     public Guid? RunId { get; private set; }
     public IReadOnlySet<string>? ResourceIds { get; private set; }
+    public string? ReportFile { get; private set; }
+
+    public Task<int> InspectAsync(
+        RunRequest request,
+        bool json,
+        string? reportFile,
+        CancellationToken cancellationToken)
+    {
+      ReportFile = reportFile;
+      return InspectAsync(request, json, cancellationToken);
+    }
+
+    public Task<int> ApplyAsync(
+        RunRequest request,
+        bool json,
+        string? reportFile,
+        CancellationToken cancellationToken)
+    {
+      ReportFile = reportFile;
+      return ApplyAsync(request, json, cancellationToken);
+    }
+
+    public Task<int> RetryAsync(
+        Guid runId,
+        IReadOnlySet<string> resourceIds,
+        bool json,
+        string? reportFile,
+        CancellationToken cancellationToken)
+    {
+      ReportFile = reportFile;
+      return RetryAsync(runId, resourceIds, json, cancellationToken);
+    }
+
+    public Task<int> ResumeAsync(
+        Guid runId,
+        bool json,
+        string? reportFile,
+        CancellationToken cancellationToken)
+    {
+      ReportFile = reportFile;
+      return ResumeAsync(runId, json, cancellationToken);
+    }
 
     public Task<int> InspectAsync(
         RunRequest request,

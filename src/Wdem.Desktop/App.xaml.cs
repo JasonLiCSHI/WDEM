@@ -2,6 +2,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Dispatching;
 using Wdem.Core.Graph;
+using Wdem.Core.Reporting;
 using Wdem.Desktop.ViewModels;
 using Wdem.Windows.Composition;
 
@@ -30,7 +31,8 @@ public partial class App : Application
           _composition.Redactor,
           new DispatcherQueueUiDispatcher(
               DispatcherQueue.GetForCurrentThread() ?? throw new InvalidOperationException(
-                  "The WinUI dispatcher is unavailable."))));
+                  "The WinUI dispatcher is unavailable.")),
+          new RunReportExporter(_composition.Redactor)));
       _window = window;
       _window.Activate();
       await window.DataContext.InitializeAsync();

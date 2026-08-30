@@ -63,6 +63,7 @@ public partial class MainWindow : Window
       ResourceSelectionViewModel viewModel => new ResourceSelectionView { DataContext = viewModel },
       PlanViewModel viewModel => new PlanView { DataContext = viewModel },
       ExecutionMonitorViewModel viewModel => new ExecutionMonitorView { DataContext = viewModel },
+      CompletionViewModel viewModel => new CompletionView(this) { DataContext = viewModel },
       _ => throw new InvalidOperationException("The current page type is not supported.")
     };
 

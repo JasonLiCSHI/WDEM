@@ -11,10 +11,22 @@ public interface IWdemCommandHandler
       bool json,
       CancellationToken cancellationToken);
 
+  Task<int> InspectAsync(
+      RunRequest request,
+      bool json,
+      string? reportFile,
+      CancellationToken cancellationToken) => InspectAsync(request, json, cancellationToken);
+
   Task<int> ApplyAsync(
       RunRequest request,
       bool json,
       CancellationToken cancellationToken);
+
+  Task<int> ApplyAsync(
+      RunRequest request,
+      bool json,
+      string? reportFile,
+      CancellationToken cancellationToken) => ApplyAsync(request, json, cancellationToken);
 
   Task<int> RetryAsync(
       Guid runId,
@@ -22,10 +34,24 @@ public interface IWdemCommandHandler
       bool json,
       CancellationToken cancellationToken);
 
+  Task<int> RetryAsync(
+      Guid runId,
+      IReadOnlySet<string> resourceIds,
+      bool json,
+      string? reportFile,
+      CancellationToken cancellationToken) =>
+      RetryAsync(runId, resourceIds, json, cancellationToken);
+
   Task<int> ResumeAsync(
       Guid runId,
       bool json,
       CancellationToken cancellationToken);
+
+  Task<int> ResumeAsync(
+      Guid runId,
+      bool json,
+      string? reportFile,
+      CancellationToken cancellationToken) => ResumeAsync(runId, json, cancellationToken);
 
   Task<int> ListRunsAsync(bool json, CancellationToken cancellationToken);
 }
@@ -54,14 +80,17 @@ public static class WdemCliBuilder
     var profile = RequiredOption<string>("--profile", "Path to a developer profile.");
     var select = MultipleOption("--select", "Optional resource id to include.");
     var json = JsonOption();
+    var report = ReportOption();
     var command = new Command("inspect", "Inspect the environment without applying changes.");
     command.Options.Add(profile);
     command.Options.Add(select);
     command.Options.Add(json);
+    command.Options.Add(report);
     command.SetAction((parseResult, cancellationToken) => InvokeAsync(
         () => handler.InspectAsync(
             CreateRunRequest(parseResult.GetValue(profile)!, parseResult.GetValue(select)),
             parseResult.GetValue(json),
+            ReportPath(parseResult.GetValue(report)),
             cancellationToken),
         parseResult.GetValue(json),
         exceptionHandler,
@@ -89,11 +118,13 @@ public static class WdemCliBuilder
       }
     });
     var json = JsonOption();
+    var report = ReportOption();
     var command = new Command("apply", "Apply the selected developer profile.");
     command.Options.Add(profile);
     command.Options.Add(select);
     command.Options.Add(maximumConcurrency);
     command.Options.Add(json);
+    command.Options.Add(report);
     command.SetAction((parseResult, cancellationToken) => InvokeAsync(
         () => handler.ApplyAsync(
             CreateRunRequest(
@@ -101,6 +132,7 @@ public static class WdemCliBuilder
                 parseResult.GetValue(select),
                 parseResult.GetValue(maximumConcurrency)),
             parseResult.GetValue(json),
+            ReportPath(parseResult.GetValue(report)),
             cancellationToken),
         parseResult.GetValue(json),
         exceptionHandler,
@@ -117,15 +149,18 @@ public static class WdemCliBuilder
     resource.Required = true;
     resource.Arity = ArgumentArity.OneOrMore;
     var json = JsonOption();
+    var report = ReportOption();
     var command = new Command("retry", "Retry failed or blocked resources from a run.");
     command.Options.Add(run);
     command.Options.Add(resource);
     command.Options.Add(json);
+    command.Options.Add(report);
     command.SetAction((parseResult, cancellationToken) => InvokeAsync(
         () => handler.RetryAsync(
             parseResult.GetValue(run),
             ResourceIds(parseResult.GetValue(resource)),
             parseResult.GetValue(json),
+            ReportPath(parseResult.GetValue(report)),
             cancellationToken),
         parseResult.GetValue(json),
         exceptionHandler,
@@ -139,13 +174,16 @@ public static class WdemCliBuilder
   {
     var run = RequiredOption<Guid>("--run", "Run id to resume.");
     var json = JsonOption();
+    var report = ReportOption();
     var command = new Command("resume", "Resume an interrupted run.");
     command.Options.Add(run);
     command.Options.Add(json);
+    command.Options.Add(report);
     command.SetAction((parseResult, cancellationToken) => InvokeAsync(
         () => handler.ResumeAsync(
             parseResult.GetValue(run),
             parseResult.GetValue(json),
+            ReportPath(parseResult.GetValue(report)),
             cancellationToken),
         parseResult.GetValue(json),
         exceptionHandler,
@@ -221,4 +259,13 @@ public static class WdemCliBuilder
   {
     Description = "Write newline-delimited JSON output."
   };
+
+  private static Option<string?> ReportOption() => new("--report")
+  {
+    Description = "Write the completed run report to a .json or .md file."
+  };
+
+  private static string? ReportPath(string? value) => string.IsNullOrWhiteSpace(value)
+      ? null
+      : Path.GetFullPath(value);
 }

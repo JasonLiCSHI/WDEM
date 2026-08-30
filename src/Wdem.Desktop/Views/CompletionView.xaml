@@ -1,0 +1,52 @@
+<UserControl x:Class="Wdem.Desktop.Views.CompletionView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <UserControl.Resources>
+        <DataTemplate x:Key="ResultTemplate">
+            <Grid Margin="0,3" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="2*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="2*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="{Binding ResourceId}" />
+                <TextBlock Grid.Column="1" Text="{Binding Outcome}" />
+                <TextBlock Grid.Column="2" Text="{Binding Compliance}" />
+                <TextBlock Grid.Column="3" Text="{Binding ErrorSummary}" TextWrapping="Wrap" />
+            </Grid>
+        </DataTemplate>
+    </UserControl.Resources>
+    <ScrollViewer>
+        <StackPanel Padding="24" Spacing="14">
+            <TextBlock Text="{Binding Heading}" FontSize="28" FontWeight="SemiBold" />
+            <TextBlock Text="{Binding ProfileDisplay}" />
+            <TextBlock Text="{Binding RunId}" />
+
+            <StackPanel Orientation="Horizontal" Spacing="10">
+                <Button Content="Export JSON report" Click="ExportJson_Click" />
+                <Button Content="Export Markdown report" Click="ExportMarkdown_Click" />
+                <HyperlinkButton Content="Return to reviewed plan"
+                                 Command="{Binding ReturnToPlanCommand}" />
+                <HyperlinkButton Content="Choose another profile"
+                                 Command="{Binding ReturnToProfilesCommand}" />
+            </StackPanel>
+            <TextBlock Text="{Binding ErrorMessage}"
+                       TextWrapping="Wrap"
+                       Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+
+            <TextBlock Text="Satisfied" FontSize="20" FontWeight="SemiBold" />
+            <ItemsControl ItemsSource="{Binding Satisfied}" ItemTemplate="{StaticResource ResultTemplate}" />
+            <TextBlock Text="Succeeded" FontSize="20" FontWeight="SemiBold" />
+            <ItemsControl ItemsSource="{Binding Succeeded}" ItemTemplate="{StaticResource ResultTemplate}" />
+            <TextBlock Text="Failed" FontSize="20" FontWeight="SemiBold" />
+            <ItemsControl ItemsSource="{Binding Failed}" ItemTemplate="{StaticResource ResultTemplate}" />
+            <TextBlock Text="Blocked" FontSize="20" FontWeight="SemiBold" />
+            <ItemsControl ItemsSource="{Binding Blocked}" ItemTemplate="{StaticResource ResultTemplate}" />
+            <TextBlock Text="Cancelled / Skipped" FontSize="20" FontWeight="SemiBold" />
+            <ItemsControl ItemsSource="{Binding CancelledOrSkipped}" ItemTemplate="{StaticResource ResultTemplate}" />
+            <TextBlock Text="Restart Required" FontSize="20" FontWeight="SemiBold" />
+            <ItemsControl ItemsSource="{Binding RestartRequired}" ItemTemplate="{StaticResource ResultTemplate}" />
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>
