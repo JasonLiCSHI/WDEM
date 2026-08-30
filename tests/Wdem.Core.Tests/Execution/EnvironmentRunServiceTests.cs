@@ -1127,6 +1127,121 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task ApplyAsync_CancellationWaitsForBoundedProviderFinalizationBeyondGenericDrain()
+  {
+    var genericDrain = TimeSpan.FromMilliseconds(150);
+    var providerFinalization = TimeSpan.FromMilliseconds(400);
+    using var cancellation = new CancellationTokenSource();
+    var verificationError = new StructuredError(
+        WdemErrorCode.ConfigurationError,
+        "Final verification failed.",
+        "The committed settings were rewritten after the external process completed.")
+    {
+      ResourceId = "git"
+    };
+    var detectedAfter = new DetectedState
+    {
+      ResourceId = "git",
+      Outcome = DetectionOutcome.Succeeded,
+      Exists = true,
+      ConfigurationHash = new string('B', 64),
+      StructuredError = verificationError
+    };
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      Capabilities = new ProviderCapabilities
+      {
+        MaxConcurrentOperations = 1,
+        CancellationFinalizationTimeout = providerFinalization
+      },
+      ProgressEvents =
+      [
+        new ProviderProgress("apply", 0.5, "External process started.")
+        {
+          BeginsCancellationFinalization = true
+        }
+      ],
+      ApplyOperation = async _ =>
+      {
+        cancellation.Cancel();
+        await Task.Delay(TimeSpan.FromMilliseconds(300));
+        return new ResourceApplyResult
+        {
+          ResourceId = "git",
+          Outcome = ApplyOutcome.Failed,
+          FinalizeAfterCancellation = true,
+          Error = verificationError,
+          FinalVerification = new VerificationResult
+          {
+            ResourceId = "git",
+            Compliance = ComplianceStatus.ConfigurationMismatch,
+            DetectedState = detectedAfter,
+            Message = "The committed settings no longer match."
+          }
+        };
+      }
+    };
+    var (service, store) = CreateService(
+        provider,
+        scheduler: new ResourceScheduler(genericDrain));
+
+    var apply = service.ApplyAsync(Request(), cancellation.Token);
+    await Task.Delay(TimeSpan.FromMilliseconds(225));
+
+    Assert.False(apply.IsCompleted);
+    var run = await apply.WaitAsync(TimeSpan.FromSeconds(2));
+    var persisted = await store.GetAsync(run.RunId, CancellationToken.None);
+    var resource = run.ResourceResults["git"];
+    Assert.Equal(ExecutionOutcome.Failed, resource.Outcome);
+    Assert.Equal(ComplianceStatus.ConfigurationMismatch, resource.FinalCompliance);
+    Assert.Equal(detectedAfter, resource.DetectedAfter);
+    Assert.Equal(verificationError, resource.Error);
+    Assert.Equal(resource, persisted!.ResourceResults["git"]);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_CancellationDoesNotReserveProviderFinalizationBeforeLaunch()
+  {
+    var genericDrain = TimeSpan.FromMilliseconds(150);
+    using var cancellation = new CancellationTokenSource();
+    var releaseApply = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      Capabilities = new ProviderCapabilities
+      {
+        MaxConcurrentOperations = 1,
+        CancellationFinalizationTimeout = TimeSpan.FromSeconds(5)
+      },
+      ApplyOperation = async _ =>
+      {
+        cancellation.Cancel();
+        await releaseApply.Task;
+        return new ResourceApplyResult
+        {
+          ResourceId = "git",
+          Outcome = ApplyOutcome.Cancelled
+        };
+      }
+    };
+    var (service, _) = CreateService(
+        provider,
+        scheduler: new ResourceScheduler(genericDrain));
+
+    var apply = service.ApplyAsync(Request(), cancellation.Token);
+    try
+    {
+      var run = await apply.WaitAsync(TimeSpan.FromSeconds(1));
+
+      Assert.Equal(ExecutionOutcome.Cancelled, run.ResourceResults["git"].Outcome);
+    }
+    finally
+    {
+      releaseApply.TrySetResult();
+    }
+  }
+
+  [Fact]
   public async Task ApplyAsync_CancellationUsesOneDeadlineAndPreservesLateProviderEvidence()
   {
     var drainBudget = TimeSpan.FromMilliseconds(600);
@@ -1959,7 +2074,7 @@ public sealed class EnvironmentRunServiceTests
 
     public string ResourceType => "package";
     public string ProviderName => "fake";
-    public ProviderCapabilities Capabilities { get; } = new()
+    public ProviderCapabilities Capabilities { get; init; } = new()
     {
       MaxConcurrentOperations = 1
     };

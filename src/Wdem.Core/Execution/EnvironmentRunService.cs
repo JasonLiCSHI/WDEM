@@ -625,6 +625,18 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
     ResourceApplyResult applied;
     var progressBuffer = new ProviderProgressBuffer(
         planned.ResourcePlan.Steps.Select(step => step.Id));
+    var cancellationFinalizationReserved = 0;
+    void ReportProgress(ProviderProgress update)
+    {
+      if (update.BeginsCancellationFinalization &&
+          Interlocked.CompareExchange(ref cancellationFinalizationReserved, 1, 0) == 0)
+      {
+        cancellationDeadline.TryReserveAdditional(
+            provider.Capabilities.CancellationFinalizationTimeout);
+      }
+
+      progressBuffer.Report(update);
+    }
     using var progressPersistence = new CancellationTokenSource();
     using var progressCancellationRegistration = cancellationToken.UnsafeRegister(
         static state =>
@@ -663,7 +675,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
           provider,
           definition,
           planned.ResourcePlan,
-          new InlineProgress<ProviderProgress>(progressBuffer.Report),
+          new InlineProgress<ProviderProgress>(ReportProgress),
           cancellationToken,
           cancellationDeadline);
       if (!applyTask.IsCompleted)

@@ -221,6 +221,90 @@ public sealed class ConfigurationProviderTests : IDisposable
     Assert.Equal(source, await File.ReadAllBytesAsync(destinationPath));
   }
 
+  [Theory]
+  [InlineData(
+      PostCommitMutation.Delete,
+      ComplianceStatus.Missing,
+      DetectionOutcome.Succeeded,
+      WdemErrorCode.VerificationError)]
+  [InlineData(
+      PostCommitMutation.Rewrite,
+      ComplianceStatus.ConfigurationMismatch,
+      DetectionOutcome.Succeeded,
+      WdemErrorCode.ConfigurationError)]
+  [InlineData(
+      PostCommitMutation.DenyRead,
+      ComplianceStatus.DetectionFailed,
+      DetectionOutcome.Failed,
+      WdemErrorCode.DetectionError)]
+  public async Task ApplyAsync_DotSettingsFailedFinalVerificationPreservesDetectedState(
+      PostCommitMutation mutation,
+      ComplianceStatus expectedCompliance,
+      DetectionOutcome expectedDetection,
+      WdemErrorCode expectedError)
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var destinationRoot = Path.Combine(_root, "user");
+    var sourcePath = Path.Combine(profiles, "team.DotSettings");
+    Directory.CreateDirectory(profiles);
+    var source = Encoding.UTF8.GetBytes("verified settings");
+    await File.WriteAllBytesAsync(sourcePath, source);
+    FileStream? readLock = null;
+    var importer = new ConfigurationImporter(
+        afterDestinationMove: null,
+        afterDestinationDirectoryLeased: null,
+        beforeDestinationPreconditionCheck: null,
+        afterCommitVerified: path =>
+        {
+          switch (mutation)
+          {
+            case PostCommitMutation.Delete:
+              File.Delete(path);
+              break;
+            case PostCommitMutation.Rewrite:
+              File.WriteAllText(path, "rewritten settings");
+              break;
+            case PostCommitMutation.DenyRead:
+              readLock = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+              break;
+            default:
+              throw new InvalidOperationException($"Unsupported mutation '{mutation}'.");
+          }
+        });
+    var provider = new ReSharperSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        importer,
+        new ComplianceEvaluator(),
+        destinationRoot);
+    var resource = ReSharperSettingsResource(
+        Convert.ToHexString(SHA256.HashData(source)),
+        ReSharperRelativeDestination());
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
+
+    ResourceApplyResult applied;
+    try
+    {
+      applied = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+    }
+    finally
+    {
+      readLock?.Dispose();
+    }
+
+    Assert.Equal(ApplyOutcome.Failed, applied.Outcome);
+    Assert.True(applied.FinalizeAfterCancellation);
+    Assert.Equal(expectedError, applied.Error!.Code);
+    var finalVerification = Assert.IsType<VerificationResult>(applied.FinalVerification);
+    Assert.Equal(expectedCompliance, finalVerification.Compliance);
+    Assert.Equal(expectedDetection, finalVerification.DetectedState.Outcome);
+    Assert.Equal(mutation == PostCommitMutation.Rewrite, finalVerification.DetectedState.Exists);
+    if (mutation != PostCommitMutation.Delete)
+    {
+      Assert.Equal(expectedError, finalVerification.DetectedState.StructuredError!.Code);
+    }
+  }
+
   [Fact]
   public async Task ApplyAsync_VsSettingsRejectsDestinationCreatedAfterPlanning()
   {
@@ -908,13 +992,29 @@ public sealed class ConfigurationProviderTests : IDisposable
     var detected = await provider.DetectAsync(resource, CancellationToken.None);
     var verifiedBefore = await provider.VerifyAsync(resource, CancellationToken.None);
     var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
+    ProviderProgress? launchProgress = null;
     Assert.Empty(process.Requests);
 
-    var applied = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+    var applied = await provider.ApplyAsync(
+        resource,
+        plan,
+        new InlineProgress(update =>
+        {
+          if (update.BeginsCancellationFinalization)
+          {
+            launchProgress = update;
+          }
+        }),
+        CancellationToken.None);
 
     Assert.Equal(ApplyOutcome.Succeeded, applied.Outcome);
     var request = Assert.Single(process.Requests);
     Assert.Equal(instance.ProductPath, request.FileName);
+    Assert.Equal(
+        Wdem.Core.Processes.ProcessExecutionRequest.DefaultTimeout,
+        request.Timeout);
+    Assert.Equal(request.Timeout, provider.Capabilities.CancellationFinalizationTimeout);
+    Assert.NotNull(launchProgress);
     Assert.Equal(
         ["/ResetSettings", request.Arguments[1], "/Command", "Exit"],
         request.Arguments);
@@ -1511,6 +1611,13 @@ public sealed class ConfigurationProviderTests : IDisposable
             ["destinationPath"] = destinationPath
           });
 
+  public enum PostCommitMutation
+  {
+    Delete,
+    Rewrite,
+    DenyRead
+  }
+
   private static string ReSharperDestination(string jetBrainsRoot) => Path.Combine(
       jetBrainsRoot,
       "Shared",
@@ -1617,6 +1724,7 @@ public sealed class ConfigurationProviderTests : IDisposable
         CancellationToken cancellationToken)
     {
       Requests.Add(request);
+      request.OnStarted?.Invoke();
       return Task.FromResult(new Wdem.Core.Processes.ProcessExecutionResult(true, 0, [], []));
     }
   }

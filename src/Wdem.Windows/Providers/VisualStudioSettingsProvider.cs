@@ -67,6 +67,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
   {
     SupportsSource = true,
     SupportsInProgressCancellation = true,
+    CancellationFinalizationTimeout = ProcessExecutionRequest.DefaultTimeout,
     ConcurrencyGroup = "visual-studio-installer"
   };
 
@@ -433,9 +434,18 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
       var process = await _processExecutor.ExecuteAsync(
           new ProcessExecutionRequest(
               selection.Instance.ProductPath,
-              ["/ResetSettings", snapshot.Path, "/Command", "Exit"])
+              ["/ResetSettings", snapshot.Path, "/Command", "Exit"],
+              Timeout: ProcessExecutionRequest.DefaultTimeout)
           {
-            CancellationMode = ProcessCancellationMode.LaunchOnly
+            CancellationMode = ProcessCancellationMode.LaunchOnly,
+            OnStarted = () => progress?.Report(new ProviderProgress(
+                "Apply",
+                0.75,
+                "Visual Studio settings import started.",
+                plan.Steps[0].Id)
+            {
+              BeginsCancellationFinalization = true
+            })
           },
           null,
           cancellationToken).ConfigureAwait(false);

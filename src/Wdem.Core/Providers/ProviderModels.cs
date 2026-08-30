@@ -47,6 +47,7 @@ public sealed record ProviderCapabilities
   public bool SupportsVersionConstraints { get; init; }
   public bool SupportsInstallerParameters { get; init; }
   public bool SupportsInProgressCancellation { get; init; }
+  public TimeSpan CancellationFinalizationTimeout { get; init; }
   public int MaxConcurrentOperations { get; init; } = 1;
   public string? ConcurrencyGroup { get; init; }
 }
@@ -218,6 +219,7 @@ public sealed record ProviderProgress
   }
 
   public ProviderLogLevel LogLevel { get; init; } = ProviderLogLevel.Info;
+  public bool BeginsCancellationFinalization { get; init; }
 
   public void Deconstruct(out string stage, out double percent, out string message)
   {

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using Wdem.Core.Execution;
 using Wdem.Windows.Configuration;
 using Xunit;
 
@@ -70,6 +71,86 @@ public sealed class ConfigurationSourceResolverTests : IDisposable
     Assert.Contains("file", result.Error!.Detail, StringComparison.OrdinalIgnoreCase);
   }
 
+  [Theory]
+  [InlineData(SourceFailureCase.ProfileTraversal, "permitted root")]
+  [InlineData(SourceFailureCase.ApplicationTraversal, "permitted root")]
+  [InlineData(SourceFailureCase.MissingFile, "safely resolved")]
+  [InlineData(SourceFailureCase.HashMismatch, "SHA-256")]
+  [InlineData(SourceFailureCase.SizeLimit, "64 MiB")]
+  [InlineData(SourceFailureCase.UncPath, "safely resolved")]
+  public async Task ResolveAsync_NegativeSourceMatrixReturnsConfigurationError(
+      SourceFailureCase failureCase,
+      string expectedDetail)
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var assets = Path.Combine(profiles, "assets");
+    var outside = Path.Combine(_root, "outside");
+    Directory.CreateDirectory(profiles);
+    Directory.CreateDirectory(assets);
+    Directory.CreateDirectory(outside);
+    var contents = Encoding.UTF8.GetBytes("verified configuration");
+    var expectedHash = Convert.ToHexString(SHA256.HashData(contents));
+    string source;
+    switch (failureCase)
+    {
+      case SourceFailureCase.ProfileTraversal:
+        await File.WriteAllBytesAsync(Path.Combine(outside, "profile.DotSettings"), contents);
+        source = Path.Combine("..", "outside", "profile.DotSettings");
+        break;
+      case SourceFailureCase.ApplicationTraversal:
+        await File.WriteAllBytesAsync(Path.Combine(outside, "asset.DotSettings"), contents);
+        source = Path.Combine(
+            "profiles",
+            "assets",
+            "..",
+            "..",
+            "..",
+            Path.GetFileName(_root),
+            "outside",
+            "asset.DotSettings");
+        break;
+      case SourceFailureCase.MissingFile:
+        source = Path.Combine("missing", "team.DotSettings");
+        break;
+      case SourceFailureCase.HashMismatch:
+        source = "mismatch.DotSettings";
+        await File.WriteAllBytesAsync(Path.Combine(profiles, source), contents);
+        expectedHash = new string('A', 64);
+        break;
+      case SourceFailureCase.SizeLimit:
+        source = "oversized.DotSettings";
+        await using (var stream = new FileStream(
+            Path.Combine(profiles, source),
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None))
+        {
+          stream.SetLength((64L * 1024 * 1024) + 1);
+        }
+        break;
+      case SourceFailureCase.UncPath:
+        source = $@"\\localhost\wdem-missing-{Guid.NewGuid():N}\team.DotSettings";
+        break;
+      default:
+        throw new InvalidOperationException($"Unsupported failure case '{failureCase}'.");
+    }
+
+    var result = await new ConfigurationSourceResolver(_root, profiles).ResolveAsync(
+        source,
+        expectedHash,
+        CancellationToken.None);
+
+    Assert.False(result.IsValid);
+    Assert.Null(result.Source);
+    Assert.Equal(WdemErrorCode.ConfigurationError, result.Error!.Code);
+    Assert.Contains(expectedDetail, result.Error.Detail, StringComparison.OrdinalIgnoreCase);
+    if (failureCase == SourceFailureCase.UncPath)
+    {
+      Assert.StartsWith(@"\\", source, StringComparison.Ordinal);
+      Assert.IsType<IOException>(result.Error.UnderlyingException);
+    }
+  }
+
   [Fact]
   public async Task ResolveAsync_AbsolutePathThroughReparseDirectoryIsRejected()
   {
@@ -81,22 +162,24 @@ public sealed class ConfigurationSourceResolverTests : IDisposable
     var target = Path.Combine(outside, "team.DotSettings");
     var contents = Encoding.UTF8.GetBytes("settings");
     await File.WriteAllBytesAsync(target, contents);
+    CreateJunction(link, outside);
     try
     {
-      Directory.CreateSymbolicLink(link, outside);
+      var result = await new ConfigurationSourceResolver(_root, profiles).ResolveAsync(
+          Path.Combine(link, "team.DotSettings"),
+          Convert.ToHexString(SHA256.HashData(contents)),
+          CancellationToken.None);
+
+      Assert.False(result.IsValid);
+      Assert.Contains(
+          "reparse",
+          result.Error!.UnderlyingException!.ToString(),
+          StringComparison.OrdinalIgnoreCase);
     }
-    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+    finally
     {
-      return;
+      Directory.Delete(link);
     }
-
-    var result = await new ConfigurationSourceResolver(_root, profiles).ResolveAsync(
-        Path.Combine(link, "team.DotSettings"),
-        Convert.ToHexString(SHA256.HashData(contents)),
-        CancellationToken.None);
-
-    Assert.False(result.IsValid);
-    Assert.Contains("reparse", result.Error!.Detail, StringComparison.OrdinalIgnoreCase);
   }
 
   [Fact]
@@ -342,5 +425,15 @@ public sealed class ConfigurationSourceResolverTests : IDisposable
     using var process = Process.Start(startInfo)!;
     process.WaitForExit();
     Assert.Equal(0, process.ExitCode);
+  }
+
+  public enum SourceFailureCase
+  {
+    ProfileTraversal,
+    ApplicationTraversal,
+    MissingFile,
+    HashMismatch,
+    SizeLimit,
+    UncPath
   }
 }

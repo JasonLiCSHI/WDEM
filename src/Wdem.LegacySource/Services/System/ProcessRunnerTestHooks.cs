@@ -2,7 +2,8 @@ namespace Wdem.LegacySource.Services.System;
 
 internal sealed class ProcessRunnerTestHooks
 {
-  public TimeSpan ProcessTimeout { get; init; } = TimeSpan.FromMinutes(10);
+  public TimeSpan ProcessTimeout { get; init; } =
+      Wdem.Core.Processes.ProcessExecutionRequest.DefaultTimeout;
 
   public TimeSpan OutputDrainTimeout { get; init; } = TimeSpan.FromSeconds(5);
 

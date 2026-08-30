@@ -122,6 +122,45 @@ namespace Wdem.LegacySource.Tests.Services.System
     }
 
     [Fact]
+    public async Task RunCommandDetailedAsync_NotifiesOnlyAfterSuccessfulStartAndIgnoresObserverFailure()
+    {
+      var runner = new DefaultProcessRunner();
+      var (executable, arguments) = Echo("started");
+      var notifications = 0;
+
+      var result = await runner.RunCommandDetailedAsync(
+          executable,
+          arguments,
+          null,
+          null,
+          null,
+          CancellationToken.None,
+          continueAfterStart: true,
+          onStarted: () =>
+          {
+            notifications++;
+            throw new InvalidOperationException("observer failure");
+          });
+
+      Assert.True(result.Started);
+      Assert.Equal(0, result.ExitCode);
+      Assert.Equal(1, notifications);
+
+      var missingResult = await runner.RunCommandDetailedAsync(
+          $"missing-{Guid.NewGuid():N}",
+          [],
+          null,
+          null,
+          null,
+          CancellationToken.None,
+          continueAfterStart: true,
+          onStarted: () => notifications++);
+
+      Assert.False(missingResult.Started);
+      Assert.Equal(1, notifications);
+    }
+
+    [Fact]
     public async Task RunCommandDetailedAsync_TimeoutRetainsStartedStateAndCollectedEvidence()
     {
       var runner = new DefaultProcessRunner(new ProcessRunnerTestHooks

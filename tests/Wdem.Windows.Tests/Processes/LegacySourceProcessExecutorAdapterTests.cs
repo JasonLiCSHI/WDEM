@@ -107,6 +107,25 @@ public sealed class LegacySourceProcessExecutorAdapterTests
   }
 
   [Fact]
+  public async Task ExecuteAsync_ForwardsSuccessfulProcessStartNotification()
+  {
+    var legacy = new RecordingProcessRunner();
+    var adapter = new LegacySourceProcessExecutorAdapter(legacy);
+    var started = false;
+
+    await adapter.ExecuteAsync(
+        new ProcessExecutionRequest("devenv.exe", [])
+        {
+          CancellationMode = ProcessCancellationMode.LaunchOnly,
+          OnStarted = () => started = true
+        },
+        null,
+        CancellationToken.None);
+
+    Assert.True(started);
+  }
+
+  [Fact]
   public async Task ExecuteAsync_LaunchOnlyFailsClosedWhenRunnerDoesNotSupportProtocol()
   {
     var adapter = new LegacySourceProcessExecutorAdapter(new LegacyCancellationProcessRunner());
@@ -329,16 +348,40 @@ public sealed class LegacySourceProcessExecutorAdapterTests
         TimeSpan? timeout,
         Action<ProcessOutputLine>? onOutput,
         CancellationToken cancellationToken,
-        bool continueAfterStart)
+        bool continueAfterStart) => RunCommandDetailedAsync(
+            fileName,
+            arguments,
+            workingDirectory,
+            timeout,
+            onOutput,
+            cancellationToken,
+            continueAfterStart,
+            onStarted: null);
+
+    public async Task<ProcessRunResult> RunCommandDetailedAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        string? workingDirectory,
+        TimeSpan? timeout,
+        Action<ProcessOutputLine>? onOutput,
+        CancellationToken cancellationToken,
+        bool continueAfterStart,
+        Action? onStarted)
     {
       ContinueAfterStart = continueAfterStart;
-      return RunCommandDetailedAsync(
+      var result = await RunCommandDetailedAsync(
           fileName,
           arguments,
           workingDirectory,
           timeout,
           onOutput,
-          cancellationToken);
+          cancellationToken).ConfigureAwait(false);
+      if (result.Started)
+      {
+        onStarted?.Invoke();
+      }
+
+      return result;
     }
 
     public Task<ProcessRunResult> RunCommandDetailedAsync(

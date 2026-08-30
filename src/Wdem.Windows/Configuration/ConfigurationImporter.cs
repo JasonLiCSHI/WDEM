@@ -71,6 +71,7 @@ public sealed class ConfigurationImporter
   private readonly Action<string>? _afterDestinationMove;
   private readonly Action<string>? _afterDestinationDirectoryLeased;
   private readonly Action<string>? _beforeDestinationPreconditionCheck;
+  private readonly Action<string>? _afterCommitVerified;
 
   public ConfigurationImporter()
   {
@@ -80,7 +81,8 @@ public sealed class ConfigurationImporter
       : this(
           afterDestinationMove,
           afterDestinationDirectoryLeased: null,
-          beforeDestinationPreconditionCheck: null)
+          beforeDestinationPreconditionCheck: null,
+          afterCommitVerified: null)
   {
   }
 
@@ -90,18 +92,21 @@ public sealed class ConfigurationImporter
       : this(
           afterDestinationMove,
           afterDestinationDirectoryLeased,
-          beforeDestinationPreconditionCheck: null)
+          beforeDestinationPreconditionCheck: null,
+          afterCommitVerified: null)
   {
   }
 
   internal ConfigurationImporter(
       Action<string>? afterDestinationMove,
       Action<string>? afterDestinationDirectoryLeased,
-      Action<string>? beforeDestinationPreconditionCheck)
+      Action<string>? beforeDestinationPreconditionCheck,
+      Action<string>? afterCommitVerified = null)
   {
     _afterDestinationMove = afterDestinationMove;
     _afterDestinationDirectoryLeased = afterDestinationDirectoryLeased;
     _beforeDestinationPreconditionCheck = beforeDestinationPreconditionCheck;
+    _afterCommitVerified = afterCommitVerified;
   }
 
   public async Task<ConfigurationImportResult> CopyAtomicallyAsync(
@@ -341,6 +346,7 @@ public sealed class ConfigurationImporter
             restoreError);
       }
 
+      _afterCommitVerified?.Invoke(fullDestination);
       destinationCommitted = false;
       return new ConfigurationImportResult(true, fullDestination, finalHash, null);
     }

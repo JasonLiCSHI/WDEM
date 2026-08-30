@@ -9,8 +9,9 @@ public sealed class CancellationDrainDeadline : IDisposable
 {
   private static readonly TimeSpan MaximumTimerDuration =
       TimeSpan.FromMilliseconds(uint.MaxValue - 1d);
-  private readonly TimeSpan _budget;
+  private readonly object _gate = new();
   private readonly CancellationTokenRegistration _registration;
+  private long _budgetTicks;
   private long _startedTimestamp = long.MinValue;
 
   public CancellationDrainDeadline(TimeSpan budget, CancellationToken cancellationToken)
@@ -23,7 +24,7 @@ public sealed class CancellationDrainDeadline : IDisposable
           $"The budget must be positive and no greater than {MaximumTimerDuration}.");
     }
 
-    _budget = budget;
+    _budgetTicks = budget.Ticks;
     _registration = cancellationToken.UnsafeRegister(
         static state => ((CancellationDrainDeadline)state!).Start(),
         this);
@@ -36,22 +37,54 @@ public sealed class CancellationDrainDeadline : IDisposable
     get
     {
       var started = Volatile.Read(ref _startedTimestamp);
+      var budget = TimeSpan.FromTicks(Volatile.Read(ref _budgetTicks));
       if (started == long.MinValue)
       {
-        return _budget;
+        return budget;
       }
 
       var elapsed = Stopwatch.GetElapsedTime(started);
-      return elapsed >= _budget ? TimeSpan.Zero : _budget - elapsed;
+      return elapsed >= budget ? TimeSpan.Zero : budget - elapsed;
     }
   }
 
   public void Dispose() => _registration.Dispose();
 
-  internal void Start() => Interlocked.CompareExchange(
-      ref _startedTimestamp,
-      Stopwatch.GetTimestamp(),
-      long.MinValue);
+  internal bool TryReserveAdditional(TimeSpan duration)
+  {
+    if (duration < TimeSpan.Zero)
+    {
+      throw new ArgumentOutOfRangeException(nameof(duration));
+    }
+
+    lock (_gate)
+    {
+      if (_startedTimestamp != long.MinValue)
+      {
+        return false;
+      }
+
+      var budget = TimeSpan.FromTicks(_budgetTicks);
+      if (duration > MaximumTimerDuration - budget)
+      {
+        throw new ArgumentOutOfRangeException(nameof(duration));
+      }
+
+      _budgetTicks = (budget + duration).Ticks;
+      return true;
+    }
+  }
+
+  internal void Start()
+  {
+    lock (_gate)
+    {
+      if (_startedTimestamp == long.MinValue)
+      {
+        _startedTimestamp = Stopwatch.GetTimestamp();
+      }
+    }
+  }
 }
 
 public interface IResourceScheduler

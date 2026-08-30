@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Wdem.Core.Compliance;
 using Wdem.Core.Execution;
 using Wdem.Core.Graph;
@@ -7,7 +9,9 @@ using Wdem.Core.Providers;
 using Wdem.Core.Resources;
 using Wdem.Core.Runs;
 using Wdem.Core.Versions;
+using Wdem.Windows.Configuration;
 using Wdem.Windows.Persistence;
+using Wdem.Windows.Providers;
 using Xunit;
 
 namespace Wdem.Windows.Tests.Execution;
@@ -28,6 +32,85 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
 
   private readonly string _directory = Path.Combine(
       Path.GetTempPath(), $"wdem-recovery-concurrency-{Guid.NewGuid():N}");
+
+  [Fact]
+  public async Task ApplyAsync_ReSharperFinalVerificationPersistsPostCommitMismatch()
+  {
+    var profiles = Path.Combine(_directory, "profiles");
+    var destinationRoot = Path.Combine(_directory, "JetBrains");
+    var sourcePath = Path.Combine(profiles, "team.DotSettings");
+    Directory.CreateDirectory(profiles);
+    var source = Encoding.UTF8.GetBytes("verified ReSharper settings");
+    await File.WriteAllBytesAsync(sourcePath, source);
+    var settings = new ResourceDefinition
+    {
+      Id = "resharper-settings",
+      Type = "resharper-settings",
+      Provider = "file",
+      Dependencies = ["resharper"],
+      Parameters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["sourcePath"] = "team.DotSettings",
+        ["expectedSha256"] = Convert.ToHexString(SHA256.HashData(source)),
+        ["destinationPath"] = Path.Combine(
+            "Shared",
+            "vAny",
+            "GlobalSettingsStorage.DotSettings")
+      }
+    };
+    var profile = new DeveloperProfile
+    {
+      Id = "developer",
+      Version = "1.0.0",
+      DisplayName = "Developer",
+      Description = "Developer workstation",
+      RequiredResources = [new ProfileResourceReference { Id = settings.Id }],
+      Resources = new Dictionary<string, ResourceDefinition>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["resharper"] = new ResourceDefinition
+        {
+          Id = "resharper",
+          Type = "package",
+          Provider = "fake"
+        },
+        [settings.Id] = settings
+      }
+    };
+    var provider = new ReSharperSettingsProvider(
+        new ConfigurationSourceResolver(_directory, profiles),
+        new ConfigurationImporter(
+            afterDestinationMove: null,
+            afterDestinationDirectoryLeased: null,
+            beforeDestinationPreconditionCheck: null,
+            afterCommitVerified: path => File.WriteAllText(path, "rewritten after commit")),
+        new ComplianceEvaluator(),
+        destinationRoot);
+    var dependencyProvider = new GatedProvider { WaitForRelease = false };
+    var store = CreateStore();
+    var service = CreateService(
+        provider,
+        store,
+        profile: profile,
+        additionalProviders: [dependencyProvider]);
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+    var persisted = await store.GetAsync(run.RunId, CancellationToken.None);
+
+    var result = run.ResourceResults[settings.Id];
+    Assert.Equal(ExecutionOutcome.Failed, result.Outcome);
+    Assert.Equal(ComplianceStatus.ConfigurationMismatch, result.FinalCompliance);
+    Assert.False(result.DetectedBefore!.Exists);
+    Assert.True(result.DetectedAfter!.Exists);
+    Assert.False(string.Equals(
+        settings.Parameters["expectedSha256"],
+        result.DetectedAfter.ConfigurationHash,
+        StringComparison.OrdinalIgnoreCase));
+    Assert.Equal(WdemErrorCode.ConfigurationError, result.Error!.Code);
+    var persistedResult = persisted!.ResourceResults[settings.Id];
+    Assert.Equal(ComplianceStatus.ConfigurationMismatch, persistedResult.FinalCompliance);
+    Assert.Equal(result.DetectedAfter.ConfigurationHash, persistedResult.DetectedAfter!.ConfigurationHash);
+    Assert.Equal(WdemErrorCode.ConfigurationError, persistedResult.Error!.Code);
+  }
 
   [Fact]
   public async Task ApplyAsync_PersistsEveryRedactedEventBeforePublishingIt()
@@ -694,9 +777,11 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
       TimeProvider? timeProvider = null,
       IRunEventSink? eventSink = null,
       LogRedactor? redactor = null,
-      DeveloperProfile? profile = null)
+      DeveloperProfile? profile = null,
+      IReadOnlyList<IResourceProvider>? additionalProviders = null)
   {
-    var registry = new ResourceProviderRegistry([provider]);
+    var registry = new ResourceProviderRegistry(
+        [provider, .. additionalProviders ?? []]);
     var compliance = new ComplianceEvaluator();
     eventSink ??= new RunEventHub();
     redactor ??= new LogRedactor();
@@ -995,7 +1080,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     public ValueTask<DetectedState> DetectAsync(
         ResourceDefinition resource,
         CancellationToken cancellationToken) =>
-        ValueTask.FromResult(Missing());
+        ValueTask.FromResult(Missing() with { ResourceId = resource.Id });
 
     public ValueTask<ResourcePlan> PlanAsync(
         ResourceDefinition resource,

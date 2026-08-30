@@ -78,6 +78,29 @@ namespace Wdem.LegacySource.Interfaces
                 onOutput,
                 cancellationToken);
 
+    /// <summary>
+    /// Runs a command and notifies an observer only after the process starts successfully.
+    /// </summary>
+    Task<ProcessRunResult> RunCommandDetailedAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        string? workingDirectory,
+        TimeSpan? timeout,
+        Action<ProcessOutputLine>? onOutput,
+        CancellationToken cancellationToken,
+        bool continueAfterStart,
+        Action? onStarted) => onStarted is not null
+            ? Task.FromException<ProcessRunResult>(new NotSupportedException(
+                "This process runner does not support process-start notifications."))
+            : RunCommandDetailedAsync(
+                fileName,
+                arguments,
+                workingDirectory,
+                timeout,
+                onOutput,
+                cancellationToken,
+                continueAfterStart);
+
     /// <summary>Runs a command and captures output using a raw argument string (deprecated).</summary>
     [Obsolete("Use the IEnumerable<string> overload instead to prevent command injection.")]
     string RunCommandWithOutput(string fileName, string args);

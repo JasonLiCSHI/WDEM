@@ -126,7 +126,25 @@ namespace Wdem.LegacySource.Services.System
         TimeSpan? timeout,
         Action<ProcessOutputLine>? onOutput,
         CancellationToken cancellationToken,
-        bool continueAfterStart)
+        bool continueAfterStart) => await RunCommandDetailedAsync(
+            fileName,
+            arguments,
+            workingDirectory,
+            timeout,
+            onOutput,
+            cancellationToken,
+            continueAfterStart,
+            onStarted: null).ConfigureAwait(false);
+
+    public async Task<ProcessRunResult> RunCommandDetailedAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        string? workingDirectory,
+        TimeSpan? timeout,
+        Action<ProcessOutputLine>? onOutput,
+        CancellationToken cancellationToken,
+        bool continueAfterStart,
+        Action? onStarted)
     {
       ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
       ArgumentNullException.ThrowIfNull(arguments);
@@ -142,7 +160,8 @@ namespace Wdem.LegacySource.Services.System
               resolvedTimeout,
               onOutput,
               cancellationToken,
-              continueAfterStart).ConfigureAwait(false)
+              continueAfterStart,
+              onStarted).ConfigureAwait(false)
           : await RunPortableCommandDetailedAsync(
               fileName,
               argumentSnapshot,
@@ -150,7 +169,8 @@ namespace Wdem.LegacySource.Services.System
               resolvedTimeout,
               onOutput,
               cancellationToken,
-              continueAfterStart).ConfigureAwait(false);
+              continueAfterStart,
+              onStarted).ConfigureAwait(false);
     }
 
     private async Task<ProcessRunResult> RunWindowsJobCommandDetailedAsync(
@@ -160,7 +180,8 @@ namespace Wdem.LegacySource.Services.System
         TimeSpan processTimeout,
         Action<ProcessOutputLine>? onOutput,
         CancellationToken cancellationToken,
-        bool continueAfterStart)
+        bool continueAfterStart,
+        Action? onStarted)
     {
       WindowsProcessJob processJob;
       try
@@ -185,6 +206,7 @@ namespace Wdem.LegacySource.Services.System
       }
 
       using var processJobScope = processJob;
+      NotifyStartedSafely(onStarted);
       var standardOutput = new List<string>();
       var standardError = new List<string>();
       var outputGate = new object();
@@ -266,7 +288,8 @@ namespace Wdem.LegacySource.Services.System
         TimeSpan processTimeout,
         Action<ProcessOutputLine>? onOutput,
         CancellationToken cancellationToken,
-        bool continueAfterStart)
+        bool continueAfterStart,
+        Action? onStarted)
     {
       var startInfo = new ProcessStartInfo
       {
@@ -290,6 +313,8 @@ namespace Wdem.LegacySource.Services.System
         {
           return StartFailure(null);
         }
+
+        NotifyStartedSafely(onStarted);
       }
       catch (Exception exception) when (exception is not OperationCanceledException)
       {
@@ -368,6 +393,19 @@ namespace Wdem.LegacySource.Services.System
           errorTask,
           outputGate,
           completionCancellation).ConfigureAwait(false);
+    }
+
+    private static void NotifyStartedSafely(Action? onStarted)
+    {
+      try
+      {
+        onStarted?.Invoke();
+      }
+      catch (Exception exception)
+      {
+        global::System.Diagnostics.Trace.WriteLine(
+            $"[ProcessRunner] Process-start observer failed: {exception.GetType().Name}");
+      }
     }
 
     private static void TerminateProcess(Process process)

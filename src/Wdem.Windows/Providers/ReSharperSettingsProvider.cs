@@ -336,10 +336,16 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
       var verification = await VerifyAsync(resource, CancellationToken.None).ConfigureAwait(false);
       if (verification.Compliance != ComplianceStatus.Satisfied)
       {
-        return Failed(resource, verification.DetectedState.StructuredError ?? Error(
+        var error = verification.DetectedState.StructuredError ?? Error(
+                resource,
+                WdemErrorCode.VerificationError,
+                "The imported ReSharper settings did not verify.");
+        return Failed(
             resource,
-            WdemErrorCode.VerificationError,
-            "The imported ReSharper settings did not verify."));
+            error,
+            plan.Steps[0],
+            finalizeAfterCancellation: true,
+            finalVerification: verification);
       }
 
       return Succeeded(resource, plan.Steps[0], finalizeAfterCancellation: true);
@@ -357,6 +363,15 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
   {
     var state = await DetectAsync(resource, cancellationToken).ConfigureAwait(false);
     var compliance = _complianceEvaluator.Evaluate(resource, state);
+    if (compliance.Error is { } complianceError && state.StructuredError is null)
+    {
+      state = state with
+      {
+        Error = complianceError.Detail,
+        StructuredError = complianceError
+      };
+    }
+
     return new VerificationResult
     {
       ResourceId = resource.Id,
