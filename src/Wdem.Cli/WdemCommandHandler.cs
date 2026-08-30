@@ -227,16 +227,16 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
             observedRunIds.TryAdd(runEvent.RunId, 0);
           });
       var run = await operation().ConfigureAwait(false);
-      if (replayPersistedEventsWhenSilent && !observedRunIds.ContainsKey(run.RunId))
-      {
-        await ReplayPersistedEventsAsync(run.RunId, json, cancellationToken)
-            .ConfigureAwait(false);
-      }
-
       if (reportFile is not null)
       {
         using var reportCancellation = new CancellationTokenSource(ReportWriteTimeout);
         await _reportExporter.ExportAsync(run, reportFile, reportCancellation.Token)
+            .ConfigureAwait(false);
+      }
+
+      if (replayPersistedEventsWhenSilent && !observedRunIds.ContainsKey(run.RunId))
+      {
+        await ReplayPersistedEventsAsync(run.RunId, json, cancellationToken)
             .ConfigureAwait(false);
       }
 

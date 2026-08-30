@@ -606,6 +606,46 @@ public sealed class WdemCliBuilderTests
   }
 
   [Fact]
+  public async Task CommandHandler_CancelledSilentResumeWritesReportBeforeReplayCancellation()
+  {
+    var run = CompletedRun(ExecutionOutcome.Cancelled);
+    using var cancellation = new CancellationTokenSource();
+    cancellation.Cancel();
+    using var sink = new RunEventHub();
+    var store = new StubExecutionRunStore { ObserveReadCancellation = true };
+    var redactor = new LogRedactor();
+    string directory = Path.Combine(Path.GetTempPath(), $"wdem-cli-report-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(directory);
+    string reportPath = Path.Combine(directory, "cancelled-resume.json");
+    try
+    {
+      var handler = new WdemCommandHandler(
+          new StubEnvironmentRunService { Result = run },
+          store,
+          new StringWriter(),
+          new StringWriter(),
+          redactor,
+          sink,
+          reportExporter: new RunReportExporter(redactor));
+
+      int exitCode = await handler.ResumeAsync(
+          Guid.NewGuid(),
+          json: false,
+          reportPath,
+          cancellation.Token);
+
+      Assert.Equal(130, exitCode);
+      Assert.Equal(1, store.ReadLogCalls);
+      using JsonDocument report = JsonDocument.Parse(await File.ReadAllTextAsync(reportPath));
+      Assert.Equal(run.RunId, report.RootElement.GetProperty("runId").GetGuid());
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  [Fact]
   public async Task CommandHandler_RejectsInvalidReportBeforeStartingRun()
   {
     var service = new StubEnvironmentRunService
@@ -1579,6 +1619,8 @@ public sealed class WdemCliBuilderTests
     public IReadOnlyList<StructuredError> StoreDiagnostics { get; init; } = [];
     public IReadOnlyList<ExecutionRun> Runs { get; init; } = [];
     public bool ListCalled { get; private set; }
+    public bool ObserveReadCancellation { get; init; }
+    public int ReadLogCalls { get; private set; }
 
     public Task CreateAsync(ExecutionRun run, CancellationToken cancellationToken) =>
         Task.CompletedTask;
@@ -1627,8 +1669,16 @@ public sealed class WdemCliBuilderTests
         Guid runId,
         long afterSequence,
         int take,
-        CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<RunLogEntry>>([]);
+        CancellationToken cancellationToken)
+    {
+      ReadLogCalls++;
+      if (ObserveReadCancellation)
+      {
+        cancellationToken.ThrowIfCancellationRequested();
+      }
+
+      return Task.FromResult<IReadOnlyList<RunLogEntry>>([]);
+    }
   }
 
   private sealed class ThrowingTextWriter : TextWriter
