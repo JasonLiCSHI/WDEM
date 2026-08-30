@@ -48,6 +48,41 @@ public sealed class CompletionViewModelTests
     Assert.Equal("C# Developer Environment Ready", viewModel.Heading);
   }
 
+  [Fact]
+  public void RunWithOnlySkippedResources_UsesReadyHeadingAndKeepsSkippedGroup()
+  {
+    var run = CreateRun(
+        ("succeeded", ExecutionState.Completed, ExecutionOutcome.Succeeded, RestartPolicy.NoRestart),
+        ("skipped", ExecutionState.Completed, ExecutionOutcome.Skipped, RestartPolicy.NoRestart));
+
+    var viewModel = new CompletionViewModel(
+        run,
+        new RunReportExporter(new LogRedactor()));
+
+    Assert.Equal("C# Developer Environment Ready", viewModel.Heading);
+    Assert.Single(viewModel.CancelledOrSkipped);
+  }
+
+  [Fact]
+  public async Task ExportFailureIsRedactedAndDoesNotPreventAnotherExport()
+  {
+    var exporter = new FailOnceReportExporter("token=export-secret");
+    var viewModel = new CompletionViewModel(
+        CreateRun(),
+        exporter,
+        new LogRedactor(["export-secret"]));
+
+    await viewModel.ExportAsync("first.json");
+
+    Assert.NotNull(viewModel.ErrorMessage);
+    Assert.DoesNotContain("export-secret", viewModel.ErrorMessage, StringComparison.Ordinal);
+
+    await viewModel.ExportAsync("second.json");
+
+    Assert.Null(viewModel.ErrorMessage);
+    Assert.Equal(2, exporter.ExportCalls);
+  }
+
   private static ExecutionRun CreateRun(
       params (string Id, ExecutionState State, ExecutionOutcome Outcome, RestartPolicy Restart)[] resources) =>
       new()
@@ -76,4 +111,24 @@ public sealed class CompletionViewModelTests
             },
             StringComparer.OrdinalIgnoreCase)
       };
+
+  private sealed class FailOnceReportExporter(string message) : IRunReportExporter
+  {
+    public int ExportCalls { get; private set; }
+
+    public string ExportJson(ExecutionRun run) => throw new NotSupportedException();
+
+    public string ExportMarkdown(ExecutionRun run) => throw new NotSupportedException();
+
+    public Task ExportAsync(
+        ExecutionRun run,
+        string filePath,
+        CancellationToken cancellationToken = default)
+    {
+      ExportCalls++;
+      return ExportCalls == 1
+          ? Task.FromException(new InvalidOperationException(message))
+          : Task.CompletedTask;
+    }
+  }
 }

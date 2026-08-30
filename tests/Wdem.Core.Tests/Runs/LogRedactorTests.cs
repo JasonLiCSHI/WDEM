@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Wdem.Core.Execution;
 using Wdem.Core.Runs;
 using Xunit;
@@ -226,5 +227,24 @@ public sealed class LogRedactorTests
     Assert.Equal("Use api-key=***", result.SuggestedAction);
     Assert.Equal("password=[REDACTED]", result.UnderlyingExceptionMessage);
     Assert.Null(result.UnderlyingException);
+  }
+
+  [Fact]
+  public void Redact_SanitizesStructuredErrorUnderlyingExceptionTypeSnapshot()
+  {
+    const string secret = "secret-exception-type";
+    var redactor = new LogRedactor([secret]);
+    string snapshot = JsonSerializer.Serialize(new
+    {
+      Code = WdemErrorCode.ProviderError,
+      Summary = "Provider failed.",
+      Detail = "Inspect the exception type.",
+      UnderlyingExceptionType = $"Vendor.{secret}.Exception"
+    });
+    StructuredError error = JsonSerializer.Deserialize<StructuredError>(snapshot)!;
+
+    StructuredError result = redactor.Redact(error);
+
+    Assert.Equal("Vendor.***.Exception", result.UnderlyingExceptionType);
   }
 }

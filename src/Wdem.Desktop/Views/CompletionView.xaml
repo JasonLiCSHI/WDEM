@@ -26,6 +26,7 @@
             <StackPanel Orientation="Horizontal" Spacing="10">
                 <Button Content="Export JSON report" Click="ExportJson_Click" />
                 <Button Content="Export Markdown report" Click="ExportMarkdown_Click" />
+                <Button Content="Retry failed resources" Command="{Binding RetryFailedCommand}" />
                 <HyperlinkButton Content="Return to reviewed plan"
                                  Command="{Binding ReturnToPlanCommand}" />
                 <HyperlinkButton Content="Choose another profile"

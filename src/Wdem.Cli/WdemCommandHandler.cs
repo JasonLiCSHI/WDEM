@@ -11,6 +11,7 @@ namespace Wdem.Cli;
 public sealed class WdemCommandHandler : IWdemCommandHandler
 {
   private static readonly TimeSpan DefaultWriteTimeout = TimeSpan.FromSeconds(1);
+  private static readonly TimeSpan ReportWriteTimeout = TimeSpan.FromSeconds(30);
   private readonly IEnvironmentRunService _environmentRuns;
   private readonly IExecutionRunStore _runStore;
   private readonly TextWriter _output;
@@ -210,6 +211,11 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
   {
     try
     {
+      if (reportFile is not null)
+      {
+        reportFile = RunReportExporter.ValidateFilePath(reportFile);
+      }
+
       var observedRunIds = new ConcurrentDictionary<Guid, byte>();
       using var subscription = _eventSink.SubscribeRequiredScoped(
           async (runEvent, observerCancellationToken) =>
@@ -229,7 +235,8 @@ public sealed class WdemCommandHandler : IWdemCommandHandler
 
       if (reportFile is not null)
       {
-        await _reportExporter.ExportAsync(run, reportFile, cancellationToken)
+        using var reportCancellation = new CancellationTokenSource(ReportWriteTimeout);
+        await _reportExporter.ExportAsync(run, reportFile, reportCancellation.Token)
             .ConfigureAwait(false);
       }
 

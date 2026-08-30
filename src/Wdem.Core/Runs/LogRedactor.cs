@@ -80,7 +80,7 @@ public sealed partial class LogRedactor
         RedactNullable(error.LogLocation),
         RedactNullable(error.SuggestedAction),
         error.IsRetryable,
-        error.UnderlyingExceptionType,
+        RedactNullable(error.UnderlyingExceptionType),
         RedactNullable(error.UnderlyingExceptionMessage));
   }
 

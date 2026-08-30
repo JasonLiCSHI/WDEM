@@ -557,6 +557,46 @@ public sealed class ExecutionMonitorViewModelTests
   }
 
   [Fact]
+  public async Task CompletionRetryNavigatesThroughFreshMonitorAndReturnsToCompletion()
+  {
+    DeveloperProfile profile = Profile();
+    var events = new TestRunEventSink();
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid())
+    {
+      ApplyResult = CompletedRun(("git", ExecutionOutcome.Failed, "install")),
+      HoldRetryUntilReleased = true
+    };
+    var main = new MainWindowViewModel(
+        new FixedProfileCatalog(profile),
+        new ResourceGraphBuilder(_ => null),
+        service,
+        events,
+        new LogRedactor(),
+        new RecordingDispatcher());
+    await main.InitializeAsync();
+    await main.ProfileSelection.SelectProfileCommand.ExecuteAsync(null);
+    await ((AsyncRelayCommand)main.ResourceSelection!.StartConfigurationCommand)
+        .ExecuteAsync(null);
+    var plan = Assert.IsType<PlanViewModel>(main.CurrentPage);
+    await plan.ApplyCommand.ExecuteAsync(null);
+    var initialCompletion = Assert.IsType<CompletionViewModel>(main.CurrentPage);
+
+    Task retrying = initialCompletion.RetryFailedCommand.ExecuteAsync(null);
+    await service.RetryStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    Assert.Equal(initialCompletion.Run.RunId, service.RetriedRunId);
+    Assert.Equal(["git"], service.RetriedResourceIds);
+    Assert.True(Assert.IsType<ExecutionMonitorViewModel>(main.CurrentPage).IsRunning);
+
+    service.ReleaseRetry.TrySetResult();
+    await retrying;
+
+    var retriedCompletion = Assert.IsType<CompletionViewModel>(main.CurrentPage);
+    Assert.NotEqual(initialCompletion.Run.RunId, retriedCompletion.Run.RunId);
+    Assert.Empty(retriedCompletion.Failed);
+  }
+
+  [Fact]
   public async Task ChangedApprovedPlanReturnsToPlanForReview()
   {
     DeveloperProfile profile = Profile();
@@ -1004,6 +1044,7 @@ public sealed class ExecutionMonitorViewModelTests
     public CancellationToken ApplyCancellationToken { get; private set; }
     public bool HoldAfterCancellation { get; init; }
     public bool HoldRetryAfterCancellation { get; init; }
+    public bool HoldRetryUntilReleased { get; init; }
     public bool HoldAfterEvents { get; set; }
     public TaskCompletionSource ApplyStarted { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1016,6 +1057,8 @@ public sealed class ExecutionMonitorViewModelTests
     public TaskCompletionSource RetryCancellationObserved { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource ReleaseRetryTerminalCompletion { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource ReleaseRetry { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource EventsPublished { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1081,6 +1124,11 @@ public sealed class ExecutionMonitorViewModelTests
       RetriedResourceIds = new HashSet<string>(resourceIds, StringComparer.OrdinalIgnoreCase);
       RetryCancellationToken = cancellationToken;
       RetryStarted.TrySetResult();
+      if (HoldRetryUntilReleased)
+      {
+        await ReleaseRetry.Task;
+      }
+
       if (HoldRetryAfterCancellation)
       {
         try

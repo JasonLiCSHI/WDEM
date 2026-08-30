@@ -1,9 +1,12 @@
 using System.Text.Json;
 using Wdem.Core.Execution;
+using Wdem.Core.Graph;
+using Wdem.Core.Planning;
 using Wdem.Core.Providers;
 using Wdem.Core.Reporting;
 using Wdem.Core.Resources;
 using Wdem.Core.Runs;
+using Wdem.Core.Versions;
 using Xunit;
 
 namespace Wdem.Core.Tests.Reporting;
@@ -65,6 +68,124 @@ public sealed class RunReportExporterTests
     {
       Directory.Delete(directory, recursive: true);
     }
+  }
+
+  [Fact]
+  public void ExportMarkdown_IncludesEveryStructuredErrorSourceAndRedactsIt()
+  {
+    const string secret = "super-secret-token";
+    StructuredError Error(string source) => new(
+        WdemErrorCode.ConfigurationError,
+        $"{source} summary {secret}",
+        $"{source} details {secret}")
+    {
+      SuggestedAction = $"{source} action {secret}"
+    };
+    var definition = new ResourceDefinition
+    {
+      Id = "failed",
+      Type = "package",
+      Provider = "fake"
+    };
+    var resourcePlan = new ResourcePlan
+    {
+      ResourceId = "failed",
+      ResourceType = "package",
+      ProviderName = "fake",
+      DesiredStateFingerprint = "fingerprint",
+      Compliance = ComplianceStatus.DetectionFailed,
+      IsExecutable = false,
+      StructuredErrors = [Error("resource-plan")]
+    };
+    var plan = new ExecutionPlan
+    {
+      PlanId = Guid.NewGuid(),
+      Fingerprint = "plan-fingerprint",
+      ProfileId = "csharp-developer",
+      ProfileVersion = "2.0.0",
+      Layers = [],
+      Resources =
+      [
+        new PlannedResource
+        {
+          Definition = definition,
+          Origin = ResourceOrigin.Required,
+          Dependencies = [],
+          ResourcePlan = resourcePlan,
+          Status = PlannedResourceStatus.DetectionFailed,
+          Risk = PlanRisk.None,
+          RequiresElevation = false,
+          IsDestructive = false,
+          RestartPolicy = RestartPolicy.NoRestart,
+          Diagnostics = [Error("planned-resource")]
+        }
+      ],
+      IsExecutable = false,
+      Errors = [Error("plan")]
+    };
+    ExecutionRun original = CreateTerminalRun(secret);
+    var failed = original.ResourceResults["failed"] with
+    {
+      DetectedBefore = new DetectedState
+      {
+        ResourceId = "failed",
+        Outcome = DetectionOutcome.Failed,
+        StructuredError = Error("detected-state")
+      }
+    };
+    var run = original with
+    {
+      Plan = plan,
+      ResourceResults = original.ResourceResults.ToDictionary(
+          pair => pair.Key,
+          pair => pair.Key == "failed" ? failed : pair.Value,
+          StringComparer.OrdinalIgnoreCase)
+    };
+
+    string markdown = new RunReportExporter(new LogRedactor([secret]))
+        .ExportMarkdown(run);
+
+    foreach (string source in new[] { "plan", "planned-resource", "resource-plan", "detected-state" })
+    {
+      Assert.Contains($"{source} summary", markdown, StringComparison.Ordinal);
+      Assert.Contains($"{source} details", markdown, StringComparison.Ordinal);
+      Assert.Contains($"{source} action", markdown, StringComparison.Ordinal);
+    }
+    Assert.DoesNotContain(secret, markdown, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void ExportMarkdown_IncludesPrimaryAndEveryInstalledVersion()
+  {
+    ExecutionRun original = CreateTerminalRun("safe");
+    var succeeded = original.ResourceResults["succeeded"] with
+    {
+      DetectedBefore = new DetectedState
+      {
+        ResourceId = "succeeded",
+        Outcome = DetectionOutcome.Succeeded,
+        Exists = true,
+        Version = "9.0.100",
+        InstalledVersions =
+        [
+          new SemanticVersion(8, 0, 204),
+          new SemanticVersion(9, 0, 100)
+        ]
+      }
+    };
+    var run = original with
+    {
+      ResourceResults = original.ResourceResults.ToDictionary(
+          pair => pair.Key,
+          pair => pair.Key == "succeeded" ? succeeded : pair.Value,
+          StringComparer.OrdinalIgnoreCase)
+    };
+
+    string markdown = new RunReportExporter(new LogRedactor()).ExportMarkdown(run);
+
+    Assert.Contains("Detected before: 9.0.100", markdown, StringComparison.Ordinal);
+    Assert.Contains("8.0.204", markdown, StringComparison.Ordinal);
+    Assert.Contains("9.0.100", markdown, StringComparison.Ordinal);
   }
 
   private static ExecutionRun CreateTerminalRun(string secret)

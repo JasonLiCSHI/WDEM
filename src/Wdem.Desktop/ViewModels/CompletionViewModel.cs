@@ -16,7 +16,8 @@ public sealed class CompletionViewModel : ObservableObject
       IRunReportExporter reportExporter,
       LogRedactor? redactor = null,
       Func<Task>? returnToPlan = null,
-      Func<Task>? returnToProfiles = null)
+      Func<Task>? returnToProfiles = null,
+      Func<Task>? retryFailed = null)
   {
     Run = run ?? throw new ArgumentNullException(nameof(run));
     _reportExporter = reportExporter ?? throw new ArgumentNullException(nameof(reportExporter));
@@ -54,8 +55,7 @@ public sealed class CompletionViewModel : ObservableObject
     bool isPartial = run.ResourceResults.Values.Any(result =>
         result.State == ExecutionState.Blocked ||
         result.Outcome is ExecutionOutcome.Failed
-            or ExecutionOutcome.Cancelled
-            or ExecutionOutcome.Skipped);
+            or ExecutionOutcome.Cancelled);
     Heading = isPartial
         ? "Environment Partially Configured"
         : "C# Developer Environment Ready";
@@ -68,6 +68,10 @@ public sealed class CompletionViewModel : ObservableObject
     ReturnToProfilesCommand = new AsyncRelayCommand(
         _ => returnToProfiles?.Invoke() ?? Task.CompletedTask,
         _ => returnToProfiles is not null,
+        ReportError);
+    RetryFailedCommand = new AsyncRelayCommand(
+        _ => retryFailed?.Invoke() ?? Task.CompletedTask,
+        _ => retryFailed is not null && Failed.Count > 0,
         ReportError);
   }
 
@@ -101,6 +105,8 @@ public sealed class CompletionViewModel : ObservableObject
 
   public AsyncRelayCommand ReturnToProfilesCommand { get; }
 
+  public AsyncRelayCommand RetryFailedCommand { get; }
+
   public async Task ExportAsync(string filePath, CancellationToken cancellationToken = default)
   {
     try
@@ -111,11 +117,10 @@ public sealed class CompletionViewModel : ObservableObject
     catch (Exception exception) when (exception is not OperationCanceledException)
     {
       ReportError(exception);
-      throw;
     }
   }
 
-  private void ReportError(Exception exception) =>
+  internal void ReportError(Exception exception) =>
       ErrorMessage = _redactor.Redact(UserErrorMessageFormatter.Format(exception));
 }
 

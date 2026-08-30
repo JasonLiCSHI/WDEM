@@ -41,8 +41,7 @@ public sealed class RunReportExporter : IRunReportExporter
       CancellationToken cancellationToken = default)
   {
     ArgumentNullException.ThrowIfNull(run);
-    ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
-    string path = Path.GetFullPath(filePath);
+    string path = ValidateFilePath(filePath);
     string extension = Path.GetExtension(path);
     string content = extension.Equals(".json", StringComparison.OrdinalIgnoreCase)
         ? ExportJson(run)
@@ -52,6 +51,22 @@ public sealed class RunReportExporter : IRunReportExporter
                 "Report file must use the .json or .md extension.",
                 nameof(filePath));
     await WriteAtomicallyAsync(path, content, cancellationToken).ConfigureAwait(false);
+  }
+
+  public static string ValidateFilePath(string filePath)
+  {
+    ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+    string path = Path.GetFullPath(filePath);
+    string extension = Path.GetExtension(path);
+    if (!extension.Equals(".json", StringComparison.OrdinalIgnoreCase) &&
+        !extension.Equals(".md", StringComparison.OrdinalIgnoreCase))
+    {
+      throw new ArgumentException(
+          "Report file must use the .json or .md extension.",
+          nameof(filePath));
+    }
+
+    return path;
   }
 
   private ReportDocument CreateDocument(ExecutionRun run) => new(
@@ -140,6 +155,22 @@ public sealed class RunReportExporter : IRunReportExporter
       }
     }
 
+    if (run.Plan is not null)
+    {
+      AppendErrors("Plan errors", run.Plan.Errors);
+      foreach (PlannedResource resource in run.Plan.Resources.OrderBy(
+                   resource => resource.Definition.Id,
+                   StringComparer.OrdinalIgnoreCase))
+      {
+        AppendErrors(
+            $"Planned resource {resource.Definition.Id} diagnostics",
+            resource.Diagnostics);
+        AppendErrors(
+            $"Resource plan {resource.Definition.Id} errors",
+            resource.ResourcePlan.StructuredErrors);
+      }
+    }
+
     markdown.AppendLine();
     markdown.AppendLine("## Resource results").AppendLine();
     foreach (ResourceResult result in results)
@@ -159,6 +190,8 @@ public sealed class RunReportExporter : IRunReportExporter
       }
 
       AppendError(result.Error);
+      AppendError(result.DetectedBefore?.StructuredError);
+      AppendError(result.DetectedAfter?.StructuredError);
       foreach (StepResult step in result.StepResults.OrderBy(step => step.StepId))
       {
         markdown.Append("- Step `").Append(step.StepId).Append("` — ")
@@ -244,6 +277,23 @@ public sealed class RunReportExporter : IRunReportExporter
       {
         markdown.Append(prefix).Append("- Error exit code: ").AppendLine(exitCode.ToString());
       }
+    }
+
+    void AppendErrors(string heading, IEnumerable<StructuredError> errors)
+    {
+      StructuredError[] materialized = errors.ToArray();
+      if (materialized.Length == 0)
+      {
+        return;
+      }
+
+      markdown.Append("### ").AppendLine(heading).AppendLine();
+      foreach (StructuredError error in materialized)
+      {
+        AppendError(error);
+      }
+
+      markdown.AppendLine();
     }
   }
 
@@ -384,15 +434,28 @@ public sealed class RunReportExporter : IRunReportExporter
       return "Unknown";
     }
 
-    if (!string.IsNullOrWhiteSpace(state.Version))
+    string? primary = string.IsNullOrWhiteSpace(state.Version) ? null : state.Version;
+    string installed = string.Join(
+        ", ",
+        state.InstalledVersions.Select(FormatVersion).Distinct(StringComparer.Ordinal));
+    if (primary is not null && installed.Length > 0)
     {
-      return state.Version;
+      return $"{primary}; installed versions: {installed}";
     }
 
-    return state.InstalledVersions.Count == 0
+    if (primary is not null)
+    {
+      return primary;
+    }
+
+    return installed.Length == 0
         ? (state.Exists ? "Present (version unknown)" : "Not present")
-        : string.Join(", ", state.InstalledVersions);
+        : installed;
   }
+
+  private static string FormatVersion(Versions.SemanticVersion version) => version.Revision == 0
+      ? $"{version.Major}.{version.Minor}.{version.Patch}"
+      : $"{version.Major}.{version.Minor}.{version.Patch}.{version.Revision}";
 
   private static string RestartText(RestartPolicy policy) => policy switch
   {

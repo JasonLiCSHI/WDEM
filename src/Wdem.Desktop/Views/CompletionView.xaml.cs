@@ -16,10 +16,25 @@ public sealed partial class CompletionView : UserControl
   }
 
   private async void ExportJson_Click(object sender, RoutedEventArgs args) =>
-      await PickAndExportAsync(".json", "WDEM JSON report");
+      await RunExportInteractionAsync(".json", "WDEM JSON report");
 
   private async void ExportMarkdown_Click(object sender, RoutedEventArgs args) =>
-      await PickAndExportAsync(".md", "WDEM Markdown report");
+      await RunExportInteractionAsync(".md", "WDEM Markdown report");
+
+  private async Task RunExportInteractionAsync(string extension, string description)
+  {
+    try
+    {
+      await PickAndExportAsync(extension, description);
+    }
+    catch (Exception exception)
+    {
+      if (DataContext is CompletionViewModel viewModel)
+      {
+        viewModel.ReportError(exception);
+      }
+    }
+  }
 
   private async Task PickAndExportAsync(string extension, string description)
   {

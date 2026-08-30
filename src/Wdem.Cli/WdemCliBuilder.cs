@@ -1,6 +1,7 @@
 using System.CommandLine;
 using System.CommandLine.Parsing;
 using Wdem.Core.Execution;
+using Wdem.Core.Reporting;
 
 namespace Wdem.Cli;
 
@@ -260,12 +261,28 @@ public static class WdemCliBuilder
     Description = "Write newline-delimited JSON output."
   };
 
-  private static Option<string?> ReportOption() => new("--report")
+  private static Option<string?> ReportOption()
   {
-    Description = "Write the completed run report to a .json or .md file."
-  };
+    var report = new Option<string?>("--report")
+    {
+      Description = "Write the completed run report to a .json or .md file.",
+      Arity = ArgumentArity.ExactlyOne
+    };
+    report.Validators.Add(result =>
+    {
+      try
+      {
+        RunReportExporter.ValidateFilePath(result.GetValueOrDefault<string?>()!);
+      }
+      catch (ArgumentException exception)
+      {
+        result.AddError(exception.Message);
+      }
+    });
+    return report;
+  }
 
-  private static string? ReportPath(string? value) => string.IsNullOrWhiteSpace(value)
+  private static string? ReportPath(string? value) => value is null
       ? null
-      : Path.GetFullPath(value);
+      : RunReportExporter.ValidateFilePath(value);
 }

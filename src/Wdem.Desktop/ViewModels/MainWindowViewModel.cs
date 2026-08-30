@@ -211,12 +211,36 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     }
     else if (_executionMonitor.Run is { } terminalRun && !_isDisposed)
     {
-      CurrentPage = new CompletionViewModel(
-          terminalRun,
-          _reportExporter!,
-          _redactor,
-          () => NavigateToReviewedPlanAsync(reviewedPlan),
-          NavigateToProfilesAsync);
+      NavigateToCompletion(terminalRun, reviewedPlan);
+    }
+  }
+
+  private void NavigateToCompletion(ExecutionRun run, PlanViewModel reviewedPlan)
+  {
+    CurrentPage = new CompletionViewModel(
+        run,
+        _reportExporter!,
+        _redactor,
+        () => NavigateToReviewedPlanAsync(reviewedPlan),
+        NavigateToProfilesAsync,
+        () => RetryFailedAsync(reviewedPlan));
+  }
+
+  private async Task RetryFailedAsync(PlanViewModel reviewedPlan)
+  {
+    if (_executionMonitor is null || _isDisposed)
+    {
+      return;
+    }
+
+    CurrentPage = _executionMonitor;
+    Task operation = _executionMonitor.RetryFailedAsync(CancellationToken.None);
+    RaiseNavigationStates();
+    await operation;
+    RaiseNavigationStates();
+    if (_executionMonitor.Run is { } terminalRun && !_isDisposed)
+    {
+      NavigateToCompletion(terminalRun, reviewedPlan);
     }
   }
 

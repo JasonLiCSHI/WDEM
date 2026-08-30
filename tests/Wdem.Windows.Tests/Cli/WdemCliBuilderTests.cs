@@ -1,3 +1,5 @@
+using System.CommandLine;
+using System.CommandLine.Parsing;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -152,6 +154,46 @@ public sealed class WdemCliBuilderTests
 
     Assert.Equal(0, exitCode);
     Assert.Equal(Path.GetFullPath("result.json"), handler.ReportFile);
+  }
+
+  [Theory]
+  [InlineData("result.JSON")]
+  [InlineData("result.MD")]
+  public async Task RunCommands_AcceptUppercaseReportExtensions(string reportFile)
+  {
+    var handler = new CapturingHandler();
+
+    int exitCode = await WdemCliBuilder.Build(handler).Parse(
+    [
+      "apply", "--profile", "developer.yaml", "--report", reportFile
+    ]).InvokeAsync();
+
+    Assert.Equal(0, exitCode);
+    Assert.Equal("apply", handler.Command);
+    Assert.Equal(Path.GetFullPath(reportFile), handler.ReportFile);
+  }
+
+  [Fact]
+  public async Task RunCommands_RejectInvalidOrMissingReportValueBeforeHandler()
+  {
+    string[][] invalidArguments =
+    [
+      ["apply", "--profile", "developer.yaml", "--report", "result.txt"],
+      ["apply", "--profile", "developer.yaml", "--report", ""],
+      ["apply", "--profile", "developer.yaml", "--report"]
+    ];
+
+    foreach (string[] arguments in invalidArguments)
+    {
+      var handler = new CapturingHandler();
+      ParseResult parsed = WdemCliBuilder.Build(handler).Parse(arguments);
+
+      int exitCode = await parsed.InvokeAsync();
+
+      Assert.NotEqual(0, exitCode);
+      Assert.NotEmpty(parsed.Errors);
+      Assert.Null(handler.Command);
+    }
   }
 
   [Fact]
@@ -522,6 +564,72 @@ public sealed class WdemCliBuilderTests
     {
       Directory.Delete(directory, recursive: true);
     }
+  }
+
+  [Fact]
+  public async Task CommandHandler_CancelledRunWritesRequestedReportBeforeReturning130()
+  {
+    var run = CompletedRun(ExecutionOutcome.Cancelled);
+    using var cancellation = new CancellationTokenSource();
+    cancellation.Cancel();
+    using var sink = new RunEventHub();
+    var service = new StubEnvironmentRunService { Result = run };
+    var redactor = new LogRedactor();
+    string directory = Path.Combine(Path.GetTempPath(), $"wdem-cli-report-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(directory);
+    string reportPath = Path.Combine(directory, "cancelled.json");
+    try
+    {
+      var handler = new WdemCommandHandler(
+          service,
+          new StubExecutionRunStore(),
+          new StringWriter(),
+          new StringWriter(),
+          redactor,
+          sink,
+          reportExporter: new RunReportExporter(redactor));
+
+      int exitCode = await handler.ApplyAsync(
+          Request(),
+          json: false,
+          reportPath,
+          cancellation.Token);
+
+      Assert.Equal(130, exitCode);
+      using JsonDocument report = JsonDocument.Parse(await File.ReadAllTextAsync(reportPath));
+      Assert.Equal(run.RunId, report.RootElement.GetProperty("runId").GetGuid());
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task CommandHandler_RejectsInvalidReportBeforeStartingRun()
+  {
+    var service = new StubEnvironmentRunService
+    {
+      Result = CompletedRun(ExecutionOutcome.Succeeded)
+    };
+    var error = new StringWriter();
+    var handler = new WdemCommandHandler(
+        service,
+        new StubExecutionRunStore(),
+        new StringWriter(),
+        error,
+        new LogRedactor(),
+        new RunEventHub());
+
+    int exitCode = await handler.ApplyAsync(
+        Request(),
+        json: true,
+        "result.txt",
+        CancellationToken.None);
+
+    Assert.Equal(1, exitCode);
+    Assert.Null(service.ApplyRequest);
+    Assert.Single(DeserializeEvents(error));
   }
 
   [Theory]
