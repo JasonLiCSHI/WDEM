@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   wdem-cross-platform:
-    name: WDEM format and build
+    name: WDEM portable format and build
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -30,11 +30,11 @@ jobs:
     - name: Setup bun
       uses: oven-sh/setup-bun@v2
 
-    - name: Restore WDEM
-      run: dotnet restore Wdem.sln -m:1 -p:EnableWindowsTargeting=true
+    - name: Restore portable WDEM projects
+      run: dotnet restore tests/Wdem.Core.Tests/Wdem.Core.Tests.csproj -m:1
 
-    - name: Check WDEM formatting
-      run: dotnet format Wdem.sln --verify-no-changes --verbosity diagnostic --no-restore
+    - name: Check portable WDEM formatting
+      run: dotnet format tests/Wdem.Core.Tests/Wdem.Core.Tests.csproj --verify-no-changes --verbosity diagnostic --no-restore
 
     - name: Check Python formatting
       run: |
@@ -44,8 +44,8 @@ jobs:
     - name: Check JS/TS formatting
       run: bun x prettier --check plugins/
 
-    - name: Build WDEM
-      run: dotnet build Wdem.sln --no-restore -m:1 -p:EnableWindowsTargeting=true
+    - name: Build portable WDEM projects
+      run: dotnet build tests/Wdem.Core.Tests/Wdem.Core.Tests.csproj --no-restore -m:1
 
   wdem-windows:
     name: WDEM Windows tests
@@ -60,6 +60,13 @@ jobs:
 
     - name: Restore dependencies
       run: dotnet restore Wdem.sln -m:1 -p:EnableWindowsTargeting=true
+
+    - name: Verify WDEM product identity
+      shell: pwsh
+      run: ./testing/wdem/assert-product-identity.ps1
+
+    - name: Check WDEM formatting
+      run: dotnet format Wdem.sln --verify-no-changes --verbosity diagnostic --no-restore
 
     - name: Build solution
       run: dotnet build Wdem.sln --no-restore -m:1 -p:EnableWindowsTargeting=true

@@ -4,7 +4,7 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
-    labels: ["dependencies", "wdem"]
+    labels: ["dependencies"]
     commit-message:
       prefix: "deps(wdem)"
 
@@ -12,6 +12,6 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
-    labels: ["dependencies", "wdem"]
+    labels: ["dependencies"]
     commit-message:
       prefix: "deps(wdem)"

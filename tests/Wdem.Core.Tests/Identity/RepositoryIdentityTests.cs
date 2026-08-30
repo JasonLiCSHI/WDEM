@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Xml.Linq;
 using Xunit;
 
@@ -69,8 +70,194 @@ public sealed class RepositoryIdentityTests
     Assert.Contains("fetch-only", provenance);
   }
 
+  [Fact]
+  public void CiBuildsPortableProjectsOnUbuntuAndTheFullSolutionOnWindows()
+  {
+    var workflow = File.ReadAllText(Path.Combine(
+        RepositoryRoot,
+        ".github",
+        "workflows",
+        "ci.yml"));
+    var crossPlatformJob = ExtractSection(workflow, "  wdem-cross-platform:", "  wdem-windows:");
+    var windowsJob = workflow[workflow.IndexOf("  wdem-windows:", StringComparison.Ordinal)..];
+
+    Assert.Contains(
+        "dotnet restore tests/Wdem.Core.Tests/Wdem.Core.Tests.csproj -m:1",
+        crossPlatformJob);
+    Assert.Contains(
+        "dotnet format tests/Wdem.Core.Tests/Wdem.Core.Tests.csproj",
+        crossPlatformJob);
+    Assert.Contains(
+        "dotnet build tests/Wdem.Core.Tests/Wdem.Core.Tests.csproj --no-restore -m:1",
+        crossPlatformJob);
+    Assert.DoesNotContain("Wdem.sln", crossPlatformJob, StringComparison.Ordinal);
+
+    Assert.Contains("dotnet format Wdem.sln", windowsJob);
+    Assert.Matches(@"dotnet restore Wdem\.sln[^\r\n]*-m:1", windowsJob);
+    Assert.Matches(@"dotnet build Wdem\.sln[^\r\n]*-m:1", windowsJob);
+    Assert.Matches(@"dotnet test Wdem\.sln[^\r\n]*-m:1", windowsJob);
+  }
+
+  [Fact]
+  public void CiRunsTheProductIdentityContractInWindowsPowerShell()
+  {
+    var workflow = File.ReadAllText(Path.Combine(
+        RepositoryRoot,
+        ".github",
+        "workflows",
+        "ci.yml"));
+
+    Assert.Matches(
+        @"(?ms)- name: Verify WDEM product identity\s+shell: pwsh\s+run: .*testing/wdem/assert-product-identity\.ps1",
+        workflow);
+  }
+
+  [Fact]
+  public void ReleaseSupportsExplicitManualTagsAndPinsItsReleaseAction()
+  {
+    var workflow = File.ReadAllText(Path.Combine(
+        RepositoryRoot,
+        ".github",
+        "workflows",
+        "release.yaml"));
+
+    Assert.Matches(
+        @"(?ms)workflow_dispatch:\s+inputs:\s+tag_name:.*?required:\s*true",
+        workflow);
+    Assert.Matches(
+        @"(?ms)- uses: actions/checkout@v7\s+with:\s+ref:\s*\$\{\{ inputs\.tag_name \|\| github\.ref \}\}",
+        workflow);
+    Assert.Matches(
+        @"uses: softprops/action-gh-release@[0-9a-f]{40}\s+# v3\.\d+\.\d+",
+        workflow);
+    Assert.Matches(
+        @"tag_name:\s*\$\{\{ inputs\.tag_name \|\| github\.ref_name \}\}",
+        workflow);
+  }
+
+  [Fact]
+  public void ProfileAuthoringGuideMatchesSupportedExtensionsAndVsixPrivilegePolicy()
+  {
+    var guide = NormalizeWhitespace(File.ReadAllText(Path.Combine(
+        RepositoryRoot,
+        "docs",
+        "wdem",
+        "profile-authoring.md")));
+
+    Assert.Contains("YAML (`.yaml`) and JSON (`.json`)", guide);
+    Assert.DoesNotContain("`.yml`", guide, StringComparison.Ordinal);
+    Assert.Matches(
+        @"visual-studio-extension.*privilegeRequirement: Administrator.*rejects CurrentUser",
+        guide);
+  }
+
+  [Fact]
+  public void DependabotDoesNotRequireARepositorySpecificLabel()
+  {
+    var configuration = File.ReadAllText(Path.Combine(
+        RepositoryRoot,
+        ".github",
+        "dependabot.yml"));
+
+    Assert.DoesNotContain("\"wdem\"", configuration, StringComparison.OrdinalIgnoreCase);
+  }
+
+  [Theory]
+  [InlineData("winhome")]
+  [InlineData("WINHOME")]
+  [InlineData("https://github.com/DotDev262/wInHoMe")]
+  public void ProductIdentityScriptRejectsBrandingRegardlessOfCase(string forbiddenBranding)
+  {
+    using var repository = new TemporaryDirectory();
+    var scriptDirectory = Path.Combine(repository.Path, "testing", "wdem");
+    var workflowDirectory = Path.Combine(repository.Path, ".github", "workflows");
+    Directory.CreateDirectory(scriptDirectory);
+    Directory.CreateDirectory(workflowDirectory);
+    File.Copy(
+        Path.Combine(RepositoryRoot, "testing", "wdem", "assert-product-identity.ps1"),
+        Path.Combine(scriptDirectory, "assert-product-identity.ps1"));
+    File.Copy(
+        Path.Combine(RepositoryRoot, ".github", "workflows", "release.yaml"),
+        Path.Combine(workflowDirectory, "release.yaml"));
+    File.WriteAllText(Path.Combine(repository.Path, "README.md"), forbiddenBranding);
+
+    Assert.Equal(0, RunProcess(repository.Path, "git", "init").ExitCode);
+    Assert.Equal(0, RunProcess(repository.Path, "git", "add", ".").ExitCode);
+
+    var result = RunProcess(
+        repository.Path,
+        "pwsh",
+        "-NoLogo",
+        "-NoProfile",
+        "-File",
+        Path.Combine(scriptDirectory, "assert-product-identity.ps1"));
+
+    Assert.NotEqual(0, result.ExitCode);
+    Assert.Contains("README.md", result.Output, StringComparison.Ordinal);
+  }
+
   private static string NormalizeWhitespace(string value) =>
       string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+  private static string ExtractSection(string text, string startMarker, string endMarker)
+  {
+    var start = text.IndexOf(startMarker, StringComparison.Ordinal);
+    Assert.True(start >= 0, $"Missing section marker: {startMarker}");
+    var end = text.IndexOf(endMarker, start, StringComparison.Ordinal);
+    Assert.True(end > start, $"Missing section marker: {endMarker}");
+    return text[start..end];
+  }
+
+  private static ProcessResult RunProcess(
+      string workingDirectory,
+      string executable,
+      params string[] arguments)
+  {
+    var startInfo = new ProcessStartInfo(executable)
+    {
+      WorkingDirectory = workingDirectory,
+      RedirectStandardOutput = true,
+      RedirectStandardError = true,
+      UseShellExecute = false,
+      CreateNoWindow = true
+    };
+    foreach (var argument in arguments)
+    {
+      startInfo.ArgumentList.Add(argument);
+    }
+
+    using var process = Process.Start(startInfo) ??
+        throw new InvalidOperationException($"Could not start {executable}.");
+    var standardOutput = process.StandardOutput.ReadToEnd();
+    var standardError = process.StandardError.ReadToEnd();
+    process.WaitForExit();
+    return new ProcessResult(process.ExitCode, standardOutput + standardError);
+  }
+
+  private sealed record ProcessResult(int ExitCode, string Output);
+
+  private sealed class TemporaryDirectory : IDisposable
+  {
+    public TemporaryDirectory()
+    {
+      Path = System.IO.Path.Combine(
+          System.IO.Path.GetTempPath(),
+          $"wdem-identity-{Guid.NewGuid():N}");
+      Directory.CreateDirectory(Path);
+    }
+
+    public string Path { get; }
+
+    public void Dispose()
+    {
+      foreach (var file in Directory.EnumerateFiles(Path, "*", SearchOption.AllDirectories))
+      {
+        File.SetAttributes(file, FileAttributes.Normal);
+      }
+
+      Directory.Delete(Path, recursive: true);
+    }
+  }
 
   [Fact]
   public void ProjectIdentitiesDoNotUseWinHome()

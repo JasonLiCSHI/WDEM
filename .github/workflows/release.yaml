@@ -4,6 +4,11 @@ on:
   push:
     tags: [ "v*" ]
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Existing release tag to build and publish
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -15,6 +20,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v7
+      with:
+        ref: ${{ inputs.tag_name || github.ref }}
 
     - name: Setup .NET
       uses: actions/setup-dotnet@v6
@@ -61,8 +68,9 @@ jobs:
         Copy-Item THIRD-PARTY-NOTICES.md (Join-Path $publish 'THIRD-PARTY-NOTICES.md')
 
     - name: Create WDEM release
-      uses: softprops/action-gh-release@v3
+      uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
       with:
+        tag_name: ${{ inputs.tag_name || github.ref_name }}
         files: |
           publish\Wdem-win-x64.zip
           publish\SHA256SUMS.txt

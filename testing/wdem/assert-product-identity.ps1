@@ -66,7 +66,7 @@ $allowed = @(
     'docs/wdem/source-provenance.md',
     'docs/superpowers/plans/2026-08-28-wdem-complete-product.md'
 )
-$matches = @(git -C $root grep -Il -e WinHome -e 'DotDev262/WinHome' -- '*.md' '*.yml' '*.yaml')
+$matches = @(git -C $root grep -Iil -e WinHome -e 'DotDev262/WinHome' -- '*.md' '*.yml' '*.yaml')
 if ($LASTEXITCODE -gt 1) {
     throw "git grep failed with exit code $LASTEXITCODE."
 }

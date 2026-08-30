@@ -1,6 +1,6 @@
 # Author WDEM developer profiles
 
-WDEM accepts UTF-8 YAML (`.yaml` or `.yml`) and JSON (`.json`) profiles. The
+WDEM accepts UTF-8 YAML (`.yaml`) and JSON (`.json`) profiles. The
 document is validated before any provider runs. Unknown fields, missing
 resources, cycles, duplicate references, unsafe IDs, and unsupported providers
 are errors.
@@ -100,7 +100,7 @@ dependants. A missing dependency or cycle invalidates the whole profile.
 | `dotnet-sdk` / `winget` | No parameters. |
 | `visual-studio` / `visual-studio` | `productId`, `edition`, `channelId`, `workloads`, and `components` required; optional `instanceId`, absolute `installPath`, `vsconfigPath`, `expectedSha256`, `bootstrapperUri`, `bootstrapperSha256`. |
 | `resharper` / `winget` | Must depend on Visual Studio; optional `visualStudioResourceId`, `instanceId`, `visualStudioInstanceId`, `productId`, `edition`, `channelId`, and `source`. |
-| `visual-studio-extension` / `vsix` | `extensionId`, `sourcePath`, and `expectedSha256` required; must depend on Visual Studio; accepts the same instance selectors plus `visualStudioResourceId`. |
+| `visual-studio-extension` / `vsix` | `extensionId`, `sourcePath`, and `expectedSha256` required; must depend on Visual Studio; accepts the same instance selectors plus `visualStudioResourceId`; `privilegeRequirement: Administrator` is mandatory and the provider rejects CurrentUser. |
 | `resharper-settings` / `file` | `sourcePath`, `expectedSha256`, and `destinationPath` required; must depend on ReSharper; optional `resharperResourceId`. |
 | `visual-studio-settings` / `visual-studio-settings` | `sourcePath`, `expectedSha256`, `settingsStorePath`, `edition`, and `channelId` required; select with `instanceId` or `productId`; must depend on Visual Studio; optional `visualStudioResourceId` and `settingsStoreSha256`. |
 
