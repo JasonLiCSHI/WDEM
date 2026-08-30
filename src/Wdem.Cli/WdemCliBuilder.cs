@@ -16,7 +16,9 @@ public interface IWdemCommandHandler
       RunRequest request,
       bool json,
       string? reportFile,
-      CancellationToken cancellationToken) => InspectAsync(request, json, cancellationToken);
+      CancellationToken cancellationToken) => reportFile is null
+          ? InspectAsync(request, json, cancellationToken)
+          : ReportNotSupported();
 
   Task<int> ApplyAsync(
       RunRequest request,
@@ -27,7 +29,9 @@ public interface IWdemCommandHandler
       RunRequest request,
       bool json,
       string? reportFile,
-      CancellationToken cancellationToken) => ApplyAsync(request, json, cancellationToken);
+      CancellationToken cancellationToken) => reportFile is null
+          ? ApplyAsync(request, json, cancellationToken)
+          : ReportNotSupported();
 
   Task<int> RetryAsync(
       Guid runId,
@@ -41,7 +45,9 @@ public interface IWdemCommandHandler
       bool json,
       string? reportFile,
       CancellationToken cancellationToken) =>
-      RetryAsync(runId, resourceIds, json, cancellationToken);
+      reportFile is null
+          ? RetryAsync(runId, resourceIds, json, cancellationToken)
+          : ReportNotSupported();
 
   Task<int> ResumeAsync(
       Guid runId,
@@ -52,9 +58,14 @@ public interface IWdemCommandHandler
       Guid runId,
       bool json,
       string? reportFile,
-      CancellationToken cancellationToken) => ResumeAsync(runId, json, cancellationToken);
+      CancellationToken cancellationToken) => reportFile is null
+          ? ResumeAsync(runId, json, cancellationToken)
+          : ReportNotSupported();
 
   Task<int> ListRunsAsync(bool json, CancellationToken cancellationToken);
+
+  private static Task<int> ReportNotSupported() => Task.FromException<int>(
+      new NotSupportedException("This command handler does not support report export."));
 }
 
 public static class WdemCliBuilder

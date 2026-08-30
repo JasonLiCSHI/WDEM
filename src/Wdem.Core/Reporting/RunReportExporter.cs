@@ -15,10 +15,12 @@ public sealed class RunReportExporter : IRunReportExporter
   private static readonly UTF8Encoding Utf8WithoutBom = new(false);
   private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
   private readonly LogRedactor _redactor;
+  private readonly ExecutionRunRedactor _runRedactor;
 
   public RunReportExporter(LogRedactor redactor)
   {
     _redactor = redactor ?? throw new ArgumentNullException(nameof(redactor));
+    _runRedactor = new ExecutionRunRedactor(redactor);
   }
 
   public LogRedactor Redactor => _redactor;
@@ -26,13 +28,13 @@ public sealed class RunReportExporter : IRunReportExporter
   public string ExportJson(ExecutionRun run)
   {
     ArgumentNullException.ThrowIfNull(run);
-    return JsonSerializer.Serialize(CreateDocument(Redact(run)), JsonOptions);
+    return JsonSerializer.Serialize(CreateDocument(run), JsonOptions);
   }
 
   public string ExportMarkdown(ExecutionRun run)
   {
     ArgumentNullException.ThrowIfNull(run);
-    return CreateMarkdown(Redact(run));
+    return CreateMarkdown(_runRedactor.Redact(run));
   }
 
   public async Task ExportAsync(
@@ -66,33 +68,196 @@ public sealed class RunReportExporter : IRunReportExporter
           nameof(filePath));
     }
 
+    if (Directory.Exists(path))
+    {
+      throw new IOException("Report destination must be a file, not a directory.");
+    }
+
+    string directory = Path.GetDirectoryName(path)
+        ?? throw new DirectoryNotFoundException("Report destination has no parent directory.");
+    if (!Directory.Exists(directory))
+    {
+      throw new DirectoryNotFoundException("Report destination directory does not exist.");
+    }
+
+    string probePath = Path.Combine(directory, $".wdem-report-{Guid.NewGuid():N}.tmp");
+    try
+    {
+      using var probe = new FileStream(
+          probePath,
+          FileMode.CreateNew,
+          FileAccess.Write,
+          FileShare.None,
+          1,
+          FileOptions.DeleteOnClose);
+    }
+    finally
+    {
+      File.Delete(probePath);
+    }
+
     return path;
   }
 
   private ReportDocument CreateDocument(ExecutionRun run) => new(
       run.RunId,
       run.Mode,
-      run.ProfileSourcePath,
-      run.ProfileId,
-      run.ProfileVersion,
-      run.SelectedOptionalResourceIds.Order(StringComparer.OrdinalIgnoreCase).ToArray(),
+      Text(run.ProfileSourcePath),
+      Text(run.ProfileId),
+      Text(run.ProfileVersion),
+      run.SelectedOptionalResourceIds.Order(StringComparer.OrdinalIgnoreCase).Select(Text).ToArray(),
       run.StartedAtUtc,
       run.EndedAtUtc,
       run.State,
       run.Outcome,
       run.RetriedFromRunId,
       run.RecoveredFromRunId,
-      run.Machine,
-      run.Graph,
-      run.Plan,
-      new SortedDictionary<string, ResourceResult>(
-          run.ResourceResults.ToDictionary(),
-          StringComparer.OrdinalIgnoreCase),
+      CreateMachine(run.Machine),
+      run.Graph is null ? null : CreateGraph(run.Graph),
+      run.Plan is null ? null : CreatePlan(run.Plan),
+      RedactDictionary(run.ResourceResults, (_, result) => CreateResourceResult(result)),
       run.RestartRequirements,
-      run.RestartReasons,
-      run.AcknowledgedRestartResourceIds.Order(StringComparer.OrdinalIgnoreCase).ToArray(),
-      BlockedIds(run),
-      UnexecutedIds(run));
+      run.RestartReasons.Select(Text).ToArray(),
+      run.AcknowledgedRestartResourceIds.Order(StringComparer.OrdinalIgnoreCase).Select(Text)
+          .ToArray(),
+      BlockedIds(run).Select(Text).ToArray(),
+      UnexecutedIds(run).Select(Text).ToArray());
+
+  private ReportMachine CreateMachine(MachineInformation machine) => new(
+      Text(machine.OperatingSystem),
+      Text(machine.Architecture),
+      Text(machine.ComputerName),
+      Text(machine.UserName));
+
+  private ReportGraph CreateGraph(ResourceGraph graph) => new(
+      RedactDictionary(graph.Nodes, (_, node) => new ReportGraphNode(
+          CreateDefinition(node.Definition),
+          node.Origin,
+          node.RequiredBy.Order(StringComparer.OrdinalIgnoreCase).Select(Text).ToArray())),
+      graph.TopologicalLayers.OrderBy(layer => layer.Index).Select(CreateLayer).ToArray());
+
+  private ReportGraphLayer CreateLayer(ResourceGraphLayer layer) => new(
+      layer.Index,
+      layer.ResourceIds.Select(Text).ToArray());
+
+  private ReportPlan CreatePlan(ExecutionPlan plan) => new(
+      plan.PlanId,
+      Text(plan.Fingerprint),
+      Text(plan.ProfileId),
+      Text(plan.ProfileVersion),
+      plan.Layers.Select(CreateLayer).ToArray(),
+      plan.Resources.Select(CreatePlannedResource).ToArray(),
+      plan.IsExecutable,
+      plan.Errors.Select(CreateError).ToArray());
+
+  private ReportPlannedResource CreatePlannedResource(PlannedResource resource) => new(
+      CreateDefinition(resource.Definition),
+      resource.Origin,
+      resource.Dependencies.Select(Text).ToArray(),
+      CreateResourcePlan(resource.ResourcePlan),
+      resource.Status,
+      resource.Risk,
+      resource.RequiresElevation,
+      resource.IsDestructive,
+      resource.RestartPolicy,
+      NullableText(resource.Reason),
+      resource.BlockedBy.Select(Text).ToArray(),
+      resource.Diagnostics.Select(CreateError).ToArray());
+
+  private ReportResourceDefinition CreateDefinition(ResourceDefinition definition) => new(
+      Text(definition.Id),
+      Text(definition.Type),
+      Text(definition.Provider),
+      NullableText(definition.DisplayName),
+      NullableText(definition.VersionConstraint),
+      NullableText(definition.PreferredVersion),
+      definition.Dependencies.Select(Text).ToArray(),
+      RedactDictionary(
+          definition.Parameters,
+          (key, value) => _redactor.RedactNamedValue(key, value)),
+      definition.PrivilegeRequirement,
+      definition.RestartPolicy);
+
+  private ReportResourcePlan CreateResourcePlan(ResourcePlan plan) => new(
+      Text(plan.ResourceId),
+      Text(plan.ResourceType),
+      Text(plan.ProviderName),
+      Text(plan.DesiredStateFingerprint),
+      NullableText(plan.ExecutionPreconditionFingerprint),
+      plan.Compliance,
+      plan.IsExecutable,
+      plan.Steps.Select(CreatePlanStep).ToArray(),
+      NullableText(plan.Error),
+      plan.StructuredErrors.Select(CreateError).ToArray());
+
+  private ReportPlanStep CreatePlanStep(PlanStep step) => new(
+      Text(step.Id),
+      Text(step.Description),
+      step.Action,
+      step.PrivilegeRequirement,
+      step.RestartPolicy,
+      step.IsDestructive,
+      NullableText(step.Reason));
+
+  private ReportResourceResult CreateResourceResult(ResourceResult result) => new(
+      Text(result.ResourceId),
+      result.State,
+      result.Outcome,
+      result.FinalCompliance,
+      result.DetectedBefore is null ? null : CreateDetectedState(result.DetectedBefore),
+      result.DetectedAfter is null ? null : CreateDetectedState(result.DetectedAfter),
+      result.Progress,
+      NullableText(result.Message),
+      result.StartedAtUtc,
+      result.EndedAtUtc,
+      result.Error is null ? null : CreateError(result.Error),
+      result.RestartRequirement,
+      result.StepResults.Select(CreateStepResult).ToArray());
+
+  private ReportDetectedState CreateDetectedState(DetectedState state) => new(
+      Text(state.ResourceId),
+      state.Outcome,
+      state.Exists,
+      NullableText(state.Version),
+      state.InstalledVersions.Select(version => new ReportSemanticVersion(
+          version.Major,
+          version.Minor,
+          version.Patch,
+          version.Revision)).ToArray(),
+      NullableText(state.ConfigurationHash),
+      state.DetectedAtUtc,
+      RedactDictionary(
+          state.Evidence,
+          (key, value) => _redactor.RedactNamedValue(key, value) ?? string.Empty),
+      NullableText(state.Error),
+      state.StructuredError is null ? null : CreateError(state.StructuredError));
+
+  private ReportStepResult CreateStepResult(StepResult result) => new(
+      Text(result.StepId),
+      Text(result.Name),
+      result.State,
+      result.Outcome,
+      result.Progress,
+      result.FirstLogSequence,
+      result.LastLogSequence,
+      result.ProcessExitCode,
+      result.ProcessSucceeded,
+      result.StartedAtUtc,
+      result.EndedAtUtc,
+      result.Error is null ? null : CreateError(result.Error));
+
+  private ReportStructuredError CreateError(StructuredError error) => new(
+      error.Code,
+      Text(error.Summary),
+      Text(error.Detail),
+      NullableText(error.ResourceId),
+      NullableText(error.StepId),
+      error.ProcessExitCode,
+      NullableText(error.LogLocation),
+      NullableText(error.SuggestedAction),
+      error.IsRetryable,
+      NullableText(error.UnderlyingExceptionType),
+      NullableText(error.UnderlyingExceptionMessage));
 
   private string CreateMarkdown(ExecutionRun run)
   {
@@ -297,130 +462,27 @@ public sealed class RunReportExporter : IRunReportExporter
     }
   }
 
-  private ExecutionRun Redact(ExecutionRun run) => run with
+  private IReadOnlyDictionary<string, TResult> RedactDictionary<TValue, TResult>(
+      IReadOnlyDictionary<string, TValue> values,
+      Func<string, TValue, TResult> redactValue)
   {
-    ProfileSourcePath = Text(run.ProfileSourcePath),
-    ProfileId = Text(run.ProfileId),
-    ProfileVersion = Text(run.ProfileVersion),
-    SelectedOptionalResourceIds = run.SelectedOptionalResourceIds.Select(Text)
-        .ToHashSet(StringComparer.OrdinalIgnoreCase),
-    Machine = run.Machine with
+    var result = new SortedDictionary<string, TResult>(StringComparer.OrdinalIgnoreCase);
+    foreach (KeyValuePair<string, TValue> pair in values
+                 .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                 .ThenBy(pair => pair.Key, StringComparer.Ordinal))
     {
-      OperatingSystem = Text(run.Machine.OperatingSystem),
-      Architecture = Text(run.Machine.Architecture),
-      ComputerName = Text(run.Machine.ComputerName),
-      UserName = Text(run.Machine.UserName)
-    },
-    Graph = run.Graph is null ? null : Redact(run.Graph),
-    Plan = run.Plan is null ? null : Redact(run.Plan),
-    ResourceResults = run.ResourceResults.ToDictionary(
-        pair => Text(pair.Key),
-        pair => Redact(pair.Value),
-        StringComparer.OrdinalIgnoreCase),
-    RestartReasons = run.RestartReasons.Select(Text).ToArray(),
-    AcknowledgedRestartResourceIds = run.AcknowledgedRestartResourceIds.Select(Text)
-        .ToHashSet(StringComparer.OrdinalIgnoreCase)
-  };
+      string baseKey = Text(pair.Key);
+      string key = baseKey;
+      for (int suffix = 2; result.ContainsKey(key); suffix++)
+      {
+        key = $"{baseKey} ({suffix})";
+      }
 
-  private ResourceResult Redact(ResourceResult result) => result with
-  {
-    ResourceId = Text(result.ResourceId),
-    DetectedBefore = result.DetectedBefore is null ? null : Redact(result.DetectedBefore),
-    DetectedAfter = result.DetectedAfter is null ? null : Redact(result.DetectedAfter),
-    Message = NullableText(result.Message),
-    Error = result.Error is null ? null : _redactor.Redact(result.Error),
-    StepResults = result.StepResults.Select(Redact).ToArray()
-  };
+      result.Add(key, redactValue(pair.Key, pair.Value));
+    }
 
-  private StepResult Redact(StepResult result) => result with
-  {
-    StepId = Text(result.StepId),
-    Name = Text(result.Name),
-    Error = result.Error is null ? null : _redactor.Redact(result.Error)
-  };
-
-  private DetectedState Redact(DetectedState state) => state with
-  {
-    ResourceId = Text(state.ResourceId),
-    Version = NullableText(state.Version),
-    ConfigurationHash = NullableText(state.ConfigurationHash),
-    Evidence = state.Evidence.ToDictionary(
-        pair => Text(pair.Key),
-        pair => _redactor.RedactNamedValue(pair.Key, pair.Value) ?? string.Empty,
-        StringComparer.OrdinalIgnoreCase),
-    Error = NullableText(state.Error),
-    StructuredError = state.StructuredError is null ? null : _redactor.Redact(state.StructuredError)
-  };
-
-  private ResourceGraph Redact(ResourceGraph graph) => graph with
-  {
-    Nodes = graph.Nodes.ToDictionary(
-        pair => Text(pair.Key),
-        pair => pair.Value with
-        {
-          Definition = Redact(pair.Value.Definition),
-          RequiredBy = pair.Value.RequiredBy.Select(Text)
-              .ToHashSet(StringComparer.OrdinalIgnoreCase)
-        },
-        StringComparer.OrdinalIgnoreCase),
-    TopologicalLayers = graph.TopologicalLayers.Select(layer => layer with
-    {
-      ResourceIds = layer.ResourceIds.Select(Text).ToArray()
-    }).ToArray()
-  };
-
-  private ExecutionPlan Redact(ExecutionPlan plan) => plan with
-  {
-    Fingerprint = Text(plan.Fingerprint),
-    ProfileId = Text(plan.ProfileId),
-    ProfileVersion = Text(plan.ProfileVersion),
-    Layers = plan.Layers.Select(layer => layer with
-    {
-      ResourceIds = layer.ResourceIds.Select(Text).ToArray()
-    }).ToArray(),
-    Resources = plan.Resources.Select(resource => resource with
-    {
-      Definition = Redact(resource.Definition),
-      Dependencies = resource.Dependencies.Select(Text).ToArray(),
-      ResourcePlan = Redact(resource.ResourcePlan),
-      Reason = NullableText(resource.Reason),
-      BlockedBy = resource.BlockedBy.Select(Text).ToArray(),
-      Diagnostics = resource.Diagnostics.Select(_redactor.Redact).ToArray()
-    }).ToArray(),
-    Errors = plan.Errors.Select(_redactor.Redact).ToArray()
-  };
-
-  private ResourcePlan Redact(ResourcePlan plan) => plan with
-  {
-    ResourceId = Text(plan.ResourceId),
-    ResourceType = Text(plan.ResourceType),
-    ProviderName = Text(plan.ProviderName),
-    DesiredStateFingerprint = Text(plan.DesiredStateFingerprint),
-    ExecutionPreconditionFingerprint = NullableText(plan.ExecutionPreconditionFingerprint),
-    Steps = plan.Steps.Select(step => step with
-    {
-      Id = Text(step.Id),
-      Description = Text(step.Description),
-      Reason = NullableText(step.Reason)
-    }).ToArray(),
-    Error = NullableText(plan.Error),
-    StructuredErrors = plan.StructuredErrors.Select(_redactor.Redact).ToArray()
-  };
-
-  private ResourceDefinition Redact(ResourceDefinition definition) => definition with
-  {
-    Id = Text(definition.Id),
-    Type = Text(definition.Type),
-    Provider = Text(definition.Provider),
-    DisplayName = NullableText(definition.DisplayName),
-    VersionConstraint = NullableText(definition.VersionConstraint),
-    PreferredVersion = NullableText(definition.PreferredVersion),
-    Dependencies = definition.Dependencies.Select(Text).ToArray(),
-    Parameters = definition.Parameters.ToDictionary(
-        pair => Text(pair.Key),
-        pair => _redactor.RedactNamedValue(pair.Key, pair.Value),
-        StringComparer.OrdinalIgnoreCase)
-  };
+    return result;
+  }
 
   private static int Count(
       IEnumerable<ResourceResult> results,
@@ -511,20 +573,35 @@ public sealed class RunReportExporter : IRunReportExporter
       }
 
       cancellationToken.ThrowIfCancellationRequested();
-      if (File.Exists(path))
-      {
-        File.Replace(temporaryPath, path, destinationBackupFileName: null);
-      }
-      else
-      {
-        File.Move(temporaryPath, path);
-      }
+      await MoveAtomicallyAsync(temporaryPath, path, cancellationToken).ConfigureAwait(false);
     }
     finally
     {
       if (File.Exists(temporaryPath))
       {
         File.Delete(temporaryPath);
+      }
+    }
+  }
+
+  private static async Task MoveAtomicallyAsync(
+      string temporaryPath,
+      string destinationPath,
+      CancellationToken cancellationToken)
+  {
+    const int maximumAttempts = 10;
+    for (var attempt = 1; ; attempt++)
+    {
+      try
+      {
+        File.Move(temporaryPath, destinationPath, overwrite: true);
+        return;
+      }
+      catch (Exception exception) when (
+          exception is IOException or UnauthorizedAccessException && attempt < maximumAttempts)
+      {
+        await Task.Delay(TimeSpan.FromMilliseconds(attempt * 10), cancellationToken)
+            .ConfigureAwait(false);
       }
     }
   }
@@ -555,13 +632,143 @@ public sealed class RunReportExporter : IRunReportExporter
       ExecutionOutcome? Outcome,
       Guid? RetriedFromRunId,
       Guid? RecoveredFromRunId,
-      MachineInformation Machine,
-      ResourceGraph? Graph,
-      ExecutionPlan? Plan,
-      IReadOnlyDictionary<string, ResourceResult> ResourceResults,
+      ReportMachine Machine,
+      ReportGraph? Graph,
+      ReportPlan? Plan,
+      IReadOnlyDictionary<string, ReportResourceResult> ResourceResults,
       IReadOnlyList<RestartPolicy> RestartRequirements,
       IReadOnlyList<string> RestartReasons,
       IReadOnlyList<string> AcknowledgedRestartResourceIds,
       IReadOnlyList<string> BlockedResourceIds,
       IReadOnlyList<string> UnexecutedResourceIds);
+
+  private sealed record ReportMachine(
+      string OperatingSystem,
+      string Architecture,
+      string ComputerName,
+      string UserName);
+
+  private sealed record ReportGraph(
+      IReadOnlyDictionary<string, ReportGraphNode> Nodes,
+      IReadOnlyList<ReportGraphLayer> TopologicalLayers);
+
+  private sealed record ReportGraphNode(
+      ReportResourceDefinition Definition,
+      ResourceOrigin Origin,
+      IReadOnlyList<string> RequiredBy);
+
+  private sealed record ReportGraphLayer(int Index, IReadOnlyList<string> ResourceIds);
+
+  private sealed record ReportPlan(
+      Guid PlanId,
+      string Fingerprint,
+      string ProfileId,
+      string ProfileVersion,
+      IReadOnlyList<ReportGraphLayer> Layers,
+      IReadOnlyList<ReportPlannedResource> Resources,
+      bool IsExecutable,
+      IReadOnlyList<ReportStructuredError> Errors);
+
+  private sealed record ReportPlannedResource(
+      ReportResourceDefinition Definition,
+      ResourceOrigin Origin,
+      IReadOnlyList<string> Dependencies,
+      ReportResourcePlan ResourcePlan,
+      PlannedResourceStatus Status,
+      PlanRisk Risk,
+      bool RequiresElevation,
+      bool IsDestructive,
+      RestartPolicy RestartPolicy,
+      string? Reason,
+      IReadOnlyList<string> BlockedBy,
+      IReadOnlyList<ReportStructuredError> Diagnostics);
+
+  private sealed record ReportResourceDefinition(
+      string Id,
+      string Type,
+      string Provider,
+      string? DisplayName,
+      string? VersionConstraint,
+      string? PreferredVersion,
+      IReadOnlyList<string> Dependencies,
+      IReadOnlyDictionary<string, string?> Parameters,
+      PrivilegeRequirement PrivilegeRequirement,
+      RestartPolicy RestartPolicy);
+
+  private sealed record ReportResourcePlan(
+      string ResourceId,
+      string ResourceType,
+      string ProviderName,
+      string DesiredStateFingerprint,
+      string? ExecutionPreconditionFingerprint,
+      ComplianceStatus Compliance,
+      bool IsExecutable,
+      IReadOnlyList<ReportPlanStep> Steps,
+      string? Error,
+      IReadOnlyList<ReportStructuredError> StructuredErrors);
+
+  private sealed record ReportPlanStep(
+      string Id,
+      string Description,
+      PlanAction Action,
+      PrivilegeRequirement PrivilegeRequirement,
+      RestartPolicy RestartPolicy,
+      bool IsDestructive,
+      string? Reason);
+
+  private sealed record ReportResourceResult(
+      string ResourceId,
+      ExecutionState State,
+      ExecutionOutcome? Outcome,
+      ComplianceStatus? FinalCompliance,
+      ReportDetectedState? DetectedBefore,
+      ReportDetectedState? DetectedAfter,
+      double Progress,
+      string? Message,
+      DateTimeOffset? StartedAtUtc,
+      DateTimeOffset? EndedAtUtc,
+      ReportStructuredError? Error,
+      RestartPolicy RestartRequirement,
+      IReadOnlyList<ReportStepResult> StepResults);
+
+  private sealed record ReportDetectedState(
+      string ResourceId,
+      DetectionOutcome Outcome,
+      bool Exists,
+      string? Version,
+      IReadOnlyList<ReportSemanticVersion> InstalledVersions,
+      string? ConfigurationHash,
+      DateTimeOffset DetectedAtUtc,
+      IReadOnlyDictionary<string, string> Evidence,
+      string? Error,
+      ReportStructuredError? StructuredError);
+
+  private sealed record ReportSemanticVersion(int Major, int Minor, int Patch, int Revision);
+
+  private sealed record ReportStepResult(
+      string StepId,
+      string Name,
+      ExecutionState State,
+      ExecutionOutcome? Outcome,
+      double Progress,
+      long FirstLogSequence,
+      long LastLogSequence,
+      int? ProcessExitCode,
+      bool? ProcessSucceeded,
+      DateTimeOffset? StartedAtUtc,
+      DateTimeOffset? EndedAtUtc,
+      ReportStructuredError? Error);
+
+  private sealed record ReportStructuredError(
+      WdemErrorCode Code,
+      string Summary,
+      string Detail,
+      string? ResourceId,
+      string? StepId,
+      int? ProcessExitCode,
+      string? LogLocation,
+      string? SuggestedAction,
+      bool IsRetryable,
+      string? UnderlyingExceptionType,
+      string? UnderlyingExceptionMessage);
 }

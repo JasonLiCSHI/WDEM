@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json;
 using Wdem.Core.Execution;
 using Wdem.Core.Graph;
@@ -49,6 +50,183 @@ public sealed class RunReportExporterTests
   }
 
   [Fact]
+  public void ExportJson_PreservesEveryDictionaryEntryWhenRedactedKeysCollide()
+  {
+    const string firstSecret = "alpha-secret";
+    const string secondSecret = "beta-secret";
+    ResourceDefinition Definition(string id) => new()
+    {
+      Id = id,
+      Type = "package",
+      Provider = "fake",
+      Parameters = new Dictionary<string, string?>
+      {
+        [firstSecret] = firstSecret,
+        [secondSecret] = secondSecret
+      }
+    };
+    DetectedState Detected(string id) => new()
+    {
+      ResourceId = id,
+      Outcome = DetectionOutcome.Succeeded,
+      Evidence = new Dictionary<string, string>
+      {
+        [firstSecret] = firstSecret,
+        [secondSecret] = secondSecret
+      }
+    };
+    ResourceResult ResultWithEvidence(string id) => Result(
+        id,
+        ExecutionState.Completed,
+        ExecutionOutcome.Succeeded) with
+      {
+        DetectedBefore = Detected(id)
+      };
+    var firstDefinition = Definition(firstSecret);
+    var secondDefinition = Definition(secondSecret);
+    var resourcePlan = new ResourcePlan
+    {
+      ResourceId = firstSecret,
+      ResourceType = "package",
+      ProviderName = "fake",
+      DesiredStateFingerprint = "fingerprint",
+      Compliance = ComplianceStatus.Satisfied,
+      IsExecutable = true
+    };
+    ExecutionRun run = CreateTerminalRun("safe") with
+    {
+      Graph = new ResourceGraph(
+          new Dictionary<string, ResolvedResource>
+          {
+            [firstSecret] = new(firstDefinition, ResourceOrigin.Required, new HashSet<string>()),
+            [secondSecret] = new(secondDefinition, ResourceOrigin.Required, new HashSet<string>())
+          },
+          []),
+      Plan = new ExecutionPlan
+      {
+        PlanId = Guid.NewGuid(),
+        Fingerprint = "fingerprint",
+        ProfileId = "profile",
+        ProfileVersion = "1.0.0",
+        Layers = [],
+        Resources =
+        [
+          new PlannedResource
+          {
+            Definition = firstDefinition,
+            Origin = ResourceOrigin.Required,
+            Dependencies = [],
+            ResourcePlan = resourcePlan,
+            Status = PlannedResourceStatus.Ready,
+            Risk = PlanRisk.None,
+            RequiresElevation = false,
+            IsDestructive = false,
+            RestartPolicy = RestartPolicy.NoRestart
+          }
+        ],
+        IsExecutable = true
+      },
+      ResourceResults = new Dictionary<string, ResourceResult>
+      {
+        [firstSecret] = ResultWithEvidence(firstSecret),
+        [secondSecret] = ResultWithEvidence(secondSecret)
+      }
+    };
+
+    string json = new RunReportExporter(new LogRedactor([firstSecret, secondSecret]))
+        .ExportJson(run);
+    using JsonDocument document = JsonDocument.Parse(json);
+
+    AssertCollisionSafeKeys(document.RootElement.GetProperty("resourceResults"));
+    AssertCollisionSafeKeys(document.RootElement.GetProperty("graph").GetProperty("nodes"));
+    AssertCollisionSafeKeys(document.RootElement.GetProperty("plan").GetProperty("resources")[0]
+        .GetProperty("definition").GetProperty("parameters"));
+    foreach (JsonProperty result in document.RootElement.GetProperty("resourceResults")
+                 .EnumerateObject())
+    {
+      AssertCollisionSafeKeys(result.Value.GetProperty("detectedBefore").GetProperty("evidence"));
+    }
+    Assert.DoesNotContain(firstSecret, json, StringComparison.Ordinal);
+    Assert.DoesNotContain(secondSecret, json, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void ExportJson_UsesExplicitStableSchemaWithoutDomainObjectsOrSecretSentinels()
+  {
+    const string secret = "schema-secret";
+    ExecutionRun run = CreatePlannedRun(secret);
+
+    string json = new RunReportExporter(new LogRedactor([secret])).ExportJson(run);
+    using JsonDocument document = JsonDocument.Parse(json);
+    JsonElement root = document.RootElement;
+    JsonElement graphNode = root.GetProperty("graph").GetProperty("nodes")
+        .EnumerateObject().Single().Value;
+    JsonElement definition = graphNode.GetProperty("definition");
+    JsonElement plan = root.GetProperty("plan");
+    JsonElement plannedResource = plan.GetProperty("resources")[0];
+    JsonElement resourcePlan = plannedResource.GetProperty("resourcePlan");
+    JsonElement result = root.GetProperty("resourceResults").EnumerateObject().Single().Value;
+    JsonElement detected = result.GetProperty("detectedBefore");
+
+    AssertPropertyNames(root,
+        "runId", "mode", "profileSourcePath", "profileId", "profileVersion",
+        "selectedOptionalResourceIds", "startedAtUtc", "endedAtUtc", "state", "outcome",
+        "retriedFromRunId", "recoveredFromRunId", "machine", "graph", "plan",
+        "resourceResults", "restartRequirements", "restartReasons",
+        "acknowledgedRestartResourceIds", "blockedResourceIds", "unexecutedResourceIds");
+    AssertPropertyNames(root.GetProperty("machine"),
+        "operatingSystem", "architecture", "computerName", "userName");
+    AssertPropertyNames(root.GetProperty("graph"), "nodes", "topologicalLayers");
+    AssertPropertyNames(graphNode, "definition", "origin", "requiredBy");
+    AssertPropertyNames(definition,
+        "id", "type", "provider", "displayName", "versionConstraint", "preferredVersion",
+        "dependencies", "parameters", "privilegeRequirement", "restartPolicy");
+    AssertPropertyNames(plan,
+        "planId", "fingerprint", "profileId", "profileVersion", "layers", "resources",
+        "isExecutable", "errors");
+    AssertPropertyNames(plannedResource,
+        "definition", "origin", "dependencies", "resourcePlan", "status", "risk",
+        "requiresElevation", "isDestructive", "restartPolicy", "reason", "blockedBy",
+        "diagnostics");
+    AssertPropertyNames(resourcePlan,
+        "resourceId", "resourceType", "providerName", "desiredStateFingerprint",
+        "executionPreconditionFingerprint", "compliance", "isExecutable", "steps", "error",
+        "structuredErrors");
+    AssertPropertyNames(resourcePlan.GetProperty("steps")[0],
+        "id", "description", "action", "privilegeRequirement", "restartPolicy",
+        "isDestructive", "reason");
+    AssertPropertyNames(result,
+        "resourceId", "state", "outcome", "finalCompliance", "detectedBefore",
+        "detectedAfter", "progress", "message", "startedAtUtc", "endedAtUtc", "error",
+        "restartRequirement", "stepResults");
+    AssertPropertyNames(detected,
+        "resourceId", "outcome", "exists", "version", "installedVersions",
+        "configurationHash", "detectedAtUtc", "evidence", "error", "structuredError");
+    AssertPropertyNames(detected.GetProperty("installedVersions")[0],
+        "major", "minor", "patch", "revision");
+    AssertPropertyNames(result.GetProperty("stepResults")[0],
+        "stepId", "name", "state", "outcome", "progress", "firstLogSequence",
+        "lastLogSequence", "processExitCode", "processSucceeded", "startedAtUtc",
+        "endedAtUtc", "error");
+    AssertPropertyNames(result.GetProperty("error"),
+        "code", "summary", "detail", "resourceId", "stepId", "processExitCode",
+        "logLocation", "suggestedAction", "isRetryable", "underlyingExceptionType",
+        "underlyingExceptionMessage");
+
+    Type[] domainTypes = typeof(RunReportExporter).GetNestedTypes(BindingFlags.NonPublic)
+        .Where(type => type.Name.StartsWith("Report", StringComparison.Ordinal))
+        .SelectMany(type => type.GetProperties())
+        .Select(property => UnwrapCollectionType(property.PropertyType))
+        .Where(type => type.Namespace?.StartsWith("Wdem.Core", StringComparison.Ordinal) == true)
+        .Where(type => type.DeclaringType != typeof(RunReportExporter))
+        .Where(type => !type.IsEnum)
+        .Distinct()
+        .ToArray();
+    Assert.Empty(domainTypes);
+    Assert.DoesNotContain(secret, json, StringComparison.Ordinal);
+  }
+
+  [Fact]
   public async Task ExportAsync_ReplacesExistingFileAndLeavesNoTemporaryFile()
   {
     string directory = Path.Combine(Path.GetTempPath(), $"wdem-report-{Guid.NewGuid():N}");
@@ -62,6 +240,78 @@ public sealed class RunReportExporterTests
       await exporter.ExportAsync(CreateTerminalRun("safe"), path, CancellationToken.None);
 
       Assert.StartsWith("# WDEM Run Report", await File.ReadAllTextAsync(path), StringComparison.Ordinal);
+      Assert.Empty(Directory.EnumerateFiles(directory, "*.tmp"));
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task ExportAsync_CreatesAbsentFileAndLeavesNoTemporaryFile()
+  {
+    string directory = Path.Combine(Path.GetTempPath(), $"wdem-report-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(directory);
+    string path = Path.Combine(directory, "run.json");
+    try
+    {
+      var exporter = new RunReportExporter(new LogRedactor());
+
+      await exporter.ExportAsync(CreateTerminalRun("safe"), path, CancellationToken.None);
+
+      using JsonDocument document = JsonDocument.Parse(await File.ReadAllTextAsync(path));
+      Assert.Equal("apply", document.RootElement.GetProperty("mode").GetString());
+      Assert.Empty(Directory.EnumerateFiles(directory, "*.tmp"));
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task ExportAsync_ConcurrentWritersProduceWholeReportWithoutTemporaryFiles()
+  {
+    string directory = Path.Combine(Path.GetTempPath(), $"wdem-report-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(directory);
+    string path = Path.Combine(directory, "run.json");
+    try
+    {
+      var exporter = new RunReportExporter(new LogRedactor());
+      Task[] exports = Enumerable.Range(0, 64)
+          .Select(_ => exporter.ExportAsync(CreateTerminalRun("safe"), path))
+          .ToArray();
+
+      await Task.WhenAll(exports);
+
+      using JsonDocument document = JsonDocument.Parse(await File.ReadAllTextAsync(path));
+      Assert.Equal("apply", document.RootElement.GetProperty("mode").GetString());
+      Assert.Empty(Directory.EnumerateFiles(directory, "*.tmp"));
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task ExportAsync_CancellationLeavesDestinationAndNoTemporaryFile()
+  {
+    string directory = Path.Combine(Path.GetTempPath(), $"wdem-report-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(directory);
+    string path = Path.Combine(directory, "run.json");
+    await File.WriteAllTextAsync(path, "original");
+    using var cancellation = new CancellationTokenSource();
+    cancellation.Cancel();
+    try
+    {
+      var exporter = new RunReportExporter(new LogRedactor());
+
+      await Assert.ThrowsAnyAsync<OperationCanceledException>(
+          () => exporter.ExportAsync(CreateTerminalRun("safe"), path, cancellation.Token));
+
+      Assert.Equal("original", await File.ReadAllTextAsync(path));
       Assert.Empty(Directory.EnumerateFiles(directory, "*.tmp"));
     }
     finally
@@ -234,6 +484,137 @@ public sealed class RunReportExporterTests
     };
   }
 
+  private static ExecutionRun CreatePlannedRun(string secret)
+  {
+    var error = new StructuredError(
+        WdemErrorCode.ConfigurationError,
+        $"summary {secret}",
+        $"detail {secret}")
+    {
+      ResourceId = $"resource-{secret}",
+      StepId = $"step-{secret}",
+      ProcessExitCode = 12,
+      LogLocation = $"log-{secret}",
+      SuggestedAction = $"action-{secret}",
+      IsRetryable = true,
+      UnderlyingException = new InvalidOperationException($"exception-{secret}")
+    };
+    var definition = new ResourceDefinition
+    {
+      Id = $"resource-{secret}",
+      Type = $"type-{secret}",
+      Provider = $"provider-{secret}",
+      DisplayName = $"display-{secret}",
+      VersionConstraint = $">={secret}",
+      PreferredVersion = $"preferred-{secret}",
+      Dependencies = [$"dependency-{secret}"],
+      Parameters = new Dictionary<string, string?>
+      {
+        [$"parameter-{secret}"] = $"value-{secret}"
+      },
+      PrivilegeRequirement = PrivilegeRequirement.Administrator,
+      RestartPolicy = RestartPolicy.RestartRequired
+    };
+    var resourcePlan = new ResourcePlan
+    {
+      ResourceId = definition.Id,
+      ResourceType = definition.Type,
+      ProviderName = definition.Provider,
+      DesiredStateFingerprint = $"desired-{secret}",
+      ExecutionPreconditionFingerprint = $"precondition-{secret}",
+      Compliance = ComplianceStatus.Missing,
+      IsExecutable = true,
+      Steps =
+      [
+        new PlanStep
+        {
+          Id = $"step-{secret}",
+          Description = $"description-{secret}",
+          Action = PlanAction.Install,
+          PrivilegeRequirement = PrivilegeRequirement.Administrator,
+          RestartPolicy = RestartPolicy.RestartRequired,
+          IsDestructive = true,
+          Reason = $"reason-{secret}"
+        }
+      ],
+      Error = $"plan-error-{secret}",
+      StructuredErrors = [error]
+    };
+    var detected = new DetectedState
+    {
+      ResourceId = definition.Id,
+      Outcome = DetectionOutcome.Succeeded,
+      Exists = true,
+      Version = $"version-{secret}",
+      InstalledVersions = [new SemanticVersion(1, 2, 3, 4)],
+      ConfigurationHash = $"hash-{secret}",
+      DetectedAtUtc = new DateTimeOffset(2026, 8, 30, 8, 1, 0, TimeSpan.Zero),
+      Evidence = new Dictionary<string, string>
+      {
+        [$"evidence-{secret}"] = $"evidence-value-{secret}"
+      },
+      Error = $"detection-error-{secret}",
+      StructuredError = error
+    };
+    ResourceResult result = Result(
+        definition.Id,
+        ExecutionState.Completed,
+        ExecutionOutcome.Failed,
+        error,
+        RestartPolicy.RestartRequired) with
+      {
+        DetectedBefore = detected,
+        DetectedAfter = detected,
+        StartedAtUtc = new DateTimeOffset(2026, 8, 30, 8, 0, 0, TimeSpan.Zero),
+        EndedAtUtc = new DateTimeOffset(2026, 8, 30, 8, 2, 0, TimeSpan.Zero)
+      };
+    ExecutionRun run = CreateTerminalRun(secret);
+    return run with
+    {
+      Graph = new ResourceGraph(
+          new Dictionary<string, ResolvedResource>
+          {
+            [definition.Id] = new(
+                definition,
+                ResourceOrigin.Required,
+                new HashSet<string>([$"required-by-{secret}"]))
+          },
+          [new ResourceGraphLayer(0, [definition.Id])]),
+      Plan = new ExecutionPlan
+      {
+        PlanId = Guid.NewGuid(),
+        Fingerprint = $"plan-{secret}",
+        ProfileId = $"profile-{secret}",
+        ProfileVersion = $"profile-version-{secret}",
+        Layers = [new ResourceGraphLayer(0, [definition.Id])],
+        Resources =
+        [
+          new PlannedResource
+          {
+            Definition = definition,
+            Origin = ResourceOrigin.Required,
+            Dependencies = [$"dependency-{secret}"],
+            ResourcePlan = resourcePlan,
+            Status = PlannedResourceStatus.Ready,
+            Risk = PlanRisk.Destructive,
+            RequiresElevation = true,
+            IsDestructive = true,
+            RestartPolicy = RestartPolicy.RestartRequired,
+            Reason = $"planned-reason-{secret}",
+            BlockedBy = [$"blocked-by-{secret}"],
+            Diagnostics = [error]
+          }
+        ],
+        IsExecutable = true,
+        Errors = [error]
+      },
+      ResourceResults = new Dictionary<string, ResourceResult>
+      {
+        [definition.Id] = result
+      }
+    };
+  }
+
   private static ResourceResult Result(
       string id,
       ExecutionState state,
@@ -264,4 +645,34 @@ public sealed class RunReportExporterTests
           }
         ]
       };
+
+  private static void AssertCollisionSafeKeys(JsonElement value)
+  {
+    Assert.Equal(["***", "*** (2)"], value.EnumerateObject().Select(property => property.Name));
+  }
+
+  private static void AssertPropertyNames(JsonElement value, params string[] expected)
+  {
+    Assert.Equal(expected, value.EnumerateObject().Select(property => property.Name));
+  }
+
+  private static Type UnwrapCollectionType(Type type)
+  {
+    if (type.IsArray)
+    {
+      return type.GetElementType()!;
+    }
+
+    if (!type.IsGenericType)
+    {
+      return type;
+    }
+
+    Type definition = type.GetGenericTypeDefinition();
+    return definition == typeof(IReadOnlyDictionary<,>)
+        ? type.GetGenericArguments()[1]
+        : definition == typeof(IReadOnlyList<>)
+            ? type.GetGenericArguments()[0]
+            : type;
+  }
 }

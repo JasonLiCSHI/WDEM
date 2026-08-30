@@ -14,16 +14,16 @@ public sealed class CompletionViewModel : ObservableObject
   public CompletionViewModel(
       ExecutionRun run,
       IRunReportExporter reportExporter,
-      LogRedactor? redactor = null,
+      LogRedactor redactor,
       Func<Task>? returnToPlan = null,
       Func<Task>? returnToProfiles = null,
       Func<Task>? retryFailed = null)
   {
-    Run = run ?? throw new ArgumentNullException(nameof(run));
+    ArgumentNullException.ThrowIfNull(run);
     _reportExporter = reportExporter ?? throw new ArgumentNullException(nameof(reportExporter));
-    redactor ??= (reportExporter as RunReportExporter)?.Redactor ?? new LogRedactor();
-    _redactor = redactor;
-    var resources = run.ResourceResults.Values
+    _redactor = redactor ?? throw new ArgumentNullException(nameof(redactor));
+    Run = new ExecutionRunRedactor(redactor).Redact(run);
+    var resources = Run.ResourceResults.Values
         .OrderBy(result => result.ResourceId, StringComparer.OrdinalIgnoreCase)
         .Select(result => new
         {
@@ -52,15 +52,15 @@ public sealed class CompletionViewModel : ObservableObject
     RestartRequired = resources.Where(item =>
             item.Result.RestartRequirement == RestartPolicy.RestartRequired)
         .Select(item => item.View).ToArray();
-    bool isPartial = run.ResourceResults.Values.Any(result =>
+    bool isPartial = Run.ResourceResults.Values.Any(result =>
         result.State == ExecutionState.Blocked ||
         result.Outcome is ExecutionOutcome.Failed
             or ExecutionOutcome.Cancelled);
     Heading = isPartial
         ? "Environment Partially Configured"
         : "C# Developer Environment Ready";
-    ProfileDisplay = redactor.Redact($"{run.ProfileId} {run.ProfileVersion}");
-    RunId = run.RunId.ToString("D");
+    ProfileDisplay = $"{Run.ProfileId} {Run.ProfileVersion}";
+    RunId = Run.RunId.ToString("D");
     ReturnToPlanCommand = new AsyncRelayCommand(
         _ => returnToPlan?.Invoke() ?? Task.CompletedTask,
         _ => returnToPlan is not null,

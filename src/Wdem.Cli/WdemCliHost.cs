@@ -131,12 +131,28 @@ public static class WdemCliHost
         await (await GetAsync(cancellationToken).ConfigureAwait(false))
             .InspectAsync(request, json, cancellationToken).ConfigureAwait(false);
 
+    public async Task<int> InspectAsync(
+        RunRequest request,
+        bool json,
+        string? reportFile,
+        CancellationToken cancellationToken) =>
+        await (await GetAsync(cancellationToken).ConfigureAwait(false))
+            .InspectAsync(request, json, reportFile, cancellationToken).ConfigureAwait(false);
+
     public async Task<int> ApplyAsync(
         RunRequest request,
         bool json,
         CancellationToken cancellationToken) =>
         await (await GetAsync(cancellationToken).ConfigureAwait(false))
             .ApplyAsync(request, json, cancellationToken).ConfigureAwait(false);
+
+    public async Task<int> ApplyAsync(
+        RunRequest request,
+        bool json,
+        string? reportFile,
+        CancellationToken cancellationToken) =>
+        await (await GetAsync(cancellationToken).ConfigureAwait(false))
+            .ApplyAsync(request, json, reportFile, cancellationToken).ConfigureAwait(false);
 
     public async Task<int> RetryAsync(
         Guid runId,
@@ -146,12 +162,30 @@ public static class WdemCliHost
         await (await GetAsync(cancellationToken).ConfigureAwait(false))
             .RetryAsync(runId, resourceIds, json, cancellationToken).ConfigureAwait(false);
 
+    public async Task<int> RetryAsync(
+        Guid runId,
+        IReadOnlySet<string> resourceIds,
+        bool json,
+        string? reportFile,
+        CancellationToken cancellationToken) =>
+        await (await GetAsync(cancellationToken).ConfigureAwait(false))
+            .RetryAsync(runId, resourceIds, json, reportFile, cancellationToken)
+            .ConfigureAwait(false);
+
     public async Task<int> ResumeAsync(
         Guid runId,
         bool json,
         CancellationToken cancellationToken) =>
         await (await GetAsync(cancellationToken).ConfigureAwait(false))
             .ResumeAsync(runId, json, cancellationToken).ConfigureAwait(false);
+
+    public async Task<int> ResumeAsync(
+        Guid runId,
+        bool json,
+        string? reportFile,
+        CancellationToken cancellationToken) =>
+        await (await GetAsync(cancellationToken).ConfigureAwait(false))
+            .ResumeAsync(runId, json, reportFile, cancellationToken).ConfigureAwait(false);
 
     public async Task<int> ListRunsAsync(
         bool json,

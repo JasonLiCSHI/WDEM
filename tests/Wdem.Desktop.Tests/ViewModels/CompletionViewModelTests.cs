@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Wdem.Core.Execution;
 using Wdem.Core.Reporting;
 using Wdem.Core.Resources;
@@ -23,7 +24,8 @@ public sealed class CompletionViewModelTests
 
     var viewModel = new CompletionViewModel(
         run,
-        new RunReportExporter(new LogRedactor()));
+        new RunReportExporter(new LogRedactor()),
+        new LogRedactor());
 
     Assert.Equal("Environment Partially Configured", viewModel.Heading);
     Assert.Single(viewModel.Satisfied);
@@ -43,7 +45,8 @@ public sealed class CompletionViewModelTests
 
     var viewModel = new CompletionViewModel(
         run,
-        new RunReportExporter(new LogRedactor()));
+        new RunReportExporter(new LogRedactor()),
+        new LogRedactor());
 
     Assert.Equal("C# Developer Environment Ready", viewModel.Heading);
   }
@@ -57,7 +60,8 @@ public sealed class CompletionViewModelTests
 
     var viewModel = new CompletionViewModel(
         run,
-        new RunReportExporter(new LogRedactor()));
+        new RunReportExporter(new LogRedactor()),
+        new LogRedactor());
 
     Assert.Equal("C# Developer Environment Ready", viewModel.Heading);
     Assert.Single(viewModel.CancelledOrSkipped);
@@ -81,6 +85,77 @@ public sealed class CompletionViewModelTests
 
     Assert.Null(viewModel.ErrorMessage);
     Assert.Equal(2, exporter.ExportCalls);
+  }
+
+  [Fact]
+  public async Task Completion_DeepRedactsPublicGroupsAndExportSnapshotWithInjectedRedactor()
+  {
+    const string secret = "completion-secret";
+    var error = new StructuredError(
+        WdemErrorCode.InstallationError,
+        $"summary-{secret}",
+        $"detail-{secret}");
+    ExecutionRun original = CreateRun(
+        ($"resource-{secret}", ExecutionState.Completed, ExecutionOutcome.Failed,
+            RestartPolicy.NoRestart));
+    ResourceResult originalResult = original.ResourceResults.Values.Single();
+    ExecutionRun run = original with
+    {
+      ProfileSourcePath = $"C:/profiles/{secret}.yaml",
+      ProfileId = $"profile-{secret}",
+      ProfileVersion = $"version-{secret}",
+      Machine = new MachineInformation(
+          $"os-{secret}",
+          $"arch-{secret}",
+          $"machine-{secret}",
+          $"user-{secret}"),
+      RestartReasons = [$"restart-{secret}"],
+      ResourceResults = new Dictionary<string, ResourceResult>
+      {
+        [$"key-{secret}"] = originalResult with
+        {
+          Message = $"message-{secret}",
+          Error = error,
+          StepResults =
+          [
+            new StepResult
+            {
+              StepId = $"step-{secret}",
+              Name = $"name-{secret}",
+              State = ExecutionState.Completed,
+              Outcome = ExecutionOutcome.Failed,
+              Error = error
+            }
+          ]
+        }
+      }
+    };
+    var exporter = new CapturingReportExporter();
+    var viewModel = new CompletionViewModel(
+        run,
+        exporter,
+        new LogRedactor([secret]));
+
+    string publicRun = JsonSerializer.Serialize(viewModel.Run);
+    string publicGroups = JsonSerializer.Serialize(new
+    {
+      viewModel.Satisfied,
+      viewModel.Succeeded,
+      viewModel.Failed,
+      viewModel.Blocked,
+      viewModel.CancelledOrSkipped,
+      viewModel.RestartRequired,
+      viewModel.ProfileDisplay
+    });
+    await viewModel.ExportAsync("report.json");
+
+    Assert.DoesNotContain(secret, publicRun, StringComparison.Ordinal);
+    Assert.DoesNotContain(secret, publicGroups, StringComparison.Ordinal);
+    Assert.NotNull(exporter.Run);
+    Assert.DoesNotContain(
+        secret,
+        JsonSerializer.Serialize(exporter.Run),
+        StringComparison.Ordinal);
   }
 
   private static ExecutionRun CreateRun(
@@ -129,6 +204,24 @@ public sealed class CompletionViewModelTests
       return ExportCalls == 1
           ? Task.FromException(new InvalidOperationException(message))
           : Task.CompletedTask;
+    }
+  }
+
+  private sealed class CapturingReportExporter : IRunReportExporter
+  {
+    public ExecutionRun? Run { get; private set; }
+
+    public string ExportJson(ExecutionRun run) => throw new NotSupportedException();
+
+    public string ExportMarkdown(ExecutionRun run) => throw new NotSupportedException();
+
+    public Task ExportAsync(
+        ExecutionRun run,
+        string filePath,
+        CancellationToken cancellationToken = default)
+    {
+      Run = run;
+      return Task.CompletedTask;
     }
   }
 }

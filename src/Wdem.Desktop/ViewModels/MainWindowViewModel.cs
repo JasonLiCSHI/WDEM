@@ -220,7 +220,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     CurrentPage = new CompletionViewModel(
         run,
         _reportExporter!,
-        _redactor,
+        _redactor!,
         () => NavigateToReviewedPlanAsync(reviewedPlan),
         NavigateToProfilesAsync,
         () => RetryFailedAsync(reviewedPlan));

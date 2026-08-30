@@ -111,6 +111,30 @@ public sealed class WdemCliBuilderTests
   }
 
   [Fact]
+  public async Task Host_LegacyHandlerWithReportFailsInsteadOfSilentlyIgnoringReport()
+  {
+    const string secret = "legacy-report-secret";
+    var handler = new LegacyHandler();
+    var error = new StringWriter();
+    string reportPath = Path.Combine(Path.GetTempPath(), $"token={secret}.json");
+
+    int exitCode = await WdemCliHost.RunAsync(
+        ["apply", "--profile", "developer.yaml", "--report", reportPath, "--json"],
+        _ => Task.FromResult<IWdemCommandHandler>(handler),
+        new StringWriter(),
+        error,
+        redactor: new LogRedactor([secret]));
+
+    Assert.Equal(1, exitCode);
+    Assert.Equal(0, handler.ApplyCalls);
+    Assert.False(File.Exists(reportPath));
+    Assert.DoesNotContain(secret, error.ToString(), StringComparison.Ordinal);
+    Assert.Equal(
+        WdemErrorCode.ProviderError,
+        Assert.Single(DeserializeEvents(error)).Error?.Code);
+  }
+
+  [Fact]
   public async Task Inspect_BindsProfileSelectionsAndJson()
   {
     var handler = new CapturingHandler();
@@ -670,6 +694,52 @@ public sealed class WdemCliBuilderTests
     Assert.Equal(1, exitCode);
     Assert.Null(service.ApplyRequest);
     Assert.Single(DeserializeEvents(error));
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task CommandHandler_RejectsUnavailableReportDestinationBeforeStartingRun(
+      bool targetIsDirectory)
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"wdem-report-preflight-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    string reportPath = targetIsDirectory
+        ? Path.Combine(root, "target.json")
+        : Path.Combine(root, "missing", "target.json");
+    if (targetIsDirectory)
+    {
+      Directory.CreateDirectory(reportPath);
+    }
+
+    try
+    {
+      var service = new StubEnvironmentRunService
+      {
+        Result = CompletedRun(ExecutionOutcome.Succeeded)
+      };
+      var handler = new WdemCommandHandler(
+          service,
+          new StubExecutionRunStore(),
+          new StringWriter(),
+          new StringWriter(),
+          new LogRedactor(),
+          new RunEventHub());
+
+      int exitCode = await handler.ApplyAsync(
+          Request(),
+          json: false,
+          reportPath,
+          CancellationToken.None);
+
+      Assert.Equal(1, exitCode);
+      Assert.Null(service.ApplyRequest);
+      Assert.Empty(Directory.EnumerateFiles(root, "*.tmp", SearchOption.AllDirectories));
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
   }
 
   [Theory]
@@ -1462,6 +1532,39 @@ public sealed class WdemCliBuilderTests
       Json = json;
       return Task.FromResult(0);
     }
+  }
+
+  private sealed class LegacyHandler : IWdemCommandHandler
+  {
+    public int ApplyCalls { get; private set; }
+
+    public Task<int> InspectAsync(
+        RunRequest request,
+        bool json,
+        CancellationToken cancellationToken) => Task.FromResult(0);
+
+    public Task<int> ApplyAsync(
+        RunRequest request,
+        bool json,
+        CancellationToken cancellationToken)
+    {
+      ApplyCalls++;
+      return Task.FromResult(0);
+    }
+
+    public Task<int> RetryAsync(
+        Guid runId,
+        IReadOnlySet<string> resourceIds,
+        bool json,
+        CancellationToken cancellationToken) => Task.FromResult(0);
+
+    public Task<int> ResumeAsync(
+        Guid runId,
+        bool json,
+        CancellationToken cancellationToken) => Task.FromResult(0);
+
+    public Task<int> ListRunsAsync(bool json, CancellationToken cancellationToken) =>
+        Task.FromResult(0);
   }
 
   private sealed class StubEnvironmentRunService : IEnvironmentRunService
