@@ -40,6 +40,47 @@ public sealed class RepositoryIdentityTests
   }
 
   [Fact]
+  public void ReleaseDocumentationRunsCliFromTheDesktopApplicationRoot()
+  {
+    var guide = File.ReadAllText(Path.Combine(
+        RepositoryRoot,
+        "docs",
+        "wdem",
+        "getting-started.md"));
+
+    var push = guide.IndexOf("Push-Location .\\WDEM\\Desktop", StringComparison.Ordinal);
+    var inspect = guide.IndexOf(
+        "..\\Cli\\Wdem.Cli.exe inspect --profile .\\profiles\\csharp-developer.yaml",
+        StringComparison.Ordinal);
+    var pop = guide.IndexOf("Pop-Location", StringComparison.Ordinal);
+
+    Assert.True(push >= 0, "The release CLI example must enter the Desktop application root.");
+    Assert.True(inspect > push, "The release CLI must run from the Desktop application root.");
+    Assert.True(pop > inspect, "The release CLI example must restore the caller's location.");
+    Assert.DoesNotContain(
+        ".\\WDEM\\Cli\\Wdem.Cli.exe inspect --profile .\\WDEM\\Desktop\\profiles",
+        guide,
+        StringComparison.Ordinal);
+
+    var troubleshooting = File.ReadAllText(Path.Combine(
+        RepositoryRoot,
+        "docs",
+        "troubleshooting.md"));
+    Assert.Contains(
+        "From the extracted `Desktop` directory",
+        troubleshooting,
+        StringComparison.Ordinal);
+    Assert.Contains(
+        "`..\\Cli\\Wdem.Cli.exe inspect --profile <path> --json`",
+        troubleshooting,
+        StringComparison.Ordinal);
+    Assert.Contains(
+        "`..\\Cli\\Wdem.Cli.exe runs list`",
+        troubleshooting,
+        StringComparison.Ordinal);
+  }
+
+  [Fact]
   public void RecoveryGuideRequiresFreshPlanningAndDocumentsTheSecurityBoundary()
   {
     var guide = NormalizeWhitespace(File.ReadAllText(Path.Combine(
@@ -289,7 +330,11 @@ public sealed class RepositoryIdentityTests
     Assert.Matches(@"AccessControlSections\]::Access", script);
     Assert.DoesNotContain("::Audit", script, StringComparison.OrdinalIgnoreCase);
     Assert.DoesNotContain("LastAccessTime", script, StringComparison.OrdinalIgnoreCase);
-    Assert.Matches(@"(?i)Get-Item[^\r\n]*-Stream\s+\*", script);
+    Assert.Contains("FindFirstStreamW", script, StringComparison.Ordinal);
+    Assert.Contains("FindNextStreamW", script, StringComparison.Ordinal);
+    Assert.Contains("CreateFileW", script, StringComparison.Ordinal);
+    Assert.Contains("FILE_FLAG_BACKUP_SEMANTICS", script, StringComparison.Ordinal);
+    Assert.Contains("FILE_FLAG_OPEN_REPARSE_POINT", script, StringComparison.Ordinal);
   }
 
   [Fact]
@@ -421,6 +466,93 @@ public sealed class RepositoryIdentityTests
         result.Output.Contains("ADS mutation detected", StringComparison.Ordinal) ||
         result.Output.Contains("SKIP ADS:", StringComparison.Ordinal),
         $"ADS coverage was silently skipped.{Environment.NewLine}{result.Output}");
+  }
+
+  [Fact]
+  public void RetiredStateFingerprintDetectsDirectoryAlternateDataStreams()
+  {
+    var script = File.ReadAllText(Path.Combine(
+        RepositoryRoot,
+        "testing",
+        "wdem",
+        "inspect-smoke.ps1"));
+    var mainScript = script.IndexOf(
+        "$root = Split-Path $PSScriptRoot",
+        StringComparison.Ordinal);
+    Assert.True(mainScript > 0, "Could not isolate the smoke fingerprint helpers.");
+
+    using var directory = new TemporaryDirectory();
+    var harnessPath = Path.Combine(directory.Path, "directory-ads-harness.ps1");
+    var testRoot = directory.Path.Replace("'", "''", StringComparison.Ordinal);
+    var harness = script[..mainScript] + $$"""
+        $testRoot = '{{testRoot}}'
+        $legacyRoot = Join-Path $testRoot 'WinHome'
+        $stateDirectory = Join-Path $legacyRoot 'state-directory'
+        New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null
+
+        $adsSupported = $true
+        try {
+            Set-Content -LiteralPath $stateDirectory -Stream 'wdem-directory-test' -Value 'alpha'
+        }
+        catch [System.NotSupportedException] {
+            $adsSupported = $false
+            Write-Output "SKIP DIRECTORY ADS: $($_.Exception.Message)"
+        }
+        if ($adsSupported) {
+            $before = Get-LegacyTreeFingerprint $legacyRoot
+            $item = Get-Item -LiteralPath $stateDirectory -Force
+            $attributes = [IO.FileAttributes]$item.Attributes
+            $creationTime = [DateTime]$item.CreationTimeUtc
+            $writeTime = [DateTime]$item.LastWriteTimeUtc
+            $aclFingerprint = Get-AclFingerprint $stateDirectory
+            $rootItem = Get-Item -LiteralPath $legacyRoot -Force
+            $rootAttributes = [IO.FileAttributes]$rootItem.Attributes
+            $rootCreationTime = [DateTime]$rootItem.CreationTimeUtc
+            $rootWriteTime = [DateTime]$rootItem.LastWriteTimeUtc
+            $rootAclFingerprint = Get-AclFingerprint $legacyRoot
+
+            Set-Content -LiteralPath $stateDirectory -Stream 'wdem-directory-test' -Value 'bravo'
+            [IO.File]::SetAttributes($stateDirectory, $attributes)
+            [IO.Directory]::SetCreationTimeUtc($stateDirectory, $creationTime)
+            [IO.Directory]::SetLastWriteTimeUtc($stateDirectory, $writeTime)
+            [IO.File]::SetAttributes($legacyRoot, $rootAttributes)
+            [IO.Directory]::SetCreationTimeUtc($legacyRoot, $rootCreationTime)
+            [IO.Directory]::SetLastWriteTimeUtc($legacyRoot, $rootWriteTime)
+
+            $restoredItem = Get-Item -LiteralPath $stateDirectory -Force
+            $restoredRootItem = Get-Item -LiteralPath $legacyRoot -Force
+            if ($restoredItem.Attributes -ne $attributes -or
+                $restoredItem.CreationTimeUtc -ne $creationTime -or
+                $restoredItem.LastWriteTimeUtc -ne $writeTime -or
+                (Get-AclFingerprint $stateDirectory) -ne $aclFingerprint -or
+                $restoredRootItem.Attributes -ne $rootAttributes -or
+                $restoredRootItem.CreationTimeUtc -ne $rootCreationTime -or
+                $restoredRootItem.LastWriteTimeUtc -ne $rootWriteTime -or
+                (Get-AclFingerprint $legacyRoot) -ne $rootAclFingerprint) {
+                throw "Directory ADS test could not restore fingerprinted metadata: state=[$($restoredItem.Attributes),$($restoredItem.CreationTimeUtc.Ticks),$($restoredItem.LastWriteTimeUtc.Ticks),$((Get-AclFingerprint $stateDirectory) -eq $aclFingerprint)] expected=[$attributes,$($creationTime.Ticks),$($writeTime.Ticks),True]; root=[$($restoredRootItem.Attributes),$($restoredRootItem.CreationTimeUtc.Ticks),$($restoredRootItem.LastWriteTimeUtc.Ticks),$((Get-AclFingerprint $legacyRoot) -eq $rootAclFingerprint)] expected=[$rootAttributes,$($rootCreationTime.Ticks),$($rootWriteTime.Ticks),True]"
+            }
+            $after = Get-LegacyTreeFingerprint $legacyRoot
+            if ($before -eq $after) { throw 'Fingerprint missed directory alternate data stream change.' }
+            Write-Output 'Directory ADS mutation detected'
+        }
+        """;
+    File.WriteAllText(harnessPath, harness);
+
+    var result = RunProcess(
+        directory.Path,
+        "powershell",
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        harnessPath);
+
+    Assert.True(result.ExitCode == 0, result.Output);
+    Assert.True(
+        result.Output.Contains("Directory ADS mutation detected", StringComparison.Ordinal) ||
+        result.Output.Contains("SKIP DIRECTORY ADS:", StringComparison.Ordinal),
+        $"Directory ADS coverage was silently skipped.{Environment.NewLine}{result.Output}");
   }
 
   [Fact]

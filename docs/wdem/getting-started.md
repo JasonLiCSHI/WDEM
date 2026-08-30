@@ -34,10 +34,17 @@ From the extracted WDEM directory, launch the desktop experience with
 ```
 
 Or use `Cli\Wdem.Cli.exe` to inspect the shipped C# profile from the command
-line:
+line. Run the CLI with `Desktop` as its application root so relative profile
+assets, including the required `.vsconfig`, resolve from the shipped layout:
 
 ```powershell
-.\WDEM\Cli\Wdem.Cli.exe inspect --profile .\WDEM\Desktop\profiles\csharp-developer.yaml
+Push-Location .\WDEM\Desktop
+try {
+    ..\Cli\Wdem.Cli.exe inspect --profile .\profiles\csharp-developer.yaml
+}
+finally {
+    Pop-Location
+}
 ```
 
 Inspect and review the complete plan before Apply. Apply can install software,

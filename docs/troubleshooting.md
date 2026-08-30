@@ -8,10 +8,12 @@ files. Confirm the archive hash against `SHA256SUMS.txt` before retrying.
 
 ## A profile is rejected
 
-Run `Cli\Wdem.Cli.exe inspect --profile <path> --json` and use the JSON pointer
-in the structured error. Check the schema version, resource/provider pair,
-dependency IDs, version syntax, source path, and 64-hex SHA-256 fields. See
-[profile authoring](wdem/profile-authoring.md).
+From the extracted `Desktop` directory, run
+`..\Cli\Wdem.Cli.exe inspect --profile <path> --json` and use the JSON pointer
+in the structured error. Running from `Desktop` preserves the shipped
+application root used to resolve relative profile assets. Check the schema
+version, resource/provider pair, dependency IDs, version syntax, source path,
+and 64-hex SHA-256 fields. See [profile authoring](wdem/profile-authoring.md).
 
 ## Apply reports a stale plan
 
@@ -21,7 +23,8 @@ new Plan, and confirm it; do not edit the snapshot to bypass the check.
 
 ## A run was cancelled, interrupted, or requires restart
 
-Use `Cli\Wdem.Cli.exe runs list`, then inspect the relevant run under
+From the same `Desktop` directory, use `..\Cli\Wdem.Cli.exe runs list`, then
+inspect the relevant run under
 `%LOCALAPPDATA%\WDEM\runs`. Resume or retry only through the supported CLI or
 desktop flow. WDEM may finish an atomic finalization after cancellation. See
 [recovery and security](wdem/recovery-and-security.md).

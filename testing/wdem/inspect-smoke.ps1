@@ -2,6 +2,185 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
 
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
+
+public sealed class WdemStreamInfo
+{
+    public WdemStreamInfo(string name, long length)
+    {
+        Name = name;
+        Length = length;
+    }
+
+    public string Name { get; private set; }
+    public long Length { get; private set; }
+}
+
+public static class WdemNativeStreams
+{
+    private const int ERROR_NO_MORE_FILES = 18;
+    private const int ERROR_HANDLE_EOF = 38;
+    private const uint GENERIC_READ = 0x80000000;
+    private const uint FILE_SHARE_READ = 0x00000001;
+    private const uint FILE_SHARE_WRITE = 0x00000002;
+    private const uint FILE_SHARE_DELETE = 0x00000004;
+    private const uint OPEN_EXISTING = 3;
+    private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+    private const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+
+    private enum StreamInfoLevels
+    {
+        FindStreamInfoStandard = 0
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct Win32FindStreamData
+    {
+        public long StreamSize;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 296)]
+        public string StreamName;
+    }
+
+    private sealed class SafeFindHandle : SafeHandleZeroOrMinusOneIsInvalid
+    {
+        private SafeFindHandle()
+            : base(true)
+        {
+        }
+
+        protected override bool ReleaseHandle()
+        {
+            return FindClose(handle);
+        }
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFindHandle FindFirstStreamW(
+        string fileName,
+        StreamInfoLevels infoLevel,
+        out Win32FindStreamData findStreamData,
+        uint flags);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool FindNextStreamW(
+        SafeFindHandle findStream,
+        out Win32FindStreamData findStreamData);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool FindClose(IntPtr findFile);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(
+        string fileName,
+        uint desiredAccess,
+        uint shareMode,
+        IntPtr securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        IntPtr templateFile);
+
+    public static WdemStreamInfo[] Enumerate(string path)
+    {
+        var streams = new List<WdemStreamInfo>();
+        Win32FindStreamData data;
+        using (var handle = FindFirstStreamW(
+            ToExtendedPath(path),
+            StreamInfoLevels.FindStreamInfoStandard,
+            out data,
+            0))
+        {
+            if (handle.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                if (IsEndOfStreams(error))
+                {
+                    return streams.ToArray();
+                }
+
+                throw new Win32Exception(error, "Could not enumerate data streams: " + path);
+            }
+
+            streams.Add(new WdemStreamInfo(data.StreamName, data.StreamSize));
+            while (true)
+            {
+                if (FindNextStreamW(handle, out data))
+                {
+                    streams.Add(new WdemStreamInfo(data.StreamName, data.StreamSize));
+                    continue;
+                }
+
+                var error = Marshal.GetLastWin32Error();
+                if (IsEndOfStreams(error))
+                {
+                    break;
+                }
+
+                throw new Win32Exception(error, "Could not continue enumerating data streams: " + path);
+            }
+        }
+
+        return streams.ToArray();
+    }
+
+    public static string ComputeSha256(string path, string streamName)
+    {
+        var streamPath = ToExtendedPath(path) + streamName;
+        using (var handle = CreateFileW(
+            streamPath,
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            IntPtr.Zero,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            IntPtr.Zero))
+        {
+            if (handle.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                throw new Win32Exception(error, "Could not open data stream: " + path + streamName);
+            }
+
+            using (var stream = new FileStream(handle, FileAccess.Read, 65536, false))
+            using (var sha256 = SHA256.Create())
+            {
+                return BitConverter.ToString(sha256.ComputeHash(stream)).Replace("-", "");
+            }
+        }
+    }
+
+    private static bool IsEndOfStreams(int error)
+    {
+        return error == ERROR_HANDLE_EOF || error == ERROR_NO_MORE_FILES;
+    }
+
+    private static string ToExtendedPath(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        if (fullPath.StartsWith(@"\\?\", StringComparison.Ordinal))
+        {
+            return fullPath;
+        }
+
+        if (fullPath.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            return @"\\?\UNC\" + fullPath.Substring(2);
+        }
+
+        return @"\\?\" + fullPath;
+    }
+}
+'@ -Language CSharp
+
 function Get-TextSha256([string[]]$Lines) {
     $text = $Lines -join "`n"
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
@@ -31,67 +210,31 @@ function Get-AclFingerprint([string]$Path) {
     return $acl.GetSecurityDescriptorSddlForm($sections)
 }
 
-function Get-FileContentFingerprint([string]$Path) {
-    $sha256 = [Security.Cryptography.SHA256]::Create()
-    $stream = $null
-    try {
-        $sharing = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
-        $stream = [IO.File]::Open(
-            $Path,
-            [IO.FileMode]::Open,
-            [IO.FileAccess]::Read,
-            $sharing)
-        return [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '')
-    }
-    finally {
-        if ($null -ne $stream) {
-            $stream.Dispose()
-        }
-        $sha256.Dispose()
-    }
-}
-
-function Get-NamedStreamContentFingerprint([string]$Path, [string]$StreamName) {
-    $sha256 = [Security.Cryptography.SHA256]::Create()
-    try {
-        Get-Content -LiteralPath $Path -Stream $StreamName -Encoding Byte -ReadCount 65536 -ErrorAction Stop |
-            ForEach-Object {
-                [byte[]]$buffer = $_
-                [void]$sha256.TransformBlock($buffer, 0, $buffer.Length, $buffer, 0)
-            }
-        [void]$sha256.TransformFinalBlock([byte[]]@(), 0, 0)
-        return [BitConverter]::ToString($sha256.Hash).Replace('-', '')
-    }
-    finally {
-        $sha256.Dispose()
-    }
-}
-
-function Get-FileStreamsFingerprint([string]$Path) {
-    $streamsBefore = @(Get-Item -LiteralPath $Path -Stream * -ErrorAction Stop)
+function Get-StreamsFingerprint([string]$Path, [bool]$IsDirectory) {
+    $streamsBefore = @([WdemNativeStreams]::Enumerate($Path))
     $metadataBefore = @(
         $streamsBefore |
-            ForEach-Object { "$(ConvertTo-FingerprintField $_.Stream)|$($_.Length)" } |
+            Where-Object { -not ($IsDirectory -and $_.Name -eq '::$DATA') } |
+            ForEach-Object { "$(ConvertTo-FingerprintField $_.Name)|$($_.Length)" } |
             Sort-Object)
     $records = New-Object 'System.Collections.Generic.List[string]'
     foreach ($stream in $streamsBefore) {
-        $streamName = [string]$stream.Stream
-        $contentHash = if ($streamName -eq ':$DATA') {
-            Get-FileContentFingerprint $Path
+        $streamName = [string]$stream.Name
+        if ($IsDirectory -and $streamName -eq '::$DATA') {
+            continue
         }
-        else {
-            Get-NamedStreamContentFingerprint $Path $streamName
-        }
+        $contentHash = [WdemNativeStreams]::ComputeSha256($Path, $streamName)
         $records.Add("$(ConvertTo-FingerprintField $streamName)|$($stream.Length)|$contentHash")
     }
 
-    $streamsAfter = @(Get-Item -LiteralPath $Path -Stream * -ErrorAction Stop)
+    $streamsAfter = @([WdemNativeStreams]::Enumerate($Path))
     $metadataAfter = @(
         $streamsAfter |
-            ForEach-Object { "$(ConvertTo-FingerprintField $_.Stream)|$($_.Length)" } |
+            Where-Object { -not ($IsDirectory -and $_.Name -eq '::$DATA') } |
+            ForEach-Object { "$(ConvertTo-FingerprintField $_.Name)|$($_.Length)" } |
             Sort-Object)
     if (($metadataBefore -join "`n") -ne ($metadataAfter -join "`n")) {
-        throw "Retired state file streams changed while they were being fingerprinted: $Path"
+        throw "Retired state streams changed while they were being fingerprinted: $Path"
     }
     return @($records | Sort-Object) -join ';'
 }
@@ -151,6 +294,7 @@ function Get-LegacyTreeFingerprintOnce([string]$Path) {
         if ($isDirectory) {
             $itemBefore = Get-Item -LiteralPath $current -Force
             $aclBefore = Get-AclFingerprint $current
+            $streamsFingerprint = Get-StreamsFingerprint $current $true
             $children = @([IO.Directory]::EnumerateFileSystemEntries($current))
             $itemAfter = Get-Item -LiteralPath $current -Force
             $aclAfter = Get-AclFingerprint $current
@@ -161,7 +305,7 @@ function Get-LegacyTreeFingerprintOnce([string]$Path) {
                 throw "Retired state directory changed while it was being fingerprinted: $current"
             }
             $records.Add(
-                "D|$encodedPath|$([int]$attributes)|$($itemBefore.CreationTimeUtc.Ticks)|$($itemBefore.LastWriteTimeUtc.Ticks)|$(ConvertTo-FingerprintField $aclBefore)")
+                "D|$encodedPath|$([int]$attributes)|$($itemBefore.CreationTimeUtc.Ticks)|$($itemBefore.LastWriteTimeUtc.Ticks)|$(ConvertTo-FingerprintField $aclBefore)|$streamsFingerprint")
             foreach ($child in $children) {
                 $pending.Push($child)
             }
@@ -170,7 +314,7 @@ function Get-LegacyTreeFingerprintOnce([string]$Path) {
 
         $itemBefore = Get-Item -LiteralPath $current -Force
         $aclBefore = Get-AclFingerprint $current
-        $streamsFingerprint = Get-FileStreamsFingerprint $current
+        $streamsFingerprint = Get-StreamsFingerprint $current $false
         $itemAfter = Get-Item -LiteralPath $current -Force
         $aclAfter = Get-AclFingerprint $current
         if ($itemAfter.Attributes -ne $attributes -or
