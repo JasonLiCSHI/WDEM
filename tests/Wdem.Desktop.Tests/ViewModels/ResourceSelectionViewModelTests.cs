@@ -79,6 +79,25 @@ public sealed class ResourceSelectionViewModelTests
     Assert.Null(main.ErrorMessage);
   }
 
+  [Fact]
+  public async Task NavigatingToProfilesClearsAStaleResourceAndMainError()
+  {
+    var main = new MainWindowViewModel(
+        new FixedProfileCatalog(Profile()),
+        new ResourceGraphBuilder(_ => null));
+    await main.InitializeAsync();
+    await main.ProfileSelection.SelectProfileCommand.ExecuteAsync(null);
+    ResourceSelectionViewModel resources = main.ResourceSelection!;
+    resources.Resources.Single(item => item.Id == "company-vs-extension").IsSelected = true;
+    Assert.NotNull(resources.ErrorMessage);
+
+    await main.NavigateToProfilesCommand.ExecuteAsync(null);
+
+    Assert.Null(resources.ErrorMessage);
+    Assert.Null(main.ProfileSelection.ErrorMessage);
+    Assert.Null(main.ErrorMessage);
+  }
+
   private static DeveloperProfile Profile() => new()
   {
     Id = "csharp-developer",

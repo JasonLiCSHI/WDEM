@@ -19,13 +19,15 @@ public sealed class MainWindowViewModel : ObservableObject
         catalog,
         SelectProfile,
         ReportError,
-        ClearError);
+        ClearErrors);
     _currentPage = ProfileSelection;
-    NavigateToProfilesCommand = new AsyncRelayCommand(_ => NavigateToProfilesAsync(), onError: ReportError);
+    NavigateToProfilesCommand = new AsyncRelayCommand(
+        _ => NavigateToProfilesAsync(),
+        onError: exception => _ = ReportError(exception));
     NavigateToResourcesCommand = new AsyncRelayCommand(
         _ => NavigateToResourcesAsync(),
         _ => ResourceSelection is not null,
-        ReportError);
+        exception => _ = ReportError(exception));
   }
 
   public object CurrentPage
@@ -70,20 +72,20 @@ public sealed class MainWindowViewModel : ObservableObject
         _graphBuilder,
         NavigateToPlan,
         ReportError,
-        ClearError);
+        ClearErrors);
     CurrentPage = ResourceSelection;
   }
 
   private Task NavigateToProfilesAsync()
   {
-    ClearError();
+    ClearErrors();
     CurrentPage = ProfileSelection;
     return Task.CompletedTask;
   }
 
   private Task NavigateToResourcesAsync()
   {
-    ClearError();
+    ClearErrors();
     if (ResourceSelection is not null)
     {
       CurrentPage = ResourceSelection;
@@ -100,13 +102,20 @@ public sealed class MainWindowViewModel : ObservableObject
         request);
   }
 
-  private void ReportError(Exception exception)
+  private string ReportError(Exception exception)
   {
     ArgumentNullException.ThrowIfNull(exception);
-    ErrorMessage = ResourceSelectionViewModel.ToUserMessage(exception);
+    string message = UserErrorMessageFormatter.Format(exception);
+    ErrorMessage = message;
+    return message;
   }
 
-  private void ClearError() => ErrorMessage = null;
+  private void ClearErrors()
+  {
+    ProfileSelection.ClearError();
+    ResourceSelection?.ClearError();
+    ErrorMessage = null;
+  }
 }
 
 public sealed record PlanPagePlaceholderViewModel(

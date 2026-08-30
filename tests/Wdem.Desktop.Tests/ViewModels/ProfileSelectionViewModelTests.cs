@@ -1,6 +1,7 @@
 using Wdem.Core.Execution;
 using Wdem.Core.Graph;
 using Wdem.Core.Profiles;
+using Wdem.Core.Resources;
 using Wdem.Desktop.ViewModels;
 using Xunit;
 
@@ -8,6 +9,19 @@ namespace Wdem.Desktop.Tests.ViewModels;
 
 public sealed class ProfileSelectionViewModelTests
 {
+  [Fact]
+  public async Task EmptyCatalogShowsTheSameSpecificErrorInChildAndMain()
+  {
+    var main = new MainWindowViewModel(
+        new FixedResultsProfileCatalog([]),
+        new ResourceGraphBuilder(_ => null));
+
+    await main.InitializeAsync();
+
+    Assert.Equal(main.ProfileSelection.ErrorMessage, main.ErrorMessage);
+    Assert.Contains("未找到", main.ErrorMessage, StringComparison.Ordinal);
+  }
+
   [Fact]
   public async Task InvalidResultShowsSameSanitizedActionableErrorInChildAndMain()
   {
@@ -47,12 +61,63 @@ public sealed class ProfileSelectionViewModelTests
     await main.InitializeAsync();
 
     Assert.NotNull(main.ProfileSelection.ErrorMessage);
-    Assert.NotNull(main.ErrorMessage);
+    Assert.Equal(main.ProfileSelection.ErrorMessage, main.ErrorMessage);
 
     await main.ProfileSelection.LoadCommand.ExecuteAsync(null);
 
     Assert.Single(main.ProfileSelection.Profiles);
     Assert.Null(main.ProfileSelection.ErrorMessage);
+    Assert.Null(main.ErrorMessage);
+  }
+
+  [Fact]
+  public async Task GraphFailureWhileSelectingProfileUsesTheSameSafeErrorInChildAndMain()
+  {
+    DeveloperProfile profile = ProfileWithRequiredSource();
+    var main = new MainWindowViewModel(
+        new FixedResultsProfileCatalog([
+          new ProfileLoadResult
+          {
+            Profile = profile,
+            SourcePath = "csharp-developer.yaml"
+          }
+        ]),
+        new ResourceGraphBuilder(_ => null));
+    await main.InitializeAsync();
+
+    await main.ProfileSelection.SelectProfileCommand.ExecuteAsync(null);
+
+    Assert.Null(main.ResourceSelection);
+    Assert.Equal(main.ProfileSelection.ErrorMessage, main.ErrorMessage);
+    Assert.Contains("WDEM_COMPANY_VSIX_PATH", main.ErrorMessage, StringComparison.Ordinal);
+    Assert.Contains("required", main.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+  }
+
+  [Fact]
+  public async Task NavigatingToResourcesClearsAStaleProfileAndMainError()
+  {
+    bool sourceIsAvailable = true;
+    DeveloperProfile profile = ProfileWithRequiredSource();
+    var main = new MainWindowViewModel(
+        new FixedResultsProfileCatalog([
+          new ProfileLoadResult
+          {
+            Profile = profile,
+            SourcePath = "csharp-developer.yaml"
+          }
+        ]),
+        new ResourceGraphBuilder(_ => sourceIsAvailable ? @"C:\safe\company.vsix" : null));
+    await main.InitializeAsync();
+    await main.ProfileSelection.SelectProfileCommand.ExecuteAsync(null);
+    Assert.NotNull(main.ResourceSelection);
+    sourceIsAvailable = false;
+    await main.ProfileSelection.SelectProfileCommand.ExecuteAsync(null);
+    Assert.NotNull(main.ProfileSelection.ErrorMessage);
+
+    await main.NavigateToResourcesCommand.ExecuteAsync(null);
+
+    Assert.Null(main.ProfileSelection.ErrorMessage);
+    Assert.Null(main.ResourceSelection!.ErrorMessage);
     Assert.Null(main.ErrorMessage);
   }
 
@@ -62,6 +127,29 @@ public sealed class ProfileSelectionViewModelTests
     Version = "1.0.0",
     DisplayName = "C# Developer",
     Description = "C# developer workstation"
+  };
+
+  private static DeveloperProfile ProfileWithRequiredSource() => new()
+  {
+    Id = "csharp-developer",
+    Version = "1.0.0",
+    DisplayName = "C# Developer",
+    Description = "C# developer workstation",
+    RequiredResources = [new ProfileResourceReference { Id = "company-vs-extension" }],
+    Resources = new Dictionary<string, ResourceDefinition>(StringComparer.OrdinalIgnoreCase)
+    {
+      ["company-vs-extension"] = new ResourceDefinition
+      {
+        Id = "company-vs-extension",
+        Type = "vsix",
+        Provider = "test",
+        DisplayName = "Company Visual Studio extension",
+        Parameters = new Dictionary<string, string?>
+        {
+          ["sourcePath"] = "${WDEM_COMPANY_VSIX_PATH}"
+        }
+      }
+    }
   };
 
   private sealed class RetryProfileCatalog(DeveloperProfile profile) : IProfileCatalog
@@ -97,11 +185,13 @@ public sealed class ProfileSelectionViewModelTests
   {
     public Task<ProfileLoadResult> LoadAsync(
         string id,
-        CancellationToken cancellationToken = default) => Task.FromResult(results[0]);
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(results.FirstOrDefault() ?? new ProfileLoadResult { SourcePath = string.Empty });
 
     public Task<ProfileLoadResult> LoadFileAsync(
         string path,
-        CancellationToken cancellationToken = default) => Task.FromResult(results[0]);
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(results.FirstOrDefault() ?? new ProfileLoadResult { SourcePath = string.Empty });
 
     public Task<IReadOnlyList<ProfileLoadResult>> LoadAllAsync(
         CancellationToken cancellationToken = default) => Task.FromResult(results);

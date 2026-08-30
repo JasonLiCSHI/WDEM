@@ -31,7 +31,7 @@ public sealed class ProfileSelectionViewModel : ObservableObject
   private const string DeliveredProfileId = "csharp-developer";
   private readonly IProfileCatalog _catalog;
   private readonly Action<DeveloperProfile> _selectProfile;
-  private readonly Action<Exception> _onError;
+  private readonly Func<Exception, string> _reportError;
   private readonly Action _clearError;
   private string? _errorMessage;
   private ProfileSelectionItemViewModel? _selectedProfile;
@@ -39,14 +39,14 @@ public sealed class ProfileSelectionViewModel : ObservableObject
   public ProfileSelectionViewModel(
       IProfileCatalog catalog,
       Action<DeveloperProfile> selectProfile,
-      Action<Exception>? onError = null,
+      Func<Exception, string>? reportError = null,
       Action? clearError = null)
   {
     ArgumentNullException.ThrowIfNull(catalog);
     ArgumentNullException.ThrowIfNull(selectProfile);
     _catalog = catalog;
     _selectProfile = selectProfile;
-    _onError = onError ?? (_ => { });
+    _reportError = reportError ?? UserErrorMessageFormatter.Format;
     _clearError = clearError ?? (() => { });
     Profiles = new ObservableCollection<ProfileSelectionItemViewModel>();
     LoadCommand = new AsyncRelayCommand(_ => LoadAsync(), onError: ReportError);
@@ -103,14 +103,11 @@ public sealed class ProfileSelectionViewModel : ObservableObject
           .FirstOrDefault();
       if (error is not null)
       {
-        var exception = new StructuredErrorException(error);
-        ErrorMessage = exception.UserMessage;
-        _onError(exception);
+        ReportError(new StructuredErrorException(error));
       }
       else
       {
-        ErrorMessage = "未找到可用的 C# Developer 配置文件。";
-        _onError(new InvalidOperationException(ErrorMessage));
+        ReportError(new UserMessageException("未找到可用的 C# Developer 配置文件。"));
       }
     }
   }
@@ -128,13 +125,14 @@ public sealed class ProfileSelectionViewModel : ObservableObject
 
   private void ReportError(Exception exception)
   {
-    ErrorMessage = "无法加载配置文件。请检查配置目录后重试。";
-    _onError(exception);
+    ErrorMessage = _reportError(exception);
   }
 
   private void ClearErrors()
   {
-    ErrorMessage = null;
+    ClearError();
     _clearError();
   }
+
+  internal void ClearError() => ErrorMessage = null;
 }

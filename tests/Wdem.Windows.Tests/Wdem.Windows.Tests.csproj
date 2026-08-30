@@ -21,6 +21,8 @@
   <ItemGroup>
     <Compile Include="..\Shared\PublishedElevatedHostSmoke.cs"
              Link="Shared\PublishedElevatedHostSmoke.cs" />
+    <Compile Include="..\Shared\TestProcessRunner.cs"
+             Link="Shared\TestProcessRunner.cs" />
     <ProjectReference Include="..\..\src\Wdem.Core\Wdem.Core.csproj" />
     <ProjectReference Include="..\..\src\Wdem.Windows\Wdem.Windows.csproj" />
     <ProjectReference Include="..\..\src\Wdem.Cli\Wdem.Cli.csproj" />

@@ -3,7 +3,6 @@ using System.Windows.Input;
 using Wdem.Core.Execution;
 using Wdem.Core.Graph;
 using Wdem.Core.Profiles;
-using Wdem.Core.Runs;
 
 namespace Wdem.Desktop.ViewModels;
 
@@ -19,43 +18,6 @@ public sealed record ResourceSelectionNavigationRequest(
     ProfileSelection Selection,
     ResourceGraph Graph);
 
-public sealed class StructuredErrorException : InvalidOperationException
-{
-  public StructuredErrorException(StructuredError error)
-      : this(CreateDisplay(error))
-  {
-  }
-
-  private StructuredErrorException(StructuredErrorDisplay display)
-      : base(display.UserMessage)
-  {
-    Error = display.Error;
-    UserMessage = display.UserMessage;
-  }
-
-  public StructuredError Error { get; }
-
-  public string UserMessage { get; }
-
-  private static StructuredErrorDisplay CreateDisplay(StructuredError error)
-  {
-    ArgumentNullException.ThrowIfNull(error);
-    var redactor = new LogRedactor();
-    StructuredError safeError = redactor.Redact(error);
-    string? safeAction = safeError.SuggestedAction is null
-        ? null
-        : new StructuredError(safeError.Code, safeError.Summary, safeError.SuggestedAction).Detail;
-    safeError = safeError with { SuggestedAction = safeAction };
-    string userMessage = string.Join(
-        Environment.NewLine,
-        new[] { safeError.Summary, safeError.Detail, safeError.SuggestedAction }
-            .Where(value => !string.IsNullOrWhiteSpace(value)));
-    return new StructuredErrorDisplay(safeError, userMessage);
-  }
-
-  private sealed record StructuredErrorDisplay(StructuredError Error, string UserMessage);
-}
-
 public sealed class ResourceSelectionViewModel : ObservableObject
 {
   private readonly DeveloperProfile _profile;
@@ -63,7 +25,7 @@ public sealed class ResourceSelectionViewModel : ObservableObject
   private readonly HashSet<string> _requiredIds;
   private readonly HashSet<string> _optionalIds;
   private readonly HashSet<string> _selectedOptionalIds;
-  private readonly Action<Exception> _onError;
+  private readonly Func<Exception, string> _reportError;
   private readonly Action _clearError;
   private ResourceGraph? _resolvedGraph;
   private string? _errorMessage;
@@ -72,14 +34,14 @@ public sealed class ResourceSelectionViewModel : ObservableObject
       DeveloperProfile profile,
       ResourceGraphBuilder graphBuilder,
       Action<ResourceSelectionNavigationRequest>? navigateToPlan = null,
-      Action<Exception>? onError = null,
+      Func<Exception, string>? reportError = null,
       Action? clearError = null)
   {
     ArgumentNullException.ThrowIfNull(profile);
     ArgumentNullException.ThrowIfNull(graphBuilder);
     _profile = profile;
     _graphBuilder = graphBuilder;
-    _onError = onError ?? (_ => { });
+    _reportError = reportError ?? UserErrorMessageFormatter.Format;
     _clearError = clearError ?? (() => { });
     _requiredIds = new HashSet<string>(
         profile.RequiredResources.Select(resource => resource.Id),
@@ -106,10 +68,10 @@ public sealed class ResourceSelectionViewModel : ObservableObject
 
     CheckEnvironmentCommand = new AsyncRelayCommand(
         _ => NavigateAsync(ResourceSelectionAction.CheckEnvironment, navigateToPlan),
-        onError: _onError);
+        onError: ReportError);
     StartConfigurationCommand = new AsyncRelayCommand(
         _ => NavigateAsync(ResourceSelectionAction.StartConfiguration, navigateToPlan),
-        onError: _onError);
+        onError: ReportError);
 
     RecalculateSelection();
   }
@@ -187,8 +149,7 @@ public sealed class ResourceSelectionViewModel : ObservableObject
       }
 
       RecalculateSelection();
-      ErrorMessage = ToUserMessage(exception);
-      _onError(exception);
+      ReportError(exception);
     }
   }
 
@@ -259,12 +220,11 @@ public sealed class ResourceSelectionViewModel : ObservableObject
 
   private void ClearErrors()
   {
-    ErrorMessage = null;
+    ClearError();
     _clearError();
   }
 
-  internal static string ToUserMessage(Exception exception) =>
-      exception is StructuredErrorException structuredException
-          ? structuredException.UserMessage
-          : "操作未完成。请检查输入后重试。";
+  private void ReportError(Exception exception) => ErrorMessage = _reportError(exception);
+
+  internal void ClearError() => ErrorMessage = null;
 }
