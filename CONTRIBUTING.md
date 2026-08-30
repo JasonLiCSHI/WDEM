@@ -1,32 +1,39 @@
 # Contributing to WDEM
 
-WDEM is establishing its product boundary around `Wdem.Core`. The repository
-currently builds transition libraries and tests; do not add a product host as
-part of this work unless explicitly scoped.
+WDEM is an independent product. Keep product hosts, namespaces, state paths,
+environment inputs, documentation, and automation WDEM-branded. Source-derived
+code remains isolated in `Wdem.LegacySource` and must not become a public host
+or release artifact.
 
 ## Build and test
 
 ```powershell
-dotnet restore Wdem.sln -p:EnableWindowsTargeting=true
-dotnet build Wdem.sln -p:EnableWindowsTargeting=true --no-restore
-dotnet test Wdem.sln -p:EnableWindowsTargeting=true --no-build
-dotnet format Wdem.sln
+dotnet restore Wdem.sln -m:1 -p:EnableWindowsTargeting=true
+dotnet format Wdem.sln --verify-no-changes --verbosity diagnostic --no-restore
+dotnet build Wdem.sln --no-restore -m:1 -p:EnableWindowsTargeting=true
+dotnet test Wdem.sln --no-restore --verbosity normal -m:1 -p:EnableWindowsTargeting=true
 ```
 
-The current projects are:
+Do not run an Apply flow on a development machine. Use focused tests, inspection
+and planning, or a disposable Windows VM for privileged end-to-end validation.
 
-- `src\Wdem.Core`
-- `src\Wdem.LegacySource`
-- `tests\Wdem.Core.Tests`
-- `tests\Wdem.LegacySource.Tests`
+The solution contains `Wdem.Core`, `Wdem.Windows`, `Wdem.Cli`,
+`Wdem.Desktop`, `Wdem.ElevatedHost`, the transition-source library, and their
+test projects. New UI belongs in WinUI 3 and uses code-behind; do not introduce
+WPF, a third-party UI framework, or MVVM infrastructure.
 
-Use focused commits and add tests for changes in either library. Supported
-hosts accept configuration through the explicit `--profile` option and keep
-state under `%LOCALAPPDATA%\WDEM`; they do not read `WDEM_CONFIG_PATH`,
-`WDEM_STATE_PATH`, or `WINHOME_STATE_PATH` as path overrides. The
-`WINHOME_STATE_PATH` name is retained only inside isolated transition-library
-migration behavior and must not become a supported host setting.
+## Product contracts
 
-For source attribution and the transition boundary, see
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) and
-[source provenance](docs/wdem/source-provenance.md).
+- Product state belongs under `%LOCALAPPDATA%\WDEM`.
+- Profiles are supplied explicitly through `--profile`.
+- Product-specific profile variables use the `WDEM_` prefix; the shipped company
+  VSIX uses `WDEM_COMPANY_VSIX_PATH` and `WDEM_COMPANY_VSIX_SHA256`.
+- Never log secrets or raw command lines containing sensitive values.
+- Any Apply change requires a fresh Detect/Plan cycle and explicit confirmation.
+- Releases contain only the ZIP, its checksum file, and third-party notices.
+
+Use focused commits and add a regression test before changing behavior. Pull
+requests must link an approved issue and describe verification performed.
+
+For the licensing boundary, see [third-party notices](THIRD-PARTY-NOTICES.md)
+and [source provenance](docs/wdem/source-provenance.md).

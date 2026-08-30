@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Self-contained Windows x64 WDEM distribution with CLI, WinUI 3 desktop, and
+  narrowly scoped elevated host.
+- Complete C# developer MVP profile, product guides, recovery guidance, and
+  release provenance/checksum assets.
 - Centralized plugin directory page in documentation.
 - AutoHotkey config provider plugin.
 - Opencode config provider plugin.
@@ -19,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pip plugin: Return bare bool in `check_installed` and add corrupted config recovery test.
 
 ### Changed
+- Completed the public product identity migration to WDEM across documentation,
+  issue templates, CI, and release automation.
+- Restricted releases to `Wdem-win-x64.zip`, `SHA256SUMS.txt`, and
+  `THIRD-PARTY-NOTICES.md`.
 - Enforce LF line endings across the repository.
 - Update test arguments to match settings protocol.
 

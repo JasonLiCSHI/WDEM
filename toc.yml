@@ -4,11 +4,15 @@
   href: docs/
   topicHref: docs/config.md
 - name: Getting Started
-  href: docs/getting-started.md
+  href: docs/wdem/getting-started.md
+- name: Profile Authoring
+  href: docs/wdem/profile-authoring.md
+- name: Recovery and Security
+  href: docs/wdem/recovery-and-security.md
 - name: 📖 API Reference
   href: api/
   topicHref: api/index.md
 - name: Security Guide
-  href: docs/security.md
+  href: docs/wdem/recovery-and-security.md
 - name: Troubleshooting
   href: docs/troubleshooting.md

@@ -11,7 +11,8 @@ permissions:
   contents: read
 
 jobs:
-  lint:
+  wdem-cross-platform:
+    name: WDEM format and build
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -29,8 +30,11 @@ jobs:
     - name: Setup bun
       uses: oven-sh/setup-bun@v2
 
-    - name: Restore cross-platform projects
-      run: dotnet restore tests/Wdem.Core.Tests/Wdem.Core.Tests.csproj
+    - name: Restore WDEM
+      run: dotnet restore Wdem.sln -m:1 -p:EnableWindowsTargeting=true
+
+    - name: Check WDEM formatting
+      run: dotnet format Wdem.sln --verify-no-changes --verbosity diagnostic --no-restore
 
     - name: Check Python formatting
       run: |
@@ -40,10 +44,11 @@ jobs:
     - name: Check JS/TS formatting
       run: bun x prettier --check plugins/
 
-    - name: Build cross-platform projects
-      run: dotnet build tests/Wdem.Core.Tests/Wdem.Core.Tests.csproj --no-restore
+    - name: Build WDEM
+      run: dotnet build Wdem.sln --no-restore -m:1 -p:EnableWindowsTargeting=true
 
-  test:
+  wdem-windows:
+    name: WDEM Windows tests
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v7
@@ -54,10 +59,10 @@ jobs:
         dotnet-version: 10.0.x
 
     - name: Restore dependencies
-      run: dotnet restore Wdem.sln -p:EnableWindowsTargeting=true
+      run: dotnet restore Wdem.sln -m:1 -p:EnableWindowsTargeting=true
 
     - name: Build solution
-      run: dotnet build Wdem.sln --no-restore -p:EnableWindowsTargeting=true
+      run: dotnet build Wdem.sln --no-restore -m:1 -p:EnableWindowsTargeting=true
 
     - name: Install uv and bun
       shell: pwsh
@@ -67,13 +72,13 @@ jobs:
         powershell -ExecutionPolicy ByPass -c "irm https://bun.sh/install.ps1 | iex"
         echo "$env:USERPROFILE\.bun\bin" >> $env:GITHUB_PATH
 
-    - name: Run tests
-      run: dotnet test Wdem.sln --no-restore -p:EnableWindowsTargeting=true
+    - name: Run WDEM tests
+      run: dotnet test Wdem.sln --no-restore --verbosity normal --collect "XPlat Code Coverage" -m:1 -p:EnableWindowsTargeting=true
 
     - name: Test plugin action downloads
       shell: bash
       run: |
-        echo "Testing action downloads for all 72 plugins..."
+        echo "Testing source-derived plugin action downloads..."
         cd plugins
         TOTAL=0
         FAILED=0

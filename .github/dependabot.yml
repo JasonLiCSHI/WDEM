@@ -4,8 +4,14 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+    labels: ["dependencies", "wdem"]
+    commit-message:
+      prefix: "deps(wdem)"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "daily"
+    labels: ["dependencies", "wdem"]
+    commit-message:
+      prefix: "deps(wdem)"

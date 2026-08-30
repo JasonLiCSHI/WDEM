@@ -1,25 +1,26 @@
 # WDEM
 
 [WDEM](https://github.com/JasonLiCSHI/WDEM) is an independent Windows
-environment-management product under active development.
+developer-environment manager. It inspects a declarative profile, builds a
+dependency-aware plan, and applies only the plan that the user confirms.
 
-## Current status
+## Download and run
 
-`Wdem.Cli.exe` is the sole supported command-line surface for managing a
-developer environment. It is profile-driven; transition source remains an
-internal library and does not provide a supported executable or command
-compatibility contract.
+Each Windows x64 release has exactly three assets:
 
-## Command line
+- `Wdem-win-x64.zip`, the complete self-contained product distribution;
+- `SHA256SUMS.txt`, the archive checksum; and
+- `THIRD-PARTY-NOTICES.md`, the source-attribution notice.
 
-Run the CLI from the build output, or use `dotnet run` while developing:
+Verify the checksum before extracting the ZIP. Keep the complete extracted
+`Cli`, `Desktop`, and `ElevatedHost` directories together: the unpackaged
+WinUI 3 desktop host requires the Windows App SDK files beside its executable.
+Start `Desktop\Wdem.Desktop.exe`, or use `Cli\Wdem.Cli.exe` for automation.
 
-```powershell
-dotnet run --project src/Wdem.Cli -- inspect --profile profiles/csharp-developer.yaml --json
-dotnet run --project src/Wdem.Cli -- apply --profile profiles/csharp-developer.yaml --select resharper --max-concurrency 4
-```
+See the [WDEM getting-started guide](docs/wdem/getting-started.md) for exact
+PowerShell commands.
 
-The supported grammar is:
+## Supported command line
 
 ```text
 wdem inspect --profile <file> [--select <resourceId> ...] [--json]
@@ -29,36 +30,34 @@ wdem resume --run <guid> [--json]
 wdem runs list [--json]
 ```
 
-`--json` writes newline-delimited JSON. A successful run exits with `0`; host
-initialization or output failures use `1`, profile or plan validation errors
-use `2`, execution failures use `3`, and cancellation uses `130`.
+`--json` writes newline-delimited JSON. Success exits `0`; host initialization
+or output failure exits `1`, profile or plan validation exits `2`, execution
+failure exits `3`, and cancellation exits `130`.
+
+## Profiles, state, and safety
+
+WDEM ships `profiles/csharp-developer.yaml` as its complete MVP profile.
+Required resources are Visual Studio, the .NET SDK, and Git. Optional resources
+are ReSharper, ReSharper settings, a company VSIX, and Visual Studio settings.
+See [profile authoring](docs/wdem/profile-authoring.md) for the schema and
+trusted-source requirements.
+
+Execution snapshots and redacted logs live under `%LOCALAPPDATA%\WDEM\runs`.
+Imported source-derived state is only migration history and never proof that a
+current resource is compliant. See [recovery and security](docs/wdem/recovery-and-security.md).
 
 ## Build and test
 
 ```powershell
-dotnet restore Wdem.sln -p:EnableWindowsTargeting=true
-dotnet build Wdem.sln -p:EnableWindowsTargeting=true --no-restore
-dotnet test Wdem.sln -p:EnableWindowsTargeting=true --no-build
+dotnet restore Wdem.sln -m:1 -p:EnableWindowsTargeting=true
+dotnet format Wdem.sln --verify-no-changes --verbosity diagnostic --no-restore
+dotnet build Wdem.sln --no-restore -m:1 -p:EnableWindowsTargeting=true
+dotnet test Wdem.sln --no-restore --verbosity normal -m:1 -p:EnableWindowsTargeting=true
 ```
 
-## Configuration and state
+## License and provenance
 
-WDEM reads a developer-profile YAML file supplied explicitly with the
-`--profile` option. There is no implicit public configuration file or
-environment-variable override.
-
-Execution snapshots and redacted event logs are stored under
-`%LOCALAPPDATA%\WDEM\runs`. On first initialization, WDEM may import supported
-legacy state from `%LOCALAPPDATA%\WinHome`. `WINHOME_STATE_PATH` belongs only
-to retired transition behavior and is not read by the supported product host;
-neither source is a continuing configuration or state interface.
-
-## Source provenance
-
-See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) and
-[source provenance](docs/wdem/source-provenance.md) for the transitional
-source boundary and license attribution.
-
-## License
-
-WDEM retains the [MIT License](LICENSE) required for source-derived material.
+WDEM retains the [MIT License](LICENSE) and explicit attribution required for
+source-derived material. That material is not a separately supported product
+or executable. See [third-party notices](THIRD-PARTY-NOTICES.md) and
+[source provenance](docs/wdem/source-provenance.md).

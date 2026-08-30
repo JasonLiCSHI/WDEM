@@ -1,18 +1,35 @@
-# Troubleshooting WDEM development
+# Troubleshoot WDEM
 
-`Wdem.Cli.exe` is the sole supported profile-driven CLI, and `Wdem.Desktop` is
-the WinUI host. Task 22 will provide a self-contained ZIP for end-user
-distribution. For development failures, first run the supported solution
-validation:
+## The desktop executable does not start
+
+Extract the whole `Wdem-win-x64.zip` again. Do not move
+`Desktop\Wdem.Desktop.exe` away from its Windows App SDK and runtime companion
+files. Confirm the archive hash against `SHA256SUMS.txt` before retrying.
+
+## A profile is rejected
+
+Run `Cli\Wdem.Cli.exe inspect --profile <path> --json` and use the JSON pointer
+in the structured error. Check the schema version, resource/provider pair,
+dependency IDs, version syntax, source path, and 64-hex SHA-256 fields. See
+[profile authoring](wdem/profile-authoring.md).
+
+## Apply reports a stale plan
+
+The machine, selected Visual Studio instance, source artifact, or destination
+changed after planning. This is a safety failure. Run a fresh Detect, review a
+new Plan, and confirm it; do not edit the snapshot to bypass the check.
+
+## A run was cancelled, interrupted, or requires restart
+
+Use `Cli\Wdem.Cli.exe runs list`, then inspect the relevant run under
+`%LOCALAPPDATA%\WDEM\runs`. Resume or retry only through the supported CLI or
+desktop flow. WDEM may finish an atomic finalization after cancellation. See
+[recovery and security](wdem/recovery-and-security.md).
+
+## Contributor validation
 
 ```powershell
-dotnet restore Wdem.sln -p:EnableWindowsTargeting=true
-dotnet build Wdem.sln -p:EnableWindowsTargeting=true --no-restore
-dotnet test Wdem.sln -p:EnableWindowsTargeting=true --no-build
+dotnet restore Wdem.sln -m:1 -p:EnableWindowsTargeting=true
+dotnet build Wdem.sln --no-restore -m:1 -p:EnableWindowsTargeting=true
+dotnet test Wdem.sln --no-restore --verbosity normal -m:1 -p:EnableWindowsTargeting=true
 ```
-
-Supported WDEM hosts use an explicit `--profile` path and isolated state under
-`%LOCALAPPDATA%\WDEM`. They intentionally ignore `WDEM_CONFIG_PATH`,
-`WDEM_STATE_PATH`, and `WINHOME_STATE_PATH` as environment overrides.
-`WINHOME_STATE_PATH` exists only as an isolated transition-library migration
-input and is not a supported WDEM interface.

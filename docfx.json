@@ -58,7 +58,12 @@
     ],
     "globalMetadata": {
       "_appTitle": "WDEM",
-      "_appFooter": "WDEM development documentation",
+      "_appName": "WDEM",
+      "_appFooter": "WDEM product and development documentation",
+      "_gitContribute": {
+        "repo": "https://github.com/JasonLiCSHI/WDEM",
+        "branch": "main"
+      },
       "_enableSearch": true,
       "_enableNewTab": true,
       "_disableNavbar": true

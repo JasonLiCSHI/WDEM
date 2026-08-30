@@ -1,30 +1,32 @@
-# Getting started with WDEM development
+# Build WDEM from source
 
-`Wdem.Cli.exe` is the sole supported profile-driven CLI, and `Wdem.Desktop` is
-the WinUI host. Task 22 will provide a self-contained ZIP for end-user
-distribution.
+This page is for contributors. For the product distribution, see
+[Get started with WDEM](wdem/getting-started.md).
+
+`Wdem.Cli.exe` is the supported profile-driven CLI. `Wdem.Desktop.exe` is the
+unpackaged WinUI 3 host, and `Wdem.ElevatedHost.exe` is its narrowly scoped UAC
+broker.
 
 ## Prerequisites
 
-Install the .NET 10 SDK. The transition library targets Windows, so enable
-Windows targeting when developing from another operating system.
+Install the .NET 10 SDK. On non-Windows build agents, enable Windows targeting;
+running the desktop or elevation host still requires Windows.
 
-## Restore, build, and test
+## Restore, format, build, and test
 
 From the repository root:
 
 ```powershell
-dotnet restore Wdem.sln -p:EnableWindowsTargeting=true
-dotnet build Wdem.sln -p:EnableWindowsTargeting=true --no-restore
-dotnet test Wdem.sln -p:EnableWindowsTargeting=true --no-build
+dotnet restore Wdem.sln -m:1 -p:EnableWindowsTargeting=true
+dotnet format Wdem.sln --verify-no-changes --verbosity diagnostic --no-restore
+dotnet build Wdem.sln --no-restore -m:1 -p:EnableWindowsTargeting=true
+dotnet test Wdem.sln --no-restore --verbosity normal -m:1 -p:EnableWindowsTargeting=true
 ```
 
-Supported WDEM hosts take a profile path explicitly through `--profile` and
-store product state under `%LOCALAPPDATA%\WDEM`. They do not use
-`WDEM_CONFIG_PATH`, `WDEM_STATE_PATH`, or `WINHOME_STATE_PATH` as environment
-overrides. `WINHOME_STATE_PATH` remains only an isolated transition-library
-migration input; it is not part of the WDEM public contract.
+Do not run Apply on a development workstation. Use inspection/planning tests or
+a disposable Windows VM. Product state is isolated under
+`%LOCALAPPDATA%\WDEM`; profiles are passed explicitly with `--profile`.
 
 For license attribution and the transition boundary, see
-[THIRD-PARTY-NOTICES](../THIRD-PARTY-NOTICES.md) and
+[third-party notices](../THIRD-PARTY-NOTICES.md) and
 [source provenance](wdem/source-provenance.md).

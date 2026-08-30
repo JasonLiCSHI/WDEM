@@ -1,5 +1,5 @@
-name: Task / Maintenance
-description: Propose a code cleanup, refactor, or maintenance task
+name: WDEM Task / Maintenance
+description: Propose a WDEM code cleanup, refactor, or maintenance task
 labels: ["type:refactor"]
 body:
   - type: textarea
@@ -27,3 +27,5 @@ body:
         - Infrastructure
         - Tests
         - CI/CD
+        - Product documentation
+        - Release packaging

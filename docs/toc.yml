@@ -4,6 +4,16 @@
   href: ../api/
 - name: Getting Started
   href: getting-started.md
+- name: WDEM Product Guides
+  items:
+  - name: Install and Start
+    href: wdem/getting-started.md
+  - name: Profile Authoring
+    href: wdem/profile-authoring.md
+  - name: Recovery and Security
+    href: wdem/recovery-and-security.md
+  - name: Source Provenance
+    href: wdem/source-provenance.md
 - name: Overview
   href: config.md
 - name: Configuration Reference

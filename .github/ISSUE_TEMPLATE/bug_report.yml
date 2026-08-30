@@ -1,4 +1,4 @@
-name: Bug Report
+name: WDEM Bug Report
 description: File a bug report to help us improve WDEM
 labels: ["bug"]
 body:
@@ -57,6 +57,16 @@ body:
       label: Relevant Logs or Config
       description: Please paste any relevant WDEM logs or your `config.yaml` (redact secrets!).
       render: yaml
+  - type: dropdown
+    id: host
+    attributes:
+      label: WDEM host
+      options:
+        - Wdem.Desktop.exe
+        - Wdem.Cli.exe
+        - Documentation or CI
+    validations:
+      required: true
   - type: textarea
     id: context
     attributes:

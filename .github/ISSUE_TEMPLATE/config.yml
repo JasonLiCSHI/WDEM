@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 💬 GitHub Discussions
+  - name: WDEM GitHub Discussions
     url: https://github.com/JasonLiCSHI/WDEM/discussions
     about: Please use discussions for questions or support.
-  - name: 🌈 GSSOC 2026 Guidelines
+  - name: WDEM contribution guidelines
     url: https://github.com/JasonLiCSHI/WDEM/blob/main/CONTRIBUTING.md
     about: Read our contribution guide before opening an issue.

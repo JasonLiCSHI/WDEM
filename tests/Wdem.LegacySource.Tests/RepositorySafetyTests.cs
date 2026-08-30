@@ -95,12 +95,27 @@ public class RepositorySafetyTests
   [InlineData("README.md")]
   [InlineData("docs/getting-started.md")]
   [InlineData("docs/troubleshooting.md")]
-  public void MigrationDocumentation_NamesOnlyTheDeliberateLegacyStateInput(string relativePath)
+  public void PublicProductDocumentation_ExposesOnlyWdemEnvironmentInputs(string relativePath)
   {
     var contents = File.ReadAllText(Path.Combine(GetRepositoryRoot(), relativePath));
 
-    Assert.Contains("WINHOME_STATE_PATH", contents);
-    Assert.DoesNotContain("WINHOME_*", contents);
+    Assert.DoesNotContain("WINHOME_", contents, StringComparison.Ordinal);
+    Assert.DoesNotContain("%LOCALAPPDATA%\\WinHome", contents, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void ProvenanceDocumentation_ConstrainsTheOneTimeLegacyStateImport()
+  {
+    var contents = File.ReadAllText(Path.Combine(
+        GetRepositoryRoot(),
+        "docs",
+        "wdem",
+        "source-provenance.md"));
+
+    Assert.Contains("%LOCALAPPDATA%\\WinHome", contents, StringComparison.Ordinal);
+    Assert.Contains("%LOCALAPPDATA%\\WDEM\\migration-v1.json", contents, StringComparison.Ordinal);
+    Assert.Contains("non-authoritative history", contents, StringComparison.Ordinal);
+    Assert.Contains("fresh Detect and Plan", contents, StringComparison.Ordinal);
   }
 
   private static void SeedRemote(string repositoryPath, string remoteName)

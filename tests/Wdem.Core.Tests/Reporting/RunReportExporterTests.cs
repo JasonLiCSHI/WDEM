@@ -79,9 +79,9 @@ public sealed class RunReportExporterTests
         id,
         ExecutionState.Completed,
         ExecutionOutcome.Succeeded) with
-      {
-        DetectedBefore = Detected(id)
-      };
+    {
+      DetectedBefore = Detected(id)
+    };
     var firstDefinition = Definition(firstSecret);
     var secondDefinition = Definition(secondSecret);
     var resourcePlan = new ResourcePlan
@@ -591,12 +591,12 @@ public sealed class RunReportExporterTests
         ExecutionOutcome.Failed,
         error,
         RestartPolicy.RestartRequired) with
-      {
-        DetectedBefore = detected,
-        DetectedAfter = detected,
-        StartedAtUtc = new DateTimeOffset(2026, 8, 30, 8, 0, 0, TimeSpan.Zero),
-        EndedAtUtc = new DateTimeOffset(2026, 8, 30, 8, 2, 0, TimeSpan.Zero)
-      };
+    {
+      DetectedBefore = detected,
+      DetectedAfter = detected,
+      StartedAtUtc = new DateTimeOffset(2026, 8, 30, 8, 0, 0, TimeSpan.Zero),
+      EndedAtUtc = new DateTimeOffset(2026, 8, 30, 8, 2, 0, TimeSpan.Zero)
+    };
     ExecutionRun run = CreateTerminalRun(secret);
     return run with
     {

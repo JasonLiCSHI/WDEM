@@ -4,18 +4,22 @@ _disableBreadcrumb: true
 
 # WDEM documentation
 
-WDEM is an independent Windows environment-management product under active
-development. The repository currently contains `Wdem.Core`, a
-`Wdem.LegacySource` transition library, and their test suites.
+WDEM is an independent Windows developer-environment manager with a WinUI 3
+desktop experience and an automation-friendly CLI. Profiles describe required
+and optional resources; WDEM detects current state, presents a deterministic
+plan, and applies only a confirmed plan.
 
-There is no public CLI, desktop host, executable download, or binary release
-yet. Product documentation and supported end-user workflows will be published
-when `Wdem.Cli` and `Wdem.Desktop` exist.
+## Product guides
 
-## Developer entry points
+- [Install and start WDEM](docs/wdem/getting-started.md)
+- [Author a developer profile](docs/wdem/profile-authoring.md)
+- [Recovery and security model](docs/wdem/recovery-and-security.md)
+- [Troubleshooting](docs/troubleshooting.md)
 
-- [Getting started for contributors](docs/getting-started.md)
+## Contributor guides
+
+- [Build and test](docs/getting-started.md)
 - [Cross-platform development](docs/cross-platform-dev.md)
-- [Build and test guidance](docs/testing.md)
+- [Testing](docs/testing.md)
 - [Source provenance](docs/wdem/source-provenance.md)
 - [Third-party notices](THIRD-PARTY-NOTICES.md)

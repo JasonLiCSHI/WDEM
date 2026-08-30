@@ -1,15 +1,17 @@
 ---
-name: Default Issue Template
-about: Please use one of the specialized templates if possible (Bug, Feature, etc.)
+name: WDEM issue
+about: Report a WDEM product or repository issue when no specialized template applies
 ---
 
 **Note: Please use a specific template (Bug Report, Feature Request, etc.) if your issue fits one of those categories.**
 
 ## Description
-A clear and concise description of the issue.
+Describe the WDEM behavior, affected host (`Wdem.Cli.exe` or
+`Wdem.Desktop.exe`), and version.
 
 ## Proposed Solution / Ideas
 If you have any ideas on how to solve this, please list them here.
 
 ## Additional Context
-Add any other context, screenshots, or logs here.
+Add screenshots or redacted logs. Never include credentials, tokens, or private
+profile values.

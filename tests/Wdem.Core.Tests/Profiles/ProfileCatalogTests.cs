@@ -10,6 +10,24 @@ namespace Wdem.Core.Tests.Profiles;
 public sealed class ProfileCatalogTests
 {
   [Fact]
+  public async Task LoadAsync_ShippedCSharpProfile_HasTheCompleteMvpResourceSet()
+  {
+    var result = await CreateProductionCatalog().LoadAsync("csharp-developer", CancellationToken.None);
+
+    Assert.True(result.IsValid, FormatErrors(result.Errors));
+    Assert.Equal(
+        ["visual-studio", "dotnet-sdk", "git"],
+        result.Profile!.RequiredResources.Select(resource => resource.Id));
+    Assert.Equal(
+        ["resharper", "resharper-settings", "company-vs-extension", "visual-studio-settings"],
+        result.Profile.OptionalResources.Select(resource => resource.Id));
+    Assert.Equal(["visual-studio"], result.Profile.Resources["resharper"].Dependencies);
+    Assert.Equal(["resharper"], result.Profile.Resources["resharper-settings"].Dependencies);
+    Assert.Equal(["visual-studio"], result.Profile.Resources["company-vs-extension"].Dependencies);
+    Assert.Equal(["visual-studio"], result.Profile.Resources["visual-studio-settings"].Dependencies);
+  }
+
+  [Fact]
   public void DeveloperProfile_NormalizesAssignedResourceDictionaryToOrdinalIgnoreCase()
   {
     var profile = new DeveloperProfile
@@ -789,6 +807,34 @@ public sealed class ProfileCatalogTests
         new StubProvider("package", "winget"),
         new StubProvider("extension", "file")
       ]));
+
+  private static DirectoryProfileCatalog CreateProductionCatalog() =>
+      new(
+          Path.Combine(FindRepositoryRoot(), "profiles"),
+          new ResourceProviderRegistry([
+            new StubProvider("visual-studio", "visual-studio"),
+            new StubProvider("dotnet-sdk", "winget"),
+            new StubProvider("git", "winget"),
+            new StubProvider("resharper", "winget"),
+            new StubProvider("resharper-settings", "file"),
+            new StubProvider("visual-studio-extension", "vsix"),
+            new StubProvider("visual-studio-settings", "visual-studio-settings")
+          ]));
+
+  private static string FindRepositoryRoot()
+  {
+    for (var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        directory is not null;
+        directory = directory.Parent)
+    {
+      if (File.Exists(Path.Combine(directory.FullName, "Wdem.sln")))
+      {
+        return directory.FullName;
+      }
+    }
+
+    throw new DirectoryNotFoundException("Could not locate the repository root.");
+  }
 
   private static string ValidSingleResourceJson(string profileId) => $$"""
       {

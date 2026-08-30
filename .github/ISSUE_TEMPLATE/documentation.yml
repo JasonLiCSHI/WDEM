@@ -1,11 +1,11 @@
-name: Documentation Issue
-description: Suggest an improvement or report an error in the documentation
+name: WDEM Documentation Issue
+description: Suggest an improvement or report an error in WDEM documentation
 labels: ["type:docs"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for helping improve our documentation!
+        Thanks for helping improve WDEM documentation!
   - type: textarea
     id: problem
     attributes:

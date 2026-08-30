@@ -23,19 +23,36 @@ public sealed class RepositoryIdentityTests
   [Fact]
   public void ProductGuidesDescribeCurrentSupportedHostsAndDistribution()
   {
-    var guides = new[]
-    {
-            Path.Combine(RepositoryRoot, "docs", "getting-started.md"),
-            Path.Combine(RepositoryRoot, "docs", "troubleshooting.md")
-        };
+    var guide = NormalizeWhitespace(File.ReadAllText(Path.Combine(
+        RepositoryRoot,
+        "docs",
+        "wdem",
+        "getting-started.md")));
 
-    foreach (var guidePath in guides)
-    {
-      var guide = NormalizeWhitespace(File.ReadAllText(guidePath));
-      Assert.Contains("`Wdem.Cli.exe` is the sole supported profile-driven CLI", guide);
-      Assert.Contains("`Wdem.Desktop` is the WinUI host", guide);
-      Assert.Contains("Task 22 will provide a self-contained ZIP", guide);
-    }
+    Assert.Contains("`Wdem-win-x64.zip`", guide);
+    Assert.Contains("`Desktop\\Wdem.Desktop.exe`", guide);
+    Assert.Contains("`Cli\\Wdem.Cli.exe`", guide);
+    Assert.Contains("`%LOCALAPPDATA%\\WDEM`", guide);
+    Assert.Contains("`WDEM_COMPANY_VSIX_PATH`", guide);
+    Assert.Contains("Retain every file", guide, StringComparison.OrdinalIgnoreCase);
+    Assert.DoesNotContain("WINHOME_", guide, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void RecoveryGuideRequiresFreshPlanningAndDocumentsTheSecurityBoundary()
+  {
+    var guide = NormalizeWhitespace(File.ReadAllText(Path.Combine(
+        RepositoryRoot,
+        "docs",
+        "wdem",
+        "recovery-and-security.md")));
+
+    Assert.Contains("UAC", guide, StringComparison.Ordinal);
+    Assert.Contains("SHA-256", guide, StringComparison.Ordinal);
+    Assert.Contains("redactor", guide, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("fresh Detect", guide, StringComparison.Ordinal);
+    Assert.Contains("fresh Plan", guide, StringComparison.Ordinal);
+    Assert.Contains("fetch-only", guide, StringComparison.Ordinal);
   }
 
   [Fact]

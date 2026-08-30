@@ -1,13 +1,16 @@
-name: Release validation
+name: WDEM product release
 
 on:
+  push:
+    tags: [ "v*" ]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  build:
+  wdem-release:
+    name: Build WDEM product distribution
     runs-on: windows-latest
 
     steps:
@@ -18,16 +21,52 @@ jobs:
       with:
         dotnet-version: 10.0.x
 
-    - name: Restore solution
-      run: dotnet restore Wdem.sln
+    - name: Restore WDEM
+      run: dotnet restore Wdem.sln -m:1 -p:EnableWindowsTargeting=true
 
-    - name: Build solution
-      run: dotnet build Wdem.sln --no-restore -c Release
+    - name: Test WDEM
+      run: dotnet test Wdem.sln --no-restore -c Release --verbosity normal -m:1 -p:EnableWindowsTargeting=true
 
-    - name: Test solution
-      run: dotnet test Wdem.sln --no-build -c Release --verbosity normal
-
-    - name: Report product release status
+    - name: Publish product distribution
       shell: pwsh
       run: |
-        Write-Host "Validated Wdem.sln. Product binary publishing is disabled until Wdem.Cli and Wdem.Desktop hosts exist."
+        $root = Join-Path $PWD 'staging\WDEM'
+        $publish = Join-Path $PWD 'publish'
+        New-Item -ItemType Directory -Force -Path $root, $publish | Out-Null
+
+        dotnet publish src\Wdem.Cli\Wdem.Cli.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -m:1 -o (Join-Path $root 'Cli')
+        if ($LASTEXITCODE -ne 0) { throw 'Publish failed: Wdem.Cli' }
+        dotnet publish src\Wdem.Desktop\Wdem.Desktop.csproj -c Release -r win-x64 --self-contained true -p:WindowsPackageType=None -p:WindowsAppSDKSelfContained=true -m:1 -o (Join-Path $root 'Desktop')
+        if ($LASTEXITCODE -ne 0) { throw 'Publish failed: Wdem.Desktop' }
+        dotnet publish src\Wdem.ElevatedHost\Wdem.ElevatedHost.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -m:1 -o (Join-Path $root 'ElevatedHost')
+        if ($LASTEXITCODE -ne 0) { throw 'Publish failed: Wdem.ElevatedHost' }
+
+        $expected = @(
+            (Join-Path $root 'Cli\Wdem.Cli.exe'),
+            (Join-Path $root 'Desktop\Wdem.Desktop.exe'),
+            (Join-Path $root 'ElevatedHost\Wdem.ElevatedHost.exe')
+        )
+        foreach ($executable in $expected) {
+            if (-not (Test-Path $executable -PathType Leaf)) {
+                throw "Missing product host: $executable"
+            }
+        }
+
+        Copy-Item THIRD-PARTY-NOTICES.md (Join-Path $root 'THIRD-PARTY-NOTICES.md')
+        $archive = Join-Path $publish 'Wdem-win-x64.zip'
+        Compress-Archive -Path (Join-Path $root '*') -DestinationPath $archive -Force
+        Get-FileHash $archive -Algorithm SHA256 | ForEach-Object {
+            "$($_.Hash)  Wdem-win-x64.zip"
+        } | Set-Content (Join-Path $publish 'SHA256SUMS.txt') -Encoding ascii
+        Copy-Item THIRD-PARTY-NOTICES.md (Join-Path $publish 'THIRD-PARTY-NOTICES.md')
+
+    - name: Create WDEM release
+      uses: softprops/action-gh-release@v3
+      with:
+        files: |
+          publish\Wdem-win-x64.zip
+          publish\SHA256SUMS.txt
+          publish\THIRD-PARTY-NOTICES.md
+        draft: false
+        prerelease: false
+        generate_release_notes: true

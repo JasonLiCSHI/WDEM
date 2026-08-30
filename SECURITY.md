@@ -1,200 +1,26 @@
-# Security Policy
+# WDEM security policy
 
-## Supported Versions
+## Supported versions
 
-We only support the latest version of WDEM. Please ensure you are using the most recent release before reporting a security vulnerability.
+Only the latest WDEM release is supported. Verify the distribution ZIP against
+its release `SHA256SUMS.txt` and retain all extracted companion files.
 
-| Version | Supported |
-| ------- | --------- |
-| Latest | :white_check_mark: |
-| < 1.0 | :x: |
+## Report a vulnerability
 
----
+Do not open a public issue for a suspected vulnerability. Use
+[GitHub private vulnerability reporting](https://github.com/JasonLiCSHI/WDEM/security/advisories/new)
+or email [security@wdem.dev](mailto:security@wdem.dev). Include the affected
+version, impact, reproducible steps, and a minimal proof of concept. Remove
+credentials, tokens, personal paths, and other secrets from attachments.
 
-## Reporting a Vulnerability
+We aim to acknowledge reports within 48 hours, provide an initial assessment
+within five business days, and coordinate disclosure after a fix is available.
 
-We take security seriously. If you discover a security vulnerability within WDEM, please do **not** disclose it publicly.
+## Product security boundary
 
-Please report vulnerabilities using one of the following methods:
-
-1. **Email**: Send a report to [security@wdem.dev](mailto:security@wdem.dev)
-2. **GitHub**: Use the [Private Vulnerability Reporting](https://github.com/JasonLiCSHI/WDEM/security/advisories/new) feature
-
-### What to Include
-
-To help us triage issues quickly, please include:
-
-- A descriptive title
-- A clear explanation of the vulnerability
-- Steps to reproduce the issue
-- Potential security impact
-- Any proof-of-concept scripts or configurations
-
-### Response Process
-
-- Reports will be acknowledged within 48 hours
-- Initial assessment will be provided within 5 business days
-- Progress updates will be shared during remediation
-- Disclosure timelines will be coordinated once a fix is available
-
-Thank you for helping keep WDEM secure. ❤️
-
----
-
-# RegistryGuard
-
-RegistryGuard is a protection mechanism that prevents unsafe registry modifications, especially when WDEM is executed with elevated SYSTEM privileges.
-
-### Why It Exists
-
-When applications run as SYSTEM, accidental writes to sensitive registry hives like `HKCU` (`HKEY_CURRENT_USER`) can create instability, permission conflicts, or unintended persistence issues.
-
-### What It Does
-
-RegistryGuard helps by:
-
-- Blocking unsafe `HKCU` modifications
-- Preventing accidental privilege misuse
-- Reducing the risk of system misconfiguration
-- Enforcing safer registry interaction patterns
-
-Contributors can review the implementation in [`src/Wdem.LegacySource/Infrastructure/Helpers/RegistryGuard.cs`](src/Wdem.LegacySource/Infrastructure/Helpers/RegistryGuard.cs).
-
----
-
-# Secret Reference Syntax
-
-WDEM supports secure secret references directly inside `config.yaml`.
-
-## Environment Variables
-
-```yaml
-envVars:
-  - variable: "API_KEY"
-    value: "{{ env:API_KEY }}"
-```
-
-Reads the value from a system environment variable.
-
----
-
-## File-Based Secrets
-
-```yaml
-envVars:
-  - variable: "TOKEN"
-    value: "{{ file:C:\secrets\token.txt }}"
-```
-
-Reads the secret value from a local file.
-
-Recommendations:
-
-- Never commit secret files to Git
-- Restrict file permissions
-- Store secrets outside public directories
-
----
-
-## Windows Credential Manager
-
-```yaml
-envVars:
-  - variable: "DB_PASSWORD"
-    value: "{{ vault:database-password }}"
-```
-
-Reads credentials securely from Windows Credential Manager.
-
-This is the only currently supported vault integration in WDEM.
-
----
-
-# Security Presets
-
-WDEM provides multiple security presets for different use cases.
-
-## Baseline
-
-Balanced configuration for general users.
-
-### Example
-
-```yaml
-security_preset: baseline
-```
-
-Recommended for:
-
-- Daily usage
-- General desktop systems
-- New users
-
----
-
-## Strict
-
-Aggressive security-focused configuration.
-
-### Example
-
-```yaml
-security_preset: strict
-```
-
-Recommended for:
-
-- Security-sensitive environments
-- Administrative systems
-- Shared devices
-
----
-
-## Privacy
-
-Focused on reducing telemetry and unnecessary data exposure.
-
-### Example
-
-```yaml
-security_preset: privacy
-```
-
-Recommended for:
-
-- Privacy-conscious users
-- Minimal telemetry environments
-
----
-
-# Safe Registry Tweaking Guidelines
-
-Before modifying the registry:
-
-- Always create backups
-- Test changes incrementally
-- Avoid unknown registry scripts
-- Document modifications carefully
-- Use least-privilege principles whenever possible
-
-### Recommended Tools
-
-- Registry Editor (`regedit`)
-- PowerShell
-- WDEM presets and safety mechanisms
-
----
-
-# Additional Recommendations
-
-- Keep Windows updated
-- Use strong administrator passwords
-- Enable system restore points
-- Review tweaks before deployment
-- Audit scripts before execution
-
----
-
-# Disclaimer
-
-Advanced registry and system-level modifications may affect system stability. Always verify configurations before applying changes to production environments.
+WDEM uses a narrowly scoped UAC broker, content hashes and signature checks,
+log/report redaction, atomic configuration writes, cancellation finalization,
+and mandatory fresh detection/planning before Apply. See
+[recovery and security](docs/wdem/recovery-and-security.md) for the user-facing
+model and [source provenance](docs/wdem/source-provenance.md) for the
+MIT-licensed transition boundary.

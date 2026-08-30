@@ -253,37 +253,37 @@ namespace Wdem.LegacySource.Services.Bootstrappers
     }
 
     private async Task<string> GetLatestVersionAsync(CancellationToken cancellationToken)
-      {
-        using var client = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
-        client.DefaultRequestHeaders.Add("User-Agent", "Wdem.LegacySource-Bootstrapper");
-        using var response = await client.GetAsync(
-            "https://api.github.com/repos/microsoft/winget-cli/releases/latest",
-            cancellationToken);
-        response.EnsureSuccessStatusCode();
-        using var json = JsonDocument.Parse(
-            await response.Content.ReadAsStringAsync(cancellationToken));
-        return json.RootElement.GetProperty("tag_name").GetString() ?? "v1.12.460";
-      }
+    {
+      using var client = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+      client.DefaultRequestHeaders.Add("User-Agent", "Wdem.LegacySource-Bootstrapper");
+      using var response = await client.GetAsync(
+          "https://api.github.com/repos/microsoft/winget-cli/releases/latest",
+          cancellationToken);
+      response.EnsureSuccessStatusCode();
+      using var json = JsonDocument.Parse(
+          await response.Content.ReadAsStringAsync(cancellationToken));
+      return json.RootElement.GetProperty("tag_name").GetString() ?? "v1.12.460";
+    }
 
     private async Task InstallAppPackageAsync(
           string path,
           CancellationToken cancellationToken)
+    {
+      string command = $"Add-AppxPackage -Path \"{path}\"";
+      var output = new List<string>();
+      var success = await _processRunner.RunCommandAsync(
+          "powershell.exe",
+          new[] { "-NoProfile", "-NonInteractive", "-Command", command },
+          false,
+          output.Add,
+          cancellationToken);
+      if (!success)
       {
-        string command = $"Add-AppxPackage -Path \"{path}\"";
-        var output = new List<string>();
-        var success = await _processRunner.RunCommandAsync(
-            "powershell.exe",
-            new[] { "-NoProfile", "-NonInteractive", "-Command", command },
-            false,
-            output.Add,
-            cancellationToken);
-        if (!success)
-        {
-          throw new Exception(
-              $"Package {Path.GetFileName(path)} failed to install: " +
-              string.Join(Environment.NewLine, output));
-        }
+        throw new Exception(
+            $"Package {Path.GetFileName(path)} failed to install: " +
+            string.Join(Environment.NewLine, output));
       }
+    }
 
     private static bool IsAppPackage(string fileName) =>
           fileName.EndsWith(".appx", StringComparison.Ordinal) ||
@@ -292,13 +292,13 @@ namespace Wdem.LegacySource.Services.Bootstrappers
           fileName.EndsWith(".msixbundle", StringComparison.Ordinal);
 
     private static bool MatchesArchitecture(string fileName, string architecture)
-      {
-        if (fileName.Contains("arm64", StringComparison.Ordinal) && architecture != "arm64") return false;
-        if (fileName.Contains("x64", StringComparison.Ordinal) && architecture != "x64") return false;
-        if (fileName.Contains("x86", StringComparison.Ordinal) &&
-            architecture != "x86" &&
-            architecture != "x64") return false;
-        return true;
+    {
+      if (fileName.Contains("arm64", StringComparison.Ordinal) && architecture != "arm64") return false;
+      if (fileName.Contains("x64", StringComparison.Ordinal) && architecture != "x64") return false;
+      if (fileName.Contains("x86", StringComparison.Ordinal) &&
+          architecture != "x86" &&
+          architecture != "x64") return false;
+      return true;
     }
   }
 }
