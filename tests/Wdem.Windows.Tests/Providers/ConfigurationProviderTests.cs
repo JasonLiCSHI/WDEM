@@ -44,7 +44,7 @@ public sealed class ConfigurationProviderTests : IDisposable
         {
           ["sourcePath"] = "team.DotSettings",
           ["expectedSha256"] = expectedHash,
-          ["destinationPath"] = destinationPath
+          ["destinationPath"] = ReSharperRelativeDestination()
         });
     var missing = await provider.DetectAsync(resource, CancellationToken.None);
     var plan = await provider.PlanAsync(resource, missing, CancellationToken.None);
@@ -78,7 +78,7 @@ public sealed class ConfigurationProviderTests : IDisposable
         new ConfigurationImporter(),
         new ComplianceEvaluator(),
         destinationRoot);
-    var resource = ReSharperSettingsResource(expectedHash, destinationPath);
+    var resource = ReSharperSettingsResource(expectedHash, ReSharperRelativeDestination());
     var detected = await provider.DetectAsync(resource, CancellationToken.None);
     var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
     await File.WriteAllTextAsync(destinationPath, "changed after planning");
@@ -106,7 +106,7 @@ public sealed class ConfigurationProviderTests : IDisposable
         new ConfigurationImporter(),
         new ComplianceEvaluator(),
         destinationRoot);
-    var resource = ReSharperSettingsResource(expectedHash, destinationPath);
+    var resource = ReSharperSettingsResource(expectedHash, ReSharperRelativeDestination());
     var detected = await provider.DetectAsync(resource, CancellationToken.None);
     var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
     await File.WriteAllTextAsync(destinationPath, "created after planning");
@@ -138,7 +138,7 @@ public sealed class ConfigurationProviderTests : IDisposable
         destinationRoot);
     var resource = ReSharperSettingsResource(
         Convert.ToHexString(SHA256.HashData(source)),
-        destinationPath);
+        ReSharperRelativeDestination());
     var detected = await provider.DetectAsync(resource, CancellationToken.None);
     var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
     var progress = new InlineProgress(update =>
@@ -210,7 +210,7 @@ public sealed class ConfigurationProviderTests : IDisposable
         destinationRoot);
     var resource = ReSharperSettingsResource(
         Convert.ToHexString(SHA256.HashData(source)),
-        destinationPath);
+        ReSharperRelativeDestination());
     var detected = await provider.DetectAsync(resource, CancellationToken.None);
     var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
 
@@ -682,6 +682,33 @@ public sealed class ConfigurationProviderTests : IDisposable
     Assert.Contains(validation.StructuredErrors,
         error => error.Code == WdemErrorCode.ConfigurationError &&
             error.Detail.Contains("GlobalSettingsStorage", StringComparison.OrdinalIgnoreCase));
+  }
+
+  [Fact]
+  public async Task ValidateAsync_ReSharperSettingsRejectsExactAbsoluteDestination()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var jetBrainsRoot = Path.Combine(_root, "JetBrains");
+    Directory.CreateDirectory(profiles);
+    var provider = new ReSharperSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        new ComplianceEvaluator(),
+        jetBrainsRoot);
+    var resource = ReSharperSettingsResource(
+        new string('A', 64),
+        Path.Combine(
+            jetBrainsRoot,
+            "Shared",
+            "vAny",
+            "GlobalSettingsStorage.DotSettings"));
+
+    var validation = await provider.ValidateAsync(resource, CancellationToken.None);
+
+    Assert.False(validation.IsValid);
+    Assert.Contains(validation.StructuredErrors,
+        error => error.Code == WdemErrorCode.ConfigurationError &&
+            error.Detail.Contains("relative", StringComparison.OrdinalIgnoreCase));
   }
 
   [Fact]
@@ -1439,6 +1466,11 @@ public sealed class ConfigurationProviderTests : IDisposable
 
   private static string ReSharperDestination(string jetBrainsRoot) => Path.Combine(
       jetBrainsRoot,
+      "Shared",
+      "vAny",
+      "GlobalSettingsStorage.DotSettings");
+
+  private static string ReSharperRelativeDestination() => Path.Combine(
       "Shared",
       "vAny",
       "GlobalSettingsStorage.DotSettings");

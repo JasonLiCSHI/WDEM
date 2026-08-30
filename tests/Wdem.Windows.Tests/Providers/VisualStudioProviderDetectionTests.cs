@@ -37,6 +37,10 @@ public sealed class VisualStudioProviderDetectionTests
         typeof(ISecureArtifactStager),
         constructors.Single(constructor => constructor.GetParameters().Length == 5)
             .GetParameters()[4].ParameterType);
+    Assert.Equal(
+        typeof(string),
+        constructors.Single(constructor => constructor.GetParameters().Length == 6)
+            .GetParameters()[5].ParameterType);
   }
 
   [Fact]

@@ -92,7 +92,7 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
       else if (!TryResolveDestination(destination, out var resolvedDestination))
       {
         errors.Add((WdemErrorCode.ConfigurationError,
-            "Parameter 'destinationPath' must identify Shared\\vAny\\GlobalSettingsStorage.DotSettings in the current user's JetBrains settings directory."));
+            "Parameter 'destinationPath' must be the relative path Shared\\vAny\\GlobalSettingsStorage.DotSettings in the current user's JetBrains settings directory."));
       }
       else if (ConfigurationSourceResolver.HasAlternateDataStream(resolvedDestination))
       {
@@ -381,10 +381,13 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
   {
     try
     {
-      resolved = Path.GetFullPath(
-          Path.IsPathFullyQualified(destination)
-              ? destination
-              : Path.Combine(_destinationRoot, destination));
+      if (Path.IsPathFullyQualified(destination))
+      {
+        resolved = string.Empty;
+        return false;
+      }
+
+      resolved = Path.GetFullPath(Path.Combine(_destinationRoot, destination));
       return string.Equals(resolved, _destinationPath, StringComparison.OrdinalIgnoreCase);
     }
     catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
