@@ -455,7 +455,6 @@ public sealed class NamedPipePrivilegeBrokerTests
     var launcher = new RecordingElevatedHostLauncher();
     launcher.Session.WaitForApplyRelease = true;
     launcher.Session.WaitForTerminationRelease = true;
-    launcher.Session.WaitForDisposeRelease = true;
     launcher.Session.TerminateException = new IOException("termination failed");
     var broker = new NamedPipePrivilegeBroker(launcher);
     var runId = Guid.NewGuid();
@@ -468,21 +467,39 @@ public sealed class NamedPipePrivilegeBrokerTests
     var completing = broker.CompleteRunAsync(runId, CancellationToken.None);
     var disposing = broker.DisposeAsync().AsTask();
     await launcher.Session.Terminated.Task.WaitAsync(TimeSpan.FromSeconds(5));
-    launcher.Session.TerminationRelease.TrySetResult();
-    await launcher.Session.TerminationCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-    await launcher.Session.DisposeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-    launcher.Session.DisposeRelease.TrySetResult();
-    await launcher.Session.DisposeCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-    // Keep the apply active until the dispose-owned cleanup publishes its failure.
-    await Task.Delay(TimeSpan.FromMilliseconds(100));
     launcher.Session.ApplyRelease.TrySetResult();
     await apply.WaitAsync(TimeSpan.FromSeconds(5));
+    launcher.Session.TerminationRelease.TrySetResult();
 
     var disposeError = await Assert.ThrowsAsync<IOException>(() => disposing);
     var completionError = await Assert.ThrowsAsync<IOException>(() => completing);
     Assert.Equal("termination failed", disposeError.Message);
     Assert.Equal(disposeError.Message, completionError.Message);
     Assert.Equal(1, launcher.Session.TerminateCalls);
+  }
+
+  [Fact]
+  public async Task RunLifecycle_CloseAndRegisterCleanup_BindsFailureBeforeLateRetry()
+  {
+    var lifecycle = new NamedPipePrivilegeBroker.RunLifecycle();
+    var registeredClose = lifecycle.CloseAndRegisterCleanup();
+    var firstCleanup = lifecycle.BeginCleanup();
+    Assert.True(firstCleanup.IsOwner);
+    Assert.Same(registeredClose.CleanupCompletion, firstCleanup.Completion);
+    lifecycle.FailCleanup(new IOException("first cleanup failed"));
+
+    var registeredObserver = lifecycle.BeginCleanup(registeredClose.CleanupCompletion);
+    Assert.False(registeredObserver.IsOwner);
+    Assert.Same(registeredClose.CleanupCompletion, registeredObserver.Completion);
+    var error = await Assert.ThrowsAsync<IOException>(
+        () => registeredClose.CleanupCompletion);
+    Assert.Equal("first cleanup failed", error.Message);
+
+    var lateClose = lifecycle.CloseAndRegisterCleanup();
+    var retryCleanup = lifecycle.BeginCleanup(lateClose.CleanupCompletion);
+    Assert.NotSame(registeredClose.CleanupCompletion, lateClose.CleanupCompletion);
+    Assert.True(retryCleanup.IsOwner);
+    Assert.Same(lateClose.CleanupCompletion, retryCleanup.Completion);
   }
 
   [Fact]

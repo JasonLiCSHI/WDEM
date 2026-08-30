@@ -107,16 +107,15 @@ public sealed class NamedPipePrivilegeBroker :
   private async Task CompleteRunCoreAsync(Guid runId, CancellationToken cancellationToken)
   {
     var lifecycle = _runLifecycles.GetOrAdd(runId, static _ => new RunLifecycle());
-    var operationsDrained = lifecycle.Close();
+    var closing = lifecycle.CloseAndRegisterCleanup();
     cancellationToken.ThrowIfCancellationRequested();
-    var cleanupCompletion = lifecycle.RegisterCleanup();
-    await operationsDrained.WaitAsync(cancellationToken).ConfigureAwait(false);
+    await closing.OperationsDrained.WaitAsync(cancellationToken).ConfigureAwait(false);
     await EnsureRunCleanupAsync(
         runId,
         lifecycle,
-        operationsDrained,
+        closing.OperationsDrained,
         cancellationToken,
-        cleanupCompletion).ConfigureAwait(false);
+        closing.CleanupCompletion).ConfigureAwait(false);
   }
 
   private async Task CompleteCancelledRunAsync(
@@ -564,7 +563,7 @@ public sealed class NamedPipePrivilegeBroker :
     public void Dispose() => Interlocked.Exchange(ref _owner, null)?.ExitOperation();
   }
 
-  private sealed class RunLifecycle
+  internal sealed class RunLifecycle
   {
     private readonly object _gate = new();
     private TaskCompletionSource _cleanupCompletion = new(
@@ -604,31 +603,22 @@ public sealed class NamedPipePrivilegeBroker :
     {
       lock (_gate)
       {
-        if (!_closed)
-        {
-          _closed = true;
-          if (_activeOperations > 0)
-          {
-            _operationsDrained = new TaskCompletionSource(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-          }
-        }
-
-        return _operationsDrained?.Task ?? Task.CompletedTask;
+        return CloseCore();
       }
     }
 
-    public Task RegisterCleanup()
+    public RunClosing CloseAndRegisterCleanup()
     {
       lock (_gate)
       {
+        var operationsDrained = CloseCore();
         if (!_cleanupSucceeded && _cleanupCompletion.Task.IsCompleted)
         {
           _cleanupCompletion = new TaskCompletionSource(
               TaskCreationOptions.RunContinuationsAsynchronously);
         }
 
-        return _cleanupCompletion.Task;
+        return new RunClosing(operationsDrained, _cleanupCompletion.Task);
       }
     }
 
@@ -657,6 +647,21 @@ public sealed class NamedPipePrivilegeBroker :
 
         return new RunCleanup(isOwner, _cleanupCompletion.Task);
       }
+    }
+
+    private Task CloseCore()
+    {
+      if (!_closed)
+      {
+        _closed = true;
+        if (_activeOperations > 0)
+        {
+          _operationsDrained = new TaskCompletionSource(
+              TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+      }
+
+      return _operationsDrained?.Task ?? Task.CompletedTask;
     }
 
     public void CompleteCleanup()
@@ -701,9 +706,13 @@ public sealed class NamedPipePrivilegeBroker :
     }
   }
 
-  private sealed record RunCleanup(
+  internal sealed record RunCleanup(
       bool IsOwner,
       Task Completion);
+
+  internal sealed record RunClosing(
+      Task OperationsDrained,
+      Task CleanupCompletion);
 
   private sealed record LaunchFailure(
       ApplyOutcome Outcome,
