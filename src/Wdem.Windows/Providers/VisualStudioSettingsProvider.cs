@@ -13,6 +13,20 @@ namespace Wdem.Windows.Providers;
 
 public sealed class VisualStudioSettingsProvider : IResourceProvider
 {
+  private static readonly string[] InstancePreconditionEvidenceKeys =
+  [
+    "visualStudioInstanceId",
+    "visualStudioProductId",
+    "visualStudioProductDisplayVersion",
+    "visualStudioInstallationVersion",
+    "visualStudioEdition",
+    "visualStudioChannelId",
+    "visualStudioInstallationPath",
+    "visualStudioProductPath",
+    "visualStudioIsComplete",
+    "visualStudioIsLaunchable"
+  ];
+
   public const string SourcePathParameter = "sourcePath";
   public const string ExpectedSha256Parameter = "expectedSha256";
   public const string SettingsStorePathParameter = "settingsStorePath";
@@ -238,9 +252,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     }
 
     var compliance = Evaluate(resource, currentState);
-    var precondition = ConfigurationExecutionPrecondition.FromDetectedState(
-        currentState,
-        "settingsStorePath");
+    var precondition = CreateExecutionPrecondition(currentState);
     if (precondition is null)
     {
       return ConfigurationProviderSupport.Plan(resource, ComplianceStatus.DetectionFailed, false) with
@@ -327,7 +339,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     }
 
     var currentState = await DetectAsync(resource, cancellationToken).ConfigureAwait(false);
-    if (!ConfigurationExecutionPrecondition.Matches(plan, currentState, "settingsStorePath"))
+    if (!MatchesExecutionPrecondition(plan, currentState))
     {
       return ConfigurationProviderSupport.Failed(resource,
           ConfigurationProviderSupport.Error(
@@ -339,6 +351,18 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     if (!plan.RequiresApply)
     {
       return new ResourceApplyResult { ResourceId = resource.Id, Outcome = ApplyOutcome.NotRequired };
+    }
+
+    var destinationPrecondition = ConfigurationDestinationPrecondition.FromDetectedState(
+        currentState,
+        "settingsStorePath");
+    if (destinationPrecondition is null)
+    {
+      return ConfigurationProviderSupport.Failed(resource,
+          ConfigurationProviderSupport.Error(
+              resource,
+              WdemErrorCode.ConfigurationError,
+              "The Visual Studio settings destination state cannot be committed safely."));
     }
 
     var selection = await SelectInstanceAsync(resource, cancellationToken).ConfigureAwait(false);
@@ -379,7 +403,10 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     }
 
     var staged = await _importer.StageAsync(
-        source.Source!, settingsStorePath, cancellationToken).ConfigureAwait(false);
+        source.Source!,
+        settingsStorePath,
+        destinationPrecondition,
+        cancellationToken).ConfigureAwait(false);
     if (!staged.Succeeded)
     {
       return ConfigurationProviderSupport.Failed(
@@ -387,15 +414,13 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
           staged.Error! with { ResourceId = resource.Id });
     }
 
+    var snapshot = staged.Snapshot!;
     try
     {
       progress?.Report(new ProviderProgress("Apply", 0.7,
           "Importing Visual Studio settings.", plan.Steps[0].Id));
       var destinationBeforeLaunch = await DetectAsync(resource, cancellationToken).ConfigureAwait(false);
-      if (!ConfigurationExecutionPrecondition.Matches(
-              plan,
-              destinationBeforeLaunch,
-              "settingsStorePath"))
+      if (!MatchesExecutionPrecondition(plan, destinationBeforeLaunch))
       {
         return ConfigurationProviderSupport.Failed(resource,
             ConfigurationProviderSupport.Error(
@@ -408,56 +433,74 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
       var process = await _processExecutor.ExecuteAsync(
           new ProcessExecutionRequest(
               selection.Instance.ProductPath,
-              ["/ResetSettings", staged.Snapshot!.Path, "/Command", "Exit"]),
+              ["/ResetSettings", snapshot.Path, "/Command", "Exit"])
+          {
+            CancellationMode = ProcessCancellationMode.LaunchOnly
+          },
           null,
-          CancellationToken.None).ConfigureAwait(false);
+          cancellationToken).ConfigureAwait(false);
       if (!process.Started || process.ExitCode != 0 || process.Error is not null)
       {
-        return ConfigurationProviderSupport.Failed(resource, (process.Error ??
+        var processError = (process.Error ??
             ConfigurationProviderSupport.Error(resource, WdemErrorCode.ConfigurationError,
                 "devenv.exe did not import the Visual Studio settings successfully.")) with
         {
           ResourceId = resource.Id,
           ProcessExitCode = process.ExitCode
-        });
+        };
+        return ConfigurationProviderSupport.Failed(
+            resource,
+            processError,
+            plan.Steps[0],
+            process.ExitCode,
+            finalizeAfterCancellation: process.Started);
       }
 
       var destinationBeforeCommit = await DetectAsync(resource, CancellationToken.None)
           .ConfigureAwait(false);
-      if (!ConfigurationExecutionPrecondition.Matches(
-              plan,
-              destinationBeforeCommit,
-              "settingsStorePath"))
+      if (!MatchesExecutionPrecondition(plan, destinationBeforeCommit))
       {
-        return ConfigurationProviderSupport.Failed(resource,
-            ConfigurationProviderSupport.Error(
+        var error = ConfigurationProviderSupport.Error(
                 resource,
                 WdemErrorCode.ConfigurationError,
-                "The Visual Studio settings destination changed after planning; the approved plan is stale."));
+                "The Visual Studio settings destination changed after planning; the approved plan is stale.");
+        return ConfigurationProviderSupport.Failed(
+            resource,
+            error,
+            plan.Steps[0],
+            process.ExitCode,
+            finalizeAfterCancellation: true);
       }
 
       // The hierarchy lease closes the directory redirection window. File-level CAS cannot
       // eliminate a final nanosecond race from a non-cooperating writer on Windows.
       var imported = await _importer.CommitStagedAsync(
-          staged.Snapshot,
+          snapshot,
           settingsStorePath,
           CancellationToken.None).ConfigureAwait(false);
       if (!imported.Succeeded)
       {
         return ConfigurationProviderSupport.Failed(
             resource,
-            imported.Error! with { ResourceId = resource.Id });
+            imported.Error! with { ResourceId = resource.Id },
+            plan.Steps[0],
+            process.ExitCode,
+            finalizeAfterCancellation: true);
       }
 
       var verification = await VerifyAsync(resource, CancellationToken.None).ConfigureAwait(false);
       if (verification.Compliance != ComplianceStatus.Satisfied)
       {
-        return ConfigurationProviderSupport.Failed(
-            resource,
-            verification.DetectedState.StructuredError ?? ConfigurationProviderSupport.Error(
+        var error = verification.DetectedState.StructuredError ?? ConfigurationProviderSupport.Error(
                 resource,
                 WdemErrorCode.ConfigurationError,
-                $"The imported Visual Studio settings final verification returned {verification.Compliance}."));
+                $"The imported Visual Studio settings final verification returned {verification.Compliance}.");
+        return ConfigurationProviderSupport.Failed(
+            resource,
+            error,
+            plan.Steps[0],
+            process.ExitCode,
+            finalizeAfterCancellation: true);
       }
 
       return ConfigurationProviderSupport.Succeeded(
@@ -468,8 +511,8 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     }
     finally
     {
-      ConfigurationImporter.DeleteStagingSnapshot(staged.Snapshot!.Path);
-      staged.Snapshot.Dispose();
+      snapshot.DeleteStagingFile();
+      snapshot.Dispose();
     }
   }
 
@@ -733,10 +776,14 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
       ["settingsStorePath"] = path,
       ["visualStudioInstanceId"] = instance.InstanceId,
       ["visualStudioProductId"] = instance.ProductId,
+      ["visualStudioProductDisplayVersion"] = instance.ProductDisplayVersion,
+      ["visualStudioInstallationVersion"] = instance.InstallationVersion,
       ["visualStudioInstallationPath"] = instance.InstallationPath,
       ["visualStudioProductPath"] = instance.ProductPath,
       ["visualStudioEdition"] = instance.Edition,
-      ["visualStudioChannelId"] = instance.ChannelId
+      ["visualStudioChannelId"] = instance.ChannelId,
+      ["visualStudioIsComplete"] = instance.IsComplete.ToString(),
+      ["visualStudioIsLaunchable"] = instance.IsLaunchable.ToString()
     };
     if (destinationHash is not null)
     {
@@ -747,6 +794,20 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
   }
 
   private sealed record InstanceSelection(VisualStudioInstance? Instance, StructuredError? Error);
+
+  private static string? CreateExecutionPrecondition(DetectedState state) =>
+      ConfigurationExecutionPrecondition.FromDetectedState(
+          state,
+          "settingsStorePath",
+          InstancePreconditionEvidenceKeys);
+
+  private static bool MatchesExecutionPrecondition(
+      ResourcePlan plan,
+      DetectedState state) => ConfigurationExecutionPrecondition.Matches(
+          plan,
+          state,
+          "settingsStorePath",
+          InstancePreconditionEvidenceKeys);
 
   private static string CreateStepId(
       ResourceDefinition resource,

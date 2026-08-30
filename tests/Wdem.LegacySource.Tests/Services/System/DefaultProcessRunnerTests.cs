@@ -256,6 +256,60 @@ namespace Wdem.LegacySource.Tests.Services.System
     }
 
     [Fact]
+    public async Task RunCommandDetailedAsync_LaunchOnlyCancellationPreservesCompletionEvidence()
+    {
+      using var cancellation = new CancellationTokenSource();
+      var runner = new DefaultProcessRunner(new ProcessRunnerTestHooks
+      {
+        WaitForExitAsync = async (waitForExit, completionToken) =>
+        {
+          cancellation.Cancel();
+          Assert.False(completionToken.IsCancellationRequested);
+          await waitForExit(completionToken);
+        }
+      });
+      var (executable, arguments) = Echo("completed-after-late-cancellation");
+
+      var result = await runner.RunCommandDetailedAsync(
+          executable,
+          arguments,
+          null,
+          null,
+          null,
+          cancellation.Token,
+          continueAfterStart: true);
+
+      Assert.True(result.Started);
+      Assert.Equal(0, result.ExitCode);
+      Assert.Contains("completed-after-late-cancellation", result.StandardOutput);
+    }
+
+    [Fact]
+    public async Task RunCommandDetailedAsync_LaunchOnlyCancellationStillEnforcesTimeout()
+    {
+      var runner = new DefaultProcessRunner(new ProcessRunnerTestHooks
+      {
+        WaitForExitAsync = (_, cancellationToken) =>
+            Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
+      });
+      var (executable, arguments) = Echo("before-launch-only-timeout");
+
+      var result = await runner.RunCommandDetailedAsync(
+          executable,
+          arguments,
+          null,
+          TimeSpan.FromMilliseconds(100),
+          null,
+          CancellationToken.None,
+          continueAfterStart: true);
+
+      Assert.True(result.Started);
+      Assert.Null(result.ExitCode);
+      Assert.Contains("before-launch-only-timeout", result.StandardOutput);
+      Assert.Equal(ProcessFailureKind.TimedOut, result.FailureKind);
+    }
+
+    [Fact]
     public async Task RunCommandAsync_MissingExecutableRetainsFailureCallbackBehavior()
     {
       var runner = new DefaultProcessRunner();

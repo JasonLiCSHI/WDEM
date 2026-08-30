@@ -35,6 +35,42 @@ public sealed class ConfigurationSourceResolverTests : IDisposable
   }
 
   [Fact]
+  public async Task ResolveAsync_LocalFileUriReturnsVerifiedImmutableSnapshot()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    Directory.CreateDirectory(profiles);
+    var source = Path.Combine(_root, "external", "team.DotSettings");
+    Directory.CreateDirectory(Path.GetDirectoryName(source)!);
+    var contents = Encoding.UTF8.GetBytes("file uri settings");
+    await File.WriteAllBytesAsync(source, contents);
+    var resolver = new ConfigurationSourceResolver(_root, profiles);
+
+    var result = await resolver.ResolveAsync(
+        new Uri(source).AbsoluteUri,
+        Convert.ToHexString(SHA256.HashData(contents)),
+        CancellationToken.None);
+
+    Assert.True(result.IsValid, result.Error?.Detail);
+    Assert.Equal(Path.GetFullPath(source), result.Source!.Path);
+    Assert.Equal(contents, result.Source.Contents.ToArray());
+  }
+
+  [Fact]
+  public async Task ResolveAsync_NonFileUriIsRejected()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    Directory.CreateDirectory(profiles);
+
+    var result = await new ConfigurationSourceResolver(_root, profiles).ResolveAsync(
+        "https://example.test/team.DotSettings",
+        new string('A', 64),
+        CancellationToken.None);
+
+    Assert.False(result.IsValid);
+    Assert.Contains("file", result.Error!.Detail, StringComparison.OrdinalIgnoreCase);
+  }
+
+  [Fact]
   public async Task ResolveAsync_AbsolutePathThroughReparseDirectoryIsRejected()
   {
     var profiles = Path.Combine(_root, "profiles");
@@ -61,6 +97,48 @@ public sealed class ConfigurationSourceResolverTests : IDisposable
 
     Assert.False(result.IsValid);
     Assert.Contains("reparse", result.Error!.Detail, StringComparison.OrdinalIgnoreCase);
+  }
+
+  [Fact]
+  public async Task ResolveAsync_HoldsSourceHierarchyAgainstJunctionSwapUntilReadCompletes()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var trusted = Path.Combine(_root, "trusted", "nested");
+    var moved = Path.Combine(_root, "moved");
+    var outside = Path.Combine(_root, "outside");
+    Directory.CreateDirectory(profiles);
+    Directory.CreateDirectory(trusted);
+    Directory.CreateDirectory(outside);
+    var source = Path.Combine(trusted, "team.DotSettings");
+    var outsideSource = Path.Combine(outside, "team.DotSettings");
+    var contents = Encoding.UTF8.GetBytes("trusted settings");
+    await File.WriteAllBytesAsync(source, contents);
+    await File.WriteAllTextAsync(outsideSource, "outside settings");
+    var swapRejected = false;
+    var resolver = new ConfigurationSourceResolver(
+        _root,
+        profiles,
+        directory =>
+        {
+          try
+          {
+            Directory.Move(directory, moved);
+            CreateJunction(directory, outside);
+          }
+          catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+          {
+            swapRejected = true;
+          }
+        });
+
+    var result = await resolver.ResolveAsync(
+        source,
+        Convert.ToHexString(SHA256.HashData(contents)),
+        CancellationToken.None);
+
+    Assert.True(result.IsValid, result.Error?.UnderlyingException?.ToString() ?? result.Error?.Detail);
+    Assert.True(swapRejected);
+    Assert.Equal(contents, result.Source!.Contents.ToArray());
   }
 
   [Fact]

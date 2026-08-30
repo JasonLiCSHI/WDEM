@@ -56,6 +56,28 @@ namespace Wdem.LegacySource.Interfaces
             onOutput,
             cancellationToken);
 
+    /// <summary>
+    /// Runs a command while optionally treating cancellation as a launch gate only.
+    /// Once a launch-only command starts, completion and output evidence are retained.
+    /// </summary>
+    Task<ProcessRunResult> RunCommandDetailedAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        string? workingDirectory,
+        TimeSpan? timeout,
+        Action<ProcessOutputLine>? onOutput,
+        CancellationToken cancellationToken,
+        bool continueAfterStart) => continueAfterStart
+            ? Task.FromException<ProcessRunResult>(new NotSupportedException(
+                "This process runner does not support launch-only cancellation."))
+            : RunCommandDetailedAsync(
+                fileName,
+                arguments,
+                workingDirectory,
+                timeout,
+                onOutput,
+                cancellationToken);
+
     /// <summary>Runs a command and captures output using a raw argument string (deprecated).</summary>
     [Obsolete("Use the IEnumerable<string> overload instead to prevent command injection.")]
     string RunCommandWithOutput(string fileName, string args);

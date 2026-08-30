@@ -28,7 +28,7 @@ public sealed class VisualStudioProvider : IResourceProvider
   {
   }
 
-  internal VisualStudioProvider(
+  public VisualStudioProvider(
       IVisualStudioDiscovery discovery,
       IComplianceEvaluator complianceEvaluator,
       string? applicationRoot)
@@ -58,23 +58,7 @@ public sealed class VisualStudioProvider : IResourceProvider
   {
   }
 
-  internal VisualStudioProvider(
-      IVisualStudioDiscovery discovery,
-      IVisualStudioInstallerClient installer,
-      ITrustedFileVerifier trustedFileVerifier,
-      IComplianceEvaluator complianceEvaluator,
-      string? applicationRoot)
-      : this(
-          discovery,
-          installer,
-          trustedFileVerifier,
-          complianceEvaluator,
-          secureArtifactStager: null,
-          applicationRoot)
-  {
-  }
-
-  internal VisualStudioProvider(
+  public VisualStudioProvider(
       IVisualStudioDiscovery discovery,
       IVisualStudioInstallerClient installer,
       ITrustedFileVerifier trustedFileVerifier,
@@ -213,6 +197,7 @@ public sealed class VisualStudioProvider : IResourceProvider
     }
 
     var candidates = instances
+        .Where(instance => instance.IsComplete && instance.IsLaunchable)
         .Where(instance => string.Equals(
             instance.ProductId,
             options.ProductId,
@@ -945,6 +930,7 @@ public sealed class VisualStudioProvider : IResourceProvider
       out string[] ambiguousCandidateIds)
   {
     var candidates = instances
+        .Where(instance => instance.IsComplete && instance.IsLaunchable)
         .Where(instance => string.Equals(
             instance.ProductId,
             options.ProductId,

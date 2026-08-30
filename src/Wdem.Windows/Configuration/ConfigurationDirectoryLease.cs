@@ -16,7 +16,67 @@ internal sealed partial class ConfigurationDirectoryLease : IDisposable
 
   internal string DirectoryPath { get; }
 
-  internal static ConfigurationDirectoryLease Acquire(string directoryPath)
+  internal static ConfigurationDirectoryLease Acquire(string directoryPath) =>
+      Acquire(directoryPath, createMissingDirectories: true);
+
+  internal static ConfigurationDirectoryLease AcquireExisting(string directoryPath) =>
+      Acquire(directoryPath, createMissingDirectories: false);
+
+  internal SafeFileHandle OpenReadOnlyFile(string path)
+  {
+    var fullPath = Path.GetFullPath(path);
+    if (!string.Equals(
+            Path.GetDirectoryName(fullPath),
+            DirectoryPath,
+            StringComparison.OrdinalIgnoreCase))
+    {
+      throw new IOException("The leased file must be directly within the leased directory.");
+    }
+
+    var handle = NativeMethods.CreateFile(
+        fullPath,
+        NativeMethods.GenericRead,
+        NativeMethods.FileShareRead,
+        0,
+        NativeMethods.OpenExisting,
+        NativeMethods.FileFlagOpenReparsePoint | NativeMethods.FileFlagSequentialScan,
+        0);
+    if (handle.IsInvalid)
+    {
+      var error = Marshal.GetLastPInvokeError();
+      handle.Dispose();
+      throw new IOException(
+          $"The configuration source file could not be leased: '{fullPath}'.",
+          new Win32Exception(error));
+    }
+
+    if (NativeMethods.GetFileInformationByHandleEx(
+            handle,
+            NativeMethods.FileAttributeTagInfo,
+            out var information,
+            (uint)Marshal.SizeOf<NativeMethods.FileAttributeTagInformation>()) == 0)
+    {
+      var error = Marshal.GetLastPInvokeError();
+      handle.Dispose();
+      throw new IOException(
+          $"The configuration source file could not be inspected: '{fullPath}'.",
+          new Win32Exception(error));
+    }
+
+    if ((information.FileAttributes &
+            (NativeMethods.FileAttributeDirectory | NativeMethods.FileAttributeReparsePoint)) != 0)
+    {
+      handle.Dispose();
+      throw new UnsafeConfigurationDirectoryException(
+          $"The configuration source must be a regular non-reparse file: '{fullPath}'.");
+    }
+
+    return handle;
+  }
+
+  private static ConfigurationDirectoryLease Acquire(
+      string directoryPath,
+      bool createMissingDirectories)
   {
     var fullDirectory = Path.GetFullPath(directoryPath);
     var root = Path.GetPathRoot(fullDirectory);
@@ -41,7 +101,16 @@ internal sealed partial class ConfigurationDirectoryLease : IDisposable
         }
 
         current = Path.Combine(current, segment);
-        Directory.CreateDirectory(current);
+        if (createMissingDirectories)
+        {
+          Directory.CreateDirectory(current);
+        }
+        else if (!Directory.Exists(current))
+        {
+          throw new DirectoryNotFoundException(
+              $"The configuration directory does not exist: '{current}'.");
+        }
+
         handles.Add(OpenValidatedDirectory(current));
       }
 
@@ -126,6 +195,7 @@ internal sealed partial class ConfigurationDirectoryLease : IDisposable
     internal const uint FileAttributeDirectory = 0x00000010;
     internal const uint FileAttributeReparsePoint = 0x00000400;
     internal const uint FileFlagOpenReparsePoint = 0x00200000;
+    internal const uint FileFlagSequentialScan = 0x08000000;
     internal const uint FileFlagBackupSemantics = 0x02000000;
     internal const int FileAttributeTagInfo = 9;
 

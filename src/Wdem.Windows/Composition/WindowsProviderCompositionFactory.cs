@@ -65,6 +65,7 @@ internal static class WindowsProviderCompositionFactory
           new VisualStudioInstallerClient(processExecutor, trustedFileVerifier),
           trustedFileVerifier,
           complianceEvaluator,
+          secureArtifactStager: null,
           applicationRoot: applicationRoot),
       new VisualStudioExtensionProvider(
           visualStudioDiscovery,

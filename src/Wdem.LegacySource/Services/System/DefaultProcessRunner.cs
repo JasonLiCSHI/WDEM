@@ -104,13 +104,29 @@ namespace Wdem.LegacySource.Services.System
             onOutput,
             cancellationToken);
 
+    public Task<ProcessRunResult> RunCommandDetailedAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        string? workingDirectory,
+        TimeSpan? timeout,
+        Action<ProcessOutputLine>? onOutput,
+        CancellationToken cancellationToken) => RunCommandDetailedAsync(
+            fileName,
+            arguments,
+            workingDirectory,
+            timeout,
+            onOutput,
+            cancellationToken,
+            continueAfterStart: false);
+
     public async Task<ProcessRunResult> RunCommandDetailedAsync(
         string fileName,
         IEnumerable<string> arguments,
         string? workingDirectory,
         TimeSpan? timeout,
         Action<ProcessOutputLine>? onOutput,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool continueAfterStart)
     {
       ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
       ArgumentNullException.ThrowIfNull(arguments);
@@ -125,14 +141,16 @@ namespace Wdem.LegacySource.Services.System
               workingDirectory,
               resolvedTimeout,
               onOutput,
-              cancellationToken).ConfigureAwait(false)
+              cancellationToken,
+              continueAfterStart).ConfigureAwait(false)
           : await RunPortableCommandDetailedAsync(
               fileName,
               argumentSnapshot,
               workingDirectory,
               resolvedTimeout,
               onOutput,
-              cancellationToken).ConfigureAwait(false);
+              cancellationToken,
+              continueAfterStart).ConfigureAwait(false);
     }
 
     private async Task<ProcessRunResult> RunWindowsJobCommandDetailedAsync(
@@ -141,11 +159,13 @@ namespace Wdem.LegacySource.Services.System
         string? workingDirectory,
         TimeSpan processTimeout,
         Action<ProcessOutputLine>? onOutput,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool continueAfterStart)
     {
       WindowsProcessJob processJob;
       try
       {
+        cancellationToken.ThrowIfCancellationRequested();
         processJob = WindowsProcessJob.Start(fileName, arguments, workingDirectory);
       }
       catch (WindowsProcessJobPostStartException exception)
@@ -181,8 +201,11 @@ namespace Wdem.LegacySource.Services.System
           outputGate,
           onOutput);
       using var timeout = new CancellationTokenSource(processTimeout);
+      var completionCancellation = continueAfterStart
+          ? CancellationToken.None
+          : cancellationToken;
       using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-          cancellationToken,
+          completionCancellation,
           timeout.Token);
       int? exitCode = null;
 
@@ -202,7 +225,7 @@ namespace Wdem.LegacySource.Services.System
       {
         processJob.Terminate();
         await DrainAfterTerminationAsync(outputTask, errorTask).ConfigureAwait(false);
-        cancellationToken.ThrowIfCancellationRequested();
+        completionCancellation.ThrowIfCancellationRequested();
         return SnapshotFailure(
             ProcessFailureKind.TimedOut,
             "Process execution timed out.",
@@ -233,7 +256,7 @@ namespace Wdem.LegacySource.Services.System
           outputTask,
           errorTask,
           outputGate,
-          cancellationToken).ConfigureAwait(false);
+          completionCancellation).ConfigureAwait(false);
     }
 
     private async Task<ProcessRunResult> RunPortableCommandDetailedAsync(
@@ -242,7 +265,8 @@ namespace Wdem.LegacySource.Services.System
         string? workingDirectory,
         TimeSpan processTimeout,
         Action<ProcessOutputLine>? onOutput,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool continueAfterStart)
     {
       var startInfo = new ProcessStartInfo
       {
@@ -261,6 +285,7 @@ namespace Wdem.LegacySource.Services.System
       using var process = new Process { StartInfo = startInfo };
       try
       {
+        cancellationToken.ThrowIfCancellationRequested();
         if (!process.Start())
         {
           return StartFailure(null);
@@ -287,8 +312,11 @@ namespace Wdem.LegacySource.Services.System
           outputGate,
           onOutput);
       using var timeout = new CancellationTokenSource(processTimeout);
+      var completionCancellation = continueAfterStart
+          ? CancellationToken.None
+          : cancellationToken;
       using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-          cancellationToken,
+          completionCancellation,
           timeout.Token);
       int? exitCode = null;
 
@@ -308,7 +336,7 @@ namespace Wdem.LegacySource.Services.System
         TerminateProcess(process);
 
         await DrainAfterTerminationAsync(outputTask, errorTask).ConfigureAwait(false);
-        cancellationToken.ThrowIfCancellationRequested();
+        completionCancellation.ThrowIfCancellationRequested();
         return SnapshotFailure(
             ProcessFailureKind.TimedOut,
             "Process execution timed out.",
@@ -339,7 +367,7 @@ namespace Wdem.LegacySource.Services.System
           outputTask,
           errorTask,
           outputGate,
-          cancellationToken).ConfigureAwait(false);
+          completionCancellation).ConfigureAwait(false);
     }
 
     private static void TerminateProcess(Process process)

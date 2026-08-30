@@ -164,17 +164,26 @@ public sealed class VisualStudioProviderApplyTests : IDisposable
   }
 
   [Fact]
-  public void Constructors_PreserveOriginalPublicOverloads()
+  public void Constructors_PreserveHistoricalSourceCompatibleOverloads()
   {
+    var discovery = new SequenceDiscovery([]);
+    var installer = new RecordingInstallerClient();
+    var verifier = new TrustedFileVerifier();
+    var evaluator = new ComplianceEvaluator();
+
+    _ = new VisualStudioProvider(discovery, evaluator, null);
+    _ = new VisualStudioProvider(discovery, installer, verifier, evaluator, null);
+    _ = new VisualStudioProvider(discovery, installer, verifier, evaluator, null, null);
+
     var parameterCounts = typeof(VisualStudioProvider)
         .GetConstructors()
         .Select(constructor => constructor.GetParameters().Length)
         .ToArray();
 
     Assert.Contains(2, parameterCounts);
+    Assert.Contains(3, parameterCounts);
     Assert.Contains(5, parameterCounts);
-    Assert.DoesNotContain(3, parameterCounts);
-    Assert.DoesNotContain(6, parameterCounts);
+    Assert.Contains(6, parameterCounts);
   }
 
   [Fact]

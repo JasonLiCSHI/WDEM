@@ -32,10 +32,15 @@ internal static class ConfigurationProviderSupport
       ICollection<(WdemErrorCode Code, string Detail)> errors)
   {
     var value = Get(resource, parameter);
+    var isAbsolutePath = !string.IsNullOrWhiteSpace(value) && Path.IsPathFullyQualified(value);
+    Uri? uri = null;
+    var isAbsoluteUri = !isAbsolutePath && Uri.TryCreate(value, UriKind.Absolute, out uri);
+    var isFileUri = isAbsoluteUri && uri!.IsFile;
+    var path = isFileUri ? uri!.LocalPath : value ?? string.Empty;
     if (string.IsNullOrWhiteSpace(value) || value.Any(char.IsControl) ||
-        !Path.GetExtension(value).Equals(extension, StringComparison.OrdinalIgnoreCase) ||
-        (requireAbsolute && !Path.IsPathFullyQualified(value)) ||
-        (!Path.IsPathFullyQualified(value) && Uri.TryCreate(value, UriKind.Absolute, out _)))
+        (isAbsoluteUri && !isFileUri) ||
+        !Path.GetExtension(path).Equals(extension, StringComparison.OrdinalIgnoreCase) ||
+        (requireAbsolute && !Path.IsPathFullyQualified(path)))
     {
       errors.Add((WdemErrorCode.ConfigurationError,
           $"Parameter '{parameter}' must identify a{(requireAbsolute ? "n absolute" : string.Empty)} '{extension}' file path."));
@@ -126,12 +131,30 @@ internal static class ConfigurationProviderSupport
 
   internal static ResourceApplyResult Failed(
       ResourceDefinition resource,
-      StructuredError error) => new()
+      StructuredError error,
+      PlanStep? step = null,
+      int? processExitCode = null,
+      bool finalizeAfterCancellation = false) => new()
       {
         ResourceId = resource.Id,
         Outcome = ApplyOutcome.Failed,
+        FinalizeAfterCancellation = finalizeAfterCancellation,
         Error = error,
-        Diagnostics = [error]
+        Diagnostics = [error],
+        StepResults = step is null
+            ? []
+            :
+            [
+              new ProviderStepResult
+              {
+                StepId = step.Id,
+                Action = step.Action,
+                Progress = 0.75,
+                ProcessExitCode = processExitCode,
+                Succeeded = false,
+                Error = error
+              }
+            ]
       };
 
   internal static ResourceApplyResult Succeeded(

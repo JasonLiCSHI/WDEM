@@ -22,14 +22,24 @@ public sealed class ConfigurationSourceResolver
   private readonly string _applicationRoot;
   private readonly string _profileRoot;
   private readonly string _assetsRoot;
+  private readonly Action<string>? _afterSourceDirectoryLeased;
 
   public ConfigurationSourceResolver(string applicationRoot, string profileRoot)
+      : this(applicationRoot, profileRoot, afterSourceDirectoryLeased: null)
+  {
+  }
+
+  internal ConfigurationSourceResolver(
+      string applicationRoot,
+      string profileRoot,
+      Action<string>? afterSourceDirectoryLeased)
   {
     ArgumentException.ThrowIfNullOrWhiteSpace(applicationRoot);
     ArgumentException.ThrowIfNullOrWhiteSpace(profileRoot);
     _applicationRoot = Path.GetFullPath(applicationRoot);
     _profileRoot = Path.GetFullPath(profileRoot);
     _assetsRoot = Path.Combine(_applicationRoot, "profiles", "assets");
+    _afterSourceDirectoryLeased = afterSourceDirectoryLeased;
   }
 
   public async Task<ConfigurationSourceResolution> ResolveAsync(
@@ -61,32 +71,17 @@ public sealed class ConfigurationSourceResolver
         return Failure("The configuration source escapes its permitted root.");
       }
 
-      if (!File.Exists(path))
-      {
-        return Failure("The configuration source does not exist.");
-      }
-
-      var attributes = File.GetAttributes(path);
-      if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
-      {
-        return Failure("The configuration source must be a regular non-reparse file.");
-      }
-
-      var pathRoot = Path.GetPathRoot(path);
-      if (string.IsNullOrEmpty(pathRoot) || ContainsReparsePoint(pathRoot, path))
-      {
-        return Failure("The configuration source path contains an unsafe reparse point.");
-      }
-
       byte[] contents;
-      await using (var stream = new FileStream(
-                       path,
-                       FileMode.Open,
-                       FileAccess.Read,
-                       FileShare.Read,
-                       bufferSize: 81920,
-                       FileOptions.Asynchronous | FileOptions.SequentialScan))
+      var directory = Path.GetDirectoryName(path) ?? throw new IOException(
+          "The configuration source directory is invalid.");
+      using (var directoryLease = ConfigurationDirectoryLease.AcquireExisting(directory))
       {
+        _afterSourceDirectoryLeased?.Invoke(directory);
+        await using var stream = new FileStream(
+            directoryLease.OpenReadOnlyFile(path),
+            FileAccess.Read,
+            bufferSize: 81920,
+            isAsync: false);
         if (stream.Length > MaxConfigurationBytes)
         {
           return Failure("The configuration source exceeds the 64 MiB size limit.");
@@ -114,8 +109,12 @@ public sealed class ConfigurationSourceResolver
     {
       throw;
     }
+    catch (NotSupportedException exception)
+    {
+      return Failure(exception.Message, exception);
+    }
     catch (Exception exception) when (exception is ArgumentException or IOException or
-        NotSupportedException or UnauthorizedAccessException or SecurityException)
+        UnauthorizedAccessException or SecurityException)
     {
       return Failure("The configuration source could not be safely resolved and read.", exception);
     }
@@ -129,9 +128,20 @@ public sealed class ConfigurationSourceResolver
       return Path.GetFullPath(source);
     }
 
-    if (Uri.TryCreate(source, UriKind.Absolute, out _) || LooksLikeUri(source))
+    if (Uri.TryCreate(source, UriKind.Absolute, out var uri))
     {
-      throw new NotSupportedException("URI-style configuration sources are not supported.");
+      if (!uri.IsFile)
+      {
+        throw new NotSupportedException("Only file URI configuration sources are supported.");
+      }
+
+      requiredRoot = null;
+      return Path.GetFullPath(uri.LocalPath);
+    }
+
+    if (LooksLikeUri(source))
+    {
+      throw new NotSupportedException("Only file URI configuration sources are supported.");
     }
 
     var normalized = source.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
@@ -157,24 +167,6 @@ public sealed class ConfigurationSourceResolver
     return value[..colon].All(character => char.IsAsciiLetterOrDigit(character) || character is '+' or '-' or '.');
   }
 
-  private static bool ContainsReparsePoint(string root, string path)
-  {
-    var relative = Path.GetRelativePath(root, path);
-    var current = root;
-    foreach (var segment in relative.Split(
-                 [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
-                 StringSplitOptions.RemoveEmptyEntries))
-    {
-      current = Path.Combine(current, segment);
-      if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
-      {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
   internal static bool IsWithin(string path, string root)
   {
     var relative = Path.GetRelativePath(root, path);
@@ -189,6 +181,13 @@ public sealed class ConfigurationSourceResolver
 
   internal static bool HasAlternateDataStream(string path)
   {
+    if (path.StartsWith("file:", StringComparison.OrdinalIgnoreCase) &&
+        Uri.TryCreate(path, UriKind.Absolute, out var uri) &&
+        uri.IsFile)
+    {
+      return HasAlternateDataStream(uri.LocalPath);
+    }
+
     var root = Path.GetPathRoot(path) ?? string.Empty;
     return path.AsSpan(root.Length).Contains(':');
   }

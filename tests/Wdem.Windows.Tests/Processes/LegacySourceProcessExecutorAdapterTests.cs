@@ -10,6 +10,21 @@ namespace Wdem.Windows.Tests.Processes;
 public sealed class LegacySourceProcessExecutorAdapterTests
 {
   [Fact]
+  public void ProcessExecutionRequest_RetainsFourValueDeconstructionContract()
+  {
+    var timeout = TimeSpan.FromMinutes(2);
+    var request = new ProcessExecutionRequest("tool.exe", ["--check"], "working", timeout);
+
+    var (fileName, arguments, workingDirectory, requestTimeout) = request;
+
+    Assert.Equal("tool.exe", fileName);
+    Assert.Equal(["--check"], arguments);
+    Assert.Equal("working", workingDirectory);
+    Assert.Equal(timeout, requestTimeout);
+    Assert.Equal(ProcessCancellationMode.ThroughCompletion, request.CancellationMode);
+  }
+
+  [Fact]
   public async Task ExecuteAsync_MapsDetailedEvidenceAndForwardsProgressInObservedOrder()
   {
     var legacy = new RecordingProcessRunner
@@ -72,6 +87,38 @@ public sealed class LegacySourceProcessExecutorAdapterTests
         CancellationToken.None);
 
     Assert.Equal(timeout, legacy.Timeout);
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_ForwardsLaunchOnlyCancellationProtocol()
+  {
+    var legacy = new RecordingProcessRunner();
+    var adapter = new LegacySourceProcessExecutorAdapter(legacy);
+
+    await adapter.ExecuteAsync(
+        new ProcessExecutionRequest("devenv.exe", [])
+        {
+          CancellationMode = ProcessCancellationMode.LaunchOnly
+        },
+        null,
+        new CancellationTokenSource().Token);
+
+    Assert.True(legacy.ContinueAfterStart);
+  }
+
+  [Fact]
+  public async Task ExecuteAsync_LaunchOnlyFailsClosedWhenRunnerDoesNotSupportProtocol()
+  {
+    var adapter = new LegacySourceProcessExecutorAdapter(new LegacyCancellationProcessRunner());
+    var request = new ProcessExecutionRequest("devenv.exe", [])
+    {
+      CancellationMode = ProcessCancellationMode.LaunchOnly
+    };
+
+    var exception = await Assert.ThrowsAsync<NotSupportedException>(() =>
+        adapter.ExecuteAsync(request, null, CancellationToken.None));
+
+    Assert.Contains("launch-only", exception.Message, StringComparison.OrdinalIgnoreCase);
   }
 
   [Fact]
@@ -187,6 +234,57 @@ public sealed class LegacySourceProcessExecutorAdapterTests
     public void Report(string value) => Lines.Add(value);
   }
 
+  private sealed class LegacyCancellationProcessRunner : IProcessRunner
+  {
+    public bool RunCommand(
+        string fileName,
+        string arguments,
+        bool dryRun,
+        Action<string>? onOutput = null) => throw new NotSupportedException();
+
+    public bool RunCommand(
+        string fileName,
+        IEnumerable<string> arguments,
+        bool dryRun,
+        Action<string>? onOutput = null) => throw new NotSupportedException();
+
+    public Task<bool> RunCommandAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        bool dryRun,
+        Action<string>? onOutput,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+
+    public Task<ProcessRunResult> RunCommandDetailedAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        Action<ProcessOutputLine>? onOutput,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+
+    public string RunCommandWithOutput(string fileName, string args) =>
+        throw new NotSupportedException();
+
+    public string RunCommandWithOutput(string fileName, IEnumerable<string> args) =>
+        throw new NotSupportedException();
+
+    public string RunCommandWithOutput(string fileName, string args, string? standardInput) =>
+        throw new NotSupportedException();
+
+    public string RunCommandWithOutput(
+        string fileName,
+        IEnumerable<string> args,
+        string? standardInput) => throw new NotSupportedException();
+
+    public string RunAndCapture(string fileName, string arguments) =>
+        throw new NotSupportedException();
+
+    public string RunAndCapture(string fileName, IEnumerable<string> arguments) =>
+        throw new NotSupportedException();
+
+    public bool RunProcessWithStartInfo(ProcessStartInfo startInfo) =>
+        throw new NotSupportedException();
+  }
+
   private sealed class RecordingProcessRunner : IProcessRunner
   {
     public Func<string, IEnumerable<string>, string?, Action<ProcessOutputLine>?, CancellationToken,
@@ -198,6 +296,7 @@ public sealed class LegacySourceProcessExecutorAdapterTests
     public IReadOnlyList<string>? Arguments { get; private set; }
     public string? WorkingDirectory { get; private set; }
     public TimeSpan? Timeout { get; private set; }
+    public bool ContinueAfterStart { get; private set; }
 
     public Task<ProcessRunResult> RunCommandDetailedAsync(
         string fileName,
@@ -221,6 +320,25 @@ public sealed class LegacySourceProcessExecutorAdapterTests
       Arguments = arguments.ToArray();
       WorkingDirectory = workingDirectory;
       return Handler(fileName, Arguments, workingDirectory, onOutput, cancellationToken);
+    }
+
+    public Task<ProcessRunResult> RunCommandDetailedAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        string? workingDirectory,
+        TimeSpan? timeout,
+        Action<ProcessOutputLine>? onOutput,
+        CancellationToken cancellationToken,
+        bool continueAfterStart)
+    {
+      ContinueAfterStart = continueAfterStart;
+      return RunCommandDetailedAsync(
+          fileName,
+          arguments,
+          workingDirectory,
+          timeout,
+          onOutput,
+          cancellationToken);
     }
 
     public Task<ProcessRunResult> RunCommandDetailedAsync(

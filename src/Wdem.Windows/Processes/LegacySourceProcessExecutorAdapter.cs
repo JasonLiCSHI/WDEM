@@ -24,7 +24,8 @@ public sealed class LegacySourceProcessExecutorAdapter(IProcessRunner legacy) : 
         request.WorkingDirectory,
         request.Timeout,
         line => ReportSafely(output, line.Text),
-        cancellationToken).ConfigureAwait(false);
+        cancellationToken,
+        request.CancellationMode == ProcessCancellationMode.LaunchOnly).ConfigureAwait(false);
 
     return new ProcessExecutionResult(
         result.Started,

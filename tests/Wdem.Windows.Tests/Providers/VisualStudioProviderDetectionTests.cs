@@ -25,11 +25,14 @@ public sealed class VisualStudioProviderDetectionTests
   }
 
   [Fact]
-  public void PublicConstructors_PreserveOnlyLegacyTwoAndFiveParameterSurface()
+  public void PublicConstructors_PreserveHistoricalTwoThreeFiveAndSixParameterSurface()
   {
     var constructors = typeof(VisualStudioProvider).GetConstructors();
 
-    Assert.Equal([2, 5], constructors.Select(constructor => constructor.GetParameters().Length));
+    Assert.Equal([2, 3, 5, 6], constructors
+        .Select(constructor => constructor.GetParameters().Length)
+        .Order()
+        .ToArray());
     Assert.Equal(
         typeof(ISecureArtifactStager),
         constructors.Single(constructor => constructor.GetParameters().Length == 5)
@@ -162,7 +165,7 @@ public sealed class VisualStudioProviderDetectionTests
   }
 
   [Fact]
-  public async Task DetectAsync_IncompleteInstance_RemainsVisibleWithHealthEvidence()
+  public async Task DetectAsync_IncompleteAndUnlaunchableInstanceIsNotSelectable()
   {
     var incomplete = Instance(
         "repairable",
@@ -179,10 +182,37 @@ public sealed class VisualStudioProviderDetectionTests
 
     var state = await provider.DetectAsync(VisualStudioResource(), CancellationToken.None);
 
-    Assert.True(state.Exists);
-    Assert.Equal("repairable", state.Evidence["instanceId"]);
-    Assert.Equal("false", state.Evidence["isComplete"]);
-    Assert.Equal("false", state.Evidence["isLaunchable"]);
+    Assert.Equal(DetectionOutcome.Succeeded, state.Outcome);
+    Assert.False(state.Exists);
+    Assert.DoesNotContain("instanceId", state.Evidence.Keys);
+  }
+
+  [Theory]
+  [InlineData(false, true)]
+  [InlineData(true, false)]
+  public async Task DetectAsync_ExplicitIdDoesNotSelectUnhealthyInstance(
+      bool isComplete,
+      bool isLaunchable)
+  {
+    var unhealthy = Instance(
+        "explicit-unhealthy",
+        "18.3.2",
+        "Community",
+        "VisualStudio.18.Release") with
+    {
+      IsComplete = isComplete,
+      IsLaunchable = isLaunchable
+    };
+    var provider = new VisualStudioProvider(
+        new StubVisualStudioDiscovery { Instances = [unhealthy] },
+        new ComplianceEvaluator());
+
+    var state = await provider.DetectAsync(
+        VisualStudioResource(instanceId: unhealthy.InstanceId),
+        CancellationToken.None);
+
+    Assert.Equal(DetectionOutcome.Succeeded, state.Outcome);
+    Assert.False(state.Exists);
   }
 
   [Fact]

@@ -24,7 +24,8 @@ public sealed class ConfigurationProviderTests : IDisposable
   {
     var profiles = Path.Combine(_root, "profiles");
     var sourcePath = Path.Combine(profiles, "team.DotSettings");
-    var destinationPath = Path.Combine(_root, "user", "team.DotSettings");
+    var jetBrainsRoot = Path.Combine(_root, "user");
+    var destinationPath = ReSharperDestination(jetBrainsRoot);
     Directory.CreateDirectory(profiles);
     var contents = Encoding.UTF8.GetBytes("<wpf:ResourceDictionary />");
     await File.WriteAllBytesAsync(sourcePath, contents);
@@ -33,7 +34,7 @@ public sealed class ConfigurationProviderTests : IDisposable
         new ConfigurationSourceResolver(_root, profiles),
         new ConfigurationImporter(),
         new ComplianceEvaluator(),
-        Path.Combine(_root, "user"));
+        jetBrainsRoot);
     var resource = Resource(
         "resharper-settings",
         "resharper-settings",
@@ -65,9 +66,9 @@ public sealed class ConfigurationProviderTests : IDisposable
     var profiles = Path.Combine(_root, "profiles");
     var destinationRoot = Path.Combine(_root, "user");
     var sourcePath = Path.Combine(profiles, "team.DotSettings");
-    var destinationPath = Path.Combine(destinationRoot, "team.DotSettings");
+    var destinationPath = ReSharperDestination(destinationRoot);
     Directory.CreateDirectory(profiles);
-    Directory.CreateDirectory(destinationRoot);
+    Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
     var contents = Encoding.UTF8.GetBytes("original settings");
     await File.WriteAllBytesAsync(sourcePath, contents);
     await File.WriteAllBytesAsync(destinationPath, contents);
@@ -94,9 +95,9 @@ public sealed class ConfigurationProviderTests : IDisposable
     var profiles = Path.Combine(_root, "profiles");
     var destinationRoot = Path.Combine(_root, "user");
     var sourcePath = Path.Combine(profiles, "team.DotSettings");
-    var destinationPath = Path.Combine(destinationRoot, "team.DotSettings");
+    var destinationPath = ReSharperDestination(destinationRoot);
     Directory.CreateDirectory(profiles);
-    Directory.CreateDirectory(destinationRoot);
+    Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
     var contents = Encoding.UTF8.GetBytes("source settings");
     await File.WriteAllBytesAsync(sourcePath, contents);
     var expectedHash = Convert.ToHexString(SHA256.HashData(contents));
@@ -122,9 +123,9 @@ public sealed class ConfigurationProviderTests : IDisposable
     var profiles = Path.Combine(_root, "profiles");
     var destinationRoot = Path.Combine(_root, "user");
     var sourcePath = Path.Combine(profiles, "team.DotSettings");
-    var destinationPath = Path.Combine(destinationRoot, "team.DotSettings");
+    var destinationPath = ReSharperDestination(destinationRoot);
     Directory.CreateDirectory(profiles);
-    Directory.CreateDirectory(destinationRoot);
+    Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
     var source = Encoding.UTF8.GetBytes("new settings");
     var previous = Encoding.UTF8.GetBytes("planned settings");
     var external = Encoding.UTF8.GetBytes("external writer");
@@ -156,12 +157,48 @@ public sealed class ConfigurationProviderTests : IDisposable
   }
 
   [Fact]
+  public async Task ApplyAsync_DotSettingsRejectsDestinationChangedAtFinalCommitPoint()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var jetBrainsRoot = Path.Combine(_root, "JetBrains");
+    var sourcePath = Path.Combine(profiles, "team.DotSettings");
+    var destinationPath = ReSharperDestination(jetBrainsRoot);
+    Directory.CreateDirectory(profiles);
+    Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
+    var source = Encoding.UTF8.GetBytes("new settings");
+    var previous = Encoding.UTF8.GetBytes("planned settings");
+    var external = Encoding.UTF8.GetBytes("final concurrent writer");
+    await File.WriteAllBytesAsync(sourcePath, source);
+    await File.WriteAllBytesAsync(destinationPath, previous);
+    var importer = new ConfigurationImporter(
+        afterDestinationMove: null,
+        afterDestinationDirectoryLeased: null,
+        beforeDestinationPreconditionCheck: path => File.WriteAllBytes(path, external));
+    var provider = new ReSharperSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        importer,
+        new ComplianceEvaluator(),
+        jetBrainsRoot);
+    var resource = ReSharperSettingsResource(
+        Convert.ToHexString(SHA256.HashData(source)),
+        Path.Combine("Shared", "vAny", "GlobalSettingsStorage.DotSettings"));
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
+
+    var applied = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, applied.Outcome);
+    Assert.Contains("stale", applied.Error!.Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.Equal(external, await File.ReadAllBytesAsync(destinationPath));
+  }
+
+  [Fact]
   public async Task ApplyAsync_DotSettingsCancellationAfterCommitFinalizesSuccess()
   {
     var profiles = Path.Combine(_root, "profiles");
     var destinationRoot = Path.Combine(_root, "user");
     var sourcePath = Path.Combine(profiles, "team.DotSettings");
-    var destinationPath = Path.Combine(destinationRoot, "team.DotSettings");
+    var destinationPath = ReSharperDestination(destinationRoot);
     Directory.CreateDirectory(profiles);
     var source = Encoding.UTF8.GetBytes("new settings");
     await File.WriteAllBytesAsync(sourcePath, source);
@@ -297,6 +334,51 @@ public sealed class ConfigurationProviderTests : IDisposable
     Assert.Contains("stale", applied.Error!.Detail, StringComparison.OrdinalIgnoreCase);
     Assert.Equal(external, await File.ReadAllBytesAsync(settingsStorePath));
     Assert.Single(process.Requests);
+    var step = Assert.Single(applied.StepResults);
+    Assert.Equal(0, step.ProcessExitCode);
+    Assert.False(step.Succeeded);
+    Assert.Equal(applied.Error, step.Error);
+    Assert.True(applied.FinalizeAfterCancellation);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_VsSettingsRejectsDestinationChangedAtFinalCommitPoint()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var settingsRoot = Path.Combine(_root, "Visual Studio 18");
+    var sourcePath = Path.Combine(profiles, "team.vssettings");
+    var settingsStorePath = Path.Combine(settingsRoot, "team.vssettings");
+    Directory.CreateDirectory(profiles);
+    Directory.CreateDirectory(settingsRoot);
+    var source = Encoding.UTF8.GetBytes("source settings");
+    var previous = Encoding.UTF8.GetBytes("planned settings");
+    var external = Encoding.UTF8.GetBytes("final concurrent writer");
+    await File.WriteAllBytesAsync(sourcePath, source);
+    await File.WriteAllBytesAsync(settingsStorePath, previous);
+    var importer = new ConfigurationImporter(
+        afterDestinationMove: null,
+        afterDestinationDirectoryLeased: null,
+        beforeDestinationPreconditionCheck: path => File.WriteAllBytes(path, external));
+    var process = new RecordingProcessExecutor();
+    var provider = new VisualStudioSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        importer,
+        new FixedVisualStudioDiscovery(VisualStudioInstance()),
+        process,
+        new ComplianceEvaluator(),
+        _ => settingsRoot);
+    var resource = VisualStudioSettingsResource(
+        Convert.ToHexString(SHA256.HashData(source)),
+        settingsStorePath);
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
+
+    var applied = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, applied.Outcome);
+    Assert.Contains("stale", applied.Error!.Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.Equal(external, await File.ReadAllBytesAsync(settingsStorePath));
+    Assert.Equal(0, Assert.Single(applied.StepResults).ProcessExitCode);
   }
 
   [Fact]
@@ -324,6 +406,48 @@ public sealed class ConfigurationProviderTests : IDisposable
     var detected = await provider.DetectAsync(resource, CancellationToken.None);
     var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
     await File.WriteAllTextAsync(settingsStorePath, "changed after planning");
+
+    var applied = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, applied.Outcome);
+    Assert.Contains("stale", applied.Error!.Detail, StringComparison.OrdinalIgnoreCase);
+    Assert.Empty(process.Requests);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_VsSettingsNoOpRejectsChangedVisualStudioInstanceEvidence()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var settingsRoot = Path.Combine(_root, "Visual Studio 18");
+    var sourcePath = Path.Combine(profiles, "team.vssettings");
+    var settingsStorePath = Path.Combine(settingsRoot, "team.vssettings");
+    Directory.CreateDirectory(profiles);
+    Directory.CreateDirectory(settingsRoot);
+    var contents = Encoding.UTF8.GetBytes("source settings");
+    await File.WriteAllBytesAsync(sourcePath, contents);
+    await File.WriteAllBytesAsync(settingsStorePath, contents);
+    var expectedHash = Convert.ToHexString(SHA256.HashData(contents));
+    var originalInstance = VisualStudioInstance();
+    var discovery = new MutableVisualStudioDiscovery(originalInstance);
+    var process = new RecordingProcessExecutor();
+    var provider = new VisualStudioSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        discovery,
+        process,
+        new ComplianceEvaluator(),
+        _ => settingsRoot);
+    var resource = VisualStudioSettingsResource(expectedHash, settingsStorePath);
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
+    discovery.Instances =
+    [
+      originalInstance with
+      {
+        ProductDisplayVersion = "18.1",
+        InstallationVersion = "18.1.0"
+      }
+    ];
 
     var applied = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
 
@@ -361,6 +485,61 @@ public sealed class ConfigurationProviderTests : IDisposable
     Assert.False(validation.IsValid);
     Assert.Contains(validation.StructuredErrors, error => error.Code == WdemErrorCode.DependencyError);
     Assert.Contains(validation.StructuredErrors, error => error.Code == WdemErrorCode.ConfigurationError);
+  }
+
+  [Fact]
+  public async Task ValidateAsync_VisualStudioSettingsAcceptsFileUriSource()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    Directory.CreateDirectory(profiles);
+    var sourcePath = Path.Combine(profiles, "team.vssettings");
+    var resource = VisualStudioSettingsResource(new string('A', 64), "team.vssettings") with
+    {
+      Parameters = new Dictionary<string, string?>(
+          VisualStudioSettingsResource(new string('A', 64), "team.vssettings").Parameters,
+          StringComparer.OrdinalIgnoreCase)
+      {
+        ["sourcePath"] = new Uri(sourcePath).AbsoluteUri
+      }
+    };
+    var provider = new VisualStudioSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        new EmptyVisualStudioDiscovery(),
+        new NeverProcessExecutor(),
+        new ComplianceEvaluator(),
+        _ => Path.Combine(_root, "Visual Studio 18"));
+
+    var validation = await provider.ValidateAsync(resource, CancellationToken.None);
+
+    Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
+  }
+
+  [Fact]
+  public async Task ValidateAsync_VisualStudioSettingsAcceptsUncFileUriSource()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    Directory.CreateDirectory(profiles);
+    var resource = VisualStudioSettingsResource(new string('A', 64), "team.vssettings") with
+    {
+      Parameters = new Dictionary<string, string?>(
+          VisualStudioSettingsResource(new string('A', 64), "team.vssettings").Parameters,
+          StringComparer.OrdinalIgnoreCase)
+      {
+        ["sourcePath"] = "file://server/share/team.vssettings"
+      }
+    };
+    var provider = new VisualStudioSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        new EmptyVisualStudioDiscovery(),
+        new NeverProcessExecutor(),
+        new ComplianceEvaluator(),
+        _ => Path.Combine(_root, "Visual Studio 18"));
+
+    var validation = await provider.ValidateAsync(resource, CancellationToken.None);
+
+    Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
   }
 
   [Fact]
@@ -483,6 +662,49 @@ public sealed class ConfigurationProviderTests : IDisposable
   }
 
   [Fact]
+  public async Task ValidateAsync_ReSharperSettingsRejectsAlternateFileWithinJetBrainsRoot()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var jetBrainsRoot = Path.Combine(_root, "JetBrains");
+    Directory.CreateDirectory(profiles);
+    var provider = new ReSharperSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        new ComplianceEvaluator(),
+        jetBrainsRoot);
+    var resource = ReSharperSettingsResource(
+        new string('A', 64),
+        Path.Combine(jetBrainsRoot, "Shared", "vAny", "Other.DotSettings"));
+
+    var validation = await provider.ValidateAsync(resource, CancellationToken.None);
+
+    Assert.False(validation.IsValid);
+    Assert.Contains(validation.StructuredErrors,
+        error => error.Code == WdemErrorCode.ConfigurationError &&
+            error.Detail.Contains("GlobalSettingsStorage", StringComparison.OrdinalIgnoreCase));
+  }
+
+  [Fact]
+  public async Task ValidateAsync_ReSharperSettingsAcceptsFixedRelativeDestination()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var jetBrainsRoot = Path.Combine(_root, "JetBrains");
+    Directory.CreateDirectory(profiles);
+    var provider = new ReSharperSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        new ComplianceEvaluator(),
+        jetBrainsRoot);
+    var resource = ReSharperSettingsResource(
+        new string('A', 64),
+        Path.Combine("Shared", "vAny", "GlobalSettingsStorage.DotSettings"));
+
+    var validation = await provider.ValidateAsync(resource, CancellationToken.None);
+
+    Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
+  }
+
+  [Fact]
   public async Task ValidateAsync_VisualStudioSettingsRejectsAlternateDataStreamDestination()
   {
     var profiles = Path.Combine(_root, "profiles");
@@ -580,6 +802,11 @@ public sealed class ConfigurationProviderTests : IDisposable
     Assert.Equal(ApplyOutcome.Failed, applied.Outcome);
     var error = Assert.IsType<StructuredError>(applied.Error);
     Assert.Equal(WdemErrorCode.ConfigurationError, error.Code);
+    var step = Assert.Single(applied.StepResults);
+    Assert.Equal(0, step.ProcessExitCode);
+    Assert.False(step.Succeeded);
+    Assert.Equal(error, step.Error);
+    Assert.True(applied.FinalizeAfterCancellation);
   }
 
   [Fact]
@@ -622,6 +849,51 @@ public sealed class ConfigurationProviderTests : IDisposable
     Assert.Equal(source, await File.ReadAllBytesAsync(settingsStorePath));
     Assert.False(File.Exists(request.Arguments[1]));
     Assert.Equal(ComplianceStatus.Missing, verifiedBefore.Compliance);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_VsSettingsLeasesVerifiedStagingBytesWhileDevenvConsumesThem()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var settingsRoot = Path.Combine(_root, "Visual Studio 18");
+    var sourcePath = Path.Combine(profiles, "team.vssettings");
+    var settingsStorePath = Path.Combine(settingsRoot, "team.vssettings");
+    Directory.CreateDirectory(profiles);
+    var source = Encoding.UTF8.GetBytes("verified source settings");
+    await File.WriteAllBytesAsync(sourcePath, source);
+    var mutationRejected = false;
+    var process = new DelegatingProcessExecutor((request, _) =>
+    {
+      try
+      {
+        File.WriteAllText(request.Arguments[1], "tampered after verification");
+      }
+      catch (IOException)
+      {
+        mutationRejected = true;
+      }
+
+      Assert.Equal(source, File.ReadAllBytes(request.Arguments[1]));
+      return Task.FromResult(new Wdem.Core.Processes.ProcessExecutionResult(true, 0, [], []));
+    });
+    var provider = new VisualStudioSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        new FixedVisualStudioDiscovery(VisualStudioInstance()),
+        process,
+        new ComplianceEvaluator(),
+        _ => settingsRoot);
+    var resource = VisualStudioSettingsResource(
+        Convert.ToHexString(SHA256.HashData(source)),
+        settingsStorePath);
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
+
+    var applied = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, applied.Outcome);
+    Assert.True(mutationRejected);
+    Assert.Equal(source, await File.ReadAllBytesAsync(settingsStorePath));
   }
 
   [Theory]
@@ -738,7 +1010,10 @@ public sealed class ConfigurationProviderTests : IDisposable
       Assert.NotEqual(settingsStorePath, request.Arguments[1]);
       Assert.True(File.Exists(request.Arguments[1]));
       Assert.EndsWith(".vssettings", request.Arguments[1], StringComparison.OrdinalIgnoreCase);
-      Assert.False(processToken.CanBeCanceled);
+      Assert.True(processToken.CanBeCanceled);
+      Assert.Equal(
+          Wdem.Core.Processes.ProcessCancellationMode.LaunchOnly,
+          request.CancellationMode);
       cancellation.Cancel();
       return Task.FromResult(new Wdem.Core.Processes.ProcessExecutionResult(true, 0, [], []));
     });
@@ -761,6 +1036,44 @@ public sealed class ConfigurationProviderTests : IDisposable
     Assert.Equal(source, await File.ReadAllBytesAsync(settingsStorePath));
     Assert.Equal([settingsStorePath], Directory.GetFiles(settingsRoot));
     Assert.Single(process.Requests);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_VsSettingsCancellationBeforeLaunchDoesNotStartDevenv()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var settingsRoot = Path.Combine(_root, "Visual Studio 18");
+    var sourcePath = Path.Combine(profiles, "team.vssettings");
+    var settingsStorePath = Path.Combine(settingsRoot, "team.vssettings");
+    Directory.CreateDirectory(profiles);
+    var source = Encoding.UTF8.GetBytes("new source settings");
+    await File.WriteAllBytesAsync(sourcePath, source);
+    using var cancellation = new CancellationTokenSource();
+    var process = new RecordingProcessExecutor();
+    var provider = new VisualStudioSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        new FixedVisualStudioDiscovery(VisualStudioInstance()),
+        process,
+        new ComplianceEvaluator(),
+        _ => settingsRoot);
+    var resource = VisualStudioSettingsResource(
+        Convert.ToHexString(SHA256.HashData(source)),
+        settingsStorePath);
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
+    var progress = new InlineProgress(update =>
+    {
+      if (update.Stage == "Apply")
+      {
+        cancellation.Cancel();
+      }
+    });
+
+    await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+        await provider.ApplyAsync(resource, plan, progress, cancellation.Token));
+
+    Assert.Empty(process.Requests);
   }
 
   [Fact]
@@ -1123,6 +1436,12 @@ public sealed class ConfigurationProviderTests : IDisposable
             ["expectedSha256"] = expectedHash,
             ["destinationPath"] = destinationPath
           });
+
+  private static string ReSharperDestination(string jetBrainsRoot) => Path.Combine(
+      jetBrainsRoot,
+      "Shared",
+      "vAny",
+      "GlobalSettingsStorage.DotSettings");
 
   private static ResourceDefinition WithOptionalInstanceSelector(ResourceDefinition resource)
   {

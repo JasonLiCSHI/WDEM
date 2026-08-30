@@ -19,6 +19,7 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
   private readonly ConfigurationImporter _importer;
   private readonly IComplianceEvaluator _complianceEvaluator;
   private readonly string _destinationRoot;
+  private readonly string _destinationPath;
 
   public ReSharperSettingsProvider(
       ConfigurationSourceResolver sourceResolver,
@@ -33,6 +34,11 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
     _destinationRoot = Path.GetFullPath(destinationRoot ?? Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "JetBrains"));
+    _destinationPath = Path.Combine(
+        _destinationRoot,
+        "Shared",
+        "vAny",
+        "GlobalSettingsStorage.DotSettings");
   }
 
   public string ResourceType => "resharper-settings";
@@ -78,10 +84,15 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
 
     if (Get(resource, DestinationPathParameter) is { } destination)
     {
-      if (!TryResolveDestination(destination, out var resolvedDestination))
+      if (ConfigurationSourceResolver.HasAlternateDataStream(destination))
       {
         errors.Add((WdemErrorCode.ConfigurationError,
-            "Parameter 'destinationPath' must remain within the current user's ReSharper settings directory."));
+            "Parameter 'destinationPath' must not identify an NTFS alternate data stream."));
+      }
+      else if (!TryResolveDestination(destination, out var resolvedDestination))
+      {
+        errors.Add((WdemErrorCode.ConfigurationError,
+            "Parameter 'destinationPath' must identify Shared\\vAny\\GlobalSettingsStorage.DotSettings in the current user's JetBrains settings directory."));
       }
       else if (ConfigurationSourceResolver.HasAlternateDataStream(resolvedDestination))
       {
@@ -268,6 +279,17 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
       return new ResourceApplyResult { ResourceId = resource.Id, Outcome = ApplyOutcome.NotRequired };
     }
 
+    var destinationPrecondition = ConfigurationDestinationPrecondition.FromDetectedState(
+        currentState,
+        "destinationPath");
+    if (destinationPrecondition is null)
+    {
+      return Failed(resource, Error(
+          resource,
+          WdemErrorCode.ConfigurationError,
+          "The ReSharper settings destination state cannot be committed safely."));
+    }
+
     progress?.Report(new ProviderProgress("Resolve", 0.25, "Verifying the ReSharper settings source.", plan.Steps[0].Id));
     var source = await _sourceResolver.ResolveAsync(
         Get(resource, SourcePathParameter)!,
@@ -281,12 +303,13 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
     progress?.Report(new ProviderProgress("Apply", 0.6, "Importing ReSharper settings.", plan.Steps[0].Id));
     var destination = ResolveDestination(Get(resource, DestinationPathParameter)!);
     var staged = await _importer.StageAsync(
-        source.Source!, destination, cancellationToken).ConfigureAwait(false);
+        source.Source!, destination, destinationPrecondition, cancellationToken).ConfigureAwait(false);
     if (!staged.Succeeded)
     {
       return Failed(resource, staged.Error! with { ResourceId = resource.Id });
     }
 
+    var snapshot = staged.Snapshot!;
     try
     {
       var destinationBeforeCommit = await DetectAsync(resource, cancellationToken).ConfigureAwait(false);
@@ -304,7 +327,7 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
       // The directory hierarchy is leased through commit and verification. A non-cooperating
       // writer can still race the file-level comparison in the final nanoseconds before replace.
       var imported = await _importer.CommitStagedAsync(
-          staged.Snapshot!, destination, cancellationToken).ConfigureAwait(false);
+          snapshot, destination, cancellationToken).ConfigureAwait(false);
       if (!imported.Succeeded)
       {
         return Failed(resource, imported.Error! with { ResourceId = resource.Id });
@@ -323,8 +346,8 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
     }
     finally
     {
-      ConfigurationImporter.DeleteStagingSnapshot(staged.Snapshot!.Path);
-      staged.Snapshot.Dispose();
+      snapshot.DeleteStagingFile();
+      snapshot.Dispose();
     }
   }
 
@@ -358,8 +381,11 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
   {
     try
     {
-      resolved = ResolveDestination(destination);
-      return ConfigurationSourceResolver.IsWithin(resolved, _destinationRoot);
+      resolved = Path.GetFullPath(
+          Path.IsPathFullyQualified(destination)
+              ? destination
+              : Path.Combine(_destinationRoot, destination));
+      return string.Equals(resolved, _destinationPath, StringComparison.OrdinalIgnoreCase);
     }
     catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
     {
@@ -368,8 +394,8 @@ public sealed class ReSharperSettingsProvider : IResourceProvider
     }
   }
 
-  private string ResolveDestination(string destination) => Path.GetFullPath(
-      Path.IsPathFullyQualified(destination)
-          ? destination
-          : Path.Combine(_destinationRoot, destination));
+  private string ResolveDestination(string destination) =>
+      TryResolveDestination(destination, out var resolved)
+          ? resolved
+          : throw new ArgumentException("The ReSharper settings destination is not the fixed trusted path.", nameof(destination));
 }
