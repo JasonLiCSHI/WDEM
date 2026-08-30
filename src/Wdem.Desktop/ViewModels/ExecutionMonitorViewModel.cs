@@ -55,6 +55,7 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
   private readonly LogRedactor _redactor;
   private readonly IUiDispatcher _dispatcher;
   private readonly RunRequest _request;
+  private readonly List<string> _activeResourceIds = [];
   private IDisposable? _subscription;
   private CancellationTokenSource? _runCancellation;
   private ExecutionRun? _run;
@@ -272,7 +273,7 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
     OnPropertyChanged(nameof(Run));
     OnPropertyChanged(nameof(RunId));
     Resources.Clear();
-    CurrentResource = null;
+    ClearCurrentResource();
     TotalProgress = 0;
     ErrorMessage = null;
     _startedAt = DateTimeOffset.UtcNow;
@@ -322,6 +323,7 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
         await _dispatcher.EnqueueAsync(() =>
             {
               ElapsedDuration = DateTimeOffset.UtcNow - _startedAt;
+              ClearCurrentResource();
               IsRunning = false;
               IsTerminal = true;
               RaiseCommandStates();
@@ -382,7 +384,6 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
     ElapsedDuration = DateTimeOffset.UtcNow - _startedAt;
     if (runEvent.ResourceId is not null)
     {
-      CurrentResource = runEvent.ResourceId;
       ResourceProgressViewModel resource = GetOrAddResource(runEvent.ResourceId);
       if (runEvent.Progress is double progress)
       {
@@ -399,6 +400,14 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
         }
 
         resource.Outcome = runEvent.Outcome;
+        if (resource.State == ExecutionState.Running)
+        {
+          MarkResourceActive(resource.Id);
+        }
+        else
+        {
+          RemoveActiveResource(resource.Id);
+        }
       }
 
       if (runEvent.StepId is not null)
@@ -421,6 +430,21 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
           step.Outcome = runEvent.Outcome;
         }
       }
+
+      if (runEvent.Kind == RunEventKind.StepProgress &&
+          resource.State == ExecutionState.Running)
+      {
+        MarkResourceActive(resource.Id);
+      }
+
+      RefreshCurrentResource();
+    }
+
+    if (runEvent.Kind == RunEventKind.Completed ||
+        (runEvent.Kind == RunEventKind.RunStateChanged &&
+         runEvent.State == ExecutionState.Completed))
+    {
+      ClearCurrentResource();
     }
 
     AddLog(new LogEntryViewModel(runEvent, _redactor));
@@ -429,6 +453,7 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
 
   private void ApplyDurableSnapshot(ExecutionRun run)
   {
+    ClearCurrentResource();
     _run = run;
     OnPropertyChanged(nameof(Run));
     OnPropertyChanged(nameof(RunId));
@@ -461,6 +486,30 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable
     var created = new ResourceProgressViewModel(resourceId);
     Resources.Add(created);
     return created;
+  }
+
+  private void MarkResourceActive(string resourceId)
+  {
+    RemoveActiveResource(resourceId);
+    _activeResourceIds.Add(resourceId);
+  }
+
+  private void RemoveActiveResource(string resourceId) =>
+      _activeResourceIds.RemoveAll(id =>
+          string.Equals(id, resourceId, StringComparison.OrdinalIgnoreCase));
+
+  private void RefreshCurrentResource()
+  {
+    _activeResourceIds.RemoveAll(id => !Resources.Any(resource =>
+        string.Equals(resource.Id, id, StringComparison.OrdinalIgnoreCase) &&
+        resource.State == ExecutionState.Running));
+    CurrentResource = _activeResourceIds.Count == 0 ? null : _activeResourceIds[^1];
+  }
+
+  private void ClearCurrentResource()
+  {
+    _activeResourceIds.Clear();
+    CurrentResource = null;
   }
 
   private void AddLog(LogEntryViewModel entry)

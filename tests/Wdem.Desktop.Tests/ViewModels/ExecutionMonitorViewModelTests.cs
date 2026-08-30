@@ -93,6 +93,113 @@ public sealed class ExecutionMonitorViewModelTests
     dispatcher.RunQueuedAndInline();
     service.ReleaseEvents.TrySetResult();
     await run;
+    Assert.Null(viewModel.CurrentResource);
+  }
+
+  [Fact]
+  public async Task CurrentResourceTracksMostRecentlyActiveRunningResource()
+  {
+    var runId = Guid.NewGuid();
+    using var events = new RunEventHub();
+    var service = new FakeEnvironmentRunService(events, runId)
+    {
+      Events =
+      [
+        StateEvent(1, "alpha", ExecutionState.Pending),
+        StateEvent(2, "alpha", ExecutionState.Ready),
+        StateEvent(3, "beta", ExecutionState.Blocked),
+        StateEvent(4, "alpha", ExecutionState.Running),
+        StateEvent(5, "beta", ExecutionState.Running),
+        new RunEvent(
+            runId,
+            6,
+            DateTimeOffset.UnixEpoch.AddSeconds(6),
+            RunEventKind.StepProgress,
+            "alpha",
+            "install",
+            0.5,
+            "Installing alpha",
+            null,
+            ExecutionState.Running,
+            null),
+        StateEvent(7, "alpha", ExecutionState.Completed, ExecutionOutcome.Succeeded),
+        StateEvent(8, "beta", ExecutionState.Completed, ExecutionOutcome.Succeeded),
+        StateEvent(9, "gamma", ExecutionState.Running),
+        new RunEvent(
+            runId,
+            10,
+            DateTimeOffset.UnixEpoch.AddSeconds(10),
+            RunEventKind.RunStateChanged,
+            null,
+            null,
+            1,
+            "Run completed",
+            null,
+            ExecutionState.Completed,
+            ExecutionOutcome.Succeeded),
+        new RunEvent(
+            runId,
+            11,
+            DateTimeOffset.UnixEpoch.AddSeconds(11),
+            RunEventKind.Completed,
+            null,
+            null,
+            1,
+            "Run completed",
+            null,
+            ExecutionState.Completed,
+            ExecutionOutcome.Succeeded)
+      ],
+      HoldAfterEvents = true
+    };
+    var dispatcher = new ControlledDispatcher();
+    var viewModel = CreateMonitor(service, events, dispatcher);
+
+    Task run = viewModel.StartAsync();
+    string?[] expected =
+    [
+      null,
+      null,
+      null,
+      "alpha",
+      "beta",
+      "alpha",
+      "beta",
+      null,
+      "gamma",
+      null,
+      null
+    ];
+    for (int index = 0; index < expected.Length; index++)
+    {
+      Assert.True(dispatcher.WaitForEnqueueCount(index + 1, TimeSpan.FromSeconds(5)));
+      dispatcher.DrainNext();
+      Assert.Equal(expected[index], viewModel.CurrentResource);
+    }
+
+    await service.EventsPublished.Task;
+    dispatcher.RunQueuedAndInline();
+    service.ReleaseEvents.TrySetResult();
+    await run;
+
+    Assert.Null(viewModel.CurrentResource);
+
+    RunEvent StateEvent(
+        long sequence,
+        string resourceId,
+        ExecutionState state,
+        ExecutionOutcome? outcome = null) => new(
+            runId,
+            sequence,
+            DateTimeOffset.UnixEpoch.AddSeconds(sequence),
+            RunEventKind.ResourceStateChanged,
+            resourceId,
+            null,
+            null,
+            state.ToString(),
+            null,
+            state,
+            outcome);
   }
 
   [Fact]
