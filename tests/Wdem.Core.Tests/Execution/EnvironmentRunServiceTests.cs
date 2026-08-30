@@ -229,9 +229,68 @@ public sealed class EnvironmentRunServiceTests
     var run = await service.ApplyAsync(Request(), CancellationToken.None);
     var persisted = await store.GetAsync(run.RunId, CancellationToken.None);
 
-    Assert.Equal(ExecutionOutcome.Failed, run.ResourceResults["git"].Outcome);
-    Assert.Equal(RestartPolicy.RestartRequired, run.ResourceResults["git"].RestartRequirement);
+    var result = run.ResourceResults["git"];
+    Assert.Equal(ExecutionOutcome.Failed, result.Outcome);
+    Assert.Equal(ComplianceStatus.Missing, result.FinalCompliance);
+    Assert.Null(result.DetectedAfter);
+    Assert.Equal(RestartPolicy.RestartRequired, result.RestartRequirement);
     Assert.Equal([RestartPolicy.RestartRequired], persisted!.RestartRequirements);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_FailedFinalVerificationPropagatesComplianceErrorAndEvidence()
+  {
+    var finalError = new StructuredError(
+        WdemErrorCode.ConfigurationError,
+        "Applied configuration does not match.",
+        "The destination hash differs from the approved configuration.")
+    {
+      ResourceId = "git",
+      StepId = "configure"
+    };
+    var detectedAfter = new DetectedState
+    {
+      ResourceId = "git",
+      Outcome = DetectionOutcome.Succeeded,
+      Exists = true,
+      ConfigurationHash = "ACTUAL",
+      Evidence = new Dictionary<string, string>
+      {
+        ["destinationSha256"] = "ACTUAL",
+        ["expectedSha256"] = "EXPECTED"
+      },
+      Error = finalError.Detail,
+      StructuredError = finalError
+    };
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyResult = new ResourceApplyResult
+      {
+        ResourceId = "git",
+        Outcome = ApplyOutcome.Failed,
+        Error = finalError,
+        FinalVerification = new VerificationResult
+        {
+          ResourceId = "git",
+          Compliance = ComplianceStatus.ConfigurationMismatch,
+          DetectedState = detectedAfter,
+          Message = finalError.Summary
+        }
+      }
+    };
+    var (service, store) = CreateService(provider);
+
+    var report = await service.ApplyAsync(Request(), CancellationToken.None);
+    var persisted = await store.GetAsync(report.RunId, CancellationToken.None);
+
+    var result = report.ResourceResults["git"];
+    Assert.Equal(ExecutionOutcome.Failed, result.Outcome);
+    Assert.Equal(ComplianceStatus.ConfigurationMismatch, result.FinalCompliance);
+    Assert.Equal(finalError, result.Error);
+    Assert.Equal(detectedAfter, result.DetectedAfter);
+    Assert.Equal("ACTUAL", result.DetectedAfter!.Evidence["destinationSha256"]);
+    Assert.Equal(result, persisted!.ResourceResults["git"]);
+    Assert.Equal(0, provider.VerifyCalls);
   }
 
   [Fact]

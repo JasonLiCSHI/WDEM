@@ -257,6 +257,9 @@ public sealed class ElevatedResourceWorker
       FinalizeAfterCancellation = result.FinalizeAfterCancellation,
       RestartRequirement = result.RestartRequirement,
       Error = result.Error is null ? null : _redactor.Redact(result.Error),
+      FinalVerification = result.FinalVerification is null
+          ? null
+          : Redact(result.FinalVerification),
       StepResults = result.StepResults.Select(step => new ProviderStepResult
       {
         StepId = _redactor.Redact(step.StepId),
@@ -270,6 +273,30 @@ public sealed class ElevatedResourceWorker
       Diagnostics = result.Diagnostics.Select(_redactor.Redact).ToArray()
     };
   }
+
+  private VerificationResult Redact(VerificationResult result) => result with
+  {
+    ResourceId = _redactor.Redact(result.ResourceId),
+    DetectedState = Redact(result.DetectedState),
+    Message = result.Message is null ? null : _redactor.Redact(result.Message)
+  };
+
+  private DetectedState Redact(DetectedState state) => state with
+  {
+    ResourceId = _redactor.Redact(state.ResourceId),
+    Version = state.Version is null ? null : _redactor.Redact(state.Version),
+    ConfigurationHash = state.ConfigurationHash is null
+        ? null
+        : _redactor.Redact(state.ConfigurationHash),
+    Evidence = state.Evidence.ToDictionary(
+        pair => _redactor.Redact(pair.Key),
+        pair => _redactor.Redact(pair.Value),
+        StringComparer.OrdinalIgnoreCase),
+    Error = state.Error is null ? null : _redactor.Redact(state.Error),
+    StructuredError = state.StructuredError is null
+        ? null
+        : _redactor.Redact(state.StructuredError)
+  };
 
   private static bool FixedEquals(string? left, string? right)
   {

@@ -804,18 +804,24 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
       ApplyOutcome.NotRequired => ExecutionOutcome.Failed,
       _ => ExecutionOutcome.Failed
     };
+    var failedVerification = applied.Outcome == ApplyOutcome.Failed
+        ? applied.FinalVerification
+        : null;
     var completed = new ResourceResult
     {
       ResourceId = id,
       State = ExecutionState.Completed,
       Outcome = outcome,
-      FinalCompliance = complianceBefore.Status,
+      FinalCompliance = failedVerification?.Compliance ?? complianceBefore.Status,
       DetectedBefore = detectedBefore,
+      DetectedAfter = failedVerification?.DetectedState,
       Progress = outcome == ExecutionOutcome.NotRequired ? 1 : 0,
+      Message = failedVerification?.Message,
       StartedAtUtc = startedAt,
       EndedAtUtc = DateTimeOffset.UtcNow,
       Error = outcome is ExecutionOutcome.Failed or ExecutionOutcome.Cancelled
-          ? applied.Error ?? (applied.Outcome == ApplyOutcome.NotRequired
+          ? applied.Error ?? failedVerification?.DetectedState.StructuredError ??
+              (applied.Outcome == ApplyOutcome.NotRequired
               ? VerificationError(
                   id,
                   $"The provider reported no work was required, but compliance remained '{complianceBefore.Status}'.")

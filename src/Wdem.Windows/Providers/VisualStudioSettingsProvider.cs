@@ -500,7 +500,8 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
             error,
             plan.Steps[0],
             process.ExitCode,
-            finalizeAfterCancellation: true);
+            finalizeAfterCancellation: true,
+            finalVerification: verification);
       }
 
       return ConfigurationProviderSupport.Succeeded(
@@ -554,7 +555,11 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
               Get(resource, ProductIdParameter),
               Get(resource, EditionParameter),
               Get(resource, ChannelIdParameter)));
-      if (selected.IsIncompatible)
+      var implicitSelectionIsIncompatible = Get(resource, InstanceIdParameter) is null &&
+          selected.Instance is null &&
+          !selected.IsAmbiguous &&
+          selected.HasEligibleInstances;
+      if (selected.IsIncompatible || implicitSelectionIsIncompatible)
       {
         return new InstanceSelection(null, ConfigurationProviderSupport.Error(
             resource,

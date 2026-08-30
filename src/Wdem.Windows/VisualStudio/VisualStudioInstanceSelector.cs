@@ -9,7 +9,8 @@ internal sealed record VisualStudioInstanceCriteria(
 internal sealed record VisualStudioInstanceSelection(
     VisualStudioInstance? Instance,
     IReadOnlyList<string> CandidateInstanceIds,
-    bool IsIncompatible = false)
+    bool IsIncompatible = false,
+    bool HasEligibleInstances = false)
 {
   public bool IsAmbiguous => CandidateInstanceIds.Count > 0;
 }
@@ -72,7 +73,8 @@ internal static class VisualStudioInstanceSelector
                 .Select(instance => instance.InstanceId)
                 .Order(StringComparer.OrdinalIgnoreCase)
                 .ToArray()
-            : []);
+            : [],
+        HasEligibleInstances: completeInstances.Length > 0);
   }
 
   private static bool MatchesCriteria(

@@ -56,6 +56,7 @@ public sealed class ElevatedResourceWorkerTests
 
     Assert.Equal(1, provider.ApplyCalls);
     Assert.Equal(ApplyOutcome.Succeeded, result.Outcome);
+    Assert.Null(result.FinalVerification);
     Assert.DoesNotContain("hunter2", progress.Items.Single().Message, StringComparison.Ordinal);
     Assert.DoesNotContain(
         "hunter2",
@@ -107,6 +108,96 @@ public sealed class ElevatedResourceWorkerTests
 
     Assert.Equal(ApplyOutcome.Failed, result.Outcome);
     Assert.Equal(RestartPolicy.RestartRequired, result.RestartRequirement);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_FailedFinalVerificationIsPreservedAndFullyRedacted()
+  {
+    var nestedError = new StructuredError(
+        WdemErrorCode.ConfigurationError,
+        "token=hunter2",
+        "password=hunter2")
+    {
+      ResourceId = "admin-resource",
+      StepId = "secret=hunter2",
+      LogLocation = "token=hunter2",
+      SuggestedAction = "password=hunter2"
+    };
+    var provider = new RecordingProvider
+    {
+      Outcome = ApplyOutcome.Failed,
+      FinalVerification = new VerificationResult
+      {
+        ResourceId = "admin-resource",
+        Compliance = ComplianceStatus.ConfigurationMismatch,
+        Message = "token=hunter2",
+        DetectedState = new DetectedState
+        {
+          ResourceId = "admin-resource",
+          Outcome = DetectionOutcome.Succeeded,
+          Exists = true,
+          Version = "token=hunter2",
+          ConfigurationHash = "secret=hunter2",
+          Evidence = new Dictionary<string, string>
+          {
+            ["token=hunter2"] = "password=hunter2"
+          },
+          Error = "secret=hunter2",
+          StructuredError = nestedError
+        }
+      }
+    };
+    var run = ApprovedRun(provider, out var approvedFingerprint);
+    var worker = new ElevatedResourceWorker(
+        new StubRunStore(run),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+
+    var result = await worker.ApplyAsync(
+        new ElevatedResourceRequest(run.RunId, "admin-resource", approvedFingerprint),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Failed, result.Outcome);
+    var verification = Assert.IsType<VerificationResult>(result.FinalVerification);
+    Assert.Equal(ComplianceStatus.ConfigurationMismatch, verification.Compliance);
+    Assert.DoesNotContain("hunter2", verification.Message, StringComparison.Ordinal);
+    Assert.Equal("admin-resource", verification.ResourceId);
+    var detected = verification.DetectedState;
+    Assert.Equal("admin-resource", detected.ResourceId);
+    Assert.Equal(DetectionOutcome.Succeeded, detected.Outcome);
+    Assert.True(detected.Exists);
+    Assert.DoesNotContain("hunter2", detected.Version, StringComparison.Ordinal);
+    Assert.DoesNotContain("hunter2", detected.ConfigurationHash, StringComparison.Ordinal);
+    var evidence = Assert.Single(detected.Evidence);
+    Assert.DoesNotContain("hunter2", evidence.Key, StringComparison.Ordinal);
+    Assert.DoesNotContain("hunter2", evidence.Value, StringComparison.Ordinal);
+    Assert.DoesNotContain("hunter2", detected.Error, StringComparison.Ordinal);
+    var error = Assert.IsType<StructuredError>(detected.StructuredError);
+    Assert.DoesNotContain("hunter2", error.Summary, StringComparison.Ordinal);
+    Assert.DoesNotContain("hunter2", error.Detail, StringComparison.Ordinal);
+    Assert.DoesNotContain("hunter2", error.StepId, StringComparison.Ordinal);
+    Assert.DoesNotContain("hunter2", error.LogLocation, StringComparison.Ordinal);
+    Assert.DoesNotContain("hunter2", error.SuggestedAction, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_CancelledProviderDoesNotCreateFinalVerification()
+  {
+    var provider = new RecordingProvider { Outcome = ApplyOutcome.Cancelled };
+    var run = ApprovedRun(provider, out var approvedFingerprint);
+    var worker = new ElevatedResourceWorker(
+        new StubRunStore(run),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+
+    var result = await worker.ApplyAsync(
+        new ElevatedResourceRequest(run.RunId, "admin-resource", approvedFingerprint),
+        null,
+        CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Cancelled, result.Outcome);
+    Assert.Null(result.FinalVerification);
   }
 
   [Fact]
@@ -763,6 +854,7 @@ public sealed class ElevatedResourceWorkerTests
     public int ProcessExitCode { get; init; } = 23;
     public bool? StepSucceeded { get; init; }
     public bool FinalizeAfterCancellation { get; init; }
+    public VerificationResult? FinalVerification { get; init; }
 
     public ValueTask<ResourceApplyResult> ApplyAsync(
         ResourceDefinition resource,
@@ -780,6 +872,7 @@ public sealed class ElevatedResourceWorkerTests
         Outcome = Outcome,
         FinalizeAfterCancellation = FinalizeAfterCancellation,
         RestartRequirement = RestartRequirement,
+        FinalVerification = FinalVerification,
         StepResults =
         [
           new ProviderStepResult

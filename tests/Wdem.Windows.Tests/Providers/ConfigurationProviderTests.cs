@@ -630,6 +630,50 @@ public sealed class ConfigurationProviderTests : IDisposable
     Assert.Equal("vs-ready", detected.Evidence["visualStudioInstanceId"]);
   }
 
+  [Theory]
+  [InlineData(
+      "Microsoft.VisualStudio.Product.Community",
+      "Enterprise",
+      "VisualStudio.18.Release")]
+  [InlineData(
+      "Microsoft.VisualStudio.Product.Community",
+      "Community",
+      "VisualStudio.18.Preview")]
+  [InlineData(
+      "Microsoft.VisualStudio.Product.Professional",
+      "Community",
+      "VisualStudio.18.Release")]
+  public async Task DetectAsync_VsSettingsImplicitIncompatibleInstanceIsConfigurationError(
+      string productId,
+      string edition,
+      string channelId)
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    Directory.CreateDirectory(profiles);
+    var source = Encoding.UTF8.GetBytes("source settings");
+    await File.WriteAllBytesAsync(Path.Combine(profiles, "team.vssettings"), source);
+    var provider = new VisualStudioSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        new FixedVisualStudioDiscovery(VisualStudioInstance() with
+        {
+          ProductId = productId,
+          Edition = edition,
+          ChannelId = channelId
+        }),
+        new NeverProcessExecutor(),
+        new ComplianceEvaluator(),
+        _ => Path.Combine(_root, "settings"));
+    var resource = WithOptionalInstanceSelector(VisualStudioSettingsResource(
+        Convert.ToHexString(SHA256.HashData(source)),
+        "team.vssettings"));
+
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+
+    Assert.Equal(DetectionOutcome.Failed, detected.Outcome);
+    Assert.Equal(WdemErrorCode.ConfigurationError, detected.StructuredError?.Code);
+  }
+
   [Fact]
   public async Task ValidateAsync_ReSharperSettingsRejectsAlternateDataStreamDestination()
   {
@@ -834,6 +878,9 @@ public sealed class ConfigurationProviderTests : IDisposable
     Assert.False(step.Succeeded);
     Assert.Equal(error, step.Error);
     Assert.True(applied.FinalizeAfterCancellation);
+    var finalVerification = Assert.IsType<VerificationResult>(applied.FinalVerification);
+    Assert.Equal(ComplianceStatus.ConfigurationMismatch, finalVerification.Compliance);
+    Assert.Equal(error, finalVerification.DetectedState.StructuredError);
   }
 
   [Fact]

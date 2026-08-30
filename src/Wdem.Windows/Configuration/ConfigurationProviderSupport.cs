@@ -134,12 +134,14 @@ internal static class ConfigurationProviderSupport
       StructuredError error,
       PlanStep? step = null,
       int? processExitCode = null,
-      bool finalizeAfterCancellation = false) => new()
+      bool finalizeAfterCancellation = false,
+      VerificationResult? finalVerification = null) => new()
       {
         ResourceId = resource.Id,
         Outcome = ApplyOutcome.Failed,
         FinalizeAfterCancellation = finalizeAfterCancellation,
         Error = error,
+        FinalVerification = finalVerification,
         Diagnostics = [error],
         StepResults = step is null
             ? []

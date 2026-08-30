@@ -254,6 +254,7 @@ public sealed record ResourceApplyResult
   public bool FinalizeAfterCancellation { get; init; }
   public RestartPolicy? RestartRequirement { get; init; }
   public StructuredError? Error { get; init; }
+  public VerificationResult? FinalVerification { get; init; }
   public IReadOnlyList<ProviderStepResult> StepResults
   {
     get => _stepResults;
