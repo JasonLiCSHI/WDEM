@@ -283,6 +283,13 @@ public sealed class RepositoryIdentityTests
         "'WinHome\\Wdem\\runs'",
         script,
         StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("CreationTimeUtc", script, StringComparison.Ordinal);
+    Assert.Matches(@"AccessControlSections\]::Owner", script);
+    Assert.Matches(@"AccessControlSections\]::Group", script);
+    Assert.Matches(@"AccessControlSections\]::Access", script);
+    Assert.DoesNotContain("::Audit", script, StringComparison.OrdinalIgnoreCase);
+    Assert.DoesNotContain("LastAccessTime", script, StringComparison.OrdinalIgnoreCase);
+    Assert.Matches(@"(?i)Get-Item[^\r\n]*-Stream\s+\*", script);
   }
 
   [Fact]
@@ -331,6 +338,35 @@ public sealed class RepositoryIdentityTests
         Assert-FingerprintChanged $before (Get-LegacyTreeFingerprint $legacyRoot) 'same-length content change'
 
         $before = Get-LegacyTreeFingerprint $legacyRoot
+        $creationTime = [IO.File]::GetCreationTimeUtc($state)
+        [IO.File]::SetCreationTimeUtc($state, $creationTime.AddMinutes(-5))
+        Assert-FingerprintChanged $before (Get-LegacyTreeFingerprint $legacyRoot) 'creation-time change'
+
+        $before = Get-LegacyTreeFingerprint $legacyRoot
+        $acl = Get-Acl -LiteralPath $state
+        $acl.SetAccessRuleProtection(-not $acl.AreAccessRulesProtected, $true)
+        Set-Acl -LiteralPath $state -AclObject $acl
+        Assert-FingerprintChanged $before (Get-LegacyTreeFingerprint $legacyRoot) 'DACL change'
+
+        $before = Get-LegacyTreeFingerprint $legacyRoot
+        $creationTime = [IO.File]::GetCreationTimeUtc($state)
+        $writeTime = [IO.File]::GetLastWriteTimeUtc($state)
+        $adsSupported = $true
+        try {
+            Set-Content -LiteralPath $state -Stream 'wdem-test' -Value 'ads-alpha'
+        }
+        catch [System.NotSupportedException] {
+            $adsSupported = $false
+            Write-Output "SKIP ADS: $($_.Exception.Message)"
+        }
+        if ($adsSupported) {
+            [IO.File]::SetCreationTimeUtc($state, $creationTime)
+            [IO.File]::SetLastWriteTimeUtc($state, $writeTime)
+            Assert-FingerprintChanged $before (Get-LegacyTreeFingerprint $legacyRoot) 'alternate data stream change'
+            Write-Output 'ADS mutation detected'
+        }
+
+        $before = Get-LegacyTreeFingerprint $legacyRoot
         [IO.File]::SetLastWriteTimeUtc($state, $stableTime.AddMinutes(1))
         Assert-FingerprintChanged $before (Get-LegacyTreeFingerprint $legacyRoot) 'write-time change'
 
@@ -355,6 +391,17 @@ public sealed class RepositoryIdentityTests
         Set-Content -LiteralPath $outsideState -Value 'changed outside legacy root'
         $after = Get-LegacyTreeFingerprint $legacyRoot
         if ($before -ne $after) { throw 'Fingerprint followed a junction outside the legacy root.' }
+
+        $outsideCreationTime = [IO.Directory]::GetCreationTimeUtc($outside)
+        [IO.Directory]::SetCreationTimeUtc($outside, $outsideCreationTime.AddMinutes(-5))
+        $after = Get-LegacyTreeFingerprint $legacyRoot
+        if ($before -ne $after) { throw 'Fingerprint followed junction target creation metadata.' }
+
+        $outsideAcl = Get-Acl -LiteralPath $outside
+        $outsideAcl.SetAccessRuleProtection(-not $outsideAcl.AreAccessRulesProtected, $true)
+        Set-Acl -LiteralPath $outside -AclObject $outsideAcl
+        $after = Get-LegacyTreeFingerprint $legacyRoot
+        if ($before -ne $after) { throw 'Fingerprint followed junction target access control.' }
         [IO.Directory]::Delete($junction)
         """;
     File.WriteAllText(harnessPath, harness);
@@ -370,6 +417,10 @@ public sealed class RepositoryIdentityTests
         harnessPath);
 
     Assert.True(result.ExitCode == 0, result.Output);
+    Assert.True(
+        result.Output.Contains("ADS mutation detected", StringComparison.Ordinal) ||
+        result.Output.Contains("SKIP ADS:", StringComparison.Ordinal),
+        $"ADS coverage was silently skipped.{Environment.NewLine}{result.Output}");
   }
 
   [Fact]

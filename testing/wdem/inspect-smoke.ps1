@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
+Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
+
 function Get-TextSha256([string[]]$Lines) {
     $text = $Lines -join "`n"
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
@@ -17,6 +19,16 @@ function ConvertTo-FingerprintField([AllowNull()][string]$Value) {
         return '-'
     }
     return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Value))
+}
+
+function Get-AclFingerprint([string]$Path) {
+    # SACL/Audit is deliberately excluded because reading it requires elevated privileges.
+    $sections =
+        [Security.AccessControl.AccessControlSections]::Owner -bor
+        [Security.AccessControl.AccessControlSections]::Group -bor
+        [Security.AccessControl.AccessControlSections]::Access
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    return $acl.GetSecurityDescriptorSddlForm($sections)
 }
 
 function Get-FileContentFingerprint([string]$Path) {
@@ -37,6 +49,51 @@ function Get-FileContentFingerprint([string]$Path) {
         }
         $sha256.Dispose()
     }
+}
+
+function Get-NamedStreamContentFingerprint([string]$Path, [string]$StreamName) {
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        Get-Content -LiteralPath $Path -Stream $StreamName -Encoding Byte -ReadCount 65536 -ErrorAction Stop |
+            ForEach-Object {
+                [byte[]]$buffer = $_
+                [void]$sha256.TransformBlock($buffer, 0, $buffer.Length, $buffer, 0)
+            }
+        [void]$sha256.TransformFinalBlock([byte[]]@(), 0, 0)
+        return [BitConverter]::ToString($sha256.Hash).Replace('-', '')
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
+function Get-FileStreamsFingerprint([string]$Path) {
+    $streamsBefore = @(Get-Item -LiteralPath $Path -Stream * -ErrorAction Stop)
+    $metadataBefore = @(
+        $streamsBefore |
+            ForEach-Object { "$(ConvertTo-FingerprintField $_.Stream)|$($_.Length)" } |
+            Sort-Object)
+    $records = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($stream in $streamsBefore) {
+        $streamName = [string]$stream.Stream
+        $contentHash = if ($streamName -eq ':$DATA') {
+            Get-FileContentFingerprint $Path
+        }
+        else {
+            Get-NamedStreamContentFingerprint $Path $streamName
+        }
+        $records.Add("$(ConvertTo-FingerprintField $streamName)|$($stream.Length)|$contentHash")
+    }
+
+    $streamsAfter = @(Get-Item -LiteralPath $Path -Stream * -ErrorAction Stop)
+    $metadataAfter = @(
+        $streamsAfter |
+            ForEach-Object { "$(ConvertTo-FingerprintField $_.Stream)|$($_.Length)" } |
+            Sort-Object)
+    if (($metadataBefore -join "`n") -ne ($metadataAfter -join "`n")) {
+        throw "Retired state file streams changed while they were being fingerprinted: $Path"
+    }
+    return @($records | Sort-Object) -join ';'
 }
 
 function Get-LegacyTreeFingerprintOnce([string]$Path) {
@@ -70,44 +127,61 @@ function Get-LegacyTreeFingerprintOnce([string]$Path) {
         $encodedPath = ConvertTo-FingerprintField $relative
         $isReparsePoint = ($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
         if ($isReparsePoint) {
-            $item = Get-Item -LiteralPath $current -Force
-            $targetProperty = $item.PSObject.Properties['Target']
+            $itemBefore = Get-Item -LiteralPath $current -Force
+            $aclBefore = Get-AclFingerprint $current
+            $targetProperty = $itemBefore.PSObject.Properties['Target']
             if ($null -eq $targetProperty) {
                 throw "Cannot safely read reparse-point target: $current"
             }
             $target = @($targetProperty.Value) -join "`0"
-            $records.Add("R|$encodedPath|$([int]$attributes)|$($item.LastWriteTimeUtc.Ticks)|$(ConvertTo-FingerprintField $target)")
+            $itemAfter = Get-Item -LiteralPath $current -Force
+            $aclAfter = Get-AclFingerprint $current
+            if ($itemAfter.Attributes -ne $attributes -or
+                $itemAfter.CreationTimeUtc.Ticks -ne $itemBefore.CreationTimeUtc.Ticks -or
+                $itemAfter.LastWriteTimeUtc.Ticks -ne $itemBefore.LastWriteTimeUtc.Ticks -or
+                $aclAfter -ne $aclBefore) {
+                throw "Retired state reparse point changed while it was being fingerprinted: $current"
+            }
+            $records.Add(
+                "R|$encodedPath|$([int]$attributes)|$($itemBefore.CreationTimeUtc.Ticks)|$($itemBefore.LastWriteTimeUtc.Ticks)|$(ConvertTo-FingerprintField $aclBefore)|$(ConvertTo-FingerprintField $target)")
             continue
         }
 
         $isDirectory = ($attributes -band [IO.FileAttributes]::Directory) -ne 0
         if ($isDirectory) {
-            $writeTimeBefore = [IO.Directory]::GetLastWriteTimeUtc($current).Ticks
+            $itemBefore = Get-Item -LiteralPath $current -Force
+            $aclBefore = Get-AclFingerprint $current
             $children = @([IO.Directory]::EnumerateFileSystemEntries($current))
-            $attributesAfter = [IO.File]::GetAttributes($current)
-            $writeTimeAfter = [IO.Directory]::GetLastWriteTimeUtc($current).Ticks
-            if ($attributesAfter -ne $attributes -or $writeTimeAfter -ne $writeTimeBefore) {
+            $itemAfter = Get-Item -LiteralPath $current -Force
+            $aclAfter = Get-AclFingerprint $current
+            if ($itemAfter.Attributes -ne $attributes -or
+                $itemAfter.CreationTimeUtc.Ticks -ne $itemBefore.CreationTimeUtc.Ticks -or
+                $itemAfter.LastWriteTimeUtc.Ticks -ne $itemBefore.LastWriteTimeUtc.Ticks -or
+                $aclAfter -ne $aclBefore) {
                 throw "Retired state directory changed while it was being fingerprinted: $current"
             }
-            $records.Add("D|$encodedPath|$([int]$attributes)|$writeTimeBefore")
+            $records.Add(
+                "D|$encodedPath|$([int]$attributes)|$($itemBefore.CreationTimeUtc.Ticks)|$($itemBefore.LastWriteTimeUtc.Ticks)|$(ConvertTo-FingerprintField $aclBefore)")
             foreach ($child in $children) {
                 $pending.Push($child)
             }
             continue
         }
 
-        $lengthBefore = ([IO.FileInfo]$current).Length
-        $writeTimeBefore = [IO.File]::GetLastWriteTimeUtc($current).Ticks
-        $contentHash = Get-FileContentFingerprint $current
-        $attributesAfter = [IO.File]::GetAttributes($current)
-        $lengthAfter = ([IO.FileInfo]$current).Length
-        $writeTimeAfter = [IO.File]::GetLastWriteTimeUtc($current).Ticks
-        if ($attributesAfter -ne $attributes -or
-            $lengthAfter -ne $lengthBefore -or
-            $writeTimeAfter -ne $writeTimeBefore) {
+        $itemBefore = Get-Item -LiteralPath $current -Force
+        $aclBefore = Get-AclFingerprint $current
+        $streamsFingerprint = Get-FileStreamsFingerprint $current
+        $itemAfter = Get-Item -LiteralPath $current -Force
+        $aclAfter = Get-AclFingerprint $current
+        if ($itemAfter.Attributes -ne $attributes -or
+            $itemAfter.CreationTimeUtc.Ticks -ne $itemBefore.CreationTimeUtc.Ticks -or
+            $itemAfter.LastWriteTimeUtc.Ticks -ne $itemBefore.LastWriteTimeUtc.Ticks -or
+            $itemAfter.Length -ne $itemBefore.Length -or
+            $aclAfter -ne $aclBefore) {
             throw "Retired state file changed while it was being fingerprinted: $current"
         }
-        $records.Add("F|$encodedPath|$([int]$attributes)|$writeTimeBefore|$lengthBefore|$contentHash")
+        $records.Add(
+            "F|$encodedPath|$([int]$attributes)|$($itemBefore.CreationTimeUtc.Ticks)|$($itemBefore.LastWriteTimeUtc.Ticks)|$($itemBefore.Length)|$(ConvertTo-FingerprintField $aclBefore)|$streamsFingerprint")
     }
 
     return 'PRESENT:' + (Get-TextSha256 @($records | Sort-Object))
