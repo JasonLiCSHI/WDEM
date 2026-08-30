@@ -64,7 +64,8 @@ foreach ($directory in "Join-Path `$root 'Cli'", "Join-Path `$root 'Desktop'", "
 $allowed = @(
     'THIRD-PARTY-NOTICES.md',
     'docs/wdem/source-provenance.md',
-    'docs/superpowers/plans/2026-08-28-wdem-complete-product.md'
+    'docs/superpowers/plans/2026-08-28-wdem-complete-product.md',
+    'testing/wdem/acceptance-checklist.md'
 )
 $matches = @(git -C $root grep -Iil -e WinHome -e 'DotDev262/WinHome' -- '*.md' '*.yml' '*.yaml')
 if ($LASTEXITCODE -gt 1) {

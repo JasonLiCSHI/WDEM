@@ -196,6 +196,148 @@ public sealed class RepositoryIdentityTests
     Assert.Contains("README.md", result.Output, StringComparison.Ordinal);
   }
 
+  [Fact]
+  public void AcceptanceChecklistRecordsAutomatedAndCleanMachineEvidence()
+  {
+    var checklistPath = Path.Combine(
+        RepositoryRoot,
+        "testing",
+        "wdem",
+        "acceptance-checklist.md");
+
+    Assert.True(File.Exists(checklistPath), "Missing WDEM acceptance checklist.");
+    var checklist = NormalizeWhitespace(File.ReadAllText(checklistPath));
+
+    foreach (var required in new[]
+             {
+               "Repository identity",
+               "State and inputs",
+               "One-time migration",
+               "Inspect safety",
+               "Desktop",
+               "Clean VM apply",
+               "DISABLED",
+               "%LOCALAPPDATA%\\WDEM\\migration-v1.json",
+               "PermissionError",
+               "fresh Detect",
+               "fresh Plan",
+               "restore the snapshot"
+             })
+    {
+      Assert.Contains(required, checklist, StringComparison.OrdinalIgnoreCase);
+    }
+
+    Assert.Contains("manual evidence", checklist, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("not executed", checklist, StringComparison.OrdinalIgnoreCase);
+  }
+
+  [Fact]
+  public void InspectSmokeUsesTheInspectContractAndCleansItsTemporaryArtifacts()
+  {
+    var scriptPath = Path.Combine(
+        RepositoryRoot,
+        "testing",
+        "wdem",
+        "inspect-smoke.ps1");
+
+    Assert.True(File.Exists(scriptPath), "Missing WDEM Inspect smoke script.");
+    var script = File.ReadAllText(scriptPath);
+
+    Assert.Contains("Wdem.Cli.csproj", script, StringComparison.Ordinal);
+    Assert.Matches(@"(?i)\binspect\b.*--profile.*--json.*--report", script);
+    Assert.DoesNotMatch(@"(?i)&?\s*[^\r\n]*Wdem(?:\.Cli)?(?:\.exe)?\s+apply\b", script);
+    Assert.Contains("resourceResults", script, StringComparison.Ordinal);
+    Assert.Contains("stepResults", script, StringComparison.Ordinal);
+    Assert.Contains("detectedAfter", script, StringComparison.Ordinal);
+    Assert.Contains("restartRequirements", script, StringComparison.Ordinal);
+    Assert.Contains("Registry", script, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("Environment", script, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("GetTempPath", script, StringComparison.Ordinal);
+    Assert.Contains("finally", script, StringComparison.OrdinalIgnoreCase);
+    Assert.DoesNotContain(
+        "Join-Path $PSScriptRoot 'inspect-report.json'",
+        script,
+        StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void CleanVmApplyRefusesBeforeAnyMachineOrFileOperation()
+  {
+    var sourceScript = Path.Combine(
+        RepositoryRoot,
+        "testing",
+        "wdem",
+        "clean-vm-apply.ps1");
+    Assert.True(File.Exists(sourceScript), "Missing WDEM clean-VM script.");
+
+    using var directory = new TemporaryDirectory();
+    var script = Path.Combine(directory.Path, "clean-vm-apply.ps1");
+    File.Copy(sourceScript, script);
+    var before = Directory.EnumerateFileSystemEntries(directory.Path)
+        .Select(Path.GetFileName)
+        .Order(StringComparer.Ordinal)
+        .ToArray();
+
+    var result = RunProcess(
+        directory.Path,
+        "pwsh",
+        "-NoLogo",
+        "-NoProfile",
+        "-File",
+        script);
+    var after = Directory.EnumerateFileSystemEntries(directory.Path)
+        .Select(Path.GetFileName)
+        .Order(StringComparer.Ordinal)
+        .ToArray();
+
+    Assert.NotEqual(0, result.ExitCode);
+    Assert.Contains(
+        "Refusing to apply outside an explicitly confirmed disposable VM.",
+        result.Output,
+        StringComparison.Ordinal);
+    Assert.Equal(before, after);
+
+    var source = File.ReadAllText(sourceScript);
+    var refusal = source.IndexOf("if (-not $Confirmed)", StringComparison.Ordinal);
+    Assert.True(refusal >= 0, "The confirmation refusal gate is missing.");
+    foreach (var operation in new[]
+             {
+               "Get-CimInstance",
+               "Test-Path",
+               "New-Item",
+               "Copy-Item",
+               "Wdem.Cli.exe"
+             })
+    {
+      Assert.True(
+          source.IndexOf(operation, StringComparison.OrdinalIgnoreCase) > refusal,
+          $"{operation} must occur after the confirmation gate.");
+    }
+    Assert.Contains("Cli\\Wdem.Cli.exe", source, StringComparison.OrdinalIgnoreCase);
+    Assert.DoesNotContain("publish\\Wdem.Cli", source, StringComparison.OrdinalIgnoreCase);
+    Assert.Matches(
+        @"foreach \(\$resourceId in @\('git', 'dotnet-sdk', 'visual-studio',\s*" +
+        @"'resharper', 'resharper-settings', 'company-vs-extension',\s*" +
+        @"'visual-studio-settings'\)\)",
+        source);
+  }
+
+  [Fact]
+  public void GettingStartedLimitsApplyAcceptanceToAConfirmedDisposableVm()
+  {
+    var guide = NormalizeWhitespace(File.ReadAllText(Path.Combine(
+        RepositoryRoot,
+        "docs",
+        "wdem",
+        "getting-started.md")));
+
+    Assert.Contains("disposable Windows 11 x64", guide, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("snapshot", guide, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("clean-vm-apply.ps1 -Confirmed", guide, StringComparison.Ordinal);
+    Assert.Contains("WDEM product release", guide, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("no upstream merge or pull-request workflow", guide, StringComparison.OrdinalIgnoreCase);
+  }
+
   private static string NormalizeWhitespace(string value) =>
       string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 

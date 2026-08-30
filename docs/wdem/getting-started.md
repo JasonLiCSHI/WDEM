@@ -68,3 +68,25 @@ new run performs a fresh Detect and builds a new Plan.
 
 Continue with [profile authoring](profile-authoring.md) or
 [recovery and security](recovery-and-security.md).
+
+## Clean-machine Apply acceptance
+
+Apply acceptance is permitted only on a disposable Windows 11 x64 VM restored
+to a fresh snapshot. Use the acceptance scripts from the matching tagged WDEM
+source and the downloaded WDEM product release; this process has no upstream
+merge or pull-request workflow.
+
+After verifying the release checksum, extract `Wdem-win-x64.zip` as
+`testing\wdem\WDEM` beside `clean-vm-apply.ps1`. Keep the release's exact `Cli`,
+`Desktop`, and `ElevatedHost` layout. Configure the trusted company VSIX path and
+SHA-256 inputs required by the full optional-resource matrix, then run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File testing\wdem\clean-vm-apply.ps1 -Confirmed
+```
+
+The script refuses to inspect the machine, create work files, or invoke Apply
+without `-Confirmed`. Never pass that switch on a developer workstation. Record
+the redacted reports and recovery evidence described in the
+[acceptance checklist](../../testing/wdem/acceptance-checklist.md), copy the
+evidence out, and restore the VM snapshot.
