@@ -245,6 +245,44 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
+  public async Task ApplyAsync_FinalVerificationWithContradictoryErrorFallsBackToVerify()
+  {
+    var trustedDetectedAfter = Satisfied("git", "2.52.1");
+    var contradictoryDetectedAfter = trustedDetectedAfter with
+    {
+      Error = "Detection reported an error despite satisfied compliance."
+    };
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      ApplyResult = new ResourceApplyResult
+      {
+        ResourceId = "git",
+        Outcome = ApplyOutcome.Succeeded,
+        FinalizeAfterCancellation = true,
+        FinalVerification = new VerificationResult
+        {
+          ResourceId = "git",
+          Compliance = ComplianceStatus.Satisfied,
+          DetectedState = contradictoryDetectedAfter
+        }
+      },
+      VerificationResult = new VerificationResult
+      {
+        ResourceId = "git",
+        Compliance = ComplianceStatus.Satisfied,
+        DetectedState = trustedDetectedAfter
+      }
+    };
+    var (service, _) = CreateService(provider);
+
+    var run = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.Succeeded, run.Outcome);
+    Assert.Equal(trustedDetectedAfter, run.ResourceResults["git"].DetectedAfter);
+    Assert.Equal(1, provider.VerifyCalls);
+  }
+
+  [Fact]
   public async Task ApplyAsync_UnflaggedLateCancellationCancelsFinalVerification()
   {
     using var cancellation = new CancellationTokenSource();

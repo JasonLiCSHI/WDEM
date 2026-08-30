@@ -945,6 +945,7 @@ public sealed class EnvironmentRunService : IEnvironmentRunService
         candidate is null ||
         candidate.Compliance != ComplianceStatus.Satisfied ||
         candidate.DetectedState.Outcome != DetectionOutcome.Succeeded ||
+        !string.IsNullOrWhiteSpace(candidate.DetectedState.Error) ||
         candidate.DetectedState.StructuredError is not null ||
         !string.Equals(applied.ResourceId, definition.Id, StringComparison.OrdinalIgnoreCase) ||
         !string.Equals(candidate.ResourceId, definition.Id, StringComparison.OrdinalIgnoreCase) ||
