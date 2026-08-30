@@ -455,6 +455,7 @@ public sealed class NamedPipePrivilegeBrokerTests
     var launcher = new RecordingElevatedHostLauncher();
     launcher.Session.WaitForApplyRelease = true;
     launcher.Session.WaitForTerminationRelease = true;
+    launcher.Session.WaitForDisposeRelease = true;
     launcher.Session.TerminateException = new IOException("termination failed");
     var broker = new NamedPipePrivilegeBroker(launcher);
     var runId = Guid.NewGuid();
@@ -467,9 +468,15 @@ public sealed class NamedPipePrivilegeBrokerTests
     var completing = broker.CompleteRunAsync(runId, CancellationToken.None);
     var disposing = broker.DisposeAsync().AsTask();
     await launcher.Session.Terminated.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    launcher.Session.TerminationRelease.TrySetResult();
+    await launcher.Session.TerminationCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await launcher.Session.DisposeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    launcher.Session.DisposeRelease.TrySetResult();
+    await launcher.Session.DisposeCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    // Keep the apply active until the dispose-owned cleanup publishes its failure.
+    await Task.Delay(TimeSpan.FromMilliseconds(100));
     launcher.Session.ApplyRelease.TrySetResult();
     await apply.WaitAsync(TimeSpan.FromSeconds(5));
-    launcher.Session.TerminationRelease.TrySetResult();
 
     var disposeError = await Assert.ThrowsAsync<IOException>(() => disposing);
     var completionError = await Assert.ThrowsAsync<IOException>(() => completing);

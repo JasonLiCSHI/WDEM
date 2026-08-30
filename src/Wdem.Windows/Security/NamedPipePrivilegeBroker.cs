@@ -109,12 +109,14 @@ public sealed class NamedPipePrivilegeBroker :
     var lifecycle = _runLifecycles.GetOrAdd(runId, static _ => new RunLifecycle());
     var operationsDrained = lifecycle.Close();
     cancellationToken.ThrowIfCancellationRequested();
+    var cleanupCompletion = lifecycle.RegisterCleanup();
     await operationsDrained.WaitAsync(cancellationToken).ConfigureAwait(false);
     await EnsureRunCleanupAsync(
         runId,
         lifecycle,
         operationsDrained,
-        cancellationToken).ConfigureAwait(false);
+        cancellationToken,
+        cleanupCompletion).ConfigureAwait(false);
   }
 
   private async Task CompleteCancelledRunAsync(
@@ -143,9 +145,10 @@ public sealed class NamedPipePrivilegeBroker :
       Guid runId,
       RunLifecycle lifecycle,
       Task operationsDrained,
-      CancellationToken cancellationToken)
+      CancellationToken cancellationToken,
+      Task? registeredCompletion = null)
   {
-    var cleanup = lifecycle.BeginCleanup();
+    var cleanup = lifecycle.BeginCleanup(registeredCompletion);
     if (cleanup.IsOwner)
     {
       try
@@ -615,10 +618,31 @@ public sealed class NamedPipePrivilegeBroker :
       }
     }
 
-    public RunCleanup BeginCleanup()
+    public Task RegisterCleanup()
     {
       lock (_gate)
       {
+        if (!_cleanupSucceeded && _cleanupCompletion.Task.IsCompleted)
+        {
+          _cleanupCompletion = new TaskCompletionSource(
+              TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        return _cleanupCompletion.Task;
+      }
+    }
+
+    public RunCleanup BeginCleanup(Task? registeredCompletion = null)
+    {
+      lock (_gate)
+      {
+        if (registeredCompletion is not null &&
+            (registeredCompletion.IsCompleted ||
+             !ReferenceEquals(registeredCompletion, _cleanupCompletion.Task)))
+        {
+          return new RunCleanup(false, registeredCompletion);
+        }
+
         var isOwner = !_cleanupStarted && !_cleanupSucceeded;
         if (isOwner)
         {
