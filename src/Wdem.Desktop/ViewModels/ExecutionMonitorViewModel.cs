@@ -9,6 +9,7 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
 {
   private const int MaximumLogEntries = 5_000;
   private readonly object _eventGate = new();
+  private readonly object _operationGate = new();
   private readonly IEnvironmentRunService _runService;
   private readonly IRunEventSink _eventSink;
   private readonly LogRedactor _redactor;
@@ -31,6 +32,7 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
   private string _restartRequirement = "NoRestart";
   private DateTimeOffset _startedAt;
   private bool _disposed;
+  private bool _disposeRequested;
   private int _dispatcherUnavailable;
 
   public ExecutionMonitorViewModel(
@@ -178,24 +180,27 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
 
   public AsyncRelayCommand RetryFailedCommand { get; }
 
-  public Task StartAsync(CancellationToken cancellationToken = default)
-  {
-    Task operation = RunOperationAsync(
+  public Task StartAsync(CancellationToken cancellationToken = default) =>
+      StartOperation(
           token => _runService.ApplyAsync(_request, token),
           cancellationToken);
-    _operationTask = operation;
-    return operation;
-  }
 
   public async Task StopAsync()
   {
-    if (_disposed)
+    CancellationTokenSource? cancellation;
+    Task? operation;
+    lock (_operationGate)
     {
-      return;
+      if (_disposed)
+      {
+        return;
+      }
+
+      cancellation = Volatile.Read(ref _runCancellation);
+      operation = _operationTask;
     }
 
-    RequestCancellation();
-    Task? operation = _operationTask;
+    RequestCancellation(cancellation);
     if (operation is not null)
     {
       await operation.ConfigureAwait(false);
@@ -204,16 +209,35 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
 
   public async ValueTask DisposeAsync()
   {
-    if (_disposed)
+    CancellationTokenSource? cancellation;
+    Task? operation;
+    lock (_operationGate)
     {
-      return;
+      if (_disposed)
+      {
+        return;
+      }
+
+      _disposeRequested = true;
+      cancellation = Volatile.Read(ref _runCancellation);
+      operation = _operationTask;
     }
 
-    await StopAsync().ConfigureAwait(false);
-    Dispose();
+    try
+    {
+      RequestCancellation(cancellation);
+      if (operation is not null)
+      {
+        await operation.ConfigureAwait(false);
+      }
+    }
+    finally
+    {
+      Dispose();
+    }
   }
 
-  public async Task RetryFailedAsync(CancellationToken cancellationToken)
+  public Task RetryFailedAsync(CancellationToken cancellationToken)
   {
     ObjectDisposedException.ThrowIf(_disposed, this);
     ExecutionRun prior = _run ?? throw new InvalidOperationException(
@@ -227,56 +251,119 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
       throw new InvalidOperationException("The execution run has no failed resources to retry.");
     }
 
-    await RunOperationAsync(
+    return StartOperation(
         token => _runService.RetryAsync(prior.RunId, failedIds, token),
-        cancellationToken).ConfigureAwait(false);
+        cancellationToken);
   }
 
   public void Dispose()
   {
-    if (_disposed)
+    CancellationTokenSource? cancellation;
+    IDisposable? subscription;
+    lock (_operationGate)
     {
-      return;
+      if (_disposed)
+      {
+        return;
+      }
+
+      _disposeRequested = true;
+      _disposed = true;
+      subscription = Interlocked.Exchange(ref _subscription, null);
+      cancellation = Volatile.Read(ref _runCancellation);
     }
 
-    _disposed = true;
-    Interlocked.Exchange(ref _subscription, null)?.Dispose();
-    var cancellation = Interlocked.Exchange(ref _runCancellation, null);
-    if (cancellation is not null)
+    subscription?.Dispose();
+    RequestCancellation(cancellation);
+  }
+
+  private Task StartOperation(
+      Func<CancellationToken, Task<ExecutionRun>> operation,
+      CancellationToken cancellationToken)
+  {
+    CancellationTokenSource runCancellation;
+    TaskCompletionSource completion;
+    lock (_operationGate)
     {
-      cancellation.Cancel();
-      cancellation.Dispose();
+      ObjectDisposedException.ThrowIf(_disposed || _disposeRequested, this);
+      if (IsRunning || _operationTask is { IsCompleted: false })
+      {
+        throw new InvalidOperationException("An execution run is already active.");
+      }
+
+      runCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+      completion = new TaskCompletionSource(
+          TaskCreationOptions.RunContinuationsAsynchronously);
+      _runCancellation = runCancellation;
+      _operationTask = completion.Task;
+    }
+
+    _ = CompleteOperationAsync(operation, runCancellation, completion);
+    return completion.Task;
+  }
+
+  private async Task CompleteOperationAsync(
+      Func<CancellationToken, Task<ExecutionRun>> operation,
+      CancellationTokenSource runCancellation,
+      TaskCompletionSource completion)
+  {
+    Exception? failure = null;
+    try
+    {
+      await RunOperationAsync(operation, runCancellation).ConfigureAwait(false);
+    }
+    catch (Exception exception)
+    {
+      failure = exception;
+    }
+
+    try
+    {
+      Interlocked.CompareExchange(ref _runCancellation, null, runCancellation);
+      runCancellation.Dispose();
+    }
+    catch (Exception exception)
+    {
+      failure ??= exception;
+    }
+
+    if (failure is OperationCanceledException cancellation)
+    {
+      completion.TrySetCanceled(cancellation.CancellationToken);
+    }
+    else if (failure is not null)
+    {
+      completion.TrySetException(failure);
+    }
+    else
+    {
+      completion.TrySetResult();
     }
   }
 
   private async Task RunOperationAsync(
       Func<CancellationToken, Task<ExecutionRun>> operation,
-      CancellationToken cancellationToken)
+      CancellationTokenSource runCancellation)
   {
-    ObjectDisposedException.ThrowIf(_disposed, this);
-    if (IsRunning)
-    {
-      throw new InvalidOperationException("An execution run is already active.");
-    }
-
-    ResetEventFilter();
-    _run = null;
-    OnPropertyChanged(nameof(Run));
-    OnPropertyChanged(nameof(RunId));
-    Resources.Clear();
-    ResetProjection();
-    TotalProgress = 0;
-    ErrorMessage = null;
-    _startedAt = DateTimeOffset.UtcNow;
-    IsTerminal = false;
-    IsRunning = true;
-    var runCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-    _runCancellation = runCancellation;
-    _subscription = _eventSink.SubscribeScoped(HandleEventAsync);
-    using var elapsedRefreshCancellation = new CancellationTokenSource();
-    Task elapsedRefresh = RefreshElapsedAsync(elapsedRefreshCancellation.Token);
+    CancellationTokenSource? elapsedRefreshCancellation = null;
+    Task? elapsedRefresh = null;
     try
     {
+      ResetEventFilter();
+      _run = null;
+      OnPropertyChanged(nameof(Run));
+      OnPropertyChanged(nameof(RunId));
+      Resources.Clear();
+      ResetProjection();
+      TotalProgress = 0;
+      ErrorMessage = null;
+      _startedAt = DateTimeOffset.UtcNow;
+      IsTerminal = false;
+      IsRunning = true;
+      runCancellation.Token.ThrowIfCancellationRequested();
+      _subscription = _eventSink.SubscribeScoped(HandleEventAsync);
+      elapsedRefreshCancellation = new CancellationTokenSource();
+      elapsedRefresh = RefreshElapsedAsync(elapsedRefreshCancellation.Token);
       ExecutionRun completed = await Task.Run(
           () => operation(runCancellation.Token),
           CancellationToken.None).ConfigureAwait(false);
@@ -299,33 +386,34 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
     }
     finally
     {
-      elapsedRefreshCancellation.Cancel();
-      try
+      if (elapsedRefreshCancellation is not null)
       {
-        await elapsedRefresh.ConfigureAwait(false);
+        elapsedRefreshCancellation.Cancel();
+        if (elapsedRefresh is not null)
+        {
+          try
+          {
+            await elapsedRefresh.ConfigureAwait(false);
+          }
+          catch (InvalidOperationException)
+          {
+            // Dispatcher shutdown must not retain a run-event subscription.
+          }
+        }
+
+        elapsedRefreshCancellation.Dispose();
       }
-      catch (InvalidOperationException)
-      {
-        // Dispatcher shutdown must not retain a run-event subscription.
-      }
+
       Interlocked.Exchange(ref _subscription, null)?.Dispose();
-      try
-      {
-        await DispatchAsync(() =>
-            {
-              ElapsedDuration = DateTimeOffset.UtcNow - _startedAt;
-              _projection.Complete();
-              ApplyProjection();
-              IsRunning = false;
-              IsTerminal = true;
-              RaiseCommandStates();
-            }, CancellationToken.None).ConfigureAwait(false);
-      }
-      finally
-      {
-        Interlocked.CompareExchange(ref _runCancellation, null, runCancellation);
-        runCancellation.Dispose();
-      }
+      await DispatchAsync(() =>
+          {
+            ElapsedDuration = DateTimeOffset.UtcNow - _startedAt;
+            _projection.Complete();
+            ApplyProjection();
+            IsRunning = false;
+            IsTerminal = true;
+            RaiseCommandStates();
+          }, CancellationToken.None).ConfigureAwait(false);
     }
   }
 
@@ -512,10 +600,13 @@ public sealed class ExecutionMonitorViewModel : ObservableObject, IDisposable, I
   }
 
   private void RequestCancellation()
+      => RequestCancellation(Volatile.Read(ref _runCancellation));
+
+  private static void RequestCancellation(CancellationTokenSource? cancellation)
   {
     try
     {
-      Volatile.Read(ref _runCancellation)?.Cancel();
+      cancellation?.Cancel();
     }
     catch (ObjectDisposedException)
     {

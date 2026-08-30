@@ -290,6 +290,36 @@ public sealed class ExecutionMonitorViewModelTests
   }
 
   [Fact]
+  public async Task StopAsyncDuringRetryWaitsForCancelledRetryCleanup()
+  {
+    var events = new TestRunEventSink();
+    var service = new FakeEnvironmentRunService(events, Guid.NewGuid())
+    {
+      ApplyResult = CompletedRun(("git", ExecutionOutcome.Failed, "install")),
+      HoldRetryAfterCancellation = true
+    };
+    var viewModel = CreateMonitor(service, events, new RecordingDispatcher());
+    await viewModel.StartAsync();
+    Task retry = viewModel.RetryFailedAsync(CancellationToken.None);
+    await service.RetryStarted.Task;
+
+    Task stopping = viewModel.StopAsync();
+    await service.RetryCancellationObserved.Task;
+
+    try
+    {
+      Assert.False(stopping.IsCompleted);
+    }
+    finally
+    {
+      service.ReleaseRetryTerminalCompletion.TrySetResult();
+      await Task.WhenAll(stopping, retry);
+    }
+
+    Assert.False(viewModel.IsRunning);
+  }
+
+  [Fact]
   public async Task CancelOnlyCancelsCurrentRunAndRemainsEnabledUntilTerminalCompletion()
   {
     var events = new TestRunEventSink();
@@ -971,12 +1001,19 @@ public sealed class ExecutionMonitorViewModelTests
     public CancellationToken RetryCancellationToken { get; private set; }
     public CancellationToken ApplyCancellationToken { get; private set; }
     public bool HoldAfterCancellation { get; init; }
+    public bool HoldRetryAfterCancellation { get; init; }
     public bool HoldAfterEvents { get; set; }
     public TaskCompletionSource ApplyStarted { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource CancellationObserved { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource ReleaseTerminalCompletion { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource RetryStarted { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource RetryCancellationObserved { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource ReleaseRetryTerminalCompletion { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource EventsPublished { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1033,7 +1070,7 @@ public sealed class ExecutionMonitorViewModelTests
       return ApplyResult with { RunId = runId };
     }
 
-    public Task<ExecutionRun> RetryAsync(
+    public async Task<ExecutionRun> RetryAsync(
         Guid priorRunId,
         IReadOnlySet<string> resourceIds,
         CancellationToken cancellationToken)
@@ -1041,7 +1078,22 @@ public sealed class ExecutionMonitorViewModelTests
       RetriedRunId = priorRunId;
       RetriedResourceIds = new HashSet<string>(resourceIds, StringComparer.OrdinalIgnoreCase);
       RetryCancellationToken = cancellationToken;
-      return Task.FromResult(CompletedRun(("git", ExecutionOutcome.Succeeded, "install")));
+      RetryStarted.TrySetResult();
+      if (HoldRetryAfterCancellation)
+      {
+        try
+        {
+          await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+          RetryCancellationObserved.TrySetResult();
+        }
+
+        await ReleaseRetryTerminalCompletion.Task;
+      }
+
+      return CompletedRun(("git", ExecutionOutcome.Succeeded, "install"));
     }
 
     public Task<IReadOnlyList<RecoveryCandidate>> FindRecoveryCandidatesAsync(
