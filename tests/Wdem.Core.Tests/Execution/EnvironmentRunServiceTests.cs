@@ -1200,12 +1200,63 @@ public sealed class EnvironmentRunServiceTests
   }
 
   [Fact]
-  public async Task ApplyAsync_CancellationDoesNotReserveProviderFinalizationBeforeLaunch()
+  public async Task ApplyAsync_CancellationBetweenProcessStartAndProgressPreservesFinalizationBudget()
+  {
+    var genericDrain = TimeSpan.FromMilliseconds(150);
+    var providerFinalization = TimeSpan.FromMilliseconds(400);
+    using var cancellation = new CancellationTokenSource();
+    var processStarted = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var releaseStartedProgress = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      Capabilities = new ProviderCapabilities
+      {
+        MaxConcurrentOperations = 1,
+        CancellationFinalizationTimeout = providerFinalization
+      },
+      ApplyWithProgressOperation = async (progress, _) =>
+      {
+        processStarted.TrySetResult();
+        cancellation.Cancel();
+        await releaseStartedProgress.Task;
+        progress?.Report(new ProviderProgress("apply", 0.5, "Process started.")
+        {
+          BeginsCancellationFinalization = true
+        });
+        return new ResourceApplyResult
+        {
+          ResourceId = "git",
+          Outcome = ApplyOutcome.Failed,
+          FinalizeAfterCancellation = true,
+          Error = new StructuredError(
+              WdemErrorCode.VerificationError,
+              "Final verification failed.",
+              "The launched process completed without a valid final state.")
+        };
+      }
+    };
+    var (service, _) = CreateService(
+        provider,
+        scheduler: new ResourceScheduler(genericDrain));
+
+    var apply = service.ApplyAsync(Request(), cancellation.Token);
+    await processStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+    await Task.Delay(TimeSpan.FromMilliseconds(225));
+    var completedBeforeStartedProgress = apply.IsCompleted;
+    releaseStartedProgress.TrySetResult();
+
+    var run = await apply.WaitAsync(TimeSpan.FromSeconds(2));
+    Assert.False(completedBeforeStartedProgress);
+    Assert.Equal(ExecutionOutcome.Failed, run.ResourceResults["git"].Outcome);
+  }
+
+  [Fact]
+  public async Task ApplyAsync_CancellationBeforeLaunchCompletesPromptlyWithPotentialFinalization()
   {
     var genericDrain = TimeSpan.FromMilliseconds(150);
     using var cancellation = new CancellationTokenSource();
-    var releaseApply = new TaskCompletionSource(
-        TaskCreationOptions.RunContinuationsAsynchronously);
     var provider = new ScriptedProvider(Missing("git"))
     {
       Capabilities = new ProviderCapabilities
@@ -1213,10 +1264,10 @@ public sealed class EnvironmentRunServiceTests
         MaxConcurrentOperations = 1,
         CancellationFinalizationTimeout = TimeSpan.FromSeconds(5)
       },
-      ApplyOperation = async _ =>
+      ApplyOperation = async cancellationToken =>
       {
         cancellation.Cancel();
-        await releaseApply.Task;
+        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
         return new ResourceApplyResult
         {
           ResourceId = "git",
@@ -1228,17 +1279,12 @@ public sealed class EnvironmentRunServiceTests
         provider,
         scheduler: new ResourceScheduler(genericDrain));
 
+    var started = Stopwatch.StartNew();
     var apply = service.ApplyAsync(Request(), cancellation.Token);
-    try
-    {
-      var run = await apply.WaitAsync(TimeSpan.FromSeconds(1));
+    var run = await apply.WaitAsync(TimeSpan.FromSeconds(1));
 
-      Assert.Equal(ExecutionOutcome.Cancelled, run.ResourceResults["git"].Outcome);
-    }
-    finally
-    {
-      releaseApply.TrySetResult();
-    }
+    Assert.Equal(ExecutionOutcome.Cancelled, run.ResourceResults["git"].Outcome);
+    Assert.True(started.Elapsed < TimeSpan.FromSeconds(1));
   }
 
   [Fact]
@@ -2083,6 +2129,11 @@ public sealed class EnvironmentRunServiceTests
     public int VerifyCalls { get; private set; }
     public Func<ResourceDefinition, DetectedState>? DetectState { get; init; }
     public Func<CancellationToken, ValueTask<ResourceApplyResult>>? ApplyOperation { get; init; }
+    public Func<
+        IProgress<ProviderProgress>?,
+        CancellationToken,
+        ValueTask<ResourceApplyResult>>? ApplyWithProgressOperation
+    { get; init; }
     public Func<CancellationToken, ValueTask<VerificationResult>>? VerificationOperation { get; init; }
     public IReadOnlyList<ProviderProgress> ProgressEvents { get; init; } = [];
     public RestartPolicy PlannedRestartPolicy { get; init; }
@@ -2180,7 +2231,9 @@ public sealed class EnvironmentRunServiceTests
         progress?.Report(progressEvent);
       }
 
-      return ApplyOperation?.Invoke(cancellationToken) ?? ValueTask.FromResult(ApplyResult);
+      return ApplyWithProgressOperation?.Invoke(progress, cancellationToken) ??
+          ApplyOperation?.Invoke(cancellationToken) ??
+          ValueTask.FromResult(ApplyResult);
     }
 
     public ValueTask<VerificationResult> VerifyAsync(

@@ -70,6 +70,28 @@ public sealed class ElevatedResourceWorkerTests
   }
 
   [Fact]
+  public async Task ApplyAsync_ApprovedSnapshot_PreservesFinalizationProgressMarker()
+  {
+    var provider = new RecordingProvider { BeginsCancellationFinalization = true };
+    var run = ApprovedRun(provider, out var approvedFingerprint);
+    var worker = new ElevatedResourceWorker(
+        new StubRunStore(run),
+        new ResourceProviderRegistry([provider]),
+        new LogRedactor());
+    var progress = new RecordingProgress();
+
+    await worker.ApplyAsync(
+        new ElevatedResourceRequest(
+            run.RunId,
+            "admin-resource",
+            approvedFingerprint),
+        progress,
+        CancellationToken.None);
+
+    Assert.True(Assert.Single(progress.Items).BeginsCancellationFinalization);
+  }
+
+  [Fact]
   public async Task ApplyAsync_ApprovedSnapshot_PreservesFinalizationOptIn()
   {
     var provider = new RecordingProvider { FinalizeAfterCancellation = true };
@@ -854,6 +876,7 @@ public sealed class ElevatedResourceWorkerTests
     public int ProcessExitCode { get; init; } = 23;
     public bool? StepSucceeded { get; init; }
     public bool FinalizeAfterCancellation { get; init; }
+    public bool BeginsCancellationFinalization { get; init; }
     public VerificationResult? FinalVerification { get; init; }
 
     public ValueTask<ResourceApplyResult> ApplyAsync(
@@ -865,7 +888,10 @@ public sealed class ElevatedResourceWorkerTests
       ApplyCalls++;
       LastResource = resource;
       LastPlan = plan;
-      progress?.Report(new ProviderProgress("apply", 0.5, "password=hunter2"));
+      progress?.Report(new ProviderProgress("apply", 0.5, "password=hunter2")
+      {
+        BeginsCancellationFinalization = BeginsCancellationFinalization
+      });
       return ValueTask.FromResult(new ResourceApplyResult
       {
         ResourceId = resource.Id,

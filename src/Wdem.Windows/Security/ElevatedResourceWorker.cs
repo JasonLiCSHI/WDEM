@@ -349,6 +349,9 @@ public sealed class ElevatedResourceWorker
         value.Percent,
         redactor.Redact(value.Message),
         value.StepId is null ? null : redactor.Redact(value.StepId),
-        value.LogLevel));
+        value.LogLevel)
+    {
+      BeginsCancellationFinalization = value.BeginsCancellationFinalization
+    });
   }
 }

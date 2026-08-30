@@ -10,9 +10,11 @@ public sealed class CancellationDrainDeadline : IDisposable
   private static readonly TimeSpan MaximumTimerDuration =
       TimeSpan.FromMilliseconds(uint.MaxValue - 1d);
   private readonly object _gate = new();
+  private readonly long _baseBudgetTicks;
+  private readonly Dictionary<long, int> _finalizationReservations = [];
   private readonly CancellationTokenRegistration _registration;
-  private long _budgetTicks;
   private long _startedTimestamp = long.MinValue;
+  private int _disposeState;
 
   public CancellationDrainDeadline(TimeSpan budget, CancellationToken cancellationToken)
   {
@@ -24,7 +26,7 @@ public sealed class CancellationDrainDeadline : IDisposable
           $"The budget must be positive and no greater than {MaximumTimerDuration}.");
     }
 
-    _budgetTicks = budget.Ticks;
+    _baseBudgetTicks = budget.Ticks;
     _registration = cancellationToken.UnsafeRegister(
         static state => ((CancellationDrainDeadline)state!).Start(),
         this);
@@ -36,8 +38,17 @@ public sealed class CancellationDrainDeadline : IDisposable
   {
     get
     {
-      var started = Volatile.Read(ref _startedTimestamp);
-      var budget = TimeSpan.FromTicks(Volatile.Read(ref _budgetTicks));
+      long started;
+      TimeSpan budget;
+      lock (_gate)
+      {
+        started = _startedTimestamp;
+        var maximumReservation = _finalizationReservations.Count == 0
+            ? 0
+            : _finalizationReservations.Keys.Max();
+        budget = TimeSpan.FromTicks(_baseBudgetTicks + maximumReservation);
+      }
+
       if (started == long.MinValue)
       {
         return budget;
@@ -48,31 +59,50 @@ public sealed class CancellationDrainDeadline : IDisposable
     }
   }
 
-  public void Dispose() => _registration.Dispose();
-
-  internal bool TryReserveAdditional(TimeSpan duration)
+  public IDisposable RegisterPotentialFinalization(TimeSpan duration)
   {
-    if (duration < TimeSpan.Zero)
+    if (duration < TimeSpan.Zero ||
+        duration > MaximumTimerDuration - TimeSpan.FromTicks(_baseBudgetTicks))
     {
       throw new ArgumentOutOfRangeException(nameof(duration));
     }
 
     lock (_gate)
     {
-      if (_startedTimestamp != long.MinValue)
+      ObjectDisposedException.ThrowIf(
+          _disposeState != 0,
+          this);
+      if (duration == TimeSpan.Zero)
       {
-        return false;
+        return EmptyReservation.Instance;
       }
 
-      var budget = TimeSpan.FromTicks(_budgetTicks);
-      if (duration > MaximumTimerDuration - budget)
+      if (_finalizationReservations.TryGetValue(duration.Ticks, out var count))
       {
-        throw new ArgumentOutOfRangeException(nameof(duration));
+        _finalizationReservations[duration.Ticks] = count + 1;
       }
-
-      _budgetTicks = (budget + duration).Ticks;
-      return true;
+      else
+      {
+        _finalizationReservations.Add(duration.Ticks, 1);
+      }
     }
+
+    return new FinalizationReservation(this, duration.Ticks);
+  }
+
+  public void Dispose()
+  {
+    lock (_gate)
+    {
+      if (_disposeState != 0)
+      {
+        return;
+      }
+
+      _disposeState = 1;
+    }
+
+    _registration.Dispose();
   }
 
   internal void Start()
@@ -83,6 +113,50 @@ public sealed class CancellationDrainDeadline : IDisposable
       {
         _startedTimestamp = Stopwatch.GetTimestamp();
       }
+    }
+  }
+
+  private void ReleaseFinalization(long durationTicks)
+  {
+    lock (_gate)
+    {
+      if (!_finalizationReservations.TryGetValue(durationTicks, out var count))
+      {
+        return;
+      }
+
+      if (count == 1)
+      {
+        _finalizationReservations.Remove(durationTicks);
+      }
+      else
+      {
+        _finalizationReservations[durationTicks] = count - 1;
+      }
+    }
+  }
+
+  private sealed class FinalizationReservation(
+      CancellationDrainDeadline owner,
+      long durationTicks) : IDisposable
+  {
+    private int _disposeState;
+
+    public void Dispose()
+    {
+      if (Interlocked.Exchange(ref _disposeState, 1) == 0)
+      {
+        owner.ReleaseFinalization(durationTicks);
+      }
+    }
+  }
+
+  private sealed class EmptyReservation : IDisposable
+  {
+    public static EmptyReservation Instance { get; } = new();
+
+    public void Dispose()
+    {
     }
   }
 }

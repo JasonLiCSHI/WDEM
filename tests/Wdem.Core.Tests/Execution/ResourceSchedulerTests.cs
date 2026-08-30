@@ -30,6 +30,133 @@ public sealed class ResourceSchedulerTests
   }
 
   [Fact]
+  public void CancellationDrainDeadline_UsesMaximumReservationInsteadOfSum()
+  {
+    using var deadline = new CancellationDrainDeadline(
+        TimeSpan.FromMilliseconds(100),
+        CancellationToken.None);
+
+    using var first = deadline.RegisterPotentialFinalization(
+        TimeSpan.FromMilliseconds(200));
+    using var second = deadline.RegisterPotentialFinalization(
+        TimeSpan.FromMilliseconds(300));
+
+    Assert.Equal(TimeSpan.FromMilliseconds(400), deadline.Remaining);
+  }
+
+  [Fact]
+  public void CancellationDrainDeadline_DuplicateReservationsAreIdempotent()
+  {
+    using var deadline = new CancellationDrainDeadline(
+        TimeSpan.FromMilliseconds(100),
+        CancellationToken.None);
+
+    using var first = deadline.RegisterPotentialFinalization(
+        TimeSpan.FromMilliseconds(250));
+    using var second = deadline.RegisterPotentialFinalization(
+        TimeSpan.FromMilliseconds(250));
+
+    Assert.Equal(TimeSpan.FromMilliseconds(350), deadline.Remaining);
+  }
+
+  [Fact]
+  public void CancellationDrainDeadline_ReleasingLargestReservationRecomputesMaximum()
+  {
+    using var deadline = new CancellationDrainDeadline(
+        TimeSpan.FromMilliseconds(100),
+        CancellationToken.None);
+    using var smaller = deadline.RegisterPotentialFinalization(
+        TimeSpan.FromMilliseconds(200));
+    var larger = deadline.RegisterPotentialFinalization(
+        TimeSpan.FromMilliseconds(300));
+
+    larger.Dispose();
+
+    Assert.Equal(TimeSpan.FromMilliseconds(300), deadline.Remaining);
+  }
+
+  [Fact]
+  public void CancellationDrainDeadline_ConcurrentReservationsUseLargestTimeout()
+  {
+    using var deadline = new CancellationDrainDeadline(
+        TimeSpan.FromMilliseconds(100),
+        CancellationToken.None);
+    var timeouts = new[]
+    {
+      TimeSpan.FromMilliseconds(125),
+      TimeSpan.FromMilliseconds(300),
+      TimeSpan.FromMilliseconds(225),
+      TimeSpan.FromMilliseconds(300)
+    };
+
+    var reservations = new IDisposable?[timeouts.Length];
+    try
+    {
+      Parallel.For(0, timeouts.Length, index =>
+      {
+        reservations[index] = deadline.RegisterPotentialFinalization(timeouts[index]);
+      });
+
+      Assert.Equal(TimeSpan.FromMilliseconds(400), deadline.Remaining);
+    }
+    finally
+    {
+      foreach (var reservation in reservations)
+      {
+        reservation?.Dispose();
+      }
+    }
+  }
+
+  [Fact]
+  public void CancellationDrainDeadline_AcceptsReservationAfterCancellationStarts()
+  {
+    using var cancellation = new CancellationTokenSource();
+    using var deadline = new CancellationDrainDeadline(
+        TimeSpan.FromMilliseconds(100),
+        cancellation.Token);
+
+    cancellation.Cancel();
+
+    using var reservation = deadline.RegisterPotentialFinalization(
+        TimeSpan.FromMilliseconds(300));
+    Assert.True(deadline.Remaining > TimeSpan.FromMilliseconds(200));
+  }
+
+  [Theory]
+  [InlineData(0)]
+  [InlineData(1)]
+  public void CancellationDrainDeadline_RejectsReservationsAfterDisposal(
+      int durationMilliseconds)
+  {
+    var deadline = new CancellationDrainDeadline(
+        TimeSpan.FromMilliseconds(100),
+        CancellationToken.None);
+    deadline.Dispose();
+
+    Assert.Throws<ObjectDisposedException>(() => deadline.RegisterPotentialFinalization(
+        TimeSpan.FromMilliseconds(durationMilliseconds)));
+  }
+
+  [Fact]
+  public void CancellationDrainDeadline_EnforcesTimerBoundAcrossBaseAndReservation()
+  {
+    var maximumSupportedBudget = TimeSpan.FromMilliseconds(uint.MaxValue - 1d);
+    var baseBudget = TimeSpan.FromMilliseconds(100);
+    using var deadline = new CancellationDrainDeadline(
+        baseBudget,
+        CancellationToken.None);
+    using var accepted = deadline.RegisterPotentialFinalization(
+        maximumSupportedBudget - baseBudget);
+
+    var error = Assert.Throws<ArgumentOutOfRangeException>(() =>
+        deadline.RegisterPotentialFinalization(maximumSupportedBudget));
+
+    Assert.Equal(maximumSupportedBudget, deadline.Remaining);
+    Assert.Equal("duration", error.ParamName);
+  }
+
+  [Fact]
   public async Task ExecuteAsync_ReportsReadyRunningCompletedAndBlockedBeforeAdvancing()
   {
     var transitions = new List<(string Id, ExecutionState State, ExecutionOutcome? Outcome)>();

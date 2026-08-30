@@ -1,3 +1,5 @@
+using System.Text.Json;
+using Wdem.Core.Providers;
 using Wdem.Windows.Security;
 using Xunit;
 
@@ -5,6 +7,23 @@ namespace Wdem.Windows.Tests.Security;
 
 public sealed class ElevatedHostLauncherTests
 {
+  [Fact]
+  public void ElevatedHostResponse_ProgressRoundTripPreservesFinalizationMarker()
+  {
+    var response = new ElevatedHostResponse(
+        "progress",
+        Progress: new ProviderProgress("apply", 0.5, "started")
+        {
+          BeginsCancellationFinalization = true
+        });
+    var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+
+    var json = JsonSerializer.Serialize(response, options);
+    var roundTrip = JsonSerializer.Deserialize<ElevatedHostResponse>(json, options);
+
+    Assert.True(roundTrip!.Progress!.BeginsCancellationFinalization);
+  }
+
   [Fact]
   public void CreateStartInfo_UsesRunAsAndOnlyBootstrapArguments()
   {
