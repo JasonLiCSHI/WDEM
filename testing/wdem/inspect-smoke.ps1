@@ -12,6 +12,116 @@ function Get-TextSha256([string[]]$Lines) {
     }
 }
 
+function ConvertTo-FingerprintField([AllowNull()][string]$Value) {
+    if ($null -eq $Value) {
+        return '-'
+    }
+    return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Value))
+}
+
+function Get-FileContentFingerprint([string]$Path) {
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    $stream = $null
+    try {
+        $sharing = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+        $stream = [IO.File]::Open(
+            $Path,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            $sharing)
+        return [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '')
+    }
+    finally {
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
+        $sha256.Dispose()
+    }
+}
+
+function Get-LegacyTreeFingerprintOnce([string]$Path) {
+    $fullRoot = [IO.Path]::GetFullPath($Path)
+    try {
+        $rootAttributes = [IO.File]::GetAttributes($fullRoot)
+    }
+    catch [IO.FileNotFoundException] {
+        return 'ABSENT'
+    }
+    catch [IO.DirectoryNotFoundException] {
+        return 'ABSENT'
+    }
+
+    if (($rootAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The retired state root is a reparse point and cannot be monitored safely.'
+    }
+
+    $pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $records = New-Object 'System.Collections.Generic.List[string]'
+    $pending.Push($fullRoot)
+    while ($pending.Count -gt 0) {
+        $current = $pending.Pop()
+        $attributes = [IO.File]::GetAttributes($current)
+        $relative = if ($current -eq $fullRoot) {
+            '.'
+        }
+        else {
+            $current.Substring($fullRoot.Length).TrimStart([char[]]@('\', '/'))
+        }
+        $encodedPath = ConvertTo-FingerprintField $relative
+        $isReparsePoint = ($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+        if ($isReparsePoint) {
+            $item = Get-Item -LiteralPath $current -Force
+            $targetProperty = $item.PSObject.Properties['Target']
+            if ($null -eq $targetProperty) {
+                throw "Cannot safely read reparse-point target: $current"
+            }
+            $target = @($targetProperty.Value) -join "`0"
+            $records.Add("R|$encodedPath|$([int]$attributes)|$($item.LastWriteTimeUtc.Ticks)|$(ConvertTo-FingerprintField $target)")
+            continue
+        }
+
+        $isDirectory = ($attributes -band [IO.FileAttributes]::Directory) -ne 0
+        if ($isDirectory) {
+            $writeTimeBefore = [IO.Directory]::GetLastWriteTimeUtc($current).Ticks
+            $children = @([IO.Directory]::EnumerateFileSystemEntries($current))
+            $attributesAfter = [IO.File]::GetAttributes($current)
+            $writeTimeAfter = [IO.Directory]::GetLastWriteTimeUtc($current).Ticks
+            if ($attributesAfter -ne $attributes -or $writeTimeAfter -ne $writeTimeBefore) {
+                throw "Retired state directory changed while it was being fingerprinted: $current"
+            }
+            $records.Add("D|$encodedPath|$([int]$attributes)|$writeTimeBefore")
+            foreach ($child in $children) {
+                $pending.Push($child)
+            }
+            continue
+        }
+
+        $lengthBefore = ([IO.FileInfo]$current).Length
+        $writeTimeBefore = [IO.File]::GetLastWriteTimeUtc($current).Ticks
+        $contentHash = Get-FileContentFingerprint $current
+        $attributesAfter = [IO.File]::GetAttributes($current)
+        $lengthAfter = ([IO.FileInfo]$current).Length
+        $writeTimeAfter = [IO.File]::GetLastWriteTimeUtc($current).Ticks
+        if ($attributesAfter -ne $attributes -or
+            $lengthAfter -ne $lengthBefore -or
+            $writeTimeAfter -ne $writeTimeBefore) {
+            throw "Retired state file changed while it was being fingerprinted: $current"
+        }
+        $records.Add("F|$encodedPath|$([int]$attributes)|$writeTimeBefore|$lengthBefore|$contentHash")
+    }
+
+    return 'PRESENT:' + (Get-TextSha256 @($records | Sort-Object))
+}
+
+function Get-LegacyTreeFingerprint([string]$Path) {
+    $first = Get-LegacyTreeFingerprintOnce $Path
+    $second = Get-LegacyTreeFingerprintOnce $Path
+    if ($first -ne $second) {
+        throw 'The retired state root changed while its fingerprint was being stabilized.'
+    }
+    return $first
+}
+
 function Get-RegistryFingerprint {
     $scopes = @(
         'HKCU\Environment',
@@ -50,6 +160,8 @@ $hadVsixSha256 = Test-Path Env:WDEM_COMPANY_VSIX_SHA256
 $registryBefore = Get-RegistryFingerprint
 $environmentBefore = Get-PersistentEnvironmentFingerprint
 $bootBefore = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+$legacyRoot = Join-Path $env:LOCALAPPDATA 'WinHome'
+$legacyBefore = Get-LegacyTreeFingerprint $legacyRoot
 
 try {
     New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
@@ -64,6 +176,11 @@ try {
     }
     finally {
         Pop-Location
+    }
+
+    $legacyAfter = Get-LegacyTreeFingerprint $legacyRoot
+    if ($legacyAfter -ne $legacyBefore) {
+        throw 'Inspect changed the retired state root.'
     }
 
     if ($inspectExitCode -ne 0) {
@@ -101,10 +218,6 @@ try {
         throw 'Inspect reported a restart operation.'
     }
 
-    $retiredRuns = Join-Path $env:LOCALAPPDATA 'WinHome\Wdem\runs'
-    if (Test-Path $retiredRuns) {
-        throw 'WDEM wrote the retired state path.'
-    }
     if (-not (Test-Path (Join-Path $env:LOCALAPPDATA 'WDEM\runs') -PathType Container)) {
         throw 'WDEM did not persist Inspect state below %LOCALAPPDATA%\WDEM.'
     }

@@ -261,6 +261,118 @@ public sealed class RepositoryIdentityTests
   }
 
   [Fact]
+  public void InspectSmokeFingerprintsTheEntireRetiredStateRoot()
+  {
+    var script = File.ReadAllText(Path.Combine(
+        RepositoryRoot,
+        "testing",
+        "wdem",
+        "inspect-smoke.ps1"));
+
+    Assert.Contains(
+        "$legacyRoot = Join-Path $env:LOCALAPPDATA 'WinHome'",
+        script,
+        StringComparison.Ordinal);
+    Assert.Matches(
+        @"\$legacyBefore\s*=\s*Get-LegacyTreeFingerprint\s+\$legacyRoot",
+        script);
+    Assert.Matches(
+        @"\$legacyAfter\s*=\s*Get-LegacyTreeFingerprint\s+\$legacyRoot",
+        script);
+    Assert.DoesNotContain(
+        "'WinHome\\Wdem\\runs'",
+        script,
+        StringComparison.OrdinalIgnoreCase);
+  }
+
+  [Fact]
+  public void RetiredStateFingerprintDetectsWholeTreeMutationsWithoutFollowingJunctions()
+  {
+    var script = File.ReadAllText(Path.Combine(
+        RepositoryRoot,
+        "testing",
+        "wdem",
+        "inspect-smoke.ps1"));
+    var mainScript = script.IndexOf(
+        "$root = Split-Path $PSScriptRoot",
+        StringComparison.Ordinal);
+    Assert.True(mainScript > 0, "Could not isolate the smoke fingerprint helpers.");
+
+    using var directory = new TemporaryDirectory();
+    var harnessPath = Path.Combine(directory.Path, "fingerprint-harness.ps1");
+    var testRoot = directory.Path.Replace("'", "''", StringComparison.Ordinal);
+    var harness = script[..mainScript] + $$"""
+        $testRoot = '{{testRoot}}'
+        $legacyRoot = Join-Path $testRoot 'WinHome'
+
+        function Assert-FingerprintChanged([string]$Before, [string]$After, [string]$Case) {
+            if ($Before -eq $After) { throw "Fingerprint missed $Case." }
+        }
+
+        function Reset-LegacyRoot {
+            if (Test-Path -LiteralPath $legacyRoot) {
+                Remove-Item -LiteralPath $legacyRoot -Recurse -Force
+            }
+        }
+
+        Reset-LegacyRoot
+        $before = Get-LegacyTreeFingerprint $legacyRoot
+        New-Item -ItemType Directory -Path $legacyRoot | Out-Null
+        Set-Content -LiteralPath (Join-Path $legacyRoot 'state.json') -Value 'alpha'
+        Assert-FingerprintChanged $before (Get-LegacyTreeFingerprint $legacyRoot) 'creation outside Wdem/runs'
+
+        $state = Join-Path $legacyRoot 'state.json'
+        $stableTime = [DateTime]::UtcNow.AddHours(-2)
+        [IO.File]::WriteAllText($state, 'alpha')
+        [IO.File]::SetLastWriteTimeUtc($state, $stableTime)
+        $before = Get-LegacyTreeFingerprint $legacyRoot
+        [IO.File]::WriteAllText($state, 'bravo')
+        [IO.File]::SetLastWriteTimeUtc($state, $stableTime)
+        Assert-FingerprintChanged $before (Get-LegacyTreeFingerprint $legacyRoot) 'same-length content change'
+
+        $before = Get-LegacyTreeFingerprint $legacyRoot
+        [IO.File]::SetLastWriteTimeUtc($state, $stableTime.AddMinutes(1))
+        Assert-FingerprintChanged $before (Get-LegacyTreeFingerprint $legacyRoot) 'write-time change'
+
+        $before = Get-LegacyTreeFingerprint $legacyRoot
+        Move-Item -LiteralPath $state -Destination (Join-Path $legacyRoot 'renamed.json')
+        Assert-FingerprintChanged $before (Get-LegacyTreeFingerprint $legacyRoot) 'rename'
+
+        $renamed = Join-Path $legacyRoot 'renamed.json'
+        $before = Get-LegacyTreeFingerprint $legacyRoot
+        Remove-Item -LiteralPath $renamed
+        Assert-FingerprintChanged $before (Get-LegacyTreeFingerprint $legacyRoot) 'deletion'
+
+        Reset-LegacyRoot
+        New-Item -ItemType Directory -Path $legacyRoot | Out-Null
+        $outside = Join-Path $testRoot 'outside'
+        New-Item -ItemType Directory -Path $outside | Out-Null
+        $outsideState = Join-Path $outside 'state.json'
+        Set-Content -LiteralPath $outsideState -Value 'alpha'
+        $junction = Join-Path $legacyRoot 'external'
+        New-Item -ItemType Junction -Path $junction -Target $outside | Out-Null
+        $before = Get-LegacyTreeFingerprint $legacyRoot
+        Set-Content -LiteralPath $outsideState -Value 'changed outside legacy root'
+        $after = Get-LegacyTreeFingerprint $legacyRoot
+        if ($before -ne $after) { throw 'Fingerprint followed a junction outside the legacy root.' }
+        [IO.Directory]::Delete($junction)
+        """;
+    File.WriteAllText(harnessPath, harness);
+
+    var result = RunProcess(
+        directory.Path,
+        "powershell",
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        harnessPath);
+
+    Assert.True(result.ExitCode == 0, result.Output);
+  }
+
+  [Fact]
   public void CleanVmApplyRefusesBeforeAnyMachineOrFileOperation()
   {
     var sourceScript = Path.Combine(
