@@ -99,6 +99,7 @@ public sealed class ProfileSelectionViewModel : ObservableObject
     if (Profiles.Count == 0)
     {
       StructuredError? error = results
+          .Where(IsDeliveredProfileResult)
           .SelectMany(result => result.Errors)
           .FirstOrDefault();
       if (error is not null)
@@ -135,4 +136,20 @@ public sealed class ProfileSelectionViewModel : ObservableObject
   }
 
   internal void ClearError() => ErrorMessage = null;
+
+  private static bool IsDeliveredProfileResult(ProfileLoadResult result)
+  {
+    if (result.Profile is not null)
+    {
+      return string.Equals(
+          result.Profile.Id,
+          DeliveredProfileId,
+          StringComparison.OrdinalIgnoreCase);
+    }
+
+    return string.Equals(
+        Path.GetFileNameWithoutExtension(result.SourcePath),
+        DeliveredProfileId,
+        StringComparison.OrdinalIgnoreCase);
+  }
 }

@@ -23,7 +23,35 @@ public sealed class ProfileSelectionViewModelTests
   }
 
   [Fact]
-  public async Task InvalidResultShowsSameSanitizedActionableErrorInChildAndMain()
+  public async Task HiddenInvalidFutureProfileDoesNotPolluteCSharpNotFoundError()
+  {
+    var hiddenError = new StructuredError(
+        WdemErrorCode.ProfileError,
+        "The Python profile is invalid.",
+        "Hidden Python profile diagnostics must stay hidden.");
+    var main = new MainWindowViewModel(
+        new FixedResultsProfileCatalog([
+          new ProfileLoadResult
+          {
+            SourcePath = "python-developer.yaml",
+            Errors = [hiddenError]
+          }
+        ]),
+        new ResourceGraphBuilder(_ => null));
+
+    await main.InitializeAsync();
+
+    Assert.Equal(main.ProfileSelection.ErrorMessage, main.ErrorMessage);
+    Assert.Contains("未找到", main.ErrorMessage, StringComparison.Ordinal);
+    Assert.DoesNotContain("Python", main.ErrorMessage, StringComparison.Ordinal);
+    Assert.DoesNotContain("diagnostics", main.ErrorMessage, StringComparison.Ordinal);
+  }
+
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public async Task IdentifiedInvalidResultShowsSameSanitizedActionableErrorInChildAndMain(
+      bool identifyByProfileId)
   {
     var error = new StructuredError(
         WdemErrorCode.ProfileError,
@@ -35,7 +63,8 @@ public sealed class ProfileSelectionViewModelTests
     var catalog = new FixedResultsProfileCatalog([
       new ProfileLoadResult
       {
-        SourcePath = "csharp-developer.yaml",
+        Profile = identifyByProfileId ? Profile() : null,
+        SourcePath = identifyByProfileId ? "choice.yaml" : "csharp-developer.yaml",
         Errors = [error]
       }
     ]);

@@ -53,6 +53,37 @@ public sealed class DesktopProjectTests
   }
 
   [Fact]
+  public void ErrorMessageUsesSingleWrappedRowOutsidePageHost()
+  {
+    string desktopDirectory = Path.GetDirectoryName(GetDesktopProjectPath())!;
+    XDocument window = XDocument.Load(Path.Combine(desktopDirectory, "MainWindow.xaml"));
+    XDocument profileView = XDocument.Load(Path.Combine(
+        desktopDirectory,
+        "Views",
+        "ProfileSelectionView.xaml"));
+    XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+    XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+
+    XElement pageHost = Assert.Single(
+        window.Descendants(presentation + "ContentControl"),
+        element => element.Attribute(x + "Name")?.Value == "PageHost");
+    XElement errorPresenter = Assert.Single(
+        window.Descendants(presentation + "TextBlock"),
+        element => element.Attribute("Text")?.Value == "{Binding ErrorMessage}");
+
+    Assert.Equal("0", pageHost.Attribute("Grid.Row")?.Value);
+    Assert.Equal("1", errorPresenter.Attribute("Grid.Row")?.Value);
+    Assert.Equal("Wrap", errorPresenter.Attribute("TextWrapping")?.Value);
+    Assert.Equal(
+        ["*", "Auto"],
+        window.Descendants(presentation + "RowDefinition")
+            .Select(row => row.Attribute("Height")?.Value));
+    Assert.DoesNotContain(
+        profileView.Descendants(presentation + "TextBlock"),
+        element => element.Attribute("Text")?.Value == "{Binding ErrorMessage}");
+  }
+
+  [Fact]
   public void ElevatedHostIsDeployedBesideDesktopOutput()
   {
     string hostPath = Path.Combine(AppContext.BaseDirectory, "Wdem.ElevatedHost.exe");

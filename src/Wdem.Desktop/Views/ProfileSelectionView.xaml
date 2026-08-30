@@ -11,7 +11,6 @@
         <StackPanel Spacing="8">
             <TextBlock Text="选择开发者配置" Style="{StaticResource SectionTitleStyle}" />
             <TextBlock Text="选择要配置的开发环境。" />
-            <TextBlock Text="{Binding ErrorMessage}" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
         </StackPanel>
 
         <ListView Grid.Row="1"

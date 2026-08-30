@@ -15,9 +15,15 @@
                                 IsEnabled="{Binding CanNavigateToResources}" />
         </NavigationView.MenuItems>
         <Grid>
-            <ContentControl x:Name="PageHost" />
-            <TextBlock Margin="24"
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <ContentControl x:Name="PageHost" Grid.Row="0" />
+            <TextBlock Grid.Row="1"
+                       Margin="24,12,24,24"
                        Text="{Binding ErrorMessage}"
+                       TextWrapping="Wrap"
                        Foreground="{ThemeResource SystemFillColorCriticalBrush}"
                        VerticalAlignment="Bottom" />
         </Grid>
