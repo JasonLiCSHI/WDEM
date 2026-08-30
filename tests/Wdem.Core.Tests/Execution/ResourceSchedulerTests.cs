@@ -45,7 +45,7 @@ public sealed class ResourceSchedulerTests
   }
 
   [Fact]
-  public void CancellationDrainDeadline_DuplicateReservationsAreIdempotent()
+  public void CancellationDrainDeadline_DuplicateReservationDurationsAreReferenceCounted()
   {
     using var deadline = new CancellationDrainDeadline(
         TimeSpan.FromMilliseconds(100),
@@ -60,7 +60,7 @@ public sealed class ResourceSchedulerTests
   }
 
   [Fact]
-  public void CancellationDrainDeadline_ReleasingLargestReservationRecomputesMaximum()
+  public void CancellationDrainDeadline_ReleasingLargestReservationBeforeStartRecomputesMaximum()
   {
     using var deadline = new CancellationDrainDeadline(
         TimeSpan.FromMilliseconds(100),
@@ -70,6 +70,74 @@ public sealed class ResourceSchedulerTests
     var larger = deadline.RegisterPotentialFinalization(
         TimeSpan.FromMilliseconds(300));
 
+    larger.Dispose();
+
+    Assert.Equal(TimeSpan.FromMilliseconds(300), deadline.Remaining);
+  }
+
+  [Fact]
+  public void CancellationDrainDeadline_ReleasingLargestReservationAfterStartRetainsCleanupBudget()
+  {
+    using var cancellation = new CancellationTokenSource();
+    using var deadline = new CancellationDrainDeadline(
+        TimeSpan.FromMilliseconds(25),
+        cancellation.Token);
+    var reservation = deadline.RegisterPotentialFinalization(TimeSpan.FromSeconds(2));
+
+    cancellation.Cancel();
+    Thread.Sleep(TimeSpan.FromMilliseconds(75));
+    reservation.Dispose();
+
+    Assert.True(deadline.Remaining > TimeSpan.FromSeconds(1));
+  }
+
+  [Fact]
+  public void CancellationDrainDeadline_RegisteringSmallerReservationAfterStartDoesNotShrinkDeadline()
+  {
+    using var cancellation = new CancellationTokenSource();
+    using var deadline = new CancellationDrainDeadline(
+        TimeSpan.FromMilliseconds(25),
+        cancellation.Token);
+    var larger = deadline.RegisterPotentialFinalization(TimeSpan.FromSeconds(2));
+    cancellation.Cancel();
+    var before = deadline.Remaining;
+
+    using var smaller = deadline.RegisterPotentialFinalization(TimeSpan.FromMilliseconds(500));
+    larger.Dispose();
+
+    Assert.InRange(deadline.Remaining, TimeSpan.FromSeconds(1), before);
+  }
+
+  [Fact]
+  public void CancellationDrainDeadline_RegisteringLargerReservationAfterStartExtendsDeadlineForward()
+  {
+    using var cancellation = new CancellationTokenSource();
+    using var deadline = new CancellationDrainDeadline(
+        TimeSpan.FromMilliseconds(25),
+        cancellation.Token);
+    cancellation.Cancel();
+    var before = deadline.Remaining;
+
+    var larger = deadline.RegisterPotentialFinalization(TimeSpan.FromSeconds(2));
+    var extended = deadline.Remaining;
+    larger.Dispose();
+
+    Assert.True(extended > before + TimeSpan.FromSeconds(1));
+    Assert.True(deadline.Remaining > TimeSpan.FromSeconds(1));
+  }
+
+  [Fact]
+  public void CancellationDrainDeadline_ReservationDisposalIsIdempotent()
+  {
+    using var deadline = new CancellationDrainDeadline(
+        TimeSpan.FromMilliseconds(100),
+        CancellationToken.None);
+    using var smaller = deadline.RegisterPotentialFinalization(
+        TimeSpan.FromMilliseconds(200));
+    var larger = deadline.RegisterPotentialFinalization(
+        TimeSpan.FromMilliseconds(300));
+
+    larger.Dispose();
     larger.Dispose();
 
     Assert.Equal(TimeSpan.FromMilliseconds(300), deadline.Remaining);
@@ -106,6 +174,28 @@ public sealed class ResourceSchedulerTests
         reservation?.Dispose();
       }
     }
+  }
+
+  [Fact]
+  public void CancellationDrainDeadline_ConcurrentRegistrationAndReleaseAfterStartRetainsMaximum()
+  {
+    using var cancellation = new CancellationTokenSource();
+    using var deadline = new CancellationDrainDeadline(
+        TimeSpan.FromMilliseconds(25),
+        cancellation.Token);
+    var durations = Enumerable.Range(1, 128)
+        .Select(index => TimeSpan.FromMilliseconds(index * 10))
+        .ToArray();
+    cancellation.Cancel();
+
+    Parallel.For(0, durations.Length, index =>
+    {
+      var reservation = deadline.RegisterPotentialFinalization(durations[index]);
+      reservation.Dispose();
+      reservation.Dispose();
+    });
+
+    Assert.True(deadline.Remaining > TimeSpan.FromSeconds(1));
   }
 
   [Fact]

@@ -14,6 +14,7 @@ public sealed class CancellationDrainDeadline : IDisposable
   private readonly Dictionary<long, int> _finalizationReservations = [];
   private readonly CancellationTokenRegistration _registration;
   private long _startedTimestamp = long.MinValue;
+  private long _startedMaximumReservationTicks;
   private int _disposeState;
 
   public CancellationDrainDeadline(TimeSpan budget, CancellationToken cancellationToken)
@@ -43,9 +44,9 @@ public sealed class CancellationDrainDeadline : IDisposable
       lock (_gate)
       {
         started = _startedTimestamp;
-        var maximumReservation = _finalizationReservations.Count == 0
-            ? 0
-            : _finalizationReservations.Keys.Max();
+        var maximumReservation = started == long.MinValue
+            ? CurrentMaximumReservationTicks()
+            : _startedMaximumReservationTicks;
         budget = TimeSpan.FromTicks(_baseBudgetTicks + maximumReservation);
       }
 
@@ -85,6 +86,12 @@ public sealed class CancellationDrainDeadline : IDisposable
       {
         _finalizationReservations.Add(duration.Ticks, 1);
       }
+
+      if (_startedTimestamp != long.MinValue &&
+          duration.Ticks > _startedMaximumReservationTicks)
+      {
+        _startedMaximumReservationTicks = duration.Ticks;
+      }
     }
 
     return new FinalizationReservation(this, duration.Ticks);
@@ -111,10 +118,15 @@ public sealed class CancellationDrainDeadline : IDisposable
     {
       if (_startedTimestamp == long.MinValue)
       {
+        _startedMaximumReservationTicks = CurrentMaximumReservationTicks();
         _startedTimestamp = Stopwatch.GetTimestamp();
       }
     }
   }
+
+  private long CurrentMaximumReservationTicks() => _finalizationReservations.Count == 0
+      ? 0
+      : _finalizationReservations.Keys.Max();
 
   private void ReleaseFinalization(long durationTicks)
   {
