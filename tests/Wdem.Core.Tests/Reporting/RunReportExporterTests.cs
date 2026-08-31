@@ -50,6 +50,156 @@ public sealed class RunReportExporterTests
   }
 
   [Fact]
+  public void ReportsIncludeRedactedResourcePresentationMetadata()
+  {
+    const string secret = "resource-presentation-secret";
+    ExecutionRun run = CreatePlannedRun(secret);
+    var exporter = new RunReportExporter(new LogRedactor([secret]));
+
+    string json = exporter.ExportJson(run);
+    string markdown = exporter.ExportMarkdown(run);
+    using var document = JsonDocument.Parse(json);
+    JsonElement definition = document.RootElement.GetProperty("plan")
+        .GetProperty("resources")[0]
+        .GetProperty("definition");
+
+    Assert.Equal("display-***", definition.GetProperty("displayName").GetString());
+    Assert.Equal("resource-description-***", definition.GetProperty("description").GetString());
+    Assert.Contains(
+        "Resource display-\\*\\*\\* display name: display-\\*\\*\\*",
+        markdown,
+        StringComparison.Ordinal);
+    Assert.Contains(
+        "Resource display-\\*\\*\\* description: resource-description-\\*\\*\\*",
+        markdown,
+        StringComparison.Ordinal);
+    Assert.DoesNotContain(secret, json, StringComparison.Ordinal);
+    Assert.DoesNotContain(secret, markdown, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void ExportMarkdown_PreservesEveryResourcePresentationWhenRedactedIdsCollide()
+  {
+    const string firstSecret = "alpha-resource-secret";
+    const string secondSecret = "beta-resource-secret";
+    ExecutionRun run = CreatePlannedRun("safe");
+    PlannedResource template = Assert.Single(run.Plan!.Resources);
+    ResourceDefinition firstDefinition = template.Definition with
+    {
+      Id = firstSecret,
+      DisplayName = $"First {firstSecret}",
+      Description = $"First details {firstSecret}"
+    };
+    ResourceDefinition secondDefinition = template.Definition with
+    {
+      Id = secondSecret,
+      DisplayName = $"Second {secondSecret}",
+      Description = $"Second details {secondSecret}"
+    };
+    run = run with
+    {
+      Plan = run.Plan with
+      {
+        Resources =
+        [
+          template with
+          {
+            Definition = firstDefinition,
+            ResourcePlan = template.ResourcePlan with { ResourceId = firstSecret }
+          },
+          template with
+          {
+            Definition = secondDefinition,
+            ResourcePlan = template.ResourcePlan with { ResourceId = secondSecret }
+          }
+        ]
+      }
+    };
+
+    string markdown = new RunReportExporter(new LogRedactor([firstSecret, secondSecret]))
+        .ExportMarkdown(run);
+
+    Assert.Contains(
+        "Resource First \\*\\*\\* display name: First \\*\\*\\*",
+        markdown,
+        StringComparison.Ordinal);
+    Assert.Contains(
+        "Resource First \\*\\*\\* description: First details \\*\\*\\*",
+        markdown,
+        StringComparison.Ordinal);
+    Assert.Contains(
+        "Resource Second \\*\\*\\* display name: Second \\*\\*\\*",
+        markdown,
+        StringComparison.Ordinal);
+    Assert.Contains(
+        "Resource Second \\*\\*\\* description: Second details \\*\\*\\*",
+        markdown,
+        StringComparison.Ordinal);
+    Assert.DoesNotContain(firstSecret, markdown, StringComparison.Ordinal);
+    Assert.DoesNotContain(secondSecret, markdown, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void ExportMarkdown_PreservesEveryUnexecutedResourceWhenRedactedIdsCollide()
+  {
+    const string firstSecret = "alpha-unexecuted-secret";
+    const string secondSecret = "beta-unexecuted-secret";
+    ExecutionRun run = CreateTerminalRun("safe") with
+    {
+      ResourceResults = new Dictionary<string, ResourceResult>
+      {
+        [firstSecret] = Result(
+            firstSecret,
+            ExecutionState.Pending,
+            ExecutionOutcome.Skipped),
+        [secondSecret] = Result(
+            secondSecret,
+            ExecutionState.Pending,
+            ExecutionOutcome.Skipped)
+      }
+    };
+
+    string markdown = new RunReportExporter(new LogRedactor([firstSecret, secondSecret]))
+        .ExportMarkdown(run);
+
+    Assert.Contains(
+        "Unexecuted IDs: \\*\\*\\*, \\*\\*\\*",
+        markdown,
+        StringComparison.Ordinal);
+    Assert.DoesNotContain(firstSecret, markdown, StringComparison.Ordinal);
+    Assert.DoesNotContain(secondSecret, markdown, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void ExportMarkdown_FlattensAndEscapesResourceMetadataInjection()
+  {
+    const string payload = "Friendly\n# heading\n- list [link](https://evil) `code` <script>";
+    ExecutionRun run = CreatePlannedRun("safe");
+    PlannedResource planned = Assert.Single(run.Plan!.Resources);
+    ResourceDefinition definition = planned.Definition with
+    {
+      DisplayName = payload,
+      Description = payload
+    };
+    run = run with
+    {
+      Plan = run.Plan with
+      {
+        Resources = [planned with { Definition = definition }]
+      }
+    };
+
+    string markdown = new RunReportExporter(new LogRedactor()).ExportMarkdown(run);
+
+    Assert.DoesNotContain("\n# heading", markdown, StringComparison.Ordinal);
+    Assert.DoesNotContain("\n- list", markdown, StringComparison.Ordinal);
+    Assert.DoesNotContain("[link](https://evil)", markdown, StringComparison.Ordinal);
+    Assert.DoesNotContain("`code`", markdown, StringComparison.Ordinal);
+    Assert.DoesNotContain("<script>", markdown, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("Friendly # heading - list", markdown, StringComparison.Ordinal);
+  }
+
+  [Fact]
   public void ReportsIncludeInitialApprovalFingerprintAndDeferredSummary()
   {
     var fingerprint = new string('E', 64);
@@ -130,6 +280,22 @@ public sealed class RunReportExporterTests
     Assert.DoesNotContain(secret, proof.ResourceType, StringComparison.Ordinal);
     Assert.DoesNotContain(secret, proof.ProviderName, StringComparison.Ordinal);
     Assert.DoesNotContain(secret, Assert.Single(proof.Dependencies), StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void ExecutionRunRedactor_RedactsGraphAndPlanDefinitionPresentationMetadata()
+  {
+    const string secret = "definition-presentation-secret";
+    ExecutionRun redacted = new ExecutionRunRedactor(new LogRedactor([secret]))
+        .Redact(CreatePlannedRun(secret));
+
+    ResourceDefinition graphDefinition = Assert.Single(redacted.Graph!.Nodes).Value.Definition;
+    ResourceDefinition planDefinition = Assert.Single(redacted.Plan!.Resources).Definition;
+
+    Assert.Equal("display-***", graphDefinition.DisplayName);
+    Assert.Equal("resource-description-***", graphDefinition.Description);
+    Assert.Equal("display-***", planDefinition.DisplayName);
+    Assert.Equal("resource-description-***", planDefinition.Description);
   }
 
   [Fact]
@@ -262,7 +428,7 @@ public sealed class RunReportExporterTests
     AssertPropertyNames(root.GetProperty("graph"), "nodes", "topologicalLayers");
     AssertPropertyNames(graphNode, "definition", "origin", "requiredBy");
     AssertPropertyNames(definition,
-        "id", "type", "provider", "displayName", "versionConstraint", "preferredVersion",
+        "id", "type", "provider", "displayName", "description", "versionConstraint", "preferredVersion",
         "dependencies", "parameters", "privilegeRequirement", "restartPolicy");
     AssertPropertyNames(plan,
         "planId", "fingerprint", "profileId", "profileVersion", "layers", "resources",
@@ -617,6 +783,7 @@ public sealed class RunReportExporterTests
       Type = $"type-{secret}",
       Provider = $"provider-{secret}",
       DisplayName = $"display-{secret}",
+      Description = $"resource-description-{secret}",
       VersionConstraint = $">={secret}",
       PreferredVersion = $"preferred-{secret}",
       Dependencies = [$"dependency-{secret}"],

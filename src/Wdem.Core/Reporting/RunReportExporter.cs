@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Net;
 using Wdem.Core.Execution;
 using Wdem.Core.Graph;
 using Wdem.Core.Planning;
@@ -34,7 +35,10 @@ public sealed class RunReportExporter : IRunReportExporter
   public string ExportMarkdown(ExecutionRun run)
   {
     ArgumentNullException.ThrowIfNull(run);
-    return CreateMarkdown(_runRedactor.Redact(run));
+    return CreateMarkdown(
+        _runRedactor.Redact(run),
+        CreateMarkdownResourcePresentations(run),
+        UnexecutedIds(run).Select(Text).ToArray());
   }
 
   public async Task ExportAsync(
@@ -188,19 +192,46 @@ public sealed class RunReportExporter : IRunReportExporter
       resource.BlockedBy.Select(Text).ToArray(),
       resource.Diagnostics.Select(CreateError).ToArray());
 
-  private ReportResourceDefinition CreateDefinition(ResourceDefinition definition) => new(
-      Text(definition.Id),
-      Text(definition.Type),
-      Text(definition.Provider),
-      NullableText(definition.DisplayName),
-      NullableText(definition.VersionConstraint),
-      NullableText(definition.PreferredVersion),
-      definition.Dependencies.Select(Text).ToArray(),
-      RedactDictionary(
-          definition.Parameters,
-          (key, value) => _redactor.RedactNamedValue(key, value)),
-      definition.PrivilegeRequirement,
-      definition.RestartPolicy);
+  private ReportResourceDefinition CreateDefinition(ResourceDefinition definition)
+  {
+    var presentation = ResourceDefinitionPresentationRedactor.Redact(definition, _redactor);
+    return new ReportResourceDefinition(
+        Text(definition.Id),
+        Text(definition.Type),
+        Text(definition.Provider),
+        presentation.DisplayName,
+        presentation.Description,
+        NullableText(definition.VersionConstraint),
+        NullableText(definition.PreferredVersion),
+        definition.Dependencies.Select(Text).ToArray(),
+        RedactDictionary(
+            definition.Parameters,
+            (key, value) => _redactor.RedactNamedValue(key, value)),
+        definition.PrivilegeRequirement,
+        definition.RestartPolicy);
+  }
+
+  private IReadOnlyList<MarkdownResourcePresentation> CreateMarkdownResourcePresentations(
+      ExecutionRun run)
+  {
+    IEnumerable<ResourceDefinition> definitions = run.Plan is not null
+        ? run.Plan.Resources.Select(resource => resource.Definition)
+        : run.Graph?.Nodes.Values.Select(node => node.Definition) ?? [];
+    return definitions
+        .DistinctBy(definition => definition.Id, StringComparer.OrdinalIgnoreCase)
+        .OrderBy(definition => definition.Id, StringComparer.OrdinalIgnoreCase)
+        .Select(definition =>
+        {
+          var presentation = ResourceDefinitionPresentationRedactor.Redact(
+              definition,
+              _redactor);
+          return new MarkdownResourcePresentation(
+              Text(definition.Id),
+              presentation.DisplayName,
+              presentation.Description);
+        })
+        .ToArray();
+  }
 
   private ReportResourcePlan CreateResourcePlan(ResourcePlan plan) => new(
       Text(plan.ResourceId),
@@ -283,7 +314,10 @@ public sealed class RunReportExporter : IRunReportExporter
       NullableText(error.UnderlyingExceptionType),
       NullableText(error.UnderlyingExceptionMessage));
 
-  private string CreateMarkdown(ExecutionRun run)
+  private string CreateMarkdown(
+      ExecutionRun run,
+      IReadOnlyList<MarkdownResourcePresentation> resourcePresentations,
+      IReadOnlyList<string> unexecutedResourceIds)
   {
     ResourceResult[] results = run.ResourceResults.Values
         .OrderBy(result => result.ResourceId, StringComparer.OrdinalIgnoreCase)
@@ -344,6 +378,20 @@ public sealed class RunReportExporter : IRunReportExporter
         "Planned steps",
         run.Plan?.Resources.Sum(resource => resource.ResourcePlan.Steps.Count).ToString()
             ?? "Unavailable");
+    foreach (MarkdownResourcePresentation presentation in resourcePresentations)
+    {
+      string resourceLabel = presentation.DisplayName ?? presentation.Id;
+      if (presentation.DisplayName is not null)
+      {
+        Field($"Resource {resourceLabel} display name", presentation.DisplayName);
+      }
+
+      if (presentation.Description is not null)
+      {
+        Field($"Resource {resourceLabel} description", presentation.Description);
+      }
+    }
+
     if (run.Graph is not null)
     {
       foreach (ResourceGraphLayer layer in run.Graph.TopologicalLayers.OrderBy(layer => layer.Index))
@@ -388,7 +436,7 @@ public sealed class RunReportExporter : IRunReportExporter
     markdown.AppendLine("## Resource results").AppendLine();
     foreach (ResourceResult result in results)
     {
-      markdown.Append("### ").AppendLine(result.ResourceId).AppendLine();
+      markdown.Append("### ").AppendLine(MarkdownInline(result.ResourceId)).AppendLine();
       Field("State", result.State.ToString());
       Field("Outcome", result.Outcome?.ToString() ?? "Unknown");
       Field("Compliance", result.FinalCompliance?.ToString() ?? "Unknown");
@@ -407,8 +455,8 @@ public sealed class RunReportExporter : IRunReportExporter
       AppendError(result.DetectedAfter?.StructuredError);
       foreach (StepResult step in result.StepResults.OrderBy(step => step.StepId))
       {
-        markdown.Append("- Step `").Append(step.StepId).Append("` — ")
-            .Append(step.Name).Append(": ")
+        markdown.Append("- Step ").Append(MarkdownInline(step.StepId)).Append(" — ")
+            .Append(MarkdownInline(step.Name)).Append(": ")
             .Append(step.State).Append(" / ")
             .Append(step.Outcome?.ToString() ?? "Unknown")
             .Append(", exit code: ")
@@ -421,7 +469,7 @@ public sealed class RunReportExporter : IRunReportExporter
 
     markdown.AppendLine("## Blocked and unexecuted").AppendLine();
     Field("Blocked IDs", JoinOrNone(BlockedIds(run)));
-    Field("Unexecuted IDs", JoinOrNone(UnexecutedIds(run)));
+    Field("Unexecuted IDs", JoinOrNone(unexecutedResourceIds));
     markdown.AppendLine();
 
     markdown.AppendLine("## Restart requirements").AppendLine();
@@ -440,20 +488,21 @@ public sealed class RunReportExporter : IRunReportExporter
       foreach (ResourceResult result in results.Where(result =>
                    result.RestartRequirement != RestartPolicy.NoRestart))
       {
-        markdown.Append("- ").Append(result.ResourceId).Append(": ")
+        markdown.Append("- ").Append(MarkdownInline(result.ResourceId)).Append(": ")
             .AppendLine(RestartText(result.RestartRequirement));
       }
     }
 
     foreach (string reason in run.RestartReasons)
     {
-      markdown.Append("- Reason: ").AppendLine(reason);
+      markdown.Append("- Reason: ").AppendLine(MarkdownInline(reason));
     }
 
     return markdown.ToString();
 
-    void Field(string name, object value) => markdown.Append("- ").Append(name).Append(": ")
-        .AppendLine(value.ToString());
+    void Field(string name, object value) => markdown.Append("- ")
+        .Append(MarkdownInline(name)).Append(": ")
+        .AppendLine(MarkdownInline(value));
 
     void AppendList(IEnumerable<string> values)
     {
@@ -466,7 +515,7 @@ public sealed class RunReportExporter : IRunReportExporter
 
       foreach (string value in items)
       {
-        markdown.Append("- ").AppendLine(value);
+        markdown.Append("- ").AppendLine(MarkdownInline(value));
       }
     }
 
@@ -478,12 +527,12 @@ public sealed class RunReportExporter : IRunReportExporter
       }
 
       markdown.Append(prefix).Append("- Error code: ").AppendLine(error.Code.ToString());
-      markdown.Append(prefix).Append("- Error summary: ").AppendLine(error.Summary);
-      markdown.Append(prefix).Append("- Error details: ").AppendLine(error.Detail);
+      markdown.Append(prefix).Append("- Error summary: ").AppendLine(MarkdownInline(error.Summary));
+      markdown.Append(prefix).Append("- Error details: ").AppendLine(MarkdownInline(error.Detail));
       if (!string.IsNullOrWhiteSpace(error.SuggestedAction))
       {
         markdown.Append(prefix).Append("- Suggested action: ")
-            .AppendLine(error.SuggestedAction);
+            .AppendLine(MarkdownInline(error.SuggestedAction));
       }
 
       if (error.ProcessExitCode is int exitCode)
@@ -500,7 +549,7 @@ public sealed class RunReportExporter : IRunReportExporter
         return;
       }
 
-      markdown.Append("### ").AppendLine(heading).AppendLine();
+      markdown.Append("### ").AppendLine(MarkdownInline(heading)).AppendLine();
       foreach (StructuredError error in materialized)
       {
         AppendError(error);
@@ -508,6 +557,28 @@ public sealed class RunReportExporter : IRunReportExporter
 
       markdown.AppendLine();
     }
+  }
+
+  private static string MarkdownInline(object value)
+  {
+    string flattened = string.Join(
+        " ",
+        (value.ToString() ?? string.Empty).Split(
+            (char[]?)null,
+            StringSplitOptions.RemoveEmptyEntries));
+    string encoded = WebUtility.HtmlEncode(flattened);
+    var escaped = new StringBuilder(encoded.Length);
+    foreach (char character in encoded)
+    {
+      if (character is '\\' or '[' or ']' or '(' or ')' or '`' or '*' or '_' or '|')
+      {
+        escaped.Append('\\');
+      }
+
+      escaped.Append(character);
+    }
+
+    return escaped.ToString();
   }
 
   private IReadOnlyDictionary<string, TResult> RedactDictionary<TValue, TResult>(
@@ -762,11 +833,17 @@ public sealed class RunReportExporter : IRunReportExporter
       IReadOnlyList<string> BlockedBy,
       IReadOnlyList<ReportStructuredError> Diagnostics);
 
+  private sealed record MarkdownResourcePresentation(
+      string Id,
+      string? DisplayName,
+      string? Description);
+
   private sealed record ReportResourceDefinition(
       string Id,
       string Type,
       string Provider,
       string? DisplayName,
+      string? Description,
       string? VersionConstraint,
       string? PreferredVersion,
       IReadOnlyList<string> Dependencies,

@@ -29,6 +29,8 @@ profile:
       defaultSelected: true
 resources:
   git:
+    displayName: Git
+    description: Distributed version control command-line tools
     type: git
     provider: winget
     versionConstraint: ">= 2.40.0"
@@ -38,6 +40,8 @@ resources:
     dependsOn: []
     parameters: {}
   editor:
+    displayName: Visual Studio Code
+    description: Lightweight source-code editor
     type: winget-package
     provider: winget
     dependsOn: [git]
@@ -60,8 +64,15 @@ Equivalent JSON skeleton:
     "optionalResources": [{ "id": "editor", "defaultSelected": true }]
   },
   "resources": {
-    "git": { "type": "git", "provider": "winget" },
+    "git": {
+      "displayName": "Git",
+      "description": "Distributed version control command-line tools",
+      "type": "git",
+      "provider": "winget"
+    },
     "editor": {
+      "displayName": "Visual Studio Code",
+      "description": "Lightweight source-code editor",
       "type": "winget-package",
       "provider": "winget",
       "dependsOn": ["git"],
@@ -72,6 +83,10 @@ Equivalent JSON skeleton:
 ```
 
 `profile.id`, resource keys, and reference IDs must be non-empty portable IDs.
+Every schema 1.0 resource requires a non-empty `displayName` and `description`;
+whitespace-only values are rejected. `profile.description` must also contain at
+least one non-whitespace character. These resource fields are shown in resource
+selection, reviewed plans, persisted run snapshots, and exported reports.
 `profile.version` and `preferredVersion` use 1-4 numeric segments such as
 `1`, `1.2`, `1.2.3`, or `1.2.3.4`. A `versionConstraint` is one of:
 
@@ -81,6 +96,10 @@ Equivalent JSON skeleton:
 - major/minor wildcard: `8.0.x`.
 
 A reference-level version setting overrides the resource-level setting.
+
+Run snapshots created before resource descriptions were introduced remain
+readable. A missing snapshot description stays `null` when the run is loaded
+and saved; no description is inferred from the resource type or provider.
 
 ## Required, optional, and automatic dependencies
 
@@ -126,6 +145,13 @@ $env:WDEM_COMPANY_VSIX_SHA256 = (Get-FileHash $env:WDEM_COMPANY_VSIX_PATH -Algor
 
 Both variables are required only when `company-vs-extension` is selected. Do
 not place a secret in either variable; the hash is an integrity value.
+
+Do not place credentials, access tokens, private paths, or other secrets in a
+resource `displayName` or `description`. WDEM applies its standard redaction to
+these fields before displaying, persisting, or exporting them, but descriptive
+metadata is still configuration, not a secret store. Markdown reports flatten
+multiline metadata and escape Markdown and HTML syntax so profile text cannot
+create headings, lists, links, code spans, or raw HTML in the report.
 
 ## Visual Studio instance selection
 

@@ -305,7 +305,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     var secondStore = CreateStore();
     var firstService = CreateService(provider, firstStore);
     var secondService = CreateService(provider, secondStore);
-    var prior = InterruptedRun();
+    var prior = await ApprovedInterruptedRunAsync();
     await firstStore.CreateAsync(prior, CancellationToken.None);
     var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -405,7 +405,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     var secondStore = CreateStore();
     var recoveryService = CreateService(provider, firstStore);
     var abandonService = CreateService(provider, secondStore);
-    var prior = InterruptedRun();
+    var prior = await ApprovedInterruptedRunAsync();
     await firstStore.CreateAsync(prior, CancellationToken.None);
     var recovery = recoveryService.RecoverAsync(prior.RunId, CancellationToken.None);
     await provider.FirstApplyEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -437,7 +437,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     var recoveryStore = new GatedRecoveryOperationStore(CreateStore());
     var recoveryService = CreateService(provider, recoveryStore);
     var abandonService = CreateService(provider, CreateStore());
-    var prior = InterruptedRun();
+    var prior = await ApprovedInterruptedRunAsync();
     await CreateStore().CreateAsync(prior, CancellationToken.None);
     var recovery = AttemptRecoveryAsync(
         recoveryService,
@@ -471,7 +471,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     };
     var firstStore = CreateStore();
     var firstService = CreateService(provider, firstStore);
-    var prior = InterruptedRun();
+    var prior = await ApprovedInterruptedRunAsync();
     await firstStore.CreateAsync(prior, CancellationToken.None);
 
     var recovered = await firstService.RecoverAsync(prior.RunId, CancellationToken.None);
@@ -520,7 +520,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     var gatedStore = new GatedRecoveryOperationStore(CreateStore());
     var finder = CreateService(provider, gatedStore);
     var competitor = CreateService(provider, CreateStore());
-    var prior = InterruptedRun();
+    var prior = await ApprovedInterruptedRunAsync();
     await backingStore.CreateAsync(prior, CancellationToken.None);
     var finding = finder.FindRecoveryCandidatesAsync(CancellationToken.None);
     await gatedStore.AcquireEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -545,7 +545,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
   {
     var provider = new GatedProvider { WaitForRelease = false };
     var firstStore = CreateStore();
-    var claimed = InterruptedRun() with
+    var claimed = (await ApprovedInterruptedRunAsync()) with
     {
       Revision = 1,
       RecoveryClaimId = Guid.NewGuid(),
@@ -576,7 +576,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
     var readClock = new MutableTimeProvider(readAt);
     var provider = new GatedProvider { WaitForRelease = false };
     var store = CreateStore(writeClock);
-    var claimed = InterruptedRun() with
+    var claimed = (await ApprovedInterruptedRunAsync(writeClock)) with
     {
       Revision = 1,
       RecoveryClaimId = Guid.NewGuid(),
@@ -630,7 +630,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
         new DateTimeOffset(2030, 1, 2, 3, 4, 5, TimeSpan.Zero));
     var provider = new GatedProvider { WaitForRelease = false };
     var store = CreateStore(clock);
-    var claimed = InterruptedRun() with
+    var claimed = (await ApprovedInterruptedRunAsync(clock)) with
     {
       Revision = 1,
       RecoveryClaimId = Guid.NewGuid(),
@@ -661,7 +661,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
         new DateTimeOffset(2030, 1, 2, 3, 4, 5, TimeSpan.Zero));
     var provider = new GatedProvider();
     var firstStore = CreateStore(clock);
-    var prior = InterruptedRun();
+    var prior = await ApprovedInterruptedRunAsync(clock);
     await firstStore.CreateAsync(prior, CancellationToken.None);
     var firstService = CreateService(provider, firstStore, clock);
     var secondService = CreateService(provider, CreateStore(clock), clock);
@@ -706,7 +706,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
         new DateTimeOffset(2030, 1, 2, 3, 4, 5, TimeSpan.Zero));
     var provider = new GatedProvider { WaitForRelease = false };
     var backingStore = CreateStore(clock);
-    var prior = InterruptedRun();
+    var prior = await ApprovedInterruptedRunAsync(clock);
     await backingStore.CreateAsync(prior, CancellationToken.None);
     var faultingStore = new ThrowOnTrySaveCallStore(backingStore, throwOnCall: 2);
     var firstService = CreateService(provider, faultingStore, clock);
@@ -739,7 +739,7 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
   {
     var provider = new GatedProvider { WaitForRelease = false };
     var backingStore = CreateStore();
-    var prior = InterruptedRun();
+    var prior = await ApprovedInterruptedRunAsync();
     await backingStore.CreateAsync(prior, CancellationToken.None);
     var faultingStore = new ThrowOnTrySaveCallStore(
         backingStore,
@@ -860,6 +860,29 @@ public sealed class EnvironmentRunServiceConcurrencyTests : IDisposable
   private static RunRequest Request() => new(
       "input/profile.yaml",
       new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+
+  private async Task<ExecutionRun> ApprovedInterruptedRunAsync(
+      TimeProvider? timeProvider = null)
+  {
+    var seedProvider = new GatedProvider { WaitForRelease = false };
+    var seedDirectory = Path.Combine(_directory, $"approval-seed-{Guid.NewGuid():N}");
+    var seedStore = new JsonExecutionRunStore(
+        new WdemDataPaths(seedDirectory),
+        new LogRedactor(),
+        timeProvider);
+    var approved = await CreateService(
+        seedProvider,
+        seedStore,
+        timeProvider).ApplyAsync(Request(), CancellationToken.None);
+    var plan = Assert.IsType<ExecutionPlan>(approved.Plan);
+    var approval = Assert.IsType<PlanApproval>(approved.PlanApproval);
+    Assert.Equal(plan.Fingerprint, approval.InitialPlanFingerprint);
+    return InterruptedRun() with
+    {
+      Plan = plan,
+      PlanApproval = approval
+    };
+  }
 
   private static ExecutionRun InterruptedRun() => new()
   {

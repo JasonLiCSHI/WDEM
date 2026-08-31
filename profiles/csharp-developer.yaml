@@ -25,6 +25,8 @@ profile:
       defaultSelected: false
 resources:
   visual-studio:
+    displayName: Visual Studio Community
+    description: Integrated development environment for .NET desktop development
     type: visual-studio
     provider: visual-studio
     parameters:
@@ -38,12 +40,18 @@ resources:
       bootstrapperUri: https://c2rsetup.officeapps.live.com/c2r/downloadVS.aspx?sku=community&channel=stable&version=VS18&source=WDEM&cid=2500
       bootstrapperSha256: 2D22F8E6B43DD723CC59E37CDE9DD22CAD778178F8C31F0300CE945C5C76A5E1
   dotnet-sdk:
+    displayName: .NET SDK
+    description: SDK and command-line tools for building .NET applications
     type: dotnet-sdk
     provider: winget
   git:
+    displayName: Git
+    description: Distributed version control command-line tools
     type: git
     provider: winget
   resharper:
+    displayName: ReSharper
+    description: JetBrains productivity and code-quality tools for Visual Studio
     type: resharper
     provider: winget
     dependsOn:
@@ -53,6 +61,8 @@ resources:
       edition: Community
       channelId: VisualStudio.18.Release
   resharper-settings:
+    displayName: ReSharper settings
+    description: Shared ReSharper settings for the C# developer environment
     type: resharper-settings
     provider: file
     dependsOn:
@@ -62,6 +72,8 @@ resources:
       expectedSha256: 4B9EBCC4DD86B8DBB6F337E45160E1A4FD09DA04A04723A4E4ACC601CEBCAFFC
       destinationPath: Shared/vAny/GlobalSettingsStorage.DotSettings
   company-vs-extension:
+    displayName: Company Visual Studio extension
+    description: Approved internal Visual Studio extension supplied by the organization
     type: visual-studio-extension
     provider: vsix
     privilegeRequirement: Administrator
@@ -75,6 +87,8 @@ resources:
       sourcePath: ${WDEM_COMPANY_VSIX_PATH}
       expectedSha256: ${WDEM_COMPANY_VSIX_SHA256}
   visual-studio-settings:
+    displayName: Visual Studio settings
+    description: Shared Visual Studio preferences for the C# developer environment
     type: visual-studio-settings
     provider: visual-studio-settings
     dependsOn:

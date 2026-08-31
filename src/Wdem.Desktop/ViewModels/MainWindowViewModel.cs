@@ -295,7 +295,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _graphBuilder,
         NavigateToPlanAsync,
         ReportError,
-        ClearErrors);
+        ClearErrors,
+        _redactor);
     CurrentPage = ResourceSelection;
   }
 

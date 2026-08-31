@@ -21,6 +21,7 @@ public sealed class ResourceDefinitionTests
 
     Assert.Empty(resource.Dependencies);
     Assert.Empty(resource.Parameters);
+    Assert.Null(resource.Description);
     Assert.Equal(PrivilegeRequirement.CurrentUser, resource.PrivilegeRequirement);
     Assert.Equal(RestartPolicy.NoRestart, resource.RestartPolicy);
   }
@@ -327,6 +328,39 @@ public sealed class ResourceDefinitionTests
     Assert.Equal(
         ResourceDefinitionFingerprint.Create(first),
         ResourceDefinitionFingerprint.Create(second));
+  }
+
+  [Fact]
+  public void Fingerprint_NullDescription_PreservesExactLegacyHash()
+  {
+    var resource = new ResourceDefinition
+    {
+      Id = "git",
+      Type = "package",
+      Provider = "winget"
+    };
+
+    Assert.Equal(
+        "B54640CFA4C8A12E3E97376F744BA49F8555D8D26BE65C18B4348E7C164BA96C",
+        ResourceDefinitionFingerprint.Create(resource));
+  }
+
+  [Fact]
+  public void Fingerprint_NonNullDescription_ChangesHash()
+  {
+    var legacy = new ResourceDefinition
+    {
+      Id = "git",
+      Type = "package",
+      Provider = "winget"
+    };
+
+    Assert.NotEqual(
+        ResourceDefinitionFingerprint.Create(legacy),
+        ResourceDefinitionFingerprint.Create(legacy with
+        {
+          Description = "Distributed version control"
+        }));
   }
 
   [Fact]

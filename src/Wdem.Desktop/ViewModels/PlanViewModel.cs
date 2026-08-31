@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using Wdem.Core.Execution;
 using Wdem.Core.Planning;
+using Wdem.Core.Resources;
 using Wdem.Core.Runs;
 
 namespace Wdem.Desktop.ViewModels;
@@ -221,8 +222,12 @@ public sealed class PlanResourceViewModel
 {
   internal PlanResourceViewModel(PlannedResource resource, LogRedactor redactor)
   {
-    Id = redactor.Redact(resource.Definition.Id);
-    DisplayName = redactor.Redact(resource.Definition.DisplayName ?? resource.Definition.Id);
+    var definition = ResourceDefinitionPresentationRedactor.Redact(
+        resource.Definition,
+        redactor);
+    Id = redactor.Redact(definition.Id);
+    DisplayName = definition.DisplayName ?? Id;
+    Description = definition.Description ?? string.Empty;
     Provider = redactor.Redact(resource.ResourcePlan.ProviderName);
     Action = string.Join(
         ", ",
@@ -253,6 +258,8 @@ public sealed class PlanResourceViewModel
   public string Id { get; }
 
   public string DisplayName { get; }
+
+  public string Description { get; }
 
   public string Provider { get; }
 

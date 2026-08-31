@@ -53,6 +53,37 @@ public sealed class DesktopProjectTests
   }
 
   [Fact]
+  public void ResourceAndPlanViewsBindResourceDescriptions()
+  {
+    string desktopDirectory = Path.GetDirectoryName(GetDesktopProjectPath())!;
+    string resourceSelection = File.ReadAllText(Path.Combine(
+        desktopDirectory,
+        "Views",
+        "ResourceSelectionView.xaml"));
+    string plan = File.ReadAllText(Path.Combine(desktopDirectory, "Views", "PlanView.xaml"));
+
+    Assert.Contains("{Binding Description}", resourceSelection, StringComparison.Ordinal);
+    Assert.Contains("{Binding Description}", plan, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void ResourceAndPlanViewModelsUseSharedPresentationRedactor()
+  {
+    string desktopDirectory = Path.GetDirectoryName(GetDesktopProjectPath())!;
+    string plan = File.ReadAllText(Path.Combine(
+        desktopDirectory,
+        "ViewModels",
+        "PlanViewModel.cs"));
+    string selection = File.ReadAllText(Path.Combine(
+        desktopDirectory,
+        "ViewModels",
+        "ResourceSelectionViewModel.cs"));
+
+    Assert.Contains("ResourceDefinitionPresentationRedactor.Redact", plan);
+    Assert.Contains("ResourceDefinitionPresentationRedactor.Redact", selection);
+  }
+
+  [Fact]
   public void RecoveryCandidatesViewBindsSafeDetailsAndActions()
   {
     string desktopDirectory = Path.GetDirectoryName(GetDesktopProjectPath())!;

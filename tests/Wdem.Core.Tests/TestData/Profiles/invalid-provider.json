@@ -8,6 +8,11 @@
     "requiredResources": [{ "id": "git" }]
   },
   "resources": {
-    "git": { "type": "package", "provider": "not-registered" }
+    "git": {
+      "displayName": "Git",
+      "description": "Distributed version control",
+      "type": "package",
+      "provider": "not-registered"
+    }
   }
 }

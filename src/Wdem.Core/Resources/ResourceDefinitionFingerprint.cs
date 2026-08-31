@@ -14,6 +14,11 @@ public static class ResourceDefinitionFingerprint
     Append(canonical, resource.Type);
     Append(canonical, resource.Provider);
     Append(canonical, resource.DisplayName);
+    if (resource.Description is not null)
+    {
+      Append(canonical, resource.Description);
+    }
+
     Append(canonical, resource.VersionConstraint);
     Append(canonical, resource.PreferredVersion);
     Append(canonical, resource.PrivilegeRequirement.ToString());

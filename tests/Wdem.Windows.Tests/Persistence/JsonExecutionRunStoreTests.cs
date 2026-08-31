@@ -1,4 +1,6 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -652,6 +654,976 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     Assert.False(File.Exists(path));
     Assert.Single(Directory.GetFiles(
         Path.GetDirectoryName(path)!, $"{run.RunId:D}.json.corrupted.*"));
+  }
+
+  [Fact]
+  public async Task GetAsync_RejectsTamperedPublicPlanBesideProtectedApproval()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = DeferredElevatedRun("protected-public-plan-secret");
+    await store.CreateAsync(run, CancellationToken.None);
+    var path = store.SnapshotPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+    document["plan"]!["resources"]![0]!["definition"]!["description"] =
+        "tampered description";
+    await File.WriteAllTextAsync(path, document.ToJsonString());
+
+    var restored = await store.GetAsync(run.RunId, CancellationToken.None);
+
+    Assert.Null(restored);
+    Assert.False(File.Exists(path));
+    Assert.Single(Directory.GetFiles(
+        Path.GetDirectoryName(path)!, $"{run.RunId:D}.json.corrupted.*"));
+  }
+
+  [Fact]
+  public async Task GetAsync_RejectsProtectedApprovalReplayedFromAnotherRun()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var first = DeferredElevatedRun("first-replay-secret");
+    var second = DeferredElevatedRun("second-replay-secret");
+    await store.CreateAsync(first, CancellationToken.None);
+    await store.CreateAsync(second, CancellationToken.None);
+    var firstDocument = JsonNode.Parse(
+        await File.ReadAllTextAsync(store.SnapshotPath(first.RunId)))!.AsObject();
+    var secondPath = store.SnapshotPath(second.RunId);
+    var secondDocument = JsonNode.Parse(
+        await File.ReadAllTextAsync(secondPath))!.AsObject();
+    secondDocument["protectedPlanApproval"] =
+        firstDocument["protectedPlanApproval"]!.DeepClone();
+    await File.WriteAllTextAsync(secondPath, secondDocument.ToJsonString());
+
+    var restored = await store.GetAsync(second.RunId, CancellationToken.None);
+
+    Assert.Null(restored);
+    Assert.False(File.Exists(secondPath));
+  }
+
+  [Fact]
+  public async Task GetAsync_RejectsCurrentSnapshotWithDeletedProtectedCommitment()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = DeferredElevatedRun("legacy-approved-secret");
+    await store.CreateAsync(run, CancellationToken.None);
+    var path = store.SnapshotPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+    document.Remove("protectedPlanApproval");
+    await File.WriteAllTextAsync(path, document.ToJsonString());
+
+    var restored = await store.GetAsync(run.RunId, CancellationToken.None);
+
+    Assert.Null(restored);
+    Assert.False(File.Exists(path));
+    Assert.Single(Directory.GetFiles(
+        Path.GetDirectoryName(path)!, $"{run.RunId:D}.json.corrupted.*"));
+  }
+
+  [Fact]
+  public async Task GetAsync_RejectsCurrentSnapshotWithDeletedApprovalAndCommitments()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ApprovedNonDeferredRun("deleted-approval-secret");
+    await store.CreateAsync(run, CancellationToken.None);
+    var path = store.SnapshotPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+    document.Remove("planApproval");
+    document.Remove("protectedPlanApproval");
+    await File.WriteAllTextAsync(path, document.ToJsonString());
+
+    var restored = await store.GetAsync(run.RunId, CancellationToken.None);
+
+    Assert.Null(restored);
+    Assert.False(File.Exists(path));
+  }
+
+  [Fact]
+  public async Task GetAsync_RejectsCurrentSnapshotWhenIndexMarkerAndEnvelopeAreDeleted()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ApprovedNonDeferredRun("deleted-marker-secret");
+    await store.CreateAsync(run, CancellationToken.None);
+    var path = store.SnapshotPath(run.RunId);
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+    document.Remove("protectedPlanApproval");
+    await File.WriteAllTextAsync(path, document.ToJsonString());
+    File.Delete(Path.Combine(
+        Path.GetDirectoryName(path)!,
+        $"{run.RunId:D}.snapshot-format"));
+    File.Delete(Path.Combine(
+        Path.GetDirectoryName(path)!,
+        ".snapshot-format-index"));
+
+    await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        store.GetAsync(run.RunId, CancellationToken.None));
+
+    Assert.True(File.Exists(path));
+    Assert.Empty(Directory.GetFiles(
+        Path.GetDirectoryName(path)!,
+        $"{run.RunId:D}.json.corrupted.*"));
+  }
+
+  [Fact]
+  public async Task GetAsync_RejectsRollbackToEarlierAuthenticatedRevision()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ApprovedNonDeferredRun("rollback-secret");
+    await store.CreateAsync(run, CancellationToken.None);
+    var path = store.SnapshotPath(run.RunId);
+    var indexPath = Path.Combine(Path.GetDirectoryName(path)!, ".snapshot-format-index");
+    byte[] revisionZero = await File.ReadAllBytesAsync(path);
+    byte[] revisionZeroIndex = await File.ReadAllBytesAsync(indexPath);
+    ExecutionRun revisionOne = await store.SaveAsync(
+        run with { RestartReasons = ["revision one"] },
+        CancellationToken.None);
+    Assert.Equal(1, revisionOne.Revision);
+    await File.WriteAllBytesAsync(path, revisionZero);
+    await File.WriteAllBytesAsync(indexPath, revisionZeroIndex);
+
+    await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        store.GetAsync(run.RunId, CancellationToken.None));
+
+    Assert.True(File.Exists(path));
+    Assert.Empty(Directory.GetFiles(
+        Path.GetDirectoryName(path)!,
+        $"{run.RunId:D}.json.corrupted.*"));
+  }
+
+  [Fact]
+  public async Task GetAsync_LoadsGenuineLegacyApprovedSnapshotWithoutFormatCommitment()
+  {
+    var runId = Guid.Parse("9a453874-4e91-4fea-a5ac-24f1f50750b8");
+    var path = _store.SnapshotPath(runId);
+    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+    File.Copy(
+        Path.Combine(
+            AppContext.BaseDirectory,
+            "TestData",
+            "Persistence",
+            "legacy-approved-run.json"),
+        path);
+
+    var restored = await _store.GetAsync(runId, CancellationToken.None);
+
+    Assert.NotNull(restored);
+    Assert.Equal(
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        restored.PlanApproval!.InitialPlanFingerprint);
+  }
+
+  [Fact]
+  public async Task GetAndListAsync_RejectUnregisteredLegacyApprovalAfterAnchorExists()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var current = ApprovedNonDeferredRun("current-anchor-secret");
+    await store.CreateAsync(current, CancellationToken.None);
+    var getRunId = Guid.NewGuid();
+    var listRunId = Guid.NewGuid();
+    var getPath = await WriteLegacyApprovedSnapshotAsync(getRunId);
+    var listPath = await WriteLegacyApprovedSnapshotAsync(listRunId);
+
+    var restored = await store.GetAsync(getRunId, CancellationToken.None);
+    var listed = await store.ListAsync(CancellationToken.None);
+
+    Assert.Null(restored);
+    Assert.DoesNotContain(listed, run => run.RunId == getRunId || run.RunId == listRunId);
+    Assert.False(File.Exists(getPath));
+    Assert.False(File.Exists(listPath));
+    Assert.Single(Directory.GetFiles(
+        Path.GetDirectoryName(getPath)!, $"{getRunId:D}.json.corrupted.*"));
+    Assert.Single(Directory.GetFiles(
+        Path.GetDirectoryName(listPath)!, $"{listRunId:D}.json.corrupted.*"));
+  }
+
+  [Fact]
+  public async Task LegacyEnrollment_AllowsEveryPreexistingCandidateToUpgrade()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var firstRunId = Guid.NewGuid();
+    var secondRunId = Guid.NewGuid();
+    await WriteLegacyApprovedSnapshotAsync(firstRunId);
+    await WriteLegacyApprovedSnapshotAsync(secondRunId);
+
+    var first = Assert.IsType<ExecutionRun>(
+        await store.GetAsync(firstRunId, CancellationToken.None));
+    var firstUpgrade = await store.SaveAsync(
+        first with { RestartReasons = ["first upgraded"] },
+        CancellationToken.None);
+    var second = Assert.IsType<ExecutionRun>(
+        await store.GetAsync(secondRunId, CancellationToken.None));
+    var secondUpgrade = await store.SaveAsync(
+        second with { RestartReasons = ["second upgraded"] },
+        CancellationToken.None);
+
+    Assert.Equal(1, firstUpgrade.Revision);
+    Assert.Equal(1, secondUpgrade.Revision);
+    Assert.Contains(
+        "protectedPlanApproval",
+        await File.ReadAllTextAsync(store.SnapshotPath(firstRunId)),
+        StringComparison.Ordinal);
+    Assert.Contains(
+        "protectedPlanApproval",
+        await File.ReadAllTextAsync(store.SnapshotPath(secondRunId)),
+        StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task LegacyEnrollment_IsConsistentAcrossConcurrentStoreInstances()
+  {
+    var paths = new WdemDataPaths(_directory);
+    var firstStore = new JsonExecutionRunStore(
+        paths,
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var secondStore = new JsonExecutionRunStore(
+        paths,
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var firstRunId = Guid.NewGuid();
+    var secondRunId = Guid.NewGuid();
+    await WriteLegacyApprovedSnapshotAsync(firstRunId);
+    await WriteLegacyApprovedSnapshotAsync(secondRunId);
+
+    var firstTask = firstStore.GetAsync(firstRunId, CancellationToken.None);
+    var secondTask = secondStore.GetAsync(secondRunId, CancellationToken.None);
+    ExecutionRun?[] results = await Task.WhenAll(firstTask, secondTask);
+
+    Assert.Equal(firstRunId, Assert.IsType<ExecutionRun>(results[0]).RunId);
+    Assert.Equal(secondRunId, Assert.IsType<ExecutionRun>(results[1]).RunId);
+  }
+
+  [Fact]
+  public async Task LegacyEnrollment_DoesNotAuthorizeMalformedOrMismatchedCandidates()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var genuineRunId = Guid.NewGuid();
+    var malformedRunId = Guid.NewGuid();
+    var mismatchedRunId = Guid.NewGuid();
+    await WriteLegacyApprovedSnapshotAsync(genuineRunId);
+    Directory.CreateDirectory(new WdemDataPaths(_directory).RunsDirectory);
+    var malformedPath = store.SnapshotPath(malformedRunId);
+    await File.WriteAllTextAsync(malformedPath, "{ malformed json");
+    await WriteLegacyApprovedSnapshotAsync(mismatchedRunId, Guid.NewGuid());
+
+    Assert.NotNull(await store.GetAsync(genuineRunId, CancellationToken.None));
+    await WriteLegacyApprovedSnapshotAsync(malformedRunId);
+    await WriteLegacyApprovedSnapshotAsync(mismatchedRunId);
+
+    Assert.Null(await store.GetAsync(malformedRunId, CancellationToken.None));
+    Assert.Null(await store.GetAsync(mismatchedRunId, CancellationToken.None));
+    Assert.False(File.Exists(malformedPath));
+    Assert.False(File.Exists(store.SnapshotPath(mismatchedRunId)));
+  }
+
+  [Fact]
+  public async Task LegacyEnrollment_RejectsMaximumRevisionOnFirstGetAndList()
+  {
+    var protector = new DeterministicApprovedResourceProtector();
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        protector);
+    var getRunId = Guid.NewGuid();
+    var listRunId = Guid.NewGuid();
+    await WriteLegacyApprovedSnapshotAsync(getRunId, revision: long.MaxValue);
+    await WriteLegacyApprovedSnapshotAsync(listRunId, revision: long.MaxValue);
+
+    var restored = await store.GetAsync(getRunId, CancellationToken.None);
+    var listed = await store.ListAsync(CancellationToken.None);
+    var indexPath = Path.Combine(
+        new WdemDataPaths(_directory).RunsDirectory,
+        ".snapshot-format-index");
+    var plaintext = protector.Unprotect(
+        await File.ReadAllBytesAsync(indexPath),
+        System.Text.Encoding.UTF8.GetBytes("WDEM\0snapshot-format-index\0v1"));
+    var runs = JsonNode.Parse(plaintext)!["runs"]!.AsObject();
+
+    Assert.Null(restored);
+    Assert.DoesNotContain(listed, run => run.RunId == getRunId || run.RunId == listRunId);
+    Assert.DoesNotContain(getRunId.ToString("D"), runs.Select(property => property.Key));
+    Assert.DoesNotContain(listRunId.ToString("D"), runs.Select(property => property.Key));
+  }
+
+  [Fact]
+  public async Task SaveAsync_RejectsMaximumResultRevisionWithoutChangingSnapshotOrIndex()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ApprovedNonDeferredRun("maximum-save-secret") with
+    {
+      Revision = long.MaxValue - 1
+    };
+    await store.CreateAsync(run, CancellationToken.None);
+    var snapshotPath = store.SnapshotPath(run.RunId);
+    var indexPath = Path.Combine(Path.GetDirectoryName(snapshotPath)!, ".snapshot-format-index");
+    byte[] snapshot = await File.ReadAllBytesAsync(snapshotPath);
+    byte[] index = await File.ReadAllBytesAsync(indexPath);
+
+    await Assert.ThrowsAsync<ArgumentException>(() => store.SaveAsync(
+        run with { RestartReasons = ["must not persist"] },
+        CancellationToken.None));
+
+    Assert.Equal(snapshot, await File.ReadAllBytesAsync(snapshotPath));
+    Assert.Equal(index, await File.ReadAllBytesAsync(indexPath));
+  }
+
+  [Fact]
+  public async Task SaveAsync_RejectsOversizedSnapshotBeforeChangingCommittedState()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ApprovedNonDeferredRun("oversized-snapshot-write-secret");
+    await store.CreateAsync(run, CancellationToken.None);
+    var snapshotPath = store.SnapshotPath(run.RunId);
+    var runsDirectory = Path.GetDirectoryName(snapshotPath)!;
+    var indexPath = Path.Combine(runsDirectory, ".snapshot-format-index");
+    var anchorPath = Path.Combine(Path.GetDirectoryName(runsDirectory)!, ".snapshot-format-anchor");
+    byte[] snapshot = await File.ReadAllBytesAsync(snapshotPath);
+    byte[] index = await File.ReadAllBytesAsync(indexPath);
+    byte[] anchor = await File.ReadAllBytesAsync(anchorPath);
+
+    var exception = await Assert.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(
+        run with { RestartReasons = [new string('x', (16 * 1024 * 1024) + 1)] },
+        CancellationToken.None));
+
+    Assert.Contains("snapshot exceeds its maximum allowed size", exception.Message);
+    Assert.Equal(snapshot, await File.ReadAllBytesAsync(snapshotPath));
+    Assert.Equal(index, await File.ReadAllBytesAsync(indexPath));
+    Assert.Equal(anchor, await File.ReadAllBytesAsync(anchorPath));
+    Assert.Equal(run.RunId, Assert.IsType<ExecutionRun>(
+        await store.GetAsync(run.RunId, CancellationToken.None)).RunId);
+  }
+
+  [Theory]
+  [InlineData(1)]
+  [InlineData(2)]
+  public async Task SaveAsync_RejectsOversizedIndexBeforeChangingCommittedState(
+      int oversizedIndexWrite)
+  {
+    var protector = new OversizedIndexWriteProtector();
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        protector);
+    var run = ApprovedNonDeferredRun("oversized-index-write-secret");
+    await store.CreateAsync(run, CancellationToken.None);
+    var snapshotPath = store.SnapshotPath(run.RunId);
+    var runsDirectory = Path.GetDirectoryName(snapshotPath)!;
+    var indexPath = Path.Combine(runsDirectory, ".snapshot-format-index");
+    var anchorPath = Path.Combine(Path.GetDirectoryName(runsDirectory)!, ".snapshot-format-anchor");
+    byte[] snapshot = await File.ReadAllBytesAsync(snapshotPath);
+    byte[] index = await File.ReadAllBytesAsync(indexPath);
+    byte[] anchor = await File.ReadAllBytesAsync(anchorPath);
+    protector.ProduceOversizedIndexOnWrite(oversizedIndexWrite);
+
+    var exception = await Assert.ThrowsAsync<InvalidDataException>(() => store.SaveAsync(
+        run with { RestartReasons = ["must not persist"] },
+        CancellationToken.None));
+
+    Assert.Contains("index exceeds its maximum allowed size", exception.Message);
+    Assert.Equal(snapshot, await File.ReadAllBytesAsync(snapshotPath));
+    Assert.Equal(index, await File.ReadAllBytesAsync(indexPath));
+    Assert.Equal(anchor, await File.ReadAllBytesAsync(anchorPath));
+    Assert.Equal(run.RunId, Assert.IsType<ExecutionRun>(
+        await store.GetAsync(run.RunId, CancellationToken.None)).RunId);
+  }
+
+  [Fact]
+  public async Task TrySaveAsync_RejectsMaximumRevisionWithoutChangingSnapshotOrIndex()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ApprovedNonDeferredRun("maximum-try-save-secret") with
+    {
+      Revision = long.MaxValue - 1
+    };
+    await store.CreateAsync(run, CancellationToken.None);
+    var snapshotPath = store.SnapshotPath(run.RunId);
+    var indexPath = Path.Combine(Path.GetDirectoryName(snapshotPath)!, ".snapshot-format-index");
+    byte[] snapshot = await File.ReadAllBytesAsync(snapshotPath);
+    byte[] index = await File.ReadAllBytesAsync(indexPath);
+
+    await Assert.ThrowsAsync<ArgumentException>(() => store.TrySaveAsync(
+        run with
+        {
+          Revision = long.MaxValue,
+          RestartReasons = ["must not persist"]
+        },
+        long.MaxValue - 1,
+        expectedRecoveryClaimId: null,
+        CancellationToken.None));
+
+    Assert.Equal(snapshot, await File.ReadAllBytesAsync(snapshotPath));
+    Assert.Equal(index, await File.ReadAllBytesAsync(indexPath));
+  }
+
+  [Fact]
+  public async Task LegacyEnrollment_SaveRejectsMaximumResultRevisionWithoutCorruption()
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var runId = Guid.NewGuid();
+    await WriteLegacyApprovedSnapshotAsync(runId, revision: long.MaxValue - 1);
+    ExecutionRun enrolled = Assert.IsType<ExecutionRun>(
+        await store.GetAsync(runId, CancellationToken.None));
+    var snapshotPath = store.SnapshotPath(runId);
+    var indexPath = Path.Combine(Path.GetDirectoryName(snapshotPath)!, ".snapshot-format-index");
+    byte[] snapshot = await File.ReadAllBytesAsync(snapshotPath);
+    byte[] index = await File.ReadAllBytesAsync(indexPath);
+
+    await Assert.ThrowsAsync<ArgumentException>(() => store.SaveAsync(
+        enrolled with { RestartReasons = ["must not persist"] },
+        CancellationToken.None));
+
+    Assert.Equal(snapshot, await File.ReadAllBytesAsync(snapshotPath));
+    Assert.Equal(index, await File.ReadAllBytesAsync(indexPath));
+  }
+
+  [Fact]
+  public async Task LegacyEnrollment_AuthenticatesMarkerBackedCurrentSnapshot()
+  {
+    var protector = new DeterministicApprovedResourceProtector();
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        protector);
+    var run = ApprovedNonDeferredRun("marker-bootstrap-secret");
+    var secondRun = ApprovedNonDeferredRun("second-marker-bootstrap-secret");
+    await store.CreateAsync(run, CancellationToken.None);
+    await store.CreateAsync(secondRun, CancellationToken.None);
+    var snapshotPath = store.SnapshotPath(run.RunId);
+    var secondSnapshotPath = store.SnapshotPath(secondRun.RunId);
+    await WriteSnapshotFormatCommitmentAsync(protector, snapshotPath, run);
+    await WriteSnapshotFormatCommitmentAsync(protector, secondSnapshotPath, secondRun);
+    DeleteSnapshotFormatIndexAndAnchor(snapshotPath);
+
+    ExecutionRun restored = Assert.IsType<ExecutionRun>(
+        await store.GetAsync(run.RunId, CancellationToken.None));
+    ExecutionRun secondRestored = Assert.IsType<ExecutionRun>(
+        await store.GetAsync(secondRun.RunId, CancellationToken.None));
+    var indexPath = Path.Combine(Path.GetDirectoryName(snapshotPath)!, ".snapshot-format-index");
+    var plaintext = protector.Unprotect(
+        await File.ReadAllBytesAsync(indexPath),
+        System.Text.Encoding.UTF8.GetBytes("WDEM\0snapshot-format-index\0v1"));
+    var runs = JsonNode.Parse(plaintext)!["runs"]!;
+    var entry = runs[run.RunId.ToString("D")]!;
+
+    Assert.Equal(run.Revision, restored.Revision);
+    Assert.Equal(secondRun.Revision, secondRestored.Revision);
+    Assert.Equal(run.Revision, entry["committed"]!["revision"]!.GetValue<long>());
+    Assert.Equal(
+        secondRun.Revision,
+        runs[secondRun.RunId.ToString("D")]!["committed"]!["revision"]!.GetValue<long>());
+    Assert.Equal(
+        Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(snapshotPath))),
+        entry["committed"]!["digest"]!.GetValue<string>());
+  }
+
+  [Fact]
+  public async Task LegacyEnrollment_RejectsMarkerWithoutRevisionAndDigest()
+  {
+    var protector = new DeterministicApprovedResourceProtector();
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        protector);
+    var run = ApprovedNonDeferredRun("weak-marker-secret");
+    await store.CreateAsync(run, CancellationToken.None);
+    var snapshotPath = store.SnapshotPath(run.RunId);
+    await WriteWeakSnapshotFormatMarkerAsync(protector, snapshotPath, run.RunId);
+    DeleteSnapshotFormatIndexAndAnchor(snapshotPath);
+
+    var restored = await store.GetAsync(run.RunId, CancellationToken.None);
+
+    Assert.Null(restored);
+    Assert.False(File.Exists(snapshotPath));
+  }
+
+  [Fact]
+  public async Task LegacyEnrollment_RejectsMarkerBackedCurrentSnapshotsWithDeletedApprovals()
+  {
+    var protector = new DeterministicApprovedResourceProtector();
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        protector);
+    var getRun = ApprovedNonDeferredRun("deleted-bootstrap-get-approval-secret");
+    var listRun = ApprovedNonDeferredRun("deleted-bootstrap-list-approval-secret");
+    await store.CreateAsync(getRun, CancellationToken.None);
+    await store.CreateAsync(listRun, CancellationToken.None);
+    var getPath = store.SnapshotPath(getRun.RunId);
+    var listPath = store.SnapshotPath(listRun.RunId);
+    await WriteSnapshotFormatCommitmentAsync(protector, getPath, getRun);
+    await WriteSnapshotFormatCommitmentAsync(protector, listPath, listRun);
+    foreach (var path in new[] { getPath, listPath })
+    {
+      var document = JsonNode.Parse(await File.ReadAllBytesAsync(path))!.AsObject();
+      document.Remove("planApproval");
+      document.Remove("protectedPlanApproval");
+      await File.WriteAllTextAsync(path, document.ToJsonString());
+    }
+
+    DeleteSnapshotFormatIndexAndAnchor(getPath);
+
+    var restored = await store.GetAsync(getRun.RunId, CancellationToken.None);
+    var listed = await store.ListAsync(CancellationToken.None);
+
+    Assert.Null(restored);
+    Assert.DoesNotContain(
+        listed,
+        run => run.RunId == getRun.RunId || run.RunId == listRun.RunId);
+    Assert.False(File.Exists(getPath));
+    Assert.False(File.Exists(listPath));
+  }
+
+  [Theory]
+  [InlineData("profileSourcePath")]
+  [InlineData("state")]
+  [InlineData("resourceResults")]
+  [InlineData("graph")]
+  public async Task LegacyEnrollment_RejectsTamperedMarkerBackedCurrentSnapshot(
+      string property)
+  {
+    var protector = new DeterministicApprovedResourceProtector();
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        protector);
+    var run = ApprovedNonDeferredRun($"marker-tamper-{property}-secret");
+    await store.CreateAsync(run, CancellationToken.None);
+    var snapshotPath = store.SnapshotPath(run.RunId);
+    await WriteSnapshotFormatCommitmentAsync(protector, snapshotPath, run);
+    DeleteSnapshotFormatIndexAndAnchor(snapshotPath);
+    var document = JsonNode.Parse(await File.ReadAllBytesAsync(snapshotPath))!.AsObject();
+    document[property] = property switch
+    {
+      "profileSourcePath" => JsonValue.Create(@"C:\tampered\profile.yaml"),
+      "state" => JsonValue.Create(nameof(ExecutionState.Ready)),
+      "resourceResults" => new JsonObject(),
+      "graph" => null,
+      _ => throw new InvalidOperationException("Unknown tamper property.")
+    };
+    await File.WriteAllTextAsync(snapshotPath, document.ToJsonString());
+
+    var restored = await store.GetAsync(run.RunId, CancellationToken.None);
+
+    Assert.Null(restored);
+    Assert.False(File.Exists(snapshotPath));
+  }
+
+  [Fact]
+  public async Task ListAsync_ReadsAuthenticatedGlobalSnapshotStateOnce()
+  {
+    var protector = new CountingApprovedResourceProtector();
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        protector);
+    var runs = Enumerable.Range(0, 4)
+        .Select(index => ApprovedNonDeferredRun($"batch-list-{index}-secret"))
+        .ToArray();
+    foreach (var run in runs)
+    {
+      await store.CreateAsync(run, CancellationToken.None);
+    }
+
+    protector.ResetReadCounts();
+
+    var listed = await store.ListAsync(CancellationToken.None);
+
+    Assert.Equal(runs.Length, listed.Count);
+    Assert.Equal(1, protector.IndexReadCount);
+    Assert.Equal(1, protector.AnchorReadCount);
+  }
+
+  [Fact]
+  public async Task ListAsync_BoundsSimultaneouslyHeldRunLocksForLargeHistory()
+  {
+    const int historySize = 65;
+    var protector = new DeterministicApprovedResourceProtector();
+    var writer = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        protector);
+    var runIds = new List<Guid>(historySize);
+    var approved = ApprovedNonDeferredRun("bounded-list-secret");
+    await writer.CreateAsync(approved, CancellationToken.None);
+    runIds.Add(approved.RunId);
+    for (var index = 1; index < historySize; index++)
+    {
+      var run = SampleRun();
+      await writer.CreateAsync(run, CancellationToken.None);
+      runIds.Add(run.RunId);
+    }
+
+    var maximumHeld = 0;
+    var observer = new ObservingApprovedResourceProtector(() =>
+    {
+      var held = 0;
+      foreach (var runId in runIds)
+      {
+        var lockPath = Path.Combine(
+            new WdemDataPaths(_directory).RunsDirectory,
+            $"{runId:D}.lock");
+        try
+        {
+          using var stream = new FileStream(
+              lockPath,
+              FileMode.Open,
+              FileAccess.ReadWrite,
+              FileShare.None);
+        }
+        catch (IOException)
+        {
+          held++;
+        }
+      }
+
+      maximumHeld = Math.Max(maximumHeld, held);
+    });
+    var reader = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        observer);
+
+    var listed = await reader.ListAsync(CancellationToken.None);
+
+    Assert.Equal(historySize, listed.Count);
+    Assert.InRange(maximumHeld, 1, 32);
+    Assert.True(maximumHeld < historySize);
+  }
+
+  [Theory]
+  [InlineData("snapshot")]
+  [InlineData("index")]
+  [InlineData("anchor")]
+  public async Task GetAsync_RejectsOversizedSnapshotIntegrityFileBeforeParsing(string artifact)
+  {
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+    var run = ApprovedNonDeferredRun($"oversized-{artifact}-secret");
+    await store.CreateAsync(run, CancellationToken.None);
+    var snapshotPath = store.SnapshotPath(run.RunId);
+    var runsDirectory = Path.GetDirectoryName(snapshotPath)!;
+    var path = artifact switch
+    {
+      "snapshot" => snapshotPath,
+      "index" => Path.Combine(runsDirectory, ".snapshot-format-index"),
+      "anchor" => Path.Combine(Path.GetDirectoryName(runsDirectory)!, ".snapshot-format-anchor"),
+      _ => throw new InvalidOperationException("Unknown snapshot integrity artifact.")
+    };
+    long maximumBytes = artifact == "anchor" ? 64 * 1024 : 16 * 1024 * 1024;
+    await using (var stream = new FileStream(path, FileMode.Create, FileAccess.Write))
+    {
+      stream.SetLength(maximumBytes + 1);
+    }
+
+    if (artifact == "snapshot")
+    {
+      var restored = await store.GetAsync(run.RunId, CancellationToken.None);
+
+      Assert.Null(restored);
+      Assert.Contains(
+          "snapshot exceeds its maximum allowed size",
+          Assert.Single(store.Diagnostics).Detail,
+          StringComparison.Ordinal);
+      Assert.False(File.Exists(snapshotPath));
+    }
+    else
+    {
+      var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+          store.GetAsync(run.RunId, CancellationToken.None));
+
+      Assert.Contains(
+          $"{artifact} exceeds its maximum allowed size",
+          exception.Message,
+          StringComparison.Ordinal);
+      Assert.True(File.Exists(snapshotPath));
+      Assert.Empty(Directory.GetFiles(
+          runsDirectory,
+          $"{run.RunId:D}.json.corrupted.*"));
+    }
+  }
+
+  [Theory]
+  [InlineData("index")]
+  [InlineData("anchor")]
+  public async Task GetAsync_GlobalIntegrityCorruptionDoesNotQuarantineRequestedSnapshot(
+      string artifact)
+  {
+    var protector = new DeterministicApprovedResourceProtector();
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        protector);
+    var run = ApprovedNonDeferredRun($"global-{artifact}-corruption-secret");
+    await store.CreateAsync(run, CancellationToken.None);
+    var snapshotPath = store.SnapshotPath(run.RunId);
+    var runsDirectory = Path.GetDirectoryName(snapshotPath)!;
+    var globalPath = artifact switch
+    {
+      "index" => Path.Combine(runsDirectory, ".snapshot-format-index"),
+      "anchor" => Path.Combine(Path.GetDirectoryName(runsDirectory)!, ".snapshot-format-anchor"),
+      _ => throw new InvalidOperationException("Unknown global integrity artifact.")
+    };
+    var entropy = System.Text.Encoding.UTF8.GetBytes(
+        $"WDEM\0snapshot-format-{artifact}\0v1");
+    await File.WriteAllBytesAsync(
+        globalPath,
+        protector.Protect("{ malformed json"u8.ToArray(), entropy));
+
+    await Assert.ThrowsAsync<JsonException>(() =>
+        store.GetAsync(run.RunId, CancellationToken.None));
+
+    Assert.True(File.Exists(snapshotPath));
+    Assert.Empty(Directory.GetFiles(
+        runsDirectory,
+        $"{run.RunId:D}.json.corrupted.*"));
+  }
+
+  [Fact]
+  public async Task SecureBoundedFileReader_RejectsReparsePointSwappedBeforeOpen()
+  {
+    var runsDirectory = new WdemDataPaths(_directory).RunsDirectory;
+    var candidateDirectory = Path.Combine(runsDirectory, "candidates");
+    var originalDirectory = Path.Combine(runsDirectory, "original-candidates");
+    var outsideDirectory = Path.Combine(_directory, "outside");
+    Directory.CreateDirectory(candidateDirectory);
+    Directory.CreateDirectory(outsideDirectory);
+    var path = Path.Combine(candidateDirectory, "candidate.json");
+    var outsidePath = Path.Combine(outsideDirectory, "candidate.json");
+    await File.WriteAllTextAsync(path, "original");
+    await File.WriteAllTextAsync(outsidePath, "outside");
+
+    try
+    {
+      await Assert.ThrowsAsync<InvalidDataException>(() => SecureBoundedFileReader.ReadAsync(
+          path,
+          candidateDirectory,
+          maximumBytes: 1024,
+          "snapshot migration candidate",
+          CancellationToken.None,
+          beforeOpen: () =>
+          {
+            Directory.Move(candidateDirectory, originalDirectory);
+            CreateJunction(candidateDirectory, outsideDirectory);
+          }));
+
+      Assert.Equal("outside", await File.ReadAllTextAsync(outsidePath));
+    }
+    finally
+    {
+      if (Directory.Exists(candidateDirectory))
+      {
+        Directory.Delete(candidateDirectory);
+      }
+
+      if (Directory.Exists(originalDirectory))
+      {
+        Directory.Move(originalDirectory, candidateDirectory);
+      }
+    }
+  }
+
+  [Fact]
+  public async Task SaveAsync_AllowsAtomicReplacementWhileProductionReaderPinsOriginalSnapshot()
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    var paths = new WdemDataPaths(_directory);
+    await using var reader = SecureBoundedFileReader.OpenMutableFile(
+        _store.SnapshotPath(run.RunId),
+        paths.RunsDirectory,
+        FileMode.Open,
+        FileAccess.Read,
+        "snapshot");
+
+    var saved = await _store.SaveAsync(run, CancellationToken.None);
+
+    Assert.Equal(1, saved.Revision);
+    Assert.True(reader.CanRead);
+  }
+
+  [Theory]
+  [InlineData("get", "runs")]
+  [InlineData("list", "runs")]
+  [InlineData("get", "root")]
+  [InlineData("list", "root")]
+  [InlineData("get", "empty-root")]
+  [InlineData("list", "empty-root")]
+  public async Task ReadOperations_RejectJunctionDirectoriesWithoutExternalSideEffects(
+      string operation,
+      string junctionLocation)
+  {
+    var paths = new WdemDataPaths(_directory);
+    var outsideDirectory = Path.Combine(_directory, "outside-owned-by-attacker");
+    var externalRunsDirectory = junctionLocation == "root"
+        ? Path.Combine(outsideDirectory, "runs")
+        : outsideDirectory;
+    Directory.CreateDirectory(externalRunsDirectory);
+    if (junctionLocation == "runs")
+    {
+      Directory.CreateDirectory(paths.Root);
+    }
+
+    var runId = Guid.NewGuid();
+    var externalSnapshot = Path.Combine(externalRunsDirectory, $"{runId:D}.json");
+    const string externalContents = "{ attacker-owned malformed snapshot";
+    await File.WriteAllTextAsync(externalSnapshot, externalContents);
+    var junctionPath = junctionLocation is "root" or "empty-root"
+        ? paths.Root
+        : paths.RunsDirectory;
+    CreateJunction(junctionPath, outsideDirectory);
+    var store = new JsonExecutionRunStore(
+        paths,
+        new LogRedactor(),
+        new DeterministicApprovedResourceProtector());
+
+    try
+    {
+      await Assert.ThrowsAsync<InvalidDataException>(() => operation switch
+      {
+        "get" => store.GetAsync(runId, CancellationToken.None),
+        "list" => ReadListAsync(store),
+        _ => throw new InvalidOperationException("Unknown read operation.")
+      });
+
+      Assert.Equal(externalContents, await File.ReadAllTextAsync(externalSnapshot));
+      Assert.Equal(
+          [externalSnapshot],
+          Directory.GetFiles(outsideDirectory, "*", SearchOption.AllDirectories));
+    }
+    finally
+    {
+      if (Directory.Exists(junctionPath))
+      {
+        Directory.Delete(junctionPath);
+      }
+    }
+
+    static async Task<ExecutionRun?> ReadListAsync(JsonExecutionRunStore store)
+    {
+      await store.ListAsync(CancellationToken.None);
+      return null;
+    }
+  }
+
+  [Theory]
+  [InlineData("root")]
+  [InlineData("runs")]
+  public async Task TryAcquireRecoveryOperationAsync_HoldsStorageDirectoriesAgainstReplacement(
+      string directory)
+  {
+    var paths = new WdemDataPaths(_directory);
+    Directory.CreateDirectory(paths.RunsDirectory);
+    var directoryPath = directory == "root" ? paths.Root : paths.RunsDirectory;
+    var replacementPath = directoryPath + "-replaced";
+    var lockOpenerCalled = false;
+    var store = new JsonExecutionRunStore(
+        paths,
+        new LogRedactor(),
+        _ =>
+        {
+          lockOpenerCalled = true;
+          Assert.ThrowsAny<IOException>(() =>
+              Directory.Move(directoryPath, replacementPath));
+          return new MemoryStream();
+        });
+
+    await using var operation = await store.TryAcquireRecoveryOperationAsync(
+        Guid.NewGuid(),
+        CancellationToken.None);
+
+    Assert.True(lockOpenerCalled);
+    Assert.NotNull(operation);
+    Assert.True(Directory.Exists(directoryPath));
+    Assert.False(Directory.Exists(replacementPath));
+  }
+
+  [Fact]
+  public async Task LegacyEnrollment_RecoversInterruptedInitialIndexWrite()
+  {
+    var runId = Guid.NewGuid();
+    await WriteLegacyApprovedSnapshotAsync(runId);
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        new InitialSnapshotIndexWriteInterruptingProtector());
+
+    await Assert.ThrowsAsync<IOException>(() =>
+        store.GetAsync(runId, CancellationToken.None));
+    var restored = await store.GetAsync(runId, CancellationToken.None);
+
+    Assert.Equal(runId, Assert.IsType<ExecutionRun>(restored).RunId);
+  }
+
+  [Fact]
+  public async Task SaveAsync_InterruptedLegacyUpgradeRestoresLegacySnapshot()
+  {
+    var runId = Guid.Parse("9a453874-4e91-4fea-a5ac-24f1f50750b8");
+    var path = _store.SnapshotPath(runId);
+    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+    File.Copy(
+        Path.Combine(
+            AppContext.BaseDirectory,
+            "TestData",
+            "Persistence",
+            "legacy-approved-run.json"),
+        path);
+    var protector = new SnapshotWriteInterruptingProtector(path);
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor(),
+        protector);
+    ExecutionRun legacy = Assert.IsType<ExecutionRun>(
+        await store.GetAsync(runId, CancellationToken.None));
+
+    await Assert.ThrowsAsync<IOException>(() => store.SaveAsync(
+        legacy with { RestartReasons = ["upgrade attempted"] },
+        CancellationToken.None));
+    protector.ReleaseSnapshot();
+
+    ExecutionRun restored = Assert.IsType<ExecutionRun>(
+        await store.GetAsync(runId, CancellationToken.None));
+    Assert.Equal(0, restored.Revision);
+    Assert.Empty(restored.RestartReasons);
+    Assert.True(File.Exists(path));
   }
 
   [Fact]
@@ -2919,6 +3891,207 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     Assert.Equal([1L, 2L], page.Select(entry => entry.Sequence));
   }
 
+  [Theory]
+  [InlineData("log")]
+  [InlineData("index")]
+  public async Task LogOperations_RejectHardLinkedMutableLeavesWithoutExternalChanges(
+      string artifact)
+  {
+    var run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    await _store.AppendLogAsync(run.RunId, SampleLog(1), CancellationToken.None);
+    var logPath = _store.LogPath(run.RunId);
+    var indexPath = _store.LogIndexPath(run.RunId);
+    if (artifact == "index")
+    {
+      string firstLine = (await File.ReadAllTextAsync(logPath)).TrimEnd('\r', '\n');
+      await File.AppendAllTextAsync(
+          logPath,
+          firstLine.Replace("\"sequence\":1", "\"sequence\":2", StringComparison.Ordinal) +
+              "\n");
+    }
+
+    var outsideDirectory = Path.Combine(_directory, "outside-hard-links");
+    Directory.CreateDirectory(outsideDirectory);
+    var leafPath = artifact == "log" ? logPath : indexPath;
+    var outsidePath = Path.Combine(outsideDirectory, Path.GetFileName(leafPath));
+    File.Move(leafPath, outsidePath);
+    CreateHardLink(leafPath, outsidePath);
+    var fixedWriteTime = DateTime.UtcNow.AddDays(-1);
+    File.SetLastWriteTimeUtc(outsidePath, fixedWriteTime);
+    byte[] expectedBytes = await File.ReadAllBytesAsync(outsidePath);
+    long expectedLength = new FileInfo(outsidePath).Length;
+    DateTime expectedWriteTime = File.GetLastWriteTimeUtc(outsidePath);
+
+    await Assert.ThrowsAsync<InvalidDataException>(() => artifact == "log"
+        ? _store.AppendLogAsync(run.RunId, SampleLog(2), CancellationToken.None)
+        : ReadLogAsync());
+
+    Assert.Equal(expectedBytes, await File.ReadAllBytesAsync(outsidePath));
+    Assert.Equal(expectedLength, new FileInfo(outsidePath).Length);
+    Assert.Equal(expectedWriteTime, File.GetLastWriteTimeUtc(outsidePath));
+
+    async Task ReadLogAsync()
+    {
+      await _store.ReadLogPageAsync(run.RunId, 0, 10, CancellationToken.None);
+    }
+  }
+
+  [Theory]
+  [InlineData("get")]
+  [InlineData("create")]
+  [InlineData("save")]
+  public async Task RunOperations_RejectHardLinkedLockWithoutExternalChanges(string operation)
+  {
+    var run = SampleRun();
+    var paths = new WdemDataPaths(_directory);
+    if (operation == "save")
+    {
+      await _store.CreateAsync(run, CancellationToken.None);
+    }
+    else
+    {
+      Directory.CreateDirectory(paths.RunsDirectory);
+    }
+
+    var lockPath = Path.Combine(paths.RunsDirectory, $"{run.RunId:D}.lock");
+    File.Delete(lockPath);
+    var outsideDirectory = Path.Combine(_directory, "outside-lock-links");
+    Directory.CreateDirectory(outsideDirectory);
+    var outsidePath = Path.Combine(outsideDirectory, "attacker-owned.txt");
+    const string externalContents = "attacker-owned-lock-target";
+    await File.WriteAllTextAsync(outsidePath, externalContents);
+    CreateHardLink(lockPath, outsidePath);
+    var fixedWriteTime = DateTime.UtcNow.AddDays(-1);
+    File.SetLastWriteTimeUtc(outsidePath, fixedWriteTime);
+    DateTime expectedWriteTime = File.GetLastWriteTimeUtc(outsidePath);
+
+    await Assert.ThrowsAsync<InvalidDataException>(() => operation switch
+    {
+      "get" => _store.GetAsync(run.RunId, CancellationToken.None),
+      "create" => _store.CreateAsync(run, CancellationToken.None),
+      "save" => _store.SaveAsync(run, CancellationToken.None),
+      _ => throw new InvalidOperationException("Unknown operation.")
+    });
+
+    Assert.True(File.Exists(outsidePath));
+    Assert.Equal(externalContents, await File.ReadAllTextAsync(outsidePath));
+    Assert.Equal(expectedWriteTime, File.GetLastWriteTimeUtc(outsidePath));
+    if (operation == "create")
+    {
+      Assert.False(File.Exists(_store.SnapshotPath(run.RunId)));
+    }
+  }
+
+  [Theory]
+  [InlineData("get")]
+  [InlineData("create")]
+  [InlineData("save")]
+  public async Task RunOperations_RejectSymbolicLinkedLockWithoutExternalChanges(
+      string operation)
+  {
+    var run = SampleRun();
+    var paths = new WdemDataPaths(_directory);
+    if (operation == "save")
+    {
+      await _store.CreateAsync(run, CancellationToken.None);
+    }
+    else
+    {
+      Directory.CreateDirectory(paths.RunsDirectory);
+    }
+
+    var lockPath = Path.Combine(paths.RunsDirectory, $"{run.RunId:D}.lock");
+    File.Delete(lockPath);
+    var outsideDirectory = Path.Combine(_directory, "outside-lock-links");
+    Directory.CreateDirectory(outsideDirectory);
+    var outsidePath = Path.Combine(outsideDirectory, "attacker-owned.txt");
+    const string externalContents = "attacker-owned-lock-target";
+    await File.WriteAllTextAsync(outsidePath, externalContents);
+    try
+    {
+      File.CreateSymbolicLink(lockPath, outsidePath);
+    }
+    catch (Exception exception) when (
+        exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+    {
+      return;
+    }
+
+    var fixedWriteTime = DateTime.UtcNow.AddDays(-1);
+    File.SetLastWriteTimeUtc(outsidePath, fixedWriteTime);
+    DateTime expectedWriteTime = File.GetLastWriteTimeUtc(outsidePath);
+
+    await Assert.ThrowsAsync<InvalidDataException>(() => operation switch
+    {
+      "get" => _store.GetAsync(run.RunId, CancellationToken.None),
+      "create" => _store.CreateAsync(run, CancellationToken.None),
+      "save" => _store.SaveAsync(run, CancellationToken.None),
+      _ => throw new InvalidOperationException("Unknown operation.")
+    });
+
+    Assert.True(File.Exists(outsidePath));
+    Assert.Equal(externalContents, await File.ReadAllTextAsync(outsidePath));
+    Assert.Equal(expectedWriteTime, File.GetLastWriteTimeUtc(outsidePath));
+    if (operation == "create")
+    {
+      Assert.False(File.Exists(_store.SnapshotPath(run.RunId)));
+    }
+  }
+
+  [Theory]
+  [InlineData("recovery")]
+  [InlineData("snapshot-state")]
+  public async Task StoreOperations_RejectHardLinkedSharedLocksWithoutExternalChanges(
+      string operation)
+  {
+    var run = SampleRun();
+    var paths = new WdemDataPaths(_directory);
+    if (operation == "snapshot-state")
+    {
+      await _store.CreateAsync(run, CancellationToken.None);
+    }
+    else
+    {
+      Directory.CreateDirectory(paths.RunsDirectory);
+    }
+
+    var lockPath = operation switch
+    {
+      "recovery" => Path.Combine(paths.RunsDirectory, $"{run.RunId:D}.recovery.lock"),
+      "snapshot-state" => Path.Combine(paths.Root, ".snapshot-format-anchor.lock"),
+      _ => throw new InvalidOperationException("Unknown operation.")
+    };
+    File.Delete(lockPath);
+    var outsideDirectory = Path.Combine(_directory, "outside-shared-lock-links");
+    Directory.CreateDirectory(outsideDirectory);
+    var outsidePath = Path.Combine(outsideDirectory, "attacker-owned.txt");
+    const string externalContents = "attacker-owned-shared-lock-target";
+    await File.WriteAllTextAsync(outsidePath, externalContents);
+    CreateHardLink(lockPath, outsidePath);
+    var fixedWriteTime = DateTime.UtcNow.AddDays(-1);
+    File.SetLastWriteTimeUtc(outsidePath, fixedWriteTime);
+    DateTime expectedWriteTime = File.GetLastWriteTimeUtc(outsidePath);
+
+    await Assert.ThrowsAsync<InvalidDataException>(InvokeOperationAsync);
+
+    Assert.True(File.Exists(outsidePath));
+    Assert.Equal(externalContents, await File.ReadAllTextAsync(outsidePath));
+    Assert.Equal(expectedWriteTime, File.GetLastWriteTimeUtc(outsidePath));
+
+    async Task InvokeOperationAsync()
+    {
+      if (operation == "recovery")
+      {
+        await _store.TryAcquireRecoveryOperationAsync(run.RunId, CancellationToken.None);
+      }
+      else
+      {
+        await _store.GetAsync(run.RunId, CancellationToken.None);
+      }
+    }
+  }
+
   [Fact]
   public async Task AppendLogAsync_PreservesCompleteTailMissingFinalNewline()
   {
@@ -3356,6 +4529,74 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task CreateAsync_RedactsAndRoundTripsDefinitionPresentationMetadata()
+  {
+    const string secret = "snapshot-presentation-secret";
+    ResourceDefinition definition = SampleDefinition() with
+    {
+      DisplayName = $"Git {secret}",
+      Description = $"Source control {secret}"
+    };
+    ExecutionRun run = SampleRun();
+    run = run with
+    {
+      Graph = new ResourceGraph(
+          new Dictionary<string, ResolvedResource>(StringComparer.OrdinalIgnoreCase)
+          {
+            ["git"] = new(
+                definition,
+                ResourceOrigin.Required,
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase))
+          },
+          run.Graph!.TopologicalLayers),
+      Plan = run.Plan! with
+      {
+        Resources = run.Plan.Resources.Select(resource => resource with
+        {
+          Definition = definition
+        }).ToArray()
+      }
+    };
+    var store = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        new LogRedactor([secret]));
+
+    await store.CreateAsync(run, CancellationToken.None);
+
+    string disk = await File.ReadAllTextAsync(store.SnapshotPath(run.RunId));
+    ExecutionRun restored = Assert.IsType<ExecutionRun>(
+        await store.GetAsync(run.RunId, CancellationToken.None));
+    Assert.DoesNotContain(secret, disk, StringComparison.Ordinal);
+    Assert.Equal("Git ***", restored.Graph!.Nodes["git"].Definition.DisplayName);
+    Assert.Equal("Source control ***", restored.Graph.Nodes["git"].Definition.Description);
+    Assert.Equal("Source control ***", Assert.Single(restored.Plan!.Resources).Definition.Description);
+  }
+
+  [Fact]
+  public async Task LegacySnapshotWithoutDescription_ReadsAndSavesWithoutInventingValue()
+  {
+    ExecutionRun run = SampleRun();
+    await _store.CreateAsync(run, CancellationToken.None);
+    string path = _store.SnapshotPath(run.RunId);
+    JsonObject document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+    document["graph"]!["nodes"]!["git"]!["definition"]!.AsObject().Remove("description");
+    document["plan"]!["resources"]!.AsArray()[0]!["definition"]!.AsObject()
+        .Remove("description");
+    await File.WriteAllTextAsync(path, document.ToJsonString());
+
+    ExecutionRun restored = Assert.IsType<ExecutionRun>(
+        await _store.GetAsync(run.RunId, CancellationToken.None));
+    Assert.Null(restored.Graph!.Nodes["git"].Definition.Description);
+    Assert.Null(Assert.Single(restored.Plan!.Resources).Definition.Description);
+
+    await _store.SaveAsync(restored, CancellationToken.None);
+    ExecutionRun saved = Assert.IsType<ExecutionRun>(
+        await _store.GetAsync(run.RunId, CancellationToken.None));
+    Assert.Null(saved.Graph!.Nodes["git"].Definition.Description);
+    Assert.Null(Assert.Single(saved.Plan!.Resources).Definition.Description);
+  }
+
+  [Fact]
   public void WindowsMachineInformationProvider_CapturesFactsFromItsEnvironmentAbstraction()
   {
     var machine = new WindowsMachineInformationProvider(new StubMachineInformationSource())
@@ -3609,6 +4850,24 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     };
   }
 
+  private static ExecutionRun ApprovedNonDeferredRun(string secret)
+  {
+    var run = ElevatedRunWithSecret(secret);
+    const string fingerprint =
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    return run with
+    {
+      Plan = run.Plan! with { Fingerprint = fingerprint },
+      PlanApproval = new PlanApproval
+      {
+        InitialPlanFingerprint = fingerprint,
+        ConfirmedAtUtc = DateTimeOffset.Parse("2026-08-30T00:00:00Z"),
+        Source = PlanApprovalSource.DesktopReviewedPlan,
+        DeferredAuthorizations = []
+      }
+    };
+  }
+
   private static ExecutionRun PromoteDeferredRun(
       ExecutionRun run,
       ResourcePlan executablePlan)
@@ -3856,6 +5115,8 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     Id = "git",
     Type = "package",
     Provider = "winget",
+    DisplayName = "Git",
+    Description = "Distributed version control",
     VersionConstraint = ">=2.52.1",
     Dependencies = [],
     Parameters = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
@@ -3897,6 +5158,112 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     Assert.True(collection.IsReadOnly);
     Assert.Throws<NotSupportedException>(() => collection.Add(values[0]));
   }
+
+  private async Task<string> WriteLegacyApprovedSnapshotAsync(
+      Guid fileRunId,
+      Guid? documentRunId = null,
+      long? revision = null)
+  {
+    var source = Path.Combine(
+        AppContext.BaseDirectory,
+        "TestData",
+        "Persistence",
+        "legacy-approved-run.json");
+    var document = JsonNode.Parse(await File.ReadAllTextAsync(source))!.AsObject();
+    document["runId"] = (documentRunId ?? fileRunId).ToString("D");
+    if (revision is not null)
+    {
+      document["revision"] = revision.Value;
+    }
+
+    var path = _store.SnapshotPath(fileRunId);
+    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+    await File.WriteAllTextAsync(
+        path,
+        document.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+    return path;
+  }
+
+  private void DeleteSnapshotFormatIndexAndAnchor(string snapshotPath)
+  {
+    var runsDirectory = Path.GetDirectoryName(snapshotPath)!;
+    File.Delete(Path.Combine(runsDirectory, ".snapshot-format-index"));
+    File.Delete(Path.Combine(Path.GetDirectoryName(runsDirectory)!, ".snapshot-format-anchor"));
+  }
+
+  private static async Task WriteSnapshotFormatCommitmentAsync(
+      IApprovedResourceProtector protector,
+      string snapshotPath,
+      ExecutionRun run)
+  {
+    byte[] snapshot = await File.ReadAllBytesAsync(snapshotPath);
+    byte[] plaintext = JsonSerializer.SerializeToUtf8Bytes(new
+    {
+      FormatVersion = 1,
+      run.RunId,
+      run.Revision,
+      Digest = Convert.ToHexString(SHA256.HashData(snapshot))
+    }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+    byte[] entropy = System.Text.Encoding.UTF8.GetBytes(
+        $"WDEM\0snapshot-format\0{run.RunId:D}");
+    await File.WriteAllBytesAsync(
+        Path.Combine(
+            Path.GetDirectoryName(snapshotPath)!,
+            $"{run.RunId:D}.snapshot-format"),
+        protector.Protect(plaintext, entropy));
+  }
+
+  private static async Task WriteWeakSnapshotFormatMarkerAsync(
+      IApprovedResourceProtector protector,
+      string snapshotPath,
+      Guid runId)
+  {
+    byte[] plaintext = JsonSerializer.SerializeToUtf8Bytes(new
+    {
+      FormatVersion = 1,
+      RunId = runId
+    }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+    byte[] entropy = System.Text.Encoding.UTF8.GetBytes(
+        $"WDEM\0snapshot-format\0{runId:D}");
+    await File.WriteAllBytesAsync(
+        Path.Combine(Path.GetDirectoryName(snapshotPath)!, $"{runId:D}.snapshot-format"),
+        protector.Protect(plaintext, entropy));
+  }
+
+  private static void CreateJunction(string path, string target)
+  {
+    var startInfo = new ProcessStartInfo("cmd.exe")
+    {
+      RedirectStandardError = true,
+      RedirectStandardOutput = true,
+      UseShellExecute = false,
+      CreateNoWindow = true
+    };
+    startInfo.ArgumentList.Add("/d");
+    startInfo.ArgumentList.Add("/c");
+    startInfo.ArgumentList.Add("mklink");
+    startInfo.ArgumentList.Add("/J");
+    startInfo.ArgumentList.Add(path);
+    startInfo.ArgumentList.Add(target);
+    using var process = Process.Start(startInfo)!;
+    process.WaitForExit();
+    Assert.Equal(0, process.ExitCode);
+  }
+
+  private static void CreateHardLink(string path, string target)
+  {
+    Assert.True(
+        CreateHardLinkWindows(path, target, IntPtr.Zero),
+        $"CreateHardLinkW failed with error {Marshal.GetLastWin32Error()}.");
+  }
+
+  [DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", CharSet = CharSet.Unicode,
+      SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool CreateHardLinkWindows(
+      string fileName,
+      string existingFileName,
+      IntPtr securityAttributes);
 
   private sealed class StubMachineInformationSource : IWindowsMachineInformationSource
   {
@@ -3942,6 +5309,155 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
           entropy);
       return plaintext;
     }
+  }
+
+  private sealed class OversizedIndexWriteProtector : IApprovedResourceProtector
+  {
+    private readonly DeterministicApprovedResourceProtector _inner = new();
+    private int _remainingIndexWrites;
+
+    public void ProduceOversizedIndexOnWrite(int writeNumber)
+    {
+      Assert.True(writeNumber > 0);
+      _remainingIndexWrites = writeNumber;
+    }
+
+    public byte[] Protect(byte[] plaintext, byte[] entropy)
+    {
+      if (string.Equals(
+              System.Text.Encoding.UTF8.GetString(entropy),
+              "WDEM\0snapshot-format-index\0v1",
+              StringComparison.Ordinal) &&
+          _remainingIndexWrites > 0 &&
+          --_remainingIndexWrites == 0)
+      {
+        return new byte[(16 * 1024 * 1024) + 1];
+      }
+
+      return _inner.Protect(plaintext, entropy);
+    }
+
+    public byte[] Unprotect(byte[] protectedData, byte[] entropy) =>
+        _inner.Unprotect(protectedData, entropy);
+  }
+
+  private sealed class CountingApprovedResourceProtector : IApprovedResourceProtector
+  {
+    private readonly DeterministicApprovedResourceProtector _inner = new();
+
+    public int IndexReadCount { get; private set; }
+    public int AnchorReadCount { get; private set; }
+
+    public byte[] Protect(byte[] plaintext, byte[] entropy) =>
+        _inner.Protect(plaintext, entropy);
+
+    public byte[] Unprotect(byte[] protectedData, byte[] entropy)
+    {
+      string purpose = System.Text.Encoding.UTF8.GetString(entropy);
+      if (string.Equals(purpose, "WDEM\0snapshot-format-index\0v1", StringComparison.Ordinal))
+      {
+        IndexReadCount++;
+      }
+      else if (string.Equals(
+          purpose,
+          "WDEM\0snapshot-format-anchor\0v1",
+          StringComparison.Ordinal))
+      {
+        AnchorReadCount++;
+      }
+
+      return _inner.Unprotect(protectedData, entropy);
+    }
+
+    public void ResetReadCounts()
+    {
+      IndexReadCount = 0;
+      AnchorReadCount = 0;
+    }
+  }
+
+  private sealed class ObservingApprovedResourceProtector(Action observer)
+      : IApprovedResourceProtector
+  {
+    private readonly DeterministicApprovedResourceProtector _inner = new();
+
+    public byte[] Protect(byte[] plaintext, byte[] entropy) =>
+        _inner.Protect(plaintext, entropy);
+
+    public byte[] Unprotect(byte[] protectedData, byte[] entropy)
+    {
+      if (string.Equals(
+              System.Text.Encoding.UTF8.GetString(entropy),
+              "WDEM\0snapshot-format-index\0v1",
+              StringComparison.Ordinal))
+      {
+        observer();
+      }
+
+      return _inner.Unprotect(protectedData, entropy);
+    }
+  }
+
+  private sealed class SnapshotWriteInterruptingProtector(string snapshotPath)
+      : IApprovedResourceProtector
+  {
+    private readonly DeterministicApprovedResourceProtector _inner = new();
+    private bool _hasInterrupted;
+    private FileStream? _snapshotLock;
+
+    public byte[] Protect(byte[] plaintext, byte[] entropy)
+    {
+      byte[] protectedData = _inner.Protect(plaintext, entropy);
+      if (!_hasInterrupted &&
+          _snapshotLock is null &&
+          System.Text.Encoding.UTF8.GetString(entropy).Contains(
+              "snapshot-format",
+              StringComparison.Ordinal))
+      {
+        _hasInterrupted = true;
+        _snapshotLock = new FileStream(
+            snapshotPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read);
+      }
+
+      return protectedData;
+    }
+
+    public byte[] Unprotect(byte[] protectedData, byte[] entropy) =>
+        _inner.Unprotect(protectedData, entropy);
+
+    public void ReleaseSnapshot()
+    {
+      _snapshotLock?.Dispose();
+      _snapshotLock = null;
+    }
+  }
+
+  private sealed class InitialSnapshotIndexWriteInterruptingProtector
+      : IApprovedResourceProtector
+  {
+    private readonly DeterministicApprovedResourceProtector _inner = new();
+    private bool _hasInterrupted;
+
+    public byte[] Protect(byte[] plaintext, byte[] entropy)
+    {
+      if (!_hasInterrupted &&
+          string.Equals(
+              System.Text.Encoding.UTF8.GetString(entropy),
+              "WDEM\0snapshot-format-index\0v1",
+              StringComparison.Ordinal))
+      {
+        _hasInterrupted = true;
+        throw new IOException("Simulated initial snapshot index interruption.");
+      }
+
+      return _inner.Protect(plaintext, entropy);
+    }
+
+    public byte[] Unprotect(byte[] protectedData, byte[] entropy) =>
+        _inner.Unprotect(protectedData, entropy);
   }
 
   private sealed class PassThroughApprovedResourceProtector : IApprovedResourceProtector

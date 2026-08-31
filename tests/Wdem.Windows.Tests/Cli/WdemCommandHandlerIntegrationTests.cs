@@ -66,6 +66,75 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
   }
 
   [Fact]
+  public async Task RetryAsync_RedactedDescriptionPreservesCanonicalApprovalAfterStoreReload()
+  {
+    const string secret = "description-approval-secret";
+    var provider = new RetryFailureProvider();
+    var profile = Profile() with
+    {
+      Resources = new Dictionary<string, ResourceDefinition>(StringComparer.OrdinalIgnoreCase)
+      {
+        ["git"] = Profile().Resources["git"] with
+        {
+          Provider = provider.ProviderName,
+          DisplayName = "Git",
+          Description = $"Source control configured for {secret}"
+        }
+      }
+    };
+    var redactor = new LogRedactor([secret]);
+    var firstStore = new JsonExecutionRunStore(new WdemDataPaths(_directory), redactor);
+    var firstService = CreateService(firstStore, redactor);
+
+    var failed = await firstService.ApplyAsync(
+        new RunRequest(
+            Path.GetFullPath("developer.yaml"),
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)),
+        CancellationToken.None);
+
+    Assert.Equal(ExecutionOutcome.Failed, failed.Outcome);
+    Assert.True(failed.Revision > 0);
+    Assert.Equal(failed.Plan!.Fingerprint, failed.PlanApproval!.InitialPlanFingerprint);
+    Assert.DoesNotContain(
+        secret,
+        await File.ReadAllTextAsync(firstStore.SnapshotPath(failed.RunId)),
+        StringComparison.Ordinal);
+
+    var restartRedactor = new LogRedactor();
+    var reloadedStore = new JsonExecutionRunStore(
+        new WdemDataPaths(_directory),
+        restartRedactor);
+    var retryService = CreateService(reloadedStore, restartRedactor);
+    var retried = await retryService.RetryAsync(
+        failed.RunId,
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "git" },
+        CancellationToken.None);
+
+    Assert.Equal(failed.RunId, retried.RetriedFromRunId);
+    Assert.Equal(2, provider.ApplyCalls);
+
+    EnvironmentRunService CreateService(
+        JsonExecutionRunStore store,
+        LogRedactor serviceRedactor)
+    {
+      var registry = new ResourceProviderRegistry([provider]);
+      var compliance = new ComplianceEvaluator();
+      return new EnvironmentRunService(
+          new FixedProfileCatalog(profile),
+          new ResourceGraphBuilder(),
+          registry,
+          compliance,
+          new ExecutionPlanner(registry, compliance),
+          new ResourceScheduler(),
+          store,
+          new DirectResourceApplyDispatcher(),
+          timeProvider: null,
+          new RunEventHub(),
+          serviceRedactor);
+    }
+  }
+
+  [Fact]
   public async Task InspectAsync_RealDetectionFailureReturnsExecutionExitCode()
   {
     var provider = new DetectionFailureProvider();
@@ -280,12 +349,13 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
         sink,
         redactor);
     var prior = InterruptedRun();
-    await store.CreateAsync(prior, CancellationToken.None);
     var replacement = await service.ApplyAsync(
         new RunRequest(
             prior.ProfileSourcePath,
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)),
         CancellationToken.None);
+    prior = WithApproval(prior, replacement);
+    await store.CreateAsync(prior, CancellationToken.None);
     replacement = await store.SaveAsync(
         replacement with
         {
@@ -414,14 +484,13 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
       {
         ["git"] = Profile().Resources["git"] with
         {
-          Provider = provider.ProviderName,
-          Parameters = new Dictionary<string, string?> { ["access_token"] = secret }
+          Provider = provider.ProviderName
         }
       }
     };
     var registry = new ResourceProviderRegistry([provider]);
     var compliance = new ComplianceEvaluator();
-    var redactor = new LogRedactor();
+    var redactor = new LogRedactor([secret]);
     var sink = new RunEventHub();
     var store = new JsonExecutionRunStore(new WdemDataPaths(_directory), redactor);
     var service = new EnvironmentRunService(
@@ -436,7 +505,13 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
         timeProvider: null,
         sink,
         redactor);
-    var prior = InterruptedRun();
+    var approvedTemplate = await service.ApplyAsync(
+        new RunRequest(
+            Path.GetFullPath("developer.yaml"),
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)),
+        CancellationToken.None);
+    provider.ResetApplyCalls();
+    var prior = WithApproval(InterruptedRun(), approvedTemplate);
     await store.CreateAsync(prior, CancellationToken.None);
     var failingHandler = new WdemCommandHandler(
         service,
@@ -815,6 +890,13 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
     }
   };
 
+  private static ExecutionRun WithApproval(ExecutionRun interrupted, ExecutionRun approved) =>
+      interrupted with
+      {
+        Plan = approved.Plan,
+        PlanApproval = approved.PlanApproval
+      };
+
   private sealed class FixedProfileCatalog : IProfileCatalog
   {
     private readonly ProfileLoadResult _result;
@@ -914,6 +996,8 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
     public ProviderCapabilities Capabilities { get; } = new();
     public int ApplyCalls => Volatile.Read(ref _applyCalls);
 
+    public void ResetApplyCalls() => Interlocked.Exchange(ref _applyCalls, 0);
+
     public ValueTask<ProviderValidationResult> ValidateAsync(
         ResourceDefinition resource,
         CancellationToken cancellationToken) =>
@@ -992,6 +1076,84 @@ public sealed class WdemCommandHandlerIntegrationTests : IDisposable
             ResourceId = resource.Id,
             Outcome = DetectionOutcome.Succeeded,
             Exists = true
+          }
+        });
+  }
+
+  private sealed class RetryFailureProvider : IResourceProvider
+  {
+    public string ResourceType => "package";
+    public string ProviderName => "retry-failure";
+    public ProviderCapabilities Capabilities { get; } = new();
+    public int ApplyCalls { get; private set; }
+
+    public ValueTask<ProviderValidationResult> ValidateAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) =>
+        ValueTask.FromResult(ProviderValidationResult.Valid);
+
+    public ValueTask<DetectedState> DetectAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) => ValueTask.FromResult(new DetectedState
+        {
+          ResourceId = resource.Id,
+          Outcome = DetectionOutcome.Succeeded,
+          Exists = false
+        });
+
+    public ValueTask<ResourcePlan> PlanAsync(
+        ResourceDefinition resource,
+        DetectedState currentState,
+        CancellationToken cancellationToken) => ValueTask.FromResult(new ResourcePlan
+        {
+          ResourceId = resource.Id,
+          ResourceType = resource.Type,
+          ProviderName = resource.Provider,
+          DesiredStateFingerprint = ResourceDefinitionFingerprint.Create(resource),
+          Compliance = ComplianceStatus.Missing,
+          IsExecutable = true,
+          Steps =
+          [
+            new PlanStep
+            {
+              Id = "install",
+              Description = "Install git",
+              Action = PlanAction.Install,
+              PrivilegeRequirement = PrivilegeRequirement.CurrentUser,
+              RestartPolicy = RestartPolicy.NoRestart
+            }
+          ]
+        });
+
+    public ValueTask<ResourceApplyResult> ApplyAsync(
+        ResourceDefinition resource,
+        ResourcePlan plan,
+        IProgress<ProviderProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+      ApplyCalls++;
+      return ValueTask.FromResult(new ResourceApplyResult
+      {
+        ResourceId = resource.Id,
+        Outcome = ApplyOutcome.Failed,
+        Error = new StructuredError(
+            WdemErrorCode.ProviderError,
+            "Apply failed.",
+            "The retryable test provider failed the apply operation.")
+      });
+    }
+
+    public ValueTask<VerificationResult> VerifyAsync(
+        ResourceDefinition resource,
+        CancellationToken cancellationToken) => ValueTask.FromResult(new VerificationResult
+        {
+          ResourceId = resource.Id,
+          Compliance = ComplianceStatus.Missing,
+          DetectedState = new DetectedState
+          {
+            ResourceId = resource.Id,
+            Outcome = DetectionOutcome.Succeeded,
+            Exists = false
           }
         });
   }

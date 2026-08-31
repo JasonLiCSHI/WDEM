@@ -137,19 +137,22 @@ public sealed class ExecutionRunRedactor
     StructuredErrors = plan.StructuredErrors.Select(_redactor.Redact).ToArray()
   };
 
-  private ResourceDefinition Redact(ResourceDefinition definition) => definition with
+  private ResourceDefinition Redact(ResourceDefinition definition)
   {
-    Id = Text(definition.Id),
-    Type = Text(definition.Type),
-    Provider = Text(definition.Provider),
-    DisplayName = NullableText(definition.DisplayName),
-    VersionConstraint = NullableText(definition.VersionConstraint),
-    PreferredVersion = NullableText(definition.PreferredVersion),
-    Dependencies = definition.Dependencies.Select(Text).ToArray(),
-    Parameters = RedactDictionary(
-        definition.Parameters,
-        (key, value) => _redactor.RedactNamedValue(key, value))
-  };
+    var presentation = ResourceDefinitionPresentationRedactor.Redact(definition, _redactor);
+    return presentation with
+    {
+      Id = Text(definition.Id),
+      Type = Text(definition.Type),
+      Provider = Text(definition.Provider),
+      VersionConstraint = NullableText(definition.VersionConstraint),
+      PreferredVersion = NullableText(definition.PreferredVersion),
+      Dependencies = definition.Dependencies.Select(Text).ToArray(),
+      Parameters = RedactDictionary(
+          definition.Parameters,
+          (key, value) => _redactor.RedactNamedValue(key, value))
+    };
+  }
 
   private IReadOnlyDictionary<string, TResult> RedactDictionary<TValue, TResult>(
       IReadOnlyDictionary<string, TValue> values,

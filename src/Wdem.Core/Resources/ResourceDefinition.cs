@@ -19,6 +19,7 @@ public sealed record ResourceDefinition
   public required string Type { get; init; }
   public required string Provider { get; init; }
   public string? DisplayName { get; init; }
+  public string? Description { get; init; }
   public string? VersionConstraint { get; init; }
   public string? PreferredVersion { get; init; }
   public IReadOnlyList<string> Dependencies { get; init; } = Array.Empty<string>();

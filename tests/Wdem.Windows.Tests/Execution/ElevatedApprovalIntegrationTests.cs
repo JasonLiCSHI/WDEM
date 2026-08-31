@@ -41,6 +41,8 @@ public sealed class ElevatedApprovalIntegrationTests : IDisposable
           },
           "resources": {
             "admin-resource": {
+              "displayName": "Administrative integration resource",
+              "description": "Exercises sealed elevated resource approval",
               "type": "integration",
               "provider": "sealed",
               "parameters": {
@@ -120,6 +122,8 @@ public sealed class ElevatedApprovalIntegrationTests : IDisposable
           },
           "resources": {
             "admin-resource": {
+              "displayName": "Administrative cleanup resource",
+              "description": "Exercises elevated host cleanup",
               "type": "integration",
               "provider": "sealed"
             }

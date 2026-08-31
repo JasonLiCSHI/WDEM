@@ -25,6 +25,12 @@ public sealed class ProfileCatalogTests
     Assert.Equal(["resharper"], result.Profile.Resources["resharper-settings"].Dependencies);
     Assert.Equal(["visual-studio"], result.Profile.Resources["company-vs-extension"].Dependencies);
     Assert.Equal(["visual-studio"], result.Profile.Resources["visual-studio-settings"].Dependencies);
+    Assert.Equal(7, result.Profile.Resources.Count);
+    Assert.All(result.Profile.Resources.Values, resource =>
+    {
+      Assert.False(string.IsNullOrWhiteSpace(resource.DisplayName));
+      Assert.False(string.IsNullOrWhiteSpace(resource.Description));
+    });
   }
 
   [Fact]
@@ -60,6 +66,8 @@ public sealed class ProfileCatalogTests
     Assert.Equal(
         "${WDEM_COMPANY_VSIX_PATH}",
         result.Profile.Resources["company-vsix"].Parameters["path"]);
+    Assert.Equal("Git", result.Profile.Resources["git"].DisplayName);
+    Assert.Equal("Distributed version control", result.Profile.Resources["git"].Description);
     Assert.Equal(Path.GetFullPath(Path.Combine(TestDataDirectory, "valid-csharp.yaml")), result.SourcePath);
   }
 
@@ -74,6 +82,66 @@ public sealed class ProfileCatalogTests
     Assert.Equal(["git", "dotnet-sdk"], result.Profile.RequiredResources.Select(item => item.Id));
     Assert.True(Assert.Single(result.Profile.OptionalResources).DefaultSelected);
     Assert.True(result.Profile.Resources.ContainsKey("GIT"));
+    Assert.Equal("Git", result.Profile.Resources["git"].DisplayName);
+    Assert.Equal("Distributed version control", result.Profile.Resources["git"].Description);
+  }
+
+  [Theory]
+  [InlineData("", "/resources/git/displayName")]
+  [InlineData("\"displayName\": \"Git\",", "/resources/git/description")]
+  [InlineData("\"displayName\": \"   \", \"description\": \"Git client\",", "/resources/git/displayName")]
+  [InlineData("\"displayName\": \"Git\", \"description\": \"\\t\",", "/resources/git/description")]
+  public async Task LoadFileAsync_RequiresNonWhitespaceResourcePresentationFields(
+      string presentationFields,
+      string pointer)
+  {
+    using var directory = new TemporaryDirectory();
+    var contents = $$"""
+        {
+          "schemaVersion": "1.0",
+          "profile": {
+            "id": "presentation",
+            "version": "1.0.0",
+            "displayName": "Presentation",
+            "description": "Profile description",
+            "requiredResources": [{ "id": "git" }]
+          },
+          "resources": {
+            "git": { {{presentationFields}} "type": "package", "provider": "winget" }
+          }
+        }
+        """;
+
+    var result = await CreateCatalog(directory.Path)
+        .LoadFileAsync(directory.Write("presentation.json", contents));
+
+    Assert.False(result.IsValid);
+    Assert.Contains(result.Errors, error => error.Detail.Contains(pointer, StringComparison.Ordinal));
+  }
+
+  [Fact]
+  public async Task LoadFileAsync_RejectsWhitespaceProfileDescriptionAtExactPointer()
+  {
+    using var directory = new TemporaryDirectory();
+    var contents = """
+        {
+          "schemaVersion": "1.0",
+          "profile": {
+            "id": "presentation",
+            "version": "1.0.0",
+            "displayName": "Presentation",
+            "description": "   "
+          },
+          "resources": {}
+        }
+        """;
+
+    var result = await CreateCatalog(directory.Path)
+        .LoadFileAsync(directory.Write("profile-description.json", contents));
+
+    Assert.False(result.IsValid);
+    Assert.Contains(result.Errors, error =>
+        error.Detail.Contains("/profile/description", StringComparison.Ordinal));
   }
 
   [Fact]
@@ -94,9 +162,13 @@ public sealed class ProfileCatalogTests
               defaultSelected: true
         resources:
           git:
+            displayName: Git
+            description: Git resource
             type: package
             provider: winget
           tool:
+            displayName: Tool
+            description: Optional tool
             type: package
             provider: winget
         """);
@@ -382,11 +454,11 @@ public sealed class ProfileCatalogTests
   }
 
   [Theory]
-  [InlineData("duplicate-ref.json", "{\"schemaVersion\":\"1.0\",\"profile\":{\"id\":\"p\",\"version\":\"1.0.0\",\"displayName\":\"P\",\"description\":\"D\",\"requiredResources\":[{\"id\":\"git\"},{\"id\":\"GIT\"}]},\"resources\":{\"git\":{\"type\":\"package\",\"provider\":\"winget\"}}}", "/profile/requiredResources/1/id")]
+  [InlineData("duplicate-ref.json", "{\"schemaVersion\":\"1.0\",\"profile\":{\"id\":\"p\",\"version\":\"1.0.0\",\"displayName\":\"P\",\"description\":\"D\",\"requiredResources\":[{\"id\":\"git\"},{\"id\":\"GIT\"}]},\"resources\":{\"git\":{\"displayName\":\"Git\",\"description\":\"Git resource\",\"type\":\"package\",\"provider\":\"winget\"}}}", "/profile/requiredResources/1/id")]
   [InlineData("unknown-ref.json", "{\"schemaVersion\":\"1.0\",\"profile\":{\"id\":\"p\",\"version\":\"1.0.0\",\"displayName\":\"P\",\"description\":\"D\",\"requiredResources\":[{\"id\":\"missing\"}]},\"resources\":{}}", "/profile/requiredResources/0/id")]
-  [InlineData("unknown-dependency.json", "{\"schemaVersion\":\"1.0\",\"profile\":{\"id\":\"p\",\"version\":\"1.0.0\",\"displayName\":\"P\",\"description\":\"D\",\"requiredResources\":[{\"id\":\"git\"}]},\"resources\":{\"git\":{\"type\":\"package\",\"provider\":\"winget\",\"dependsOn\":[\"missing\"]}}}", "/resources/git/dependsOn/0")]
-  [InlineData("bad-constraint.json", "{\"schemaVersion\":\"1.0\",\"profile\":{\"id\":\"p\",\"version\":\"1.0.0\",\"displayName\":\"P\",\"description\":\"D\",\"requiredResources\":[{\"id\":\"git\"}]},\"resources\":{\"git\":{\"type\":\"package\",\"provider\":\"winget\",\"versionConstraint\":\"latest\"}}}", "/resources/git/versionConstraint")]
-  [InlineData("bad-preferred.json", "{\"schemaVersion\":\"1.0\",\"profile\":{\"id\":\"p\",\"version\":\"1.0.0\",\"displayName\":\"P\",\"description\":\"D\",\"requiredResources\":[{\"id\":\"git\"}]},\"resources\":{\"git\":{\"type\":\"package\",\"provider\":\"winget\",\"preferredVersion\":\"vNext\"}}}", "/resources/git/preferredVersion")]
+  [InlineData("unknown-dependency.json", "{\"schemaVersion\":\"1.0\",\"profile\":{\"id\":\"p\",\"version\":\"1.0.0\",\"displayName\":\"P\",\"description\":\"D\",\"requiredResources\":[{\"id\":\"git\"}]},\"resources\":{\"git\":{\"displayName\":\"Git\",\"description\":\"Git resource\",\"type\":\"package\",\"provider\":\"winget\",\"dependsOn\":[\"missing\"]}}}", "/resources/git/dependsOn/0")]
+  [InlineData("bad-constraint.json", "{\"schemaVersion\":\"1.0\",\"profile\":{\"id\":\"p\",\"version\":\"1.0.0\",\"displayName\":\"P\",\"description\":\"D\",\"requiredResources\":[{\"id\":\"git\"}]},\"resources\":{\"git\":{\"displayName\":\"Git\",\"description\":\"Git resource\",\"type\":\"package\",\"provider\":\"winget\",\"versionConstraint\":\"latest\"}}}", "/resources/git/versionConstraint")]
+  [InlineData("bad-preferred.json", "{\"schemaVersion\":\"1.0\",\"profile\":{\"id\":\"p\",\"version\":\"1.0.0\",\"displayName\":\"P\",\"description\":\"D\",\"requiredResources\":[{\"id\":\"git\"}]},\"resources\":{\"git\":{\"displayName\":\"Git\",\"description\":\"Git resource\",\"type\":\"package\",\"provider\":\"winget\",\"preferredVersion\":\"vNext\"}}}", "/resources/git/preferredVersion")]
   public async Task LoadFileAsync_SemanticViolationsIncludeExactJsonPointer(string fileName, string contents, string pointer)
   {
     using var directory = new TemporaryDirectory();
@@ -610,7 +682,12 @@ public sealed class ProfileCatalogTests
             "requiredResources": [{ "id": "git/tools~beta" }]
           },
           "resources": {
-            "git/tools~beta": { "type": "package", "provider": "missing" }
+            "git/tools~beta": {
+              "displayName": "Git tools",
+              "description": "Git tool bundle",
+              "type": "package",
+              "provider": "missing"
+            }
           }
         }
         """;
@@ -846,7 +923,14 @@ public sealed class ProfileCatalogTests
           "description": "Description",
           "requiredResources": [{ "id": "git" }]
         },
-        "resources": { "git": { "type": "package", "provider": "winget" } }
+        "resources": {
+          "git": {
+            "displayName": "Git",
+            "description": "Git resource",
+            "type": "package",
+            "provider": "winget"
+          }
+        }
       }
       """;
 
@@ -861,6 +945,8 @@ public sealed class ProfileCatalogTests
           - id: git
       resources:
         git:
+          displayName: Git
+          description: Git resource
           type: package
           provider: winget
       """;

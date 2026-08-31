@@ -28,4 +28,9 @@
     <ProjectReference Include="..\..\src\Wdem.Cli\Wdem.Cli.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="TestData\Persistence\legacy-approved-run.json"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

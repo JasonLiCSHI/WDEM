@@ -9,8 +9,8 @@
     "optionalResources": [{ "id": "resharper", "defaultSelected": true }]
   },
   "resources": {
-    "git": { "type": "package", "provider": "winget", "parameters": { "packageId": "Git.Git" } },
-    "dotnet-sdk": { "type": "package", "provider": "winget", "dependsOn": ["git"], "parameters": { "packageId": "Microsoft.DotNet.SDK.10" } },
-    "resharper": { "type": "package", "provider": "winget", "parameters": { "packageId": "JetBrains.ReSharper" } }
+    "git": { "displayName": "Git", "description": "Distributed version control", "type": "package", "provider": "winget", "parameters": { "packageId": "Git.Git" } },
+    "dotnet-sdk": { "displayName": ".NET SDK", "description": "SDK for building .NET applications", "type": "package", "provider": "winget", "dependsOn": ["git"], "parameters": { "packageId": "Microsoft.DotNet.SDK.10" } },
+    "resharper": { "displayName": "ReSharper", "description": "Visual Studio productivity extension", "type": "package", "provider": "winget", "parameters": { "packageId": "JetBrains.ReSharper" } }
   }
 }

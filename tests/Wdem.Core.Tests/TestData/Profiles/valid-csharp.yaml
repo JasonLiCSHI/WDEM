@@ -13,12 +13,16 @@ profile:
     - id: company-vsix
 resources:
   git:
+    displayName: Git
+    description: Distributed version control
     type: package
     provider: winget
     preferredVersion: "2.45.1"
     parameters:
       packageId: Git.Git
   dotnet-sdk:
+    displayName: .NET SDK
+    description: SDK for building .NET applications
     type: package
     provider: winget
     versionConstraint: ">= 10.0.0"
@@ -27,11 +31,15 @@ resources:
     parameters:
       packageId: Microsoft.DotNet.SDK.10
   resharper:
+    displayName: ReSharper
+    description: Visual Studio productivity extension
     type: package
     provider: winget
     parameters:
       packageId: JetBrains.ReSharper
   company-vsix:
+    displayName: Company Visual Studio extension
+    description: Internal Visual Studio tooling
     type: extension
     provider: file
     parameters:

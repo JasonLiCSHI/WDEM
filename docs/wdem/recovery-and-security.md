@@ -49,6 +49,28 @@ then `resume --run <guid>` to recover or
 `abandon --run <guid>` to mark an incomplete run cancelled without applying
 anything.
 
+Approved snapshots are bound to a current-user-protected revision index under
+the runs directory and an authenticated freshness anchor under the WDEM root.
+WDEM rejects an older snapshot, a changed snapshot, a replayed or missing
+revision index, or an approval envelope removed from a committed snapshot.
+Pending and committed index and anchor entries let WDEM recover the old or new
+complete state if a process stops during an atomic upgrade. Simultaneously
+deleting or rolling back the entire WDEM root, including every protected
+freshness anchor, is outside the locally detectable threat model; the missing
+run grants no authority to apply changes.
+
+When the protected index and anchor are first created, WDEM performs one
+bounded scan under the root state lock. It enrolls every structurally valid
+legacy approved snapshot whose canonical filename matches its run ID, binding
+the candidate's revision and digest into the authenticated index. The enrolled
+set supports upgrading multiple legacy runs independently and is not expanded
+on later reads. Malformed, mismatched, oversized, or subsequently injected
+legacy snapshots are not authorized and are quarantined when read.
+Older current-format snapshots are enrolled as committed only when their
+current-user-protected per-run commitment authenticates the snapshot's exact
+revision and digest and the protected approval envelope validates. A marker
+without that revision and digest is not sufficient to authorize a snapshot.
+
 Recovery never replays historical commands or trusts stale machine state. Core
 reloads the profile, rebuilds the resource graph, runs a fresh Detect, and
 creates a fresh Plan in a replacement run. Recovery may apply that fresh plan

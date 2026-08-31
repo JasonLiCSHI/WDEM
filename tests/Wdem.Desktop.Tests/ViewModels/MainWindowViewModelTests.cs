@@ -15,6 +15,27 @@ namespace Wdem.Desktop.Tests.ViewModels;
 public sealed class MainWindowViewModelTests
 {
   [Fact]
+  public void PlanResourcePresentationUsesRedactedDescriptionWithoutProviderFallback()
+  {
+    const string secret = "plan-description-secret";
+    PlannedResource planned = Assert.Single(InspectRun(executable: true).Plan!.Resources);
+    planned = planned with
+    {
+      Definition = planned.Definition with
+      {
+        DisplayName = $"Git {secret}",
+        Description = $"Source control {secret}"
+      }
+    };
+
+    var viewModel = new PlanResourceViewModel(planned, new LogRedactor([secret]));
+
+    Assert.Equal("Git ***", viewModel.DisplayName);
+    Assert.Equal("Source control ***", viewModel.Description);
+    Assert.DoesNotContain(viewModel.Provider, viewModel.Description, StringComparison.Ordinal);
+  }
+
+  [Fact]
   public async Task InitializeAsync_RecoveryCandidatesPreemptProfileSelectionWithUsefulDetails()
   {
     var candidate = RecoveryCandidate();

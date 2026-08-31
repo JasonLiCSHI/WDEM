@@ -1,6 +1,7 @@
 using Wdem.Core.Graph;
 using Wdem.Core.Profiles;
 using Wdem.Core.Resources;
+using Wdem.Core.Runs;
 using Wdem.Desktop.ViewModels;
 using Xunit;
 
@@ -8,6 +9,36 @@ namespace Wdem.Desktop.Tests.ViewModels;
 
 public sealed class ResourceSelectionViewModelTests
 {
+  [Fact]
+  public void ResourcePresentationUsesRedactedDefinitionMetadata()
+  {
+    const string secret = "selection-secret";
+    DeveloperProfile profile = Profile();
+    profile = profile with
+    {
+      Resources = profile.Resources.ToDictionary(
+          pair => pair.Key,
+          pair => pair.Key == "visual-studio"
+              ? pair.Value with
+              {
+                DisplayName = $"Visual Studio {secret}",
+                Description = $"IDE configured with {secret}"
+              }
+              : pair.Value,
+          StringComparer.OrdinalIgnoreCase)
+    };
+    var viewModel = new ResourceSelectionViewModel(
+        profile,
+        new ResourceGraphBuilder(_ => null),
+        redactor: new LogRedactor([secret]));
+
+    ResourceSelectionItemViewModel item = viewModel.Resources.Single(resource =>
+        resource.Id == "visual-studio");
+
+    Assert.Equal("Visual Studio ***", item.DisplayName);
+    Assert.Equal("IDE configured with ***", item.Description);
+  }
+
   [Fact]
   public void RequiredResourceCannotBeDeselected()
   {
@@ -189,6 +220,7 @@ public sealed class ResourceSelectionViewModelTests
         Type = id,
         Provider = "test",
         DisplayName = displayName,
+        Description = $"Configure {displayName}",
         Dependencies = dependencies ?? [],
         Parameters = parameters ?? new Dictionary<string, string?>()
       };

@@ -22,6 +22,8 @@ internal static class ProfileDocumentMapper
         Id = property.Name,
         Type = resource.GetProperty("type").GetString()!,
         Provider = resource.GetProperty("provider").GetString()!,
+        DisplayName = resource.GetProperty("displayName").GetString()!,
+        Description = resource.GetProperty("description").GetString()!,
         VersionConstraint = GetOptionalString(resource, "versionConstraint"),
         PreferredVersion = GetOptionalString(resource, "preferredVersion"),
         PrivilegeRequirement = GetOptionalEnum(

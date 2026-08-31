@@ -3,6 +3,7 @@ using System.Collections.Frozen;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Wdem.Core.Execution;
 using Wdem.Core.Graph;
@@ -20,7 +21,16 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
   private const int SharingViolationHResult = unchecked((int)0x80070020);
   private const int LockViolationHResult = unchecked((int)0x80070021);
   private const int MaximumLogPageSize = 1000;
+  private const int MaximumListRunLockBatchSize = 32;
+  private const int MaximumLegacyMigrationCandidateFiles = 4096;
+  private const long MaximumLegacyMigrationCandidateBytes = 16 * 1024 * 1024;
+  private const int MaximumSnapshotBytes = 16 * 1024 * 1024;
+  private const int MaximumSnapshotFormatIndexBytes = 16 * 1024 * 1024;
+  private const int MaximumSnapshotFormatAnchorBytes = 64 * 1024;
+  private const int MaximumSnapshotFormatCommitmentBytes = 64 * 1024;
   private const int LogIndexRecordSize = sizeof(long) * 3;
+  private const string ProtectedPlanApprovalPropertyName = "protectedPlanApproval";
+  private const int CurrentSnapshotFormatVersion = 1;
   private static readonly TimeSpan MaximumClaimClockSkew = TimeSpan.FromMinutes(5);
   private static readonly UTF8Encoding Utf8WithoutBom = new(false);
   private readonly object _diagnosticsGate = new();
@@ -112,6 +122,15 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
   public string ApprovedResourcesPath(Guid runId) =>
       Path.Combine(_paths.RunsDirectory, $"{runId:D}.approved.json");
 
+  private string SnapshotFormatCommitmentPath(Guid runId) =>
+      Path.Combine(_paths.RunsDirectory, $"{runId:D}.snapshot-format");
+
+  private string SnapshotFormatIndexPath() =>
+      Path.Combine(_paths.RunsDirectory, ".snapshot-format-index");
+
+  private string SnapshotFormatAnchorPath() =>
+      Path.Combine(_paths.Root, ".snapshot-format-anchor");
+
   public Task CreateAsync(ExecutionRun run, CancellationToken cancellationToken) =>
       CreateAsync(run, [], cancellationToken);
 
@@ -149,10 +168,11 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
           approvedResources,
           cancellationToken)
           .ConfigureAwait(false);
-      await WriteBytesAtomicallyAsync(
-          path,
-          JsonSerializer.SerializeToUtf8Bytes(Redact(run), _snapshotJsonOptions),
-          cancellationToken).ConfigureAwait(false);
+      await PersistSnapshotWithCommitmentAsync(
+          run,
+          SerializeSnapshot(run),
+          cancellationToken)
+          .ConfigureAwait(false);
     }
     catch
     {
@@ -168,7 +188,8 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
   public async Task<ExecutionRun?> GetAsync(Guid runId, CancellationToken cancellationToken)
   {
     cancellationToken.ThrowIfCancellationRequested();
-    if (!Directory.Exists(_paths.RunsDirectory))
+    using var existingDirectoryScope = AcquireExistingRunsDirectoryScope();
+    if (existingDirectoryScope is null)
     {
       return null;
     }
@@ -341,7 +362,8 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
       CancellationToken cancellationToken)
   {
     cancellationToken.ThrowIfCancellationRequested();
-    if (!Directory.Exists(_paths.RunsDirectory))
+    using var directoryScope = AcquireExistingRunsDirectoryScope();
+    if (directoryScope is null)
     {
       return [];
     }
@@ -351,16 +373,65 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
         .Select(name => Guid.TryParse(name, out var runId) ? runId : (Guid?)null)
         .Where(runId => runId.HasValue)
         .Select(runId => runId!.Value)
+        .Distinct()
         .OrderBy(runId => runId)
         .ToArray();
     var runs = new List<ExecutionRun>();
-    foreach (var runId in runIds)
+    if (runIds.Length == 0)
     {
-      cancellationToken.ThrowIfCancellationRequested();
-      var run = await GetAsync(runId, cancellationToken).ConfigureAwait(false);
-      if (run is not null)
+      await using var stateLock = await AcquireSnapshotFormatStateLockAsync(cancellationToken)
+          .ConfigureAwait(false);
+      await ReadAuthenticatedSnapshotFormatIndexAsync(cancellationToken)
+          .ConfigureAwait(false);
+      return runs;
+    }
+
+    foreach (Guid[] batch in runIds.Chunk(MaximumListRunLockBatchSize))
+    {
+      var runLocks = new List<FileStream>(batch.Length);
+      try
       {
-        runs.Add(run);
+        foreach (var runId in batch)
+        {
+          runLocks.Add(await AcquireRunLockFileAsync(
+              runId,
+              cancellationToken,
+              deleteOnCloseWhenSnapshotMissing: true).ConfigureAwait(false));
+        }
+
+        await using var stateLock = await AcquireSnapshotFormatStateLockAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var batchState = new BatchSnapshotFormatState(
+            await ReadAuthenticatedSnapshotFormatIndexAsync(cancellationToken)
+                .ConfigureAwait(false));
+        foreach (var runId in batch)
+        {
+          cancellationToken.ThrowIfCancellationRequested();
+          var run = await ReadSnapshotAsync(runId, cancellationToken, batchState)
+              .ConfigureAwait(false);
+          if (run?.State == ExecutionState.Completed)
+          {
+            DeleteApprovedResources(runId);
+          }
+
+          if (run is not null)
+          {
+            runs.Add(run);
+          }
+        }
+
+        if (batchState.IsChanged)
+        {
+          await PersistSnapshotFormatIndexAsync(batchState.Index, cancellationToken)
+              .ConfigureAwait(false);
+        }
+      }
+      finally
+      {
+        for (int index = runLocks.Count - 1; index >= 0; index--)
+        {
+          await runLocks[index].DisposeAsync().ConfigureAwait(false);
+        }
       }
     }
 
@@ -372,19 +443,21 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
       CancellationToken cancellationToken)
   {
     cancellationToken.ThrowIfCancellationRequested();
-    Directory.CreateDirectory(_paths.RunsDirectory);
-    var lockPath = Path.Combine(_paths.RunsDirectory, $"{runId:D}.recovery.lock");
+    var directoryScope = AcquireRunsDirectoryScope();
     try
     {
-      var lease = _recoveryLockOpener(lockPath);
+      var lockPath = Path.Combine(_paths.RunsDirectory, $"{runId:D}.recovery.lock");
+      var lease = new OwnedAsyncLease(_recoveryLockOpener(lockPath), directoryScope);
       return Task.FromResult<IAsyncDisposable?>(lease);
     }
     catch (IOException exception) when (IsLockContention(exception))
     {
+      directoryScope.Dispose();
       return Task.FromResult<IAsyncDisposable?>(null);
     }
     catch (IOException exception)
     {
+      directoryScope.Dispose();
       var diagnostic = new StructuredError(
           WdemErrorCode.DetectionError,
           "Recovery operation lock could not be acquired.",
@@ -399,19 +472,22 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
 
       throw;
     }
+    catch
+    {
+      directoryScope.Dispose();
+      throw;
+    }
   }
 
   private static bool IsLockContention(IOException exception) =>
       exception.HResult is SharingViolationHResult or LockViolationHResult;
 
   private static IAsyncDisposable OpenRecoveryLock(string lockPath) =>
-      new FileStream(
+      SecureBoundedFileReader.OpenLockFile(
           lockPath,
-          FileMode.OpenOrCreate,
-          FileAccess.ReadWrite,
-          FileShare.None,
-          1,
-          FileOptions.Asynchronous);
+          Path.GetDirectoryName(lockPath)!,
+          deleteOnClose: false,
+          "recovery operation lock");
 
   public async Task<ExecutionRun> SaveAsync(
       ExecutionRun run,
@@ -419,6 +495,13 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
   {
     ArgumentNullException.ThrowIfNull(run);
     ValidateRunForPersistence(run);
+    if (run.Revision == long.MaxValue - 1)
+    {
+      throw new ArgumentException(
+          "The execution run revision cannot be incremented to a supported revision.",
+          nameof(run));
+    }
+
     cancellationToken.ThrowIfCancellationRequested();
     await using var runLock = await AcquireRunLockForExistingSnapshotAsync(
         run.RunId,
@@ -439,10 +522,12 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     ValidatePersistenceTransition(current, run);
 
     var saved = run with { Revision = checked(run.Revision + 1) };
-    await WriteBytesAtomicallyAsync(
-        path,
-        JsonSerializer.SerializeToUtf8Bytes(Redact(saved), _snapshotJsonOptions),
-        cancellationToken).ConfigureAwait(false);
+    ValidateRunForPersistence(saved);
+    await PersistSnapshotWithCommitmentAsync(
+        saved,
+        SerializeSnapshot(saved),
+        cancellationToken)
+        .ConfigureAwait(false);
     if (saved.State == ExecutionState.Completed)
     {
       DeleteApprovedResources(saved.RunId);
@@ -487,10 +572,11 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     EnsurePlanApprovalUnchanged(current.PlanApproval, run.PlanApproval);
     ValidatePersistenceTransition(current, run);
 
-    await WriteBytesAtomicallyAsync(
-        path,
-        JsonSerializer.SerializeToUtf8Bytes(Redact(run), _snapshotJsonOptions),
-        cancellationToken).ConfigureAwait(false);
+    await PersistSnapshotWithCommitmentAsync(
+        run,
+        SerializeSnapshot(run),
+        cancellationToken)
+        .ConfigureAwait(false);
     if (run.State == ExecutionState.Completed)
     {
       DeleteApprovedResources(run.RunId);
@@ -774,13 +860,13 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     var persistedEntry = _redactor.Redact(entry);
     var line = JsonSerializer.Serialize(persistedEntry, _logJsonOptions) + "\n";
     var bytes = Utf8WithoutBom.GetBytes(line);
-    await using var stream = new FileStream(
+    await using var stream = SecureBoundedFileReader.OpenMutableFile(
         logPath,
-        FileMode.Append,
-        FileAccess.Write,
-        FileShare.Read,
-        4096,
-        FileOptions.Asynchronous | FileOptions.WriteThrough);
+        _paths.RunsDirectory,
+        FileMode.OpenOrCreate,
+        FileAccess.ReadWrite,
+        "run log");
+    stream.Position = stream.Length;
     var startOffset = stream.Length;
     await stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
     await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -849,26 +935,148 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     return options;
   }
 
-  private async Task<FileStream> AcquireRunLockAsync(
+  private SecureDirectoryScope AcquireRootDirectoryScope()
+  {
+    var scope = new SecureDirectoryScope();
+    try
+    {
+      var rootParent = Path.GetDirectoryName(Path.GetFullPath(_paths.Root)) ??
+          throw new InvalidOperationException("The WDEM root directory must have a parent.");
+      Directory.CreateDirectory(rootParent);
+      scope.Add(SecureBoundedFileReader.OpenDirectoryLease(
+          rootParent,
+          "local application data"));
+      Directory.CreateDirectory(_paths.Root);
+      scope.Add(SecureBoundedFileReader.OpenDirectoryLease(_paths.Root, "WDEM root"));
+      return scope;
+    }
+    catch
+    {
+      scope.Dispose();
+      throw;
+    }
+  }
+
+  private SecureDirectoryScope? AcquireExistingRootDirectoryScope()
+  {
+    var scope = new SecureDirectoryScope();
+    try
+    {
+      var rootParent = Path.GetDirectoryName(Path.GetFullPath(_paths.Root)) ??
+          throw new InvalidOperationException("The WDEM root directory must have a parent.");
+      var rootParentLease = SecureBoundedFileReader.TryOpenDirectoryLease(
+          rootParent,
+          "local application data");
+      if (rootParentLease is null)
+      {
+        scope.Dispose();
+        return null;
+      }
+
+      scope.Add(rootParentLease);
+      var rootLease = SecureBoundedFileReader.TryOpenDirectoryLease(_paths.Root, "WDEM root");
+      if (rootLease is null)
+      {
+        scope.Dispose();
+        return null;
+      }
+
+      scope.Add(rootLease);
+      return scope;
+    }
+    catch
+    {
+      scope.Dispose();
+      throw;
+    }
+  }
+
+  private SecureDirectoryScope? AcquireExistingRunsDirectoryScope()
+  {
+    var scope = AcquireExistingRootDirectoryScope();
+    if (scope is null)
+    {
+      return null;
+    }
+
+    try
+    {
+      var runsLease = SecureBoundedFileReader.TryOpenDirectoryLease(
+          _paths.RunsDirectory,
+          "execution runs");
+      if (runsLease is null)
+      {
+        scope.Dispose();
+        return null;
+      }
+
+      scope.Add(runsLease);
+      return scope;
+    }
+    catch
+    {
+      scope.Dispose();
+      throw;
+    }
+  }
+
+  private SecureDirectoryScope AcquireRunsDirectoryScope()
+  {
+    var scope = AcquireRootDirectoryScope();
+    try
+    {
+      Directory.CreateDirectory(_paths.RunsDirectory);
+      scope.Add(SecureBoundedFileReader.OpenDirectoryLease(
+          _paths.RunsDirectory,
+          "execution runs"));
+      return scope;
+    }
+    catch
+    {
+      scope.Dispose();
+      throw;
+    }
+  }
+
+  private async Task<OwnedAsyncLease> AcquireRunLockAsync(
       Guid runId,
       CancellationToken cancellationToken,
-      bool deleteOnClose = false)
+      bool deleteOnCloseWhenSnapshotMissing = false)
   {
-    Directory.CreateDirectory(_paths.RunsDirectory);
+    var directoryScope = AcquireRunsDirectoryScope();
+    try
+    {
+      var stream = await AcquireRunLockFileAsync(
+          runId,
+          cancellationToken,
+          deleteOnCloseWhenSnapshotMissing).ConfigureAwait(false);
+      return new OwnedAsyncLease(stream, directoryScope);
+    }
+    catch
+    {
+      directoryScope.Dispose();
+      throw;
+    }
+  }
+
+  private async Task<FileStream> AcquireRunLockFileAsync(
+      Guid runId,
+      CancellationToken cancellationToken,
+      bool deleteOnCloseWhenSnapshotMissing)
+  {
     var lockPath = Path.Combine(_paths.RunsDirectory, $"{runId:D}.lock");
+    bool deleteOnClose = deleteOnCloseWhenSnapshotMissing &&
+        !File.Exists(SnapshotPath(runId));
     while (true)
     {
       cancellationToken.ThrowIfCancellationRequested();
       try
       {
-        return new FileStream(
+        return SecureBoundedFileReader.OpenLockFile(
             lockPath,
-            FileMode.OpenOrCreate,
-            FileAccess.ReadWrite,
-            FileShare.None,
-            1,
-            FileOptions.Asynchronous
-                | (deleteOnClose ? FileOptions.DeleteOnClose : FileOptions.None));
+            _paths.RunsDirectory,
+            deleteOnClose,
+            "execution run lock");
       }
       catch (IOException exception) when (IsLockContention(exception))
       {
@@ -878,17 +1086,51 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     }
   }
 
-  private Task<FileStream> AcquireRunLockForExistingSnapshotAsync(
+  private Task<OwnedAsyncLease> AcquireRunLockForExistingSnapshotAsync(
       Guid runId,
       CancellationToken cancellationToken) =>
       AcquireRunLockAsync(
           runId,
           cancellationToken,
-          deleteOnClose: !File.Exists(SnapshotPath(runId)));
+          deleteOnCloseWhenSnapshotMissing: true);
+
+  private async Task<OwnedAsyncLease> AcquireSnapshotFormatStateLockAsync(
+      CancellationToken cancellationToken)
+  {
+    var directoryScope = AcquireRootDirectoryScope();
+    try
+    {
+      var lockPath = SnapshotFormatAnchorPath() + ".lock";
+      while (true)
+      {
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+          var stream = SecureBoundedFileReader.OpenLockFile(
+              lockPath,
+              _paths.Root,
+              deleteOnClose: false,
+              "snapshot format state lock");
+          return new OwnedAsyncLease(stream, directoryScope);
+        }
+        catch (IOException exception) when (IsLockContention(exception))
+        {
+          await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken)
+              .ConfigureAwait(false);
+        }
+      }
+    }
+    catch
+    {
+      directoryScope.Dispose();
+      throw;
+    }
+  }
 
   private async Task<ExecutionRun?> ReadSnapshotAsync(
       Guid runId,
-      CancellationToken cancellationToken)
+      CancellationToken cancellationToken,
+      BatchSnapshotFormatState? batchState = null)
   {
     var path = SnapshotPath(runId);
     if (!File.Exists(path))
@@ -896,37 +1138,122 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
       return null;
     }
 
+    byte[] snapshotBytes;
     try
     {
-      await using var stream = new FileStream(
+      snapshotBytes = await SecureBoundedFileReader.ReadAsync(
           path,
-          FileMode.Open,
-          FileAccess.Read,
-          FileShare.Read,
-          4096,
-          FileOptions.Asynchronous | FileOptions.SequentialScan);
-      var run = await JsonSerializer.DeserializeAsync<ExecutionRun>(
-          stream,
-          _snapshotJsonOptions,
+          _paths.RunsDirectory,
+          MaximumSnapshotBytes,
+          "snapshot",
           cancellationToken).ConfigureAwait(false);
+    }
+    catch (Exception exception) when (IsSnapshotCorruptionException(exception))
+    {
+      PreserveCorruptedSnapshot(runId, path, exception);
+      return null;
+    }
+
+    if (batchState is not null)
+    {
+      var batchResult = TryRestoreSnapshot(
+          runId,
+          path,
+          snapshotBytes,
+          batchState.Index);
+      batchState.IsChanged |= batchResult.IndexChanged;
+      return batchResult.Run;
+    }
+
+    await using var stateLock = await AcquireSnapshotFormatStateLockAsync(cancellationToken)
+        .ConfigureAwait(false);
+    var index = await ReadAuthenticatedSnapshotFormatIndexAsync(cancellationToken)
+        .ConfigureAwait(false);
+    var result = TryRestoreSnapshot(runId, path, snapshotBytes, index);
+    if (result.IndexChanged)
+    {
+      await PersistSnapshotFormatIndexAsync(index, cancellationToken).ConfigureAwait(false);
+    }
+
+    return result.Run;
+  }
+
+  private (ExecutionRun? Run, bool IndexChanged) TryRestoreSnapshot(
+      Guid runId,
+      string path,
+      byte[] snapshotBytes,
+      SnapshotFormatIndex index)
+  {
+    bool indexChanged = false;
+    try
+    {
+      var formatCommitment = ReconcileSnapshotFormatCommitment(
+          runId,
+          snapshotBytes,
+          index,
+          out indexChanged);
+      var document = JsonNode.Parse(snapshotBytes) as JsonObject ??
+          throw new JsonException("The execution run snapshot must be a JSON object.");
+      var protectedPlanApproval = document[ProtectedPlanApprovalPropertyName]?.DeepClone();
+      document.Remove(ProtectedPlanApprovalPropertyName);
+      var run = document.Deserialize<ExecutionRun>(_snapshotJsonOptions);
       if (run is null || run.RunId != runId)
       {
         throw new JsonException("The execution run snapshot has no matching run identifier.");
       }
 
       ValidateRun(run);
-      return SnapshotRestoredRun(run);
+      if (formatCommitment.ExpectedRevision is { } expectedRevision &&
+          run.Revision != expectedRevision)
+      {
+        throw new InvalidOperationException(
+            "The execution run snapshot revision does not match its format commitment.");
+      }
+
+      if (formatCommitment.IsCurrent &&
+          (run.Plan is null ||
+           run.PlanApproval is null ||
+           protectedPlanApproval is null))
+      {
+        throw new InvalidOperationException(
+            "The current execution run snapshot must contain a plan, approval, and protected " +
+            "plan approval.");
+      }
+
+      if (!formatCommitment.IsCurrent &&
+          run.PlanApproval is not null &&
+          !formatCommitment.IsLegacyMigrationCandidate)
+      {
+        throw new InvalidOperationException(
+            "The legacy approved execution run was not authenticated during migration.");
+      }
+
+      if (protectedPlanApproval is not null)
+      {
+        var envelope = protectedPlanApproval.Deserialize<ProtectedPlanApproval>(
+            _snapshotJsonOptions) ??
+            throw new JsonException("The protected plan approval is null.");
+        run = RestoreProtectedPlanApproval(run, envelope);
+        ValidateRun(run);
+      }
+
+      return (SnapshotRestoredRun(run), indexChanged);
     }
-    catch (Exception exception) when (
-        exception is JsonException
-            or NotSupportedException
-            or InvalidOperationException
-            or ArgumentException)
+    catch (Exception exception) when (IsSnapshotCorruptionException(exception))
     {
       PreserveCorruptedSnapshot(runId, path, exception);
-      return null;
+      return (null, indexChanged);
     }
   }
+
+  private static bool IsSnapshotCorruptionException(Exception exception) =>
+      exception is JsonException
+          or NotSupportedException
+          or CryptographicException
+          or FormatException
+          or InvalidDataException
+          or InvalidOperationException
+          or ArgumentException;
 
   private void PreserveCorruptedSnapshot(Guid runId, string path, Exception exception)
   {
@@ -1283,7 +1610,7 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     {
       await using (var stream = new FileStream(
           temporaryPath,
-          FileMode.Create,
+          FileMode.CreateNew,
           FileAccess.Write,
           FileShare.None,
           4096,
@@ -1317,18 +1644,16 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
       string logPath,
       CancellationToken cancellationToken)
   {
-    if (!File.Exists(logPath))
+    await using var log = SecureBoundedFileReader.TryOpenMutableFile(
+        logPath,
+        _paths.RunsDirectory,
+        FileAccess.ReadWrite,
+        "run log");
+    if (log is null)
     {
       return new LogIndexState(0, 0, 0);
     }
 
-    await using var log = new FileStream(
-        logPath,
-        FileMode.Open,
-        FileAccess.ReadWrite,
-        FileShare.Read,
-        4096,
-        FileOptions.Asynchronous | FileOptions.WriteThrough);
     var indexPath = logPath + ".index";
     var state = await ValidateLogIndexAsync(log, indexPath, cancellationToken)
         .ConfigureAwait(false);
@@ -1339,13 +1664,12 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     }
 
     log.Position = state.Value.IndexedLength;
-    await using var index = new FileStream(
+    await using var index = SecureBoundedFileReader.OpenMutableFile(
         indexPath,
+        _paths.RunsDirectory,
         FileMode.OpenOrCreate,
-        FileAccess.Write,
-        FileShare.Read,
-        4096,
-        FileOptions.Asynchronous | FileOptions.WriteThrough);
+        FileAccess.ReadWrite,
+        "run log index");
     index.Position = state.Value.Count * LogIndexRecordSize;
     var reconciled = await AppendLogTailToIndexAsync(
         log,
@@ -1384,13 +1708,12 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
       return null;
     }
 
-    await using var index = new FileStream(
+    await using var index = SecureBoundedFileReader.OpenMutableFile(
         indexPath,
+        _paths.RunsDirectory,
         FileMode.Open,
         FileAccess.Read,
-        FileShare.Read,
-        4096,
-        FileOptions.Asynchronous | FileOptions.RandomAccess);
+        "run log index");
     var count = index.Length / LogIndexRecordSize;
     var lastSequence = 0L;
     var indexedLength = 0L;
@@ -1443,24 +1766,24 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
       string indexPath,
       CancellationToken cancellationToken)
   {
+    var logPath = indexPath[..^".index".Length];
     var temporaryPath = $"{indexPath}.{Guid.NewGuid():N}.tmp";
     try
     {
       log.Position = 0;
       LogIndexState rebuilt;
-      await using (var temporaryIndex = new FileStream(
+      await using (var temporaryIndex = SecureBoundedFileReader.OpenMutableFile(
           temporaryPath,
+          _paths.RunsDirectory,
           FileMode.CreateNew,
           FileAccess.Write,
-          FileShare.None,
-          4096,
-          FileOptions.Asynchronous | FileOptions.WriteThrough))
+          "temporary run log index"))
       {
         rebuilt = await AppendLogTailToIndexAsync(
             log,
             temporaryIndex,
             new LogIndexState(0, 0, 0),
-            log.Name,
+            logPath,
             cancellationToken).ConfigureAwait(false);
         await FlushLogAndIndexAsync(log, temporaryIndex, cancellationToken)
             .ConfigureAwait(false);
@@ -1476,7 +1799,7 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
         File.Move(temporaryPath, indexPath);
       }
 
-      RememberValidatedLogIndex(log.Name, rebuilt);
+      RememberValidatedLogIndex(logPath, rebuilt);
       return rebuilt;
     }
     finally
@@ -1576,13 +1899,12 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
       int take,
       CancellationToken cancellationToken)
   {
-    await using var index = new FileStream(
+    await using var index = SecureBoundedFileReader.OpenMutableFile(
         logPath + ".index",
+        _paths.RunsDirectory,
         FileMode.Open,
         FileAccess.Read,
-        FileShare.ReadWrite,
-        4096,
-        FileOptions.Asynchronous | FileOptions.RandomAccess);
+        "run log index");
     var low = 0L;
     var high = recordCount;
     while (low < high)
@@ -1601,13 +1923,12 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     }
 
     var entries = new List<RunLogEntry>(take);
-    await using var log = new FileStream(
+    await using var log = SecureBoundedFileReader.OpenMutableFile(
         logPath,
+        _paths.RunsDirectory,
         FileMode.Open,
         FileAccess.Read,
-        FileShare.ReadWrite,
-        4096,
-        FileOptions.Asynchronous | FileOptions.RandomAccess);
+        "run log");
     for (var ordinal = low; ordinal < recordCount && entries.Count < take; ordinal++)
     {
       cancellationToken.ThrowIfCancellationRequested();
@@ -1668,18 +1989,18 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     return Utf8WithoutBom.GetString(bytes, 0, length);
   }
 
-  private static async Task AppendLogIndexRecordAsync(
+  private async Task AppendLogIndexRecordAsync(
       string logPath,
       LogIndexRecord record,
       CancellationToken cancellationToken)
   {
-    await using var index = new FileStream(
+    await using var index = SecureBoundedFileReader.OpenMutableFile(
         logPath + ".index",
-        FileMode.Append,
-        FileAccess.Write,
-        FileShare.Read,
-        4096,
-        FileOptions.Asynchronous | FileOptions.WriteThrough);
+        _paths.RunsDirectory,
+        FileMode.OpenOrCreate,
+        FileAccess.ReadWrite,
+        "run log index");
+    index.Position = index.Length;
     await WriteLogIndexRecordAsync(index, record, cancellationToken).ConfigureAwait(false);
     await index.FlushAsync(cancellationToken).ConfigureAwait(false);
     index.Flush(flushToDisk: true);
@@ -1756,10 +2077,10 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
 
   private static void ValidateRun(ExecutionRun run)
   {
-    if (run.Revision < 0)
+    if (run.Revision < 0 || run.Revision == long.MaxValue)
     {
       throw new ArgumentException(
-          "An execution run revision cannot be negative.",
+          "An execution run revision must be non-negative and incrementable.",
           nameof(run));
     }
 
@@ -2271,6 +2592,775 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
   private static IReadOnlyList<T> ReadOnly<T>(IEnumerable<T> values) =>
       Array.AsReadOnly(values.ToArray());
 
+  private async Task PersistSnapshotWithCommitmentAsync(
+      ExecutionRun run,
+      byte[] snapshotBytes,
+      CancellationToken cancellationToken)
+  {
+    SecureBoundedFileReader.EnsureLengthWithinMaximum(
+        snapshotBytes.LongLength,
+        MaximumSnapshotBytes,
+        "snapshot");
+    var path = SnapshotPath(run.RunId);
+    if (run.Plan is null || run.PlanApproval is null)
+    {
+      await WriteBytesAtomicallyAsync(path, snapshotBytes, cancellationToken)
+          .ConfigureAwait(false);
+      return;
+    }
+
+    await using var stateLock = await AcquireSnapshotFormatStateLockAsync(cancellationToken)
+        .ConfigureAwait(false);
+    var index = await ReadAuthenticatedSnapshotFormatIndexAsync(cancellationToken)
+        .ConfigureAwait(false);
+    var key = run.RunId.ToString("D");
+    SnapshotRevisionCommitment? committed = null;
+    SnapshotRevisionCommitment? legacy = null;
+    byte[]? previousBytes = File.Exists(path)
+        ? await SecureBoundedFileReader.ReadAsync(
+            path,
+            _paths.RunsDirectory,
+            MaximumSnapshotBytes,
+            "snapshot",
+            cancellationToken).ConfigureAwait(false)
+        : null;
+
+    if (index.Runs.TryGetValue(key, out var existing))
+    {
+      if (previousBytes is null)
+      {
+        if (existing.Committed is not null || existing.Legacy is not null)
+        {
+          throw new InvalidOperationException(
+              "A committed execution run snapshot cannot be recreated after deletion.");
+        }
+
+        index.Runs.Remove(key);
+      }
+      else
+      {
+        var digest = SnapshotDigest(previousBytes);
+        if (existing.Pending is { } pending && pending.MatchesDigest(digest))
+        {
+          committed = pending;
+        }
+        else if (existing.Committed is { } current && current.MatchesDigest(digest))
+        {
+          committed = current;
+        }
+        else if (existing.Legacy is { } migration && migration.MatchesDigest(digest))
+        {
+          committed = migration;
+          legacy = migration;
+        }
+        else if (existing.Committed is not null || existing.Legacy is not null)
+        {
+          throw new InvalidOperationException(
+              "The execution run snapshot does not match its authenticated revision.");
+        }
+        else
+        {
+          index.Runs.Remove(key);
+        }
+      }
+    }
+    else if (previousBytes is not null)
+    {
+      throw new InvalidOperationException(
+          "The execution run snapshot has no authenticated revision.");
+    }
+
+    if (committed is { } previous && run.Revision != checked(previous.Revision + 1))
+    {
+      throw new InvalidOperationException(
+          "The replacement snapshot revision must follow its authenticated revision.");
+    }
+
+    var next = new SnapshotRevisionCommitment(run.Revision, SnapshotDigest(snapshotBytes));
+    index.Runs[key] = new SnapshotFormatIndexEntry(
+        legacy is null ? committed : null,
+        next,
+        legacy);
+    var pendingIndexWrite = PrepareSnapshotFormatIndex(index);
+    var committedRuns = new Dictionary<string, SnapshotFormatIndexEntry>(
+        pendingIndexWrite.Index.Runs,
+        StringComparer.OrdinalIgnoreCase)
+    {
+      [key] = new SnapshotFormatIndexEntry(next, Pending: null, Legacy: null)
+    };
+    var committedIndexWrite = PrepareSnapshotFormatIndex(
+        pendingIndexWrite.Index with { Runs = committedRuns });
+
+    await PersistPreparedSnapshotFormatIndexAsync(pendingIndexWrite, cancellationToken)
+        .ConfigureAwait(false);
+
+    await WriteBytesAtomicallyAsync(path, snapshotBytes, cancellationToken)
+        .ConfigureAwait(false);
+
+    await PersistPreparedSnapshotFormatIndexAsync(committedIndexWrite, cancellationToken)
+        .ConfigureAwait(false);
+  }
+
+  private SnapshotFormatReconciliation ReconcileSnapshotFormatCommitment(
+      Guid runId,
+      byte[] snapshotBytes,
+      SnapshotFormatIndex index,
+      out bool indexChanged)
+  {
+    indexChanged = false;
+    var key = runId.ToString("D");
+    if (!index.Runs.TryGetValue(key, out var entry))
+    {
+      if (File.Exists(SnapshotFormatCommitmentPath(runId)))
+      {
+        throw new InvalidOperationException(
+            "The current-format execution run snapshot has no authenticated revision.");
+      }
+
+      return new SnapshotFormatReconciliation(
+          IsCurrent: false,
+          ExpectedRevision: null,
+          IsLegacyMigrationCandidate: false);
+    }
+
+    var digest = SnapshotDigest(snapshotBytes);
+    if (entry.Pending is { } pending && pending.MatchesDigest(digest))
+    {
+      index.Runs[key] = new SnapshotFormatIndexEntry(pending, Pending: null);
+      indexChanged = true;
+      return new SnapshotFormatReconciliation(
+          IsCurrent: true,
+          pending.Revision,
+          IsLegacyMigrationCandidate: false);
+    }
+
+    if (entry.Committed is { } committed && committed.MatchesDigest(digest))
+    {
+      if (entry.Pending is not null)
+      {
+        index.Runs[key] = new SnapshotFormatIndexEntry(
+            committed,
+            Pending: null,
+            Legacy: null);
+        indexChanged = true;
+      }
+
+      return new SnapshotFormatReconciliation(
+          IsCurrent: true,
+          committed.Revision,
+          IsLegacyMigrationCandidate: false);
+    }
+
+    if (entry.Legacy is { } legacy && legacy.MatchesDigest(digest))
+    {
+      if (entry.Pending is not null)
+      {
+        index.Runs[key] = new SnapshotFormatIndexEntry(
+            Committed: null,
+            Pending: null,
+            Legacy: legacy);
+        indexChanged = true;
+      }
+
+      return new SnapshotFormatReconciliation(
+          IsCurrent: false,
+          legacy.Revision,
+          IsLegacyMigrationCandidate: true);
+    }
+
+    throw new InvalidOperationException(
+        "The execution run snapshot does not match its authenticated revision.");
+  }
+
+  private async Task<SnapshotFormatIndex> ReadAuthenticatedSnapshotFormatIndexAsync(
+      CancellationToken cancellationToken)
+  {
+    var indexPath = SnapshotFormatIndexPath();
+    var anchorPath = SnapshotFormatAnchorPath();
+    var indexExists = File.Exists(indexPath);
+    var anchorExists = File.Exists(anchorPath);
+    if (!indexExists && !anchorExists)
+    {
+      return await EnrollLegacyMigrationCandidatesAsync(cancellationToken)
+          .ConfigureAwait(false);
+    }
+
+    if (indexExists && !anchorExists)
+    {
+      throw new InvalidOperationException(
+          "The snapshot format index is missing its root freshness anchor.");
+    }
+
+    var anchor = await ReadSnapshotFormatAnchorAsync(cancellationToken).ConfigureAwait(false) ??
+        throw new InvalidOperationException("The snapshot format freshness anchor is missing.");
+    if (!indexExists)
+    {
+      if (anchor.Committed is null && anchor.Pending is not null)
+      {
+        File.Delete(anchorPath);
+        return await EnrollLegacyMigrationCandidatesAsync(cancellationToken)
+            .ConfigureAwait(false);
+      }
+
+      throw new InvalidOperationException(
+          "The root freshness anchor refers to a missing snapshot format index.");
+    }
+
+    var read = await ReadSnapshotFormatIndexFileAsync(cancellationToken).ConfigureAwait(false);
+    if (anchor.Pending is { } pending && pending.Matches(read.Index, read.Digest))
+    {
+      await WriteSnapshotFormatAnchorAsync(
+          new SnapshotFormatAnchor(
+              CurrentSnapshotFormatVersion,
+              pending,
+              Pending: null),
+          cancellationToken).ConfigureAwait(false);
+      return read.Index;
+    }
+
+    if (anchor.Committed is { } committed && committed.Matches(read.Index, read.Digest))
+    {
+      if (anchor.Pending is not null)
+      {
+        await WriteSnapshotFormatAnchorAsync(
+            new SnapshotFormatAnchor(
+                CurrentSnapshotFormatVersion,
+                committed,
+                Pending: null),
+            cancellationToken).ConfigureAwait(false);
+      }
+
+      return read.Index;
+    }
+
+    throw new InvalidOperationException(
+        "The snapshot format index does not match its root freshness anchor.");
+  }
+
+  private async Task<SnapshotFormatIndex> EnrollLegacyMigrationCandidatesAsync(
+      CancellationToken cancellationToken)
+  {
+    var paths = Directory.EnumerateFiles(
+            _paths.RunsDirectory,
+            "*.json",
+            SearchOption.TopDirectoryOnly)
+        .Take(MaximumLegacyMigrationCandidateFiles + 1)
+        .ToArray();
+    if (paths.Length > MaximumLegacyMigrationCandidateFiles)
+    {
+      throw new InvalidOperationException(
+          "The legacy snapshot migration scan exceeded its file limit.");
+    }
+
+    var index = SnapshotFormatIndex.Empty();
+    foreach (var path in paths)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      var name = Path.GetFileNameWithoutExtension(path);
+      if (!Guid.TryParseExact(name, "D", out var runId) ||
+          !string.Equals(name, runId.ToString("D"), StringComparison.OrdinalIgnoreCase))
+      {
+        continue;
+      }
+
+      if (File.Exists(SnapshotFormatCommitmentPath(runId)))
+      {
+        var current = await TryReadCurrentMigrationCandidateAsync(
+            path,
+            runId,
+            cancellationToken).ConfigureAwait(false);
+        if (current is not null)
+        {
+          index.Runs.Add(
+              runId.ToString("D"),
+              new SnapshotFormatIndexEntry(
+                  Committed: current,
+                  Pending: null,
+                  Legacy: null));
+        }
+      }
+      else
+      {
+        var legacy = await TryReadLegacyMigrationCandidateAsync(
+            path,
+            runId,
+            cancellationToken).ConfigureAwait(false);
+        if (legacy is not null)
+        {
+          index.Runs.Add(
+              runId.ToString("D"),
+              new SnapshotFormatIndexEntry(
+                  Committed: null,
+                  Pending: null,
+                  Legacy: legacy));
+        }
+      }
+    }
+
+    return await PersistSnapshotFormatIndexAsync(index, cancellationToken)
+        .ConfigureAwait(false);
+  }
+
+  private async Task<SnapshotRevisionCommitment?> TryReadCurrentMigrationCandidateAsync(
+      string path,
+      Guid expectedRunId,
+      CancellationToken cancellationToken)
+  {
+    try
+    {
+      byte[]? bytes = await TryReadMigrationCandidateBytesAsync(path, cancellationToken)
+          .ConfigureAwait(false);
+      if (bytes is null)
+      {
+        return null;
+      }
+
+      var commitment = await ReadLegacySnapshotFormatCommitmentAsync(
+          expectedRunId,
+          cancellationToken).ConfigureAwait(false);
+      if (commitment.Revision == long.MaxValue ||
+          !commitment.MatchesDigest(SnapshotDigest(bytes)))
+      {
+        return null;
+      }
+
+      var document = JsonNode.Parse(bytes) as JsonObject;
+      var protectedPlanApproval = document?[ProtectedPlanApprovalPropertyName]?.DeepClone();
+      document?.Remove(ProtectedPlanApprovalPropertyName);
+      var run = document?.Deserialize<ExecutionRun>(_snapshotJsonOptions);
+      if (run is null ||
+          run.RunId != expectedRunId ||
+          run.Revision != commitment.Revision ||
+          run.Plan is null ||
+          run.PlanApproval is null ||
+          protectedPlanApproval is null)
+      {
+        return null;
+      }
+
+      ValidateRun(run);
+      var envelope = protectedPlanApproval.Deserialize<ProtectedPlanApproval>(
+          _snapshotJsonOptions) ??
+          throw new JsonException("The protected plan approval is null.");
+      run = RestoreProtectedPlanApproval(run, envelope);
+      ValidateRun(run);
+      return commitment;
+    }
+    catch (Exception exception) when (
+        exception is IOException
+            or UnauthorizedAccessException
+            or JsonException
+            or NotSupportedException
+            or CryptographicException
+            or FormatException
+            or InvalidOperationException
+            or ArgumentException)
+    {
+      return null;
+    }
+  }
+
+  private async Task<SnapshotRevisionCommitment?> TryReadLegacyMigrationCandidateAsync(
+      string path,
+      Guid expectedRunId,
+      CancellationToken cancellationToken)
+  {
+    try
+    {
+      byte[]? bytes = await TryReadMigrationCandidateBytesAsync(path, cancellationToken)
+          .ConfigureAwait(false);
+      if (bytes is null)
+      {
+        return null;
+      }
+
+      var document = JsonNode.Parse(bytes) as JsonObject;
+      if (document is null || document.ContainsKey(ProtectedPlanApprovalPropertyName))
+      {
+        return null;
+      }
+
+      var run = document.Deserialize<ExecutionRun>(_snapshotJsonOptions);
+      if (run is null ||
+          run.RunId != expectedRunId ||
+          run.Plan is null ||
+          run.PlanApproval is null)
+      {
+        return null;
+      }
+
+      ValidateRun(run);
+      return new SnapshotRevisionCommitment(run.Revision, SnapshotDigest(bytes));
+    }
+    catch (Exception exception) when (
+        exception is IOException
+            or UnauthorizedAccessException
+            or JsonException
+            or NotSupportedException
+            or FormatException
+            or InvalidOperationException
+            or ArgumentException)
+    {
+      return null;
+    }
+  }
+
+  private async Task<byte[]?> TryReadMigrationCandidateBytesAsync(
+      string path,
+      CancellationToken cancellationToken)
+  {
+    try
+    {
+      return await SecureBoundedFileReader.ReadAsync(
+          path,
+          _paths.RunsDirectory,
+          checked((int)MaximumLegacyMigrationCandidateBytes),
+          "snapshot migration candidate",
+          cancellationToken).ConfigureAwait(false);
+    }
+    catch (Exception exception) when (
+        exception is IOException or UnauthorizedAccessException)
+    {
+      return null;
+    }
+  }
+
+  private async Task<SnapshotFormatIndexRead> ReadSnapshotFormatIndexFileAsync(
+      CancellationToken cancellationToken)
+  {
+    var protectedIndex = await SecureBoundedFileReader.ReadAsync(
+        SnapshotFormatIndexPath(),
+        _paths.RunsDirectory,
+        MaximumSnapshotFormatIndexBytes,
+        "index",
+        cancellationToken).ConfigureAwait(false);
+    var plaintext = _approvedResourceProtector.Unprotect(
+        protectedIndex,
+        SnapshotFormatIndexEntropy());
+    var index = JsonSerializer.Deserialize<SnapshotFormatIndex>(
+        plaintext,
+        _snapshotJsonOptions) ??
+        throw new JsonException("The snapshot format index is null.");
+    if (index.FormatVersion != CurrentSnapshotFormatVersion ||
+        index.Generation <= 0 ||
+        index.Runs is null)
+    {
+      throw new InvalidOperationException("The snapshot format index version is unsupported.");
+    }
+
+    var validatedRuns = new Dictionary<string, SnapshotFormatIndexEntry>(
+        StringComparer.OrdinalIgnoreCase);
+    foreach (var (key, entry) in index.Runs)
+    {
+      if (!Guid.TryParseExact(key, "D", out _) ||
+          entry is null ||
+          (entry.Committed is null && entry.Pending is null && entry.Legacy is null) ||
+          (entry.Committed is not null && entry.Legacy is not null))
+      {
+        throw new InvalidOperationException("The snapshot format index is malformed.");
+      }
+
+      ValidateSnapshotRevisionCommitment(entry.Committed);
+      ValidateSnapshotRevisionCommitment(entry.Pending);
+      ValidateSnapshotRevisionCommitment(entry.Legacy);
+      var previous = entry.Committed ?? entry.Legacy;
+      if (entry.Pending is { } pending &&
+          previous is { } committed &&
+          pending.Revision != checked(committed.Revision + 1))
+      {
+        throw new InvalidOperationException(
+            "The pending snapshot revision does not follow its authenticated revision.");
+      }
+
+      validatedRuns.Add(key, entry);
+    }
+
+    return new SnapshotFormatIndexRead(
+        new SnapshotFormatIndex(
+            CurrentSnapshotFormatVersion,
+            index.Generation,
+            validatedRuns),
+        SnapshotDigest(plaintext));
+  }
+
+  private async Task<SnapshotFormatIndex> PersistSnapshotFormatIndexAsync(
+      SnapshotFormatIndex index,
+      CancellationToken cancellationToken) =>
+      await PersistPreparedSnapshotFormatIndexAsync(
+          PrepareSnapshotFormatIndex(index),
+          cancellationToken).ConfigureAwait(false);
+
+  private PreparedSnapshotFormatIndex PrepareSnapshotFormatIndex(
+      SnapshotFormatIndex index)
+  {
+    var nextIndex = index with { Generation = checked(index.Generation + 1) };
+    var plaintext = JsonSerializer.SerializeToUtf8Bytes(nextIndex, _snapshotJsonOptions);
+    var protectedIndex = _approvedResourceProtector.Protect(
+        plaintext,
+        SnapshotFormatIndexEntropy());
+    SecureBoundedFileReader.EnsureLengthWithinMaximum(
+        protectedIndex.LongLength,
+        MaximumSnapshotFormatIndexBytes,
+        "index");
+    var next = new SnapshotIndexCommitment(nextIndex.Generation, SnapshotDigest(plaintext));
+    return new PreparedSnapshotFormatIndex(nextIndex, next, protectedIndex);
+  }
+
+  private async Task<SnapshotFormatIndex> PersistPreparedSnapshotFormatIndexAsync(
+      PreparedSnapshotFormatIndex prepared,
+      CancellationToken cancellationToken)
+  {
+    var anchor = await ReadSnapshotFormatAnchorAsync(cancellationToken).ConfigureAwait(false);
+    if (prepared.Index.Generation == 1 && anchor is not null)
+    {
+      throw new InvalidOperationException(
+          "A new snapshot format index cannot replace an existing freshness anchor.");
+    }
+
+    var committed = anchor?.Committed;
+    await WriteSnapshotFormatAnchorAsync(
+        new SnapshotFormatAnchor(
+            CurrentSnapshotFormatVersion,
+            committed,
+            prepared.Commitment),
+        cancellationToken).ConfigureAwait(false);
+
+    await WriteBytesAtomicallyAsync(
+        SnapshotFormatIndexPath(),
+        prepared.ProtectedBytes,
+        cancellationToken).ConfigureAwait(false);
+
+    await WriteSnapshotFormatAnchorAsync(
+        new SnapshotFormatAnchor(
+            CurrentSnapshotFormatVersion,
+            prepared.Commitment,
+            Pending: null),
+        cancellationToken).ConfigureAwait(false);
+    return prepared.Index;
+  }
+
+  private async Task<SnapshotFormatAnchor?> ReadSnapshotFormatAnchorAsync(
+      CancellationToken cancellationToken)
+  {
+    var path = SnapshotFormatAnchorPath();
+    if (!File.Exists(path))
+    {
+      return null;
+    }
+
+    var protectedAnchor = await SecureBoundedFileReader.ReadAsync(
+        path,
+        _paths.Root,
+        MaximumSnapshotFormatAnchorBytes,
+        "anchor",
+        cancellationToken).ConfigureAwait(false);
+    var plaintext = _approvedResourceProtector.Unprotect(
+        protectedAnchor,
+        SnapshotFormatAnchorEntropy());
+    var anchor = JsonSerializer.Deserialize<SnapshotFormatAnchor>(
+        plaintext,
+        _snapshotJsonOptions) ??
+        throw new JsonException("The snapshot format freshness anchor is null.");
+    if (anchor.FormatVersion != CurrentSnapshotFormatVersion ||
+        (anchor.Committed is null && anchor.Pending is null))
+    {
+      throw new InvalidOperationException("The snapshot format freshness anchor is malformed.");
+    }
+
+    ValidateSnapshotIndexCommitment(anchor.Committed);
+    ValidateSnapshotIndexCommitment(anchor.Pending);
+    if (anchor.Pending is { } pending &&
+        pending.Generation != checked((anchor.Committed?.Generation ?? 0) + 1))
+    {
+      throw new InvalidOperationException(
+          "The pending snapshot index generation does not follow its committed generation.");
+    }
+
+    return anchor;
+  }
+
+  private async Task WriteSnapshotFormatAnchorAsync(
+      SnapshotFormatAnchor anchor,
+      CancellationToken cancellationToken)
+  {
+    var plaintext = JsonSerializer.SerializeToUtf8Bytes(anchor, _snapshotJsonOptions);
+    var protectedAnchor = _approvedResourceProtector.Protect(
+        plaintext,
+        SnapshotFormatAnchorEntropy());
+    SecureBoundedFileReader.EnsureLengthWithinMaximum(
+        protectedAnchor.LongLength,
+        MaximumSnapshotFormatAnchorBytes,
+        "anchor");
+    await WriteBytesAtomicallyAsync(
+        SnapshotFormatAnchorPath(),
+        protectedAnchor,
+        cancellationToken).ConfigureAwait(false);
+  }
+
+  private async Task<SnapshotRevisionCommitment> ReadLegacySnapshotFormatCommitmentAsync(
+      Guid runId,
+    CancellationToken cancellationToken)
+  {
+    var path = SnapshotFormatCommitmentPath(runId);
+    var protectedCommitment = await SecureBoundedFileReader.ReadAsync(
+        path,
+        _paths.RunsDirectory,
+        MaximumSnapshotFormatCommitmentBytes,
+        "snapshot format commitment",
+        cancellationToken).ConfigureAwait(false);
+
+    var plaintext = _approvedResourceProtector.Unprotect(
+        protectedCommitment,
+        SnapshotFormatEntropy(runId));
+    var commitment = JsonSerializer.Deserialize<LegacySnapshotFormatCommitment>(
+        plaintext,
+        _snapshotJsonOptions) ??
+        throw new JsonException("The snapshot format commitment is null.");
+    if (commitment.FormatVersion != CurrentSnapshotFormatVersion ||
+        commitment.RunId != runId)
+    {
+      throw new InvalidOperationException(
+          "The snapshot format commitment does not match its execution run.");
+    }
+
+    var revisionCommitment = new SnapshotRevisionCommitment(
+        commitment.Revision,
+        commitment.Digest);
+    ValidateSnapshotRevisionCommitment(revisionCommitment);
+    return revisionCommitment;
+  }
+
+  private static void ValidateSnapshotRevisionCommitment(
+      SnapshotRevisionCommitment? commitment)
+  {
+    if (commitment is null)
+    {
+      return;
+    }
+
+    if (commitment.Revision < 0 || commitment.Revision == long.MaxValue)
+    {
+      throw new InvalidOperationException(
+          "The snapshot format index contains an invalid revision.");
+    }
+
+    ValidateSha256(commitment.Digest, "snapshot digest");
+  }
+
+  private static void ValidateSnapshotIndexCommitment(SnapshotIndexCommitment? commitment)
+  {
+    if (commitment is null)
+    {
+      return;
+    }
+
+    if (commitment.Generation <= 0)
+    {
+      throw new InvalidOperationException(
+          "The snapshot format anchor contains an invalid generation.");
+    }
+
+    ValidateSha256(commitment.Digest, "snapshot index digest");
+  }
+
+  private static string SnapshotDigest(byte[] snapshotBytes) =>
+      Convert.ToHexString(SHA256.HashData(snapshotBytes));
+
+  private byte[] SerializeSnapshot(ExecutionRun run)
+  {
+    var publicRun = Redact(run);
+    var document = JsonSerializer.SerializeToNode(publicRun, _snapshotJsonOptions)?.AsObject() ??
+        throw new JsonException("The execution run snapshot could not be serialized.");
+    if (run.Plan is not null && run.PlanApproval is not null)
+    {
+      var binding = new PlanApprovalBinding(
+          run.RunId,
+          run.Revision,
+          run.Plan.PlanId,
+          run.Plan.Fingerprint,
+          run.PlanApproval.InitialPlanFingerprint);
+      var commitment = new TrustedPlanApproval(
+          binding,
+          run.Plan,
+          run.PlanApproval,
+          publicRun.Plan!,
+          publicRun.PlanApproval!);
+      var plaintext = JsonSerializer.SerializeToUtf8Bytes(commitment, _snapshotJsonOptions);
+      var protectedData = _approvedResourceProtector.Protect(
+          plaintext,
+          binding.Entropy());
+      document[ProtectedPlanApprovalPropertyName] = JsonSerializer.SerializeToNode(
+          new ProtectedPlanApproval(
+              binding,
+              Convert.ToBase64String(protectedData)),
+          _snapshotJsonOptions);
+    }
+
+    return JsonSerializer.SerializeToUtf8Bytes(document, _snapshotJsonOptions);
+  }
+
+  private ExecutionRun RestoreProtectedPlanApproval(
+      ExecutionRun publicRun,
+      ProtectedPlanApproval envelope)
+  {
+    var binding = envelope.Binding;
+    if (binding.RunId != publicRun.RunId ||
+        binding.Revision != publicRun.Revision ||
+        binding.PlanId == Guid.Empty)
+    {
+      throw new InvalidOperationException(
+          "The protected plan approval does not match its execution run snapshot.");
+    }
+
+    ValidateSha256(binding.PlanFingerprint, "protected plan fingerprint");
+    ValidateSha256(binding.ApprovalFingerprint, "protected approval fingerprint");
+    var protectedData = Convert.FromBase64String(envelope.ProtectedPayload);
+    var plaintext = _approvedResourceProtector.Unprotect(
+        protectedData,
+        binding.Entropy());
+    var commitment = JsonSerializer.Deserialize<TrustedPlanApproval>(
+        plaintext,
+        _snapshotJsonOptions) ??
+        throw new JsonException("The protected plan approval payload is null.");
+    if (!commitment.Binding.Matches(binding) ||
+        commitment.Plan.PlanId != binding.PlanId ||
+        !FixedEquals(commitment.Plan.Fingerprint, binding.PlanFingerprint) ||
+        !FixedEquals(
+            commitment.Approval.InitialPlanFingerprint,
+            binding.ApprovalFingerprint))
+    {
+      throw new InvalidOperationException(
+          "The protected plan approval payload does not match its snapshot envelope.");
+    }
+
+    if (publicRun.Plan is null || publicRun.PlanApproval is null ||
+        !JsonEquivalent(publicRun.Plan, commitment.PublicPlan) ||
+        !JsonEquivalent(publicRun.PlanApproval, commitment.PublicApproval))
+    {
+      throw new InvalidOperationException(
+          "The public execution plan does not match its protected approval commitment.");
+    }
+
+    return publicRun with
+    {
+      Plan = commitment.Plan,
+      PlanApproval = commitment.Approval
+    };
+  }
+
+  private bool JsonEquivalent<T>(T first, T second) => JsonNode.DeepEquals(
+      JsonSerializer.SerializeToNode(first, _snapshotJsonOptions),
+      JsonSerializer.SerializeToNode(second, _snapshotJsonOptions));
+
+  private static byte[] SnapshotFormatEntropy(Guid runId) => Encoding.UTF8.GetBytes(
+      $"WDEM\0snapshot-format\0{runId:D}");
+
+  private static byte[] SnapshotFormatIndexEntropy() => Encoding.UTF8.GetBytes(
+      "WDEM\0snapshot-format-index\0v1");
+
+  private static byte[] SnapshotFormatAnchorEntropy() => Encoding.UTF8.GetBytes(
+      "WDEM\0snapshot-format-anchor\0v1");
+
   private ExecutionRun Redact(ExecutionRun run) => run with
   {
     ProfileSourcePath = _redactor.Redact(run.ProfileSourcePath),
@@ -2396,24 +3486,27 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
     StructuredErrors = plan.StructuredErrors.Select(_redactor.Redact).ToArray()
   };
 
-  private ResourceDefinition Redact(ResourceDefinition definition) => definition with
+  private ResourceDefinition Redact(ResourceDefinition definition)
   {
-    Id = _redactor.Redact(definition.Id),
-    Type = _redactor.Redact(definition.Type),
-    Provider = _redactor.Redact(definition.Provider),
-    DisplayName = definition.DisplayName is null ? null : _redactor.Redact(definition.DisplayName),
-    VersionConstraint = definition.VersionConstraint is null
-        ? null
-        : _redactor.Redact(definition.VersionConstraint),
-    PreferredVersion = definition.PreferredVersion is null
-        ? null
-        : _redactor.Redact(definition.PreferredVersion),
-    Dependencies = definition.Dependencies.Select(_redactor.Redact).ToArray(),
-    Parameters = definition.Parameters.ToDictionary(
-        pair => _redactor.Redact(pair.Key),
-        pair => _redactor.RedactNamedValue(pair.Key, pair.Value),
-        StringComparer.OrdinalIgnoreCase)
-  };
+    var presentation = ResourceDefinitionPresentationRedactor.Redact(definition, _redactor);
+    return presentation with
+    {
+      Id = _redactor.Redact(definition.Id),
+      Type = _redactor.Redact(definition.Type),
+      Provider = _redactor.Redact(definition.Provider),
+      VersionConstraint = definition.VersionConstraint is null
+          ? null
+          : _redactor.Redact(definition.VersionConstraint),
+      PreferredVersion = definition.PreferredVersion is null
+          ? null
+          : _redactor.Redact(definition.PreferredVersion),
+      Dependencies = definition.Dependencies.Select(_redactor.Redact).ToArray(),
+      Parameters = definition.Parameters.ToDictionary(
+          pair => _redactor.Redact(pair.Key),
+          pair => _redactor.RedactNamedValue(pair.Key, pair.Value),
+          StringComparer.OrdinalIgnoreCase)
+    };
+  }
 
   private readonly record struct LogIndexState(
       long Count,
@@ -2440,6 +3533,126 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
       string Fingerprint,
       string ProtectedPayload,
       IReadOnlyList<string>? ClaimedPlanFingerprints = null);
+
+  private sealed record ProtectedPlanApproval(
+      PlanApprovalBinding Binding,
+      string ProtectedPayload);
+
+  private readonly record struct PlanApprovalBinding(
+      Guid RunId,
+      long Revision,
+      Guid PlanId,
+      string PlanFingerprint,
+      string ApprovalFingerprint)
+  {
+    public byte[] Entropy() => Encoding.UTF8.GetBytes(
+        $"WDEM\0plan-approval\0{RunId:D}\0{Revision}\0{PlanId:D}\0" +
+        $"{PlanFingerprint}\0{ApprovalFingerprint}");
+
+    public bool Matches(PlanApprovalBinding other) =>
+        RunId == other.RunId &&
+        Revision == other.Revision &&
+        PlanId == other.PlanId &&
+        FixedEquals(PlanFingerprint, other.PlanFingerprint) &&
+        FixedEquals(ApprovalFingerprint, other.ApprovalFingerprint);
+  }
+
+  private sealed record TrustedPlanApproval(
+      PlanApprovalBinding Binding,
+      ExecutionPlan Plan,
+      PlanApproval Approval,
+      ExecutionPlan PublicPlan,
+      PlanApproval PublicApproval);
+
+  private sealed record LegacySnapshotFormatCommitment(
+      int FormatVersion,
+      Guid RunId,
+      long Revision,
+      string Digest);
+
+  private sealed record SnapshotFormatIndex(
+      int FormatVersion,
+      long Generation,
+      Dictionary<string, SnapshotFormatIndexEntry> Runs)
+  {
+    public static SnapshotFormatIndex Empty() => new(
+        CurrentSnapshotFormatVersion,
+        Generation: 0,
+        new Dictionary<string, SnapshotFormatIndexEntry>(StringComparer.OrdinalIgnoreCase));
+  }
+
+  private sealed record SnapshotFormatAnchor(
+      int FormatVersion,
+      SnapshotIndexCommitment? Committed,
+      SnapshotIndexCommitment? Pending);
+
+  private sealed record SnapshotIndexCommitment(long Generation, string Digest)
+  {
+    public bool Matches(SnapshotFormatIndex index, string digest) =>
+        Generation == index.Generation && FixedEquals(Digest, digest);
+  }
+
+  private readonly record struct SnapshotFormatIndexRead(
+      SnapshotFormatIndex Index,
+      string Digest);
+
+  private readonly record struct PreparedSnapshotFormatIndex(
+      SnapshotFormatIndex Index,
+      SnapshotIndexCommitment Commitment,
+      byte[] ProtectedBytes);
+
+  private sealed record SnapshotFormatIndexEntry(
+      SnapshotRevisionCommitment? Committed,
+      SnapshotRevisionCommitment? Pending,
+      SnapshotRevisionCommitment? Legacy = null);
+
+  private sealed record SnapshotRevisionCommitment(long Revision, string Digest)
+  {
+    public bool MatchesDigest(string digest) => FixedEquals(Digest, digest);
+  }
+
+  private readonly record struct SnapshotFormatReconciliation(
+      bool IsCurrent,
+      long? ExpectedRevision,
+      bool IsLegacyMigrationCandidate);
+
+  private sealed class BatchSnapshotFormatState(SnapshotFormatIndex index)
+  {
+    public SnapshotFormatIndex Index { get; } = index;
+    public bool IsChanged { get; set; }
+  }
+
+  private sealed class SecureDirectoryScope : IDisposable
+  {
+    private readonly List<SecureDirectoryLease> _leases = [];
+
+    public void Add(SecureDirectoryLease lease) => _leases.Add(lease);
+
+    public void Dispose()
+    {
+      for (int index = _leases.Count - 1; index >= 0; index--)
+      {
+        _leases[index].Dispose();
+      }
+    }
+  }
+
+  private sealed class OwnedAsyncLease(
+      IAsyncDisposable inner,
+      SecureDirectoryScope directoryScope) : IAsyncDisposable
+  {
+    public async ValueTask DisposeAsync()
+    {
+      try
+      {
+        await inner.DisposeAsync().ConfigureAwait(false);
+      }
+      finally
+      {
+        directoryScope.Dispose();
+      }
+    }
+  }
 
   private sealed class ReadOnlyStringSetJsonConverter : JsonConverter<IReadOnlySet<string>>
   {

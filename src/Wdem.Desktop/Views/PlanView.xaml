@@ -33,6 +33,9 @@
                                     CornerRadius="6">
                                 <StackPanel Spacing="4">
                                     <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding Description}"
+                                               TextWrapping="Wrap"
+                                               Opacity="0.72" />
                                     <TextBlock Text="{Binding Id}" Opacity="0.7" />
                                     <TextBlock Text="{Binding ProviderDisplay}" />
                                     <TextBlock Text="{Binding ActionDisplay}" />

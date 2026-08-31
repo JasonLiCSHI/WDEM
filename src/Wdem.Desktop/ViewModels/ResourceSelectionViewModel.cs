@@ -3,6 +3,8 @@ using System.Windows.Input;
 using Wdem.Core.Execution;
 using Wdem.Core.Graph;
 using Wdem.Core.Profiles;
+using Wdem.Core.Resources;
+using Wdem.Core.Runs;
 
 namespace Wdem.Desktop.ViewModels;
 
@@ -27,6 +29,7 @@ public sealed class ResourceSelectionViewModel : ObservableObject
   private readonly HashSet<string> _selectedOptionalIds;
   private readonly Func<Exception, string> _reportError;
   private readonly Action _clearError;
+  private readonly LogRedactor _redactor;
   private readonly AsyncRelayCommand _checkEnvironmentCommand;
   private readonly AsyncRelayCommand _startConfigurationCommand;
   private ResourceGraph? _resolvedGraph;
@@ -38,7 +41,8 @@ public sealed class ResourceSelectionViewModel : ObservableObject
       ResourceGraphBuilder graphBuilder,
       Func<ResourceSelectionNavigationRequest, Task>? navigateToPlan = null,
       Func<Exception, string>? reportError = null,
-      Action? clearError = null)
+      Action? clearError = null,
+      LogRedactor? redactor = null)
   {
     ArgumentNullException.ThrowIfNull(profile);
     ArgumentNullException.ThrowIfNull(graphBuilder);
@@ -46,6 +50,7 @@ public sealed class ResourceSelectionViewModel : ObservableObject
     _graphBuilder = graphBuilder;
     _reportError = reportError ?? UserErrorMessageFormatter.Format;
     _clearError = clearError ?? (() => { });
+    _redactor = redactor ?? new LogRedactor();
     _requiredIds = new HashSet<string>(
         profile.RequiredResources.Select(resource => resource.Id),
         StringComparer.OrdinalIgnoreCase);
@@ -113,10 +118,11 @@ public sealed class ResourceSelectionViewModel : ObservableObject
   private ResourceSelectionItemViewModel CreateItem(string id)
   {
     var resource = _profile.Resources[id];
+    var definition = ResourceDefinitionPresentationRedactor.Redact(resource, _redactor);
     return new ResourceSelectionItemViewModel(
         resource.Id,
-        resource.DisplayName ?? resource.Id,
-        $"{resource.Type} · {resource.Provider}",
+        definition.DisplayName ?? _redactor.Redact(resource.Id),
+        definition.Description ?? string.Empty,
         ChangeSelection);
   }
 

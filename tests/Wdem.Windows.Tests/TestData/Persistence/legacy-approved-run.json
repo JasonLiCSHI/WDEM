@@ -1,0 +1,44 @@
+{
+  "runId": "9a453874-4e91-4fea-a5ac-24f1f50750b8",
+  "mode": "Apply",
+  "profileSourcePath": "C:\\profiles\\legacy-developer.json",
+  "profileId": "legacy-developer",
+  "profileVersion": "1.0.0",
+  "selectedOptionalResourceIds": [],
+  "startedAtUtc": "2025-01-02T03:04:05+00:00",
+  "endedAtUtc": null,
+  "state": "Running",
+  "outcome": null,
+  "retriedFromRunId": null,
+  "recoveredFromRunId": null,
+  "revision": 0,
+  "recoveryClaimId": null,
+  "recoveryClaimedAtUtc": null,
+  "machine": {
+    "operatingSystem": "Windows",
+    "architecture": "X64",
+    "computerName": "LEGACY-PC",
+    "userName": "legacy-user"
+  },
+  "graph": null,
+  "plan": {
+    "planId": "38f353b4-c45c-4549-a93a-075973ac3b58",
+    "fingerprint": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "profileId": "legacy-developer",
+    "profileVersion": "1.0.0",
+    "layers": [],
+    "resources": [],
+    "isExecutable": true,
+    "errors": []
+  },
+  "planApproval": {
+    "initialPlanFingerprint": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "confirmedAtUtc": "2025-01-02T03:05:00+00:00",
+    "source": "DesktopReviewedPlan",
+    "deferredAuthorizations": []
+  },
+  "resourceResults": {},
+  "restartRequirements": [],
+  "restartReasons": [],
+  "acknowledgedRestartResourceIds": []
+}

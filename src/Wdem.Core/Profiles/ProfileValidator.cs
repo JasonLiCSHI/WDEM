@@ -96,6 +96,13 @@ internal sealed class ProfileValidator(IResourceProviderRegistry providerRegistr
     if (root.TryGetProperty("profile", out var profile) && profile.ValueKind == JsonValueKind.Object)
     {
       AddWhitespaceError(profile, "id", "/profile/id", "profile id", sourcePath, errors);
+      AddRequiredNonWhitespaceStringError(
+          profile,
+          "description",
+          "/profile/description",
+          "profile description",
+          sourcePath,
+          errors);
       AddReferenceWhitespaceErrors(profile, "requiredResources", sourcePath, errors, cancellationToken);
       AddReferenceWhitespaceErrors(profile, "optionalResources", sourcePath, errors, cancellationToken);
     }
@@ -129,6 +136,20 @@ internal sealed class ProfileValidator(IResourceProviderRegistry providerRegistr
       }
 
       AddWhitespaceError(property.Value, "type", $"{resourcePointer}/type", "resource type", sourcePath, errors);
+      AddRequiredNonWhitespaceStringError(
+          property.Value,
+          "displayName",
+          $"{resourcePointer}/displayName",
+          "resource display name",
+          sourcePath,
+          errors);
+      AddRequiredNonWhitespaceStringError(
+          property.Value,
+          "description",
+          $"{resourcePointer}/description",
+          "resource description",
+          sourcePath,
+          errors);
       AddWhitespaceError(
           property.Value,
           "provider",
@@ -206,6 +227,24 @@ internal sealed class ProfileValidator(IResourceProviderRegistry providerRegistr
       errors.Add(ProfileErrorFactory.Create(sourcePath, $"The {fieldName} cannot be blank.",
           $"The {fieldName} must contain at least one non-whitespace character.", pointer));
     }
+  }
+
+  private static void AddRequiredNonWhitespaceStringError(
+      JsonElement element,
+      string propertyName,
+      string pointer,
+      string fieldName,
+      string sourcePath,
+      List<StructuredError> errors)
+  {
+    if (!element.TryGetProperty(propertyName, out _))
+    {
+      errors.Add(ProfileErrorFactory.Create(sourcePath, $"The {fieldName} is required.",
+          $"The {fieldName} must contain at least one non-whitespace character.", pointer));
+      return;
+    }
+
+    AddWhitespaceError(element, propertyName, pointer, fieldName, sourcePath, errors);
   }
 
   private async Task<IReadOnlyList<StructuredError>> ValidateSemanticsAsync(

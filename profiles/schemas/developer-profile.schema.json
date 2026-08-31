@@ -23,7 +23,7 @@
         "id": { "type": "string", "minLength": 1, "pattern": "\\S" },
         "version": { "type": "string", "minLength": 1 },
         "displayName": { "type": "string", "minLength": 1 },
-        "description": { "type": "string" },
+        "description": { "type": "string", "minLength": 1, "pattern": "\\S" },
         "requiredResources": {
           "type": "array",
           "items": { "$ref": "#/$defs/resourceReference" },
@@ -50,8 +50,10 @@
     "resource": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "provider"],
+      "required": ["displayName", "description", "type", "provider"],
       "properties": {
+        "displayName": { "type": "string", "minLength": 1, "pattern": "\\S" },
+        "description": { "type": "string", "minLength": 1, "pattern": "\\S" },
         "type": { "type": "string", "minLength": 1, "pattern": "\\S" },
         "provider": { "type": "string", "minLength": 1, "pattern": "\\S" },
         "versionConstraint": { "type": "string", "minLength": 1 },
