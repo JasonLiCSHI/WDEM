@@ -1,0 +1,9 @@
+<Solution>
+  <Project Path="src/Wdem.Core/Wdem.Core.csproj" />
+  <Project Path="src/Wdem.Windows/Wdem.Windows.csproj" />
+  <Project Path="src/Wdem.Cli/Wdem.Cli.csproj" />
+  <Project Path="src/Wdem.App/Wdem.App.csproj" />
+  <Project Path="tests/Wdem.Core.Tests/Wdem.Core.Tests.csproj" />
+  <Project Path="tests/Wdem.Windows.Tests/Wdem.Windows.Tests.csproj" />
+  <Project Path="tests/Wdem.App.Tests/Wdem.App.Tests.csproj" />
+</Solution>

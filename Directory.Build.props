@@ -1,0 +1,10 @@
+<Project>
+  <PropertyGroup>
+    <Product>Windows Developer Environment Manager</Product>
+    <Authors>WDEM Contributors</Authors>
+    <VersionPrefix>0.1.0</VersionPrefix>
+    <RepositoryUrl>https://github.com/JasonLiCSHI/WDEM</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+</Project>
