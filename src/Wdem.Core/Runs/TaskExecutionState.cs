@@ -10,6 +10,7 @@ public enum TaskExecutionState
   Applying,
   RunningPost,
   Verifying,
+  Running,
   Cancelling,
   Satisfied,
   Succeeded,

@@ -1,5 +1,7 @@
 namespace Wdem.Core.Runs;
 
+using Wdem.Core.Workflows;
+
 public sealed record WorkflowTaskSnapshot(
     string TaskId,
     TaskExecutionState State,
@@ -11,13 +13,13 @@ public sealed record WorkflowTaskSnapshot(
     int ActivityCount,
     TaskCapabilities Capabilities)
 {
-  public bool IsTerminal => State is
-      TaskExecutionState.NotSelected or
-      TaskExecutionState.Satisfied or
-      TaskExecutionState.Succeeded or
-      TaskExecutionState.Failed or
-      TaskExecutionState.Cancelled or
-      TaskExecutionState.Blocked;
+  public string? RuntimeStateId { get; init; }
+
+  public string? ActivityId { get; init; }
+
+  public WorkflowActivityLocation? ActivityLocation { get; init; }
+
+  public bool IsTerminal => State == TaskExecutionState.NotSelected || Outcome is not null;
 
   public bool CanStart => Capabilities.CanStart;
 

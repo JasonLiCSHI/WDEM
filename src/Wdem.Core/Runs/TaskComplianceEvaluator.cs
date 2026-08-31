@@ -7,11 +7,18 @@ namespace Wdem.Core.Runs;
 internal static class TaskComplianceEvaluator
 {
   public static TaskComplianceEvaluation Evaluate(TaskDefinition task, StepReport detectStep)
+      => Evaluate(task, task.Detect, detectStep);
+
+  public static TaskComplianceEvaluation Evaluate(
+      TaskDefinition task,
+      CommandDefinition detectionCommand,
+      StepReport detectStep)
   {
     ArgumentNullException.ThrowIfNull(task);
+    ArgumentNullException.ThrowIfNull(detectionCommand);
     ArgumentNullException.ThrowIfNull(detectStep);
 
-    var detectedVersion = ExtractVersion(task.Detect.VersionPattern, detectStep.Stdout);
+    var detectedVersion = ExtractVersion(detectionCommand.VersionPattern, detectStep.Stdout);
     if (detectStep.ExitCode != 0)
     {
       return new TaskComplianceEvaluation(TaskComplianceState.Missing, detectedVersion);
@@ -23,7 +30,7 @@ internal static class TaskComplianceEvaluator
     }
 
     var constraint = VersionConstraint.Parse(task.VersionConstraint);
-    var candidate = string.IsNullOrWhiteSpace(task.Detect.VersionPattern)
+    var candidate = string.IsNullOrWhiteSpace(detectionCommand.VersionPattern)
         ? detectStep.Stdout
         : detectedVersion;
 

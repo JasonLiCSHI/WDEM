@@ -30,6 +30,9 @@
   <sys:String x:Key="ExitCodeLabel">exit code</sys:String>
   <sys:String x:Key="ErrorLabel">error</sys:String>
   <sys:String x:Key="PipelineSummary">Detect · Pre ×{0} · Apply · Post ×{1} · Verify</sys:String>
+  <sys:String x:Key="ComposableWorkflowSummary">Composable workflow · {0} states · {1} activities</sys:String>
+  <sys:String x:Key="WorkflowLabel">State workflow</sys:String>
+  <sys:String x:Key="WorkflowStateDetail">{0} → Task {1} | Entry: {2} | Residence: {3} | Exit: {4} | Next: {5}</sys:String>
   <sys:String x:Key="StartTaskButton">Start</sys:String>
   <sys:String x:Key="CancelTaskButton">Cancel</sys:String>
   <sys:String x:Key="StartAllButton">Start selected tasks</sys:String>

@@ -30,6 +30,9 @@
   <sys:String x:Key="ExitCodeLabel">退出码</sys:String>
   <sys:String x:Key="ErrorLabel">错误</sys:String>
   <sys:String x:Key="PipelineSummary">Detect · Pre ×{0} · Apply · Post ×{1} · Verify</sys:String>
+  <sys:String x:Key="ComposableWorkflowSummary">可编排工作流 · {0} 个状态 · {1} 个活动</sys:String>
+  <sys:String x:Key="WorkflowLabel">状态工作流</sys:String>
+  <sys:String x:Key="WorkflowStateDetail">{0} → Task {1} | 进入: {2} | 驻留: {3} | 退出: {4} | 下一步: {5}</sys:String>
   <sys:String x:Key="StartTaskButton">开始</sys:String>
   <sys:String x:Key="CancelTaskButton">取消</sys:String>
   <sys:String x:Key="StartAllButton">开始所选任务</sys:String>

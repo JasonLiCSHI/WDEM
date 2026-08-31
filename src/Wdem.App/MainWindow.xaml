@@ -433,11 +433,35 @@
                                 <TextBlock Text="{Binding DetectedVersionDisplay}" Style="{StaticResource DetectedVersionText}" />
                               </StackPanel>
                             </WrapPanel>
-                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource DetectLabel}" /><Run Text=": " /><Run Text="{Binding DetectDetails}" /></TextBlock>
-                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PreLabel}" /><Run Text=": " /><Run Text="{Binding PreDetails}" /></TextBlock>
-                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource ApplyLabel}" /><Run Text=": " /><Run Text="{Binding ApplyDetails}" /></TextBlock>
-                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PostLabel}" /><Run Text=": " /><Run Text="{Binding PostDetails}" /></TextBlock>
-                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource VerifyLabel}" /><Run Text=": " /><Run Text="{Binding VerifyDetails}" /></TextBlock>
+                            <StackPanel>
+                              <StackPanel.Style>
+                                <Style TargetType="StackPanel">
+                                  <Style.Triggers>
+                                    <DataTrigger Binding="{Binding HasCustomWorkflow}" Value="True">
+                                      <Setter Property="Visibility" Value="Collapsed" />
+                                    </DataTrigger>
+                                  </Style.Triggers>
+                                </Style>
+                              </StackPanel.Style>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource DetectLabel}" /><Run Text=": " /><Run Text="{Binding DetectDetails}" /></TextBlock>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PreLabel}" /><Run Text=": " /><Run Text="{Binding PreDetails}" /></TextBlock>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource ApplyLabel}" /><Run Text=": " /><Run Text="{Binding ApplyDetails}" /></TextBlock>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PostLabel}" /><Run Text=": " /><Run Text="{Binding PostDetails}" /></TextBlock>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource VerifyLabel}" /><Run Text=": " /><Run Text="{Binding VerifyDetails}" /></TextBlock>
+                            </StackPanel>
+                            <TextBlock TextWrapping="Wrap" Margin="0,2">
+                              <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                  <Setter Property="Visibility" Value="Collapsed" />
+                                  <Style.Triggers>
+                                    <DataTrigger Binding="{Binding HasCustomWorkflow}" Value="True">
+                                      <Setter Property="Visibility" Value="Visible" />
+                                    </DataTrigger>
+                                  </Style.Triggers>
+                                </Style>
+                              </TextBlock.Style>
+                              <Run FontWeight="SemiBold" Text="{DynamicResource WorkflowLabel}" /><Run Text=":&#x0a;" /><Run Text="{Binding WorkflowDetails}" />
+                            </TextBlock>
                             <TextBlock TextWrapping="Wrap" Margin="0,7,0,2" Foreground="{StaticResource Muted}"><Run FontWeight="SemiBold" Text="{DynamicResource LastResultLabel}" /><Run Text=": " /><Run Text="{Binding LastResult}" /></TextBlock>
                           </StackPanel>
                         </Border>
@@ -556,11 +580,35 @@
                                 <TextBlock Text="{Binding DetectedVersionDisplay}" Style="{StaticResource DetectedVersionText}" />
                               </StackPanel>
                             </WrapPanel>
-                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource DetectLabel}" /><Run Text=": " /><Run Text="{Binding DetectDetails}" /></TextBlock>
-                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PreLabel}" /><Run Text=": " /><Run Text="{Binding PreDetails}" /></TextBlock>
-                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource ApplyLabel}" /><Run Text=": " /><Run Text="{Binding ApplyDetails}" /></TextBlock>
-                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PostLabel}" /><Run Text=": " /><Run Text="{Binding PostDetails}" /></TextBlock>
-                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource VerifyLabel}" /><Run Text=": " /><Run Text="{Binding VerifyDetails}" /></TextBlock>
+                            <StackPanel>
+                              <StackPanel.Style>
+                                <Style TargetType="StackPanel">
+                                  <Style.Triggers>
+                                    <DataTrigger Binding="{Binding HasCustomWorkflow}" Value="True">
+                                      <Setter Property="Visibility" Value="Collapsed" />
+                                    </DataTrigger>
+                                  </Style.Triggers>
+                                </Style>
+                              </StackPanel.Style>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource DetectLabel}" /><Run Text=": " /><Run Text="{Binding DetectDetails}" /></TextBlock>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PreLabel}" /><Run Text=": " /><Run Text="{Binding PreDetails}" /></TextBlock>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource ApplyLabel}" /><Run Text=": " /><Run Text="{Binding ApplyDetails}" /></TextBlock>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PostLabel}" /><Run Text=": " /><Run Text="{Binding PostDetails}" /></TextBlock>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource VerifyLabel}" /><Run Text=": " /><Run Text="{Binding VerifyDetails}" /></TextBlock>
+                            </StackPanel>
+                            <TextBlock TextWrapping="Wrap" Margin="0,2">
+                              <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                  <Setter Property="Visibility" Value="Collapsed" />
+                                  <Style.Triggers>
+                                    <DataTrigger Binding="{Binding HasCustomWorkflow}" Value="True">
+                                      <Setter Property="Visibility" Value="Visible" />
+                                    </DataTrigger>
+                                  </Style.Triggers>
+                                </Style>
+                              </TextBlock.Style>
+                              <Run FontWeight="SemiBold" Text="{DynamicResource WorkflowLabel}" /><Run Text=":&#x0a;" /><Run Text="{Binding WorkflowDetails}" />
+                            </TextBlock>
                             <TextBlock TextWrapping="Wrap" Margin="0,7,0,2" Foreground="{StaticResource Muted}"><Run FontWeight="SemiBold" Text="{DynamicResource LastResultLabel}" /><Run Text=": " /><Run Text="{Binding LastResult}" /></TextBlock>
                           </StackPanel>
                         </Border>

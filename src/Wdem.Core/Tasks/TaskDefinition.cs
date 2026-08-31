@@ -1,5 +1,7 @@
 namespace Wdem.Core.Tasks;
 
+using Wdem.Core.Workflows;
+
 public sealed record TaskDefinition(
     string Id,
     string DisplayName,
@@ -12,4 +14,5 @@ public sealed record TaskDefinition(
     IReadOnlyList<CommandDefinition> Pre,
     CommandDefinition? Apply,
     IReadOnlyList<CommandDefinition> Post,
-    string? Description = null);
+    string? Description = null,
+    TaskWorkflowDefinition? Workflow = null);

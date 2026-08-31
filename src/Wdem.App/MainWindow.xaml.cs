@@ -528,6 +528,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         case TaskExecutionState.Applying:
         case TaskExecutionState.RunningPost:
         case TaskExecutionState.Verifying:
+        case TaskExecutionState.Running:
           row.Status = FormatExecutionState(task.State);
           row.VisualState = TaskVisualState.Running;
           break;
@@ -718,7 +719,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
       TaskExecutionState.RunningPre or
       TaskExecutionState.Applying or
       TaskExecutionState.RunningPost or
-      TaskExecutionState.Verifying;
+      TaskExecutionState.Verifying or
+      TaskExecutionState.Running;
 
   private static string FormatExecutionState(TaskExecutionState state) => state switch
   {
@@ -727,6 +729,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     TaskExecutionState.Applying => I18n.Get("ApplyingStatus"),
     TaskExecutionState.RunningPost => I18n.Get("RunningPostStatus"),
     TaskExecutionState.Verifying => I18n.Get("VerifyingStatus"),
+    TaskExecutionState.Running => I18n.Get("RunningStatus"),
     _ => I18n.Get("RunningStatus")
   };
 
@@ -793,7 +796,16 @@ public sealed class TaskRow : INotifyPropertyChanged
     PreferredVersion = string.IsNullOrWhiteSpace(definition.PreferredVersion)
         ? "—"
         : definition.PreferredVersion;
-    PipelineSummary = I18n.Format("PipelineSummary", definition.Pre.Count, definition.Post.Count);
+    HasCustomWorkflow = definition.Workflow is not null;
+    PipelineSummary = definition.Workflow is null
+        ? I18n.Format("PipelineSummary", definition.Pre.Count, definition.Post.Count)
+        : I18n.Format(
+            "ComposableWorkflowSummary",
+            definition.Workflow.States.Count,
+            definition.Workflow.ActivityCount);
+    WorkflowDetails = definition.Workflow is null
+        ? "—"
+        : FormatWorkflow(definition.Workflow);
     DetectDetails = FormatCommand(definition.Detect);
     PreDetails = FormatCommands(definition.Pre);
     ApplyDetails = definition.Apply is null
@@ -837,6 +849,10 @@ public sealed class TaskRow : INotifyPropertyChanged
 
   public string PipelineSummary { get; }
 
+  public bool HasCustomWorkflow { get; }
+
+  public string WorkflowDetails { get; }
+
   public string DetectDetails { get; }
 
   public string PreDetails { get; }
@@ -860,6 +876,27 @@ public sealed class TaskRow : INotifyPropertyChanged
       OnPropertyChanged();
     }
   }
+
+  private static string FormatWorkflow(Wdem.Core.Workflows.TaskWorkflowDefinition workflow) =>
+      string.Join(
+          Environment.NewLine,
+          workflow.States.Values.Select(state => I18n.Format(
+              "WorkflowStateDetail",
+              state.DisplayName,
+              state.TaskState,
+              FormatActivityNames(state.EntryActivities),
+              FormatActivityNames(state.ResidenceActivities),
+              FormatActivityNames(state.ExitActivities),
+              state.IsTerminal
+                  ? state.TerminalOutcome
+                  : string.Join(", ", state.Transitions.Select(
+                      transition => $"{transition.Name} → {transition.TargetStateId}")))));
+
+  private static string FormatActivityNames(
+      IReadOnlyList<Wdem.Core.Workflows.WorkflowActivity> activities) =>
+      activities.Count == 0
+          ? I18n.Get("NoSteps")
+          : string.Join(", ", activities.Select(activity => activity.DisplayName));
 
   public string DetectedVersionDisplay =>
       string.IsNullOrWhiteSpace(_detectedVersion) ? "—" : _detectedVersion;

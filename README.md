@@ -40,14 +40,14 @@ flowchart LR
     S --> P["Profile parser<br/>& content trust"]
     C -. offline fallback .-> P
     P --> G["Selected Tasks<br/>& DAG"]
-    G --> W["Detect → Pre → Apply<br/>→ Post → Verify"]
+    G --> W["Task state machine<br/>Entry · Residence · Exit"]
     W --> R["Windows runtime"]
     W --> O["Snapshots · Progress<br/>JSONL logs · Report"]
     O --> CLI["CLI"]
     O --> GUI["WPF GUI"]
 ```
 
-Task state is the single source of execution truth. The engine first moves a Task into a valid state, then runs the corresponding Activity. The Activity result drives the next transition. The GUI only reacts to `CanStart`, `CanCancel`, and `CanSelect` values in immutable snapshots; it does not duplicate workflow rules.
+The Task state machine is the single source of execution truth. It enters a runtime state before running its Entry, Residence, and Exit Activities; Activity results select the next transition. Each runtime state projects a stable Task state into immutable snapshots. The GUI reacts only to the projected Task state and `CanStart`, `CanCancel`, and `CanSelect` capabilities; it does not duplicate workflow rules.
 
 ```text
 Pending → Ready → Detecting → RunningPre → Applying → RunningPost → Verifying
@@ -59,7 +59,7 @@ Running → Cancelling → Cancelled       dependency failure → Blocked
 
 - **Declarative Profiles** — Define Task metadata, Required/Optional behavior, dependencies, sources, version requirements, and phase commands.
 - **Deterministic Task DAG** — Expand dependency closure, remove duplicates, produce a topological order, and report cycles before execution.
-- **Complete lifecycle** — Enforce `Detect → Pre → Apply → Post → Verify`; every retry starts again at Detect.
+- **Composable lifecycle** — Schema v1 compiles to `Detect → Pre → Apply → Post → Verify`; Schema v2 can declare an arbitrary bounded state graph with Entry, Residence, and Exit Activities.
 - **Version awareness** — Support exact, wildcard, minimum, and range requirements, with an explicit upgrade state below the minimum version.
 - **Reactive controls** — Start or cancel one Task or the entire plan; Core projects every available action from workflow state.
 - **Safe cancellation** — Terminate the complete active process tree, prevent new Activities, and block Tasks that depend on the cancelled Task.
@@ -118,7 +118,53 @@ The Task below declares a minimum version, source, detection strategy, installat
 }
 ```
 
-`source` may identify a WinGet package, URL, file path, or enterprise source. `{source}` and `{preferredVersion}` are available as argument placeholders. The format evolves through `schemaVersion`, while new execution mechanisms plug in through an `ITaskRuntime` adapter. Core never needs product-specific knowledge.
+`source` may identify a WinGet package, URL, file path, or enterprise source. `{source}` and `{preferredVersion}` are available as argument placeholders. Schema v1 stays the compact choice for the standard lifecycle.
+
+Schema v2 adds declarative state composition when a Task needs branching, recovery, or a non-standard lifecycle:
+
+```json
+{
+  "schemaVersion": 2,
+  "id": "custom-workflow",
+  "version": "1.0.0",
+  "displayName": "Custom workflow",
+  "tasks": {
+    "tool": {
+      "displayName": "Tool",
+      "required": true,
+      "detect": { "executable": "tool", "arguments": ["--version"] },
+      "apply": { "executable": "tool-installer", "arguments": ["install"] },
+      "workflow": {
+        "initialState": "configure",
+        "maxTransitions": 20,
+        "states": [
+          {
+            "id": "configure",
+            "taskState": "Running",
+            "entry": [
+              { "id": "prepare", "phase": "prepare", "executable": "tool", "arguments": ["prepare"] }
+            ],
+            "residence": [
+              { "id": "configure", "phase": "configure", "executable": "tool", "arguments": ["configure"] }
+            ],
+            "exit": [
+              { "id": "cleanup", "phase": "cleanup", "executable": "tool", "arguments": ["cleanup"] }
+            ],
+            "transitions": [
+              { "target": "done", "condition": "activitiesSucceeded" },
+              { "target": "failed", "condition": "activitiesFailed" }
+            ]
+          },
+          { "id": "done", "taskState": "Succeeded", "outcome": "Succeeded" },
+          { "id": "failed", "taskState": "Failed", "outcome": "Failed" }
+        ]
+      }
+    }
+  }
+}
+```
+
+Declarative transitions support `always`, `activitiesSucceeded`, `activitiesFailed`, `taskSatisfied`, and `taskNotSatisfied`. Code extensions can derive from `WorkflowActivity` and use custom transition predicates. `ITaskWorkflowProvider` selects or builds the state graph, while `ITaskRuntime` remains the execution adapter. The state graph is validated before execution and bounded by `maxTransitions`.
 
 See the [MVP requirements](docs/MVP_REQUIREMENTS.md) for complete constraints and the [architecture guide](docs/ARCHITECTURE.md) for module boundaries and the state model.
 
