@@ -18,9 +18,10 @@ within five business days, and coordinate disclosure after a fix is available.
 
 ## Product security boundary
 
-WDEM uses a narrowly scoped UAC broker, mandatory content-hash verification,
-log/report redaction, atomic configuration writes, cancellation finalization,
-and mandatory fresh detection/planning before Apply. See
+The current WDEM MVP uses a narrowly scoped UAC broker and requires SHA-256
+verification for configuration inputs. It also provides log/report redaction,
+atomic configuration writes, cancellation finalization, and mandatory fresh
+detection/planning before Apply. See
 [recovery and security](docs/wdem/recovery-and-security.md) for the user-facing
 model and [source provenance](docs/wdem/source-provenance.md) for the
 MIT-licensed transition boundary.
