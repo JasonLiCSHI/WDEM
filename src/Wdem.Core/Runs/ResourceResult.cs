@@ -12,6 +12,7 @@ public sealed record ResourceResult
   public required string ResourceId { get; init; }
   public required ExecutionState State { get; init; }
   public ExecutionOutcome? Outcome { get; init; }
+  public int RetryCount { get; init; }
   public ComplianceStatus? FinalCompliance { get; init; }
   public DetectedState? DetectedBefore { get; init; }
   public DetectedState? DetectedAfter { get; init; }

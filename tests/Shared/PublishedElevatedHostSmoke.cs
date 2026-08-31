@@ -12,12 +12,59 @@ internal static class PublishedElevatedHostSmoke
 {
   public const string UsageError =
       "The elevated host accepts only the required bootstrap arguments.";
+  private static readonly TimeSpan PublishLeaseTimeout = TimeSpan.FromMinutes(5);
+  private static readonly TimeSpan PublishLeaseRetryDelay = TimeSpan.FromMilliseconds(100);
+
+  public static async Task<FileStream> AcquirePublishLeaseAsync(
+      string repositoryRoot,
+      CancellationToken cancellationToken = default)
+  {
+    ArgumentException.ThrowIfNullOrWhiteSpace(repositoryRoot);
+    string normalizedRoot = Path.GetFullPath(repositoryRoot)
+        .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+        .ToUpperInvariant();
+    byte[] rootHash = System.Security.Cryptography.SHA256.HashData(
+        System.Text.Encoding.UTF8.GetBytes(normalizedRoot));
+    string lockDirectory = Path.Combine(Path.GetTempPath(), "wdem-test-publish-locks");
+    string lockPath = Path.Combine(
+        lockDirectory,
+        $"{Convert.ToHexString(rootHash)[..24]}.lock");
+    Directory.CreateDirectory(lockDirectory);
+
+    var wait = System.Diagnostics.Stopwatch.StartNew();
+    while (true)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      try
+      {
+        return new FileStream(
+            lockPath,
+            FileMode.OpenOrCreate,
+            FileAccess.ReadWrite,
+            FileShare.None,
+            bufferSize: 1,
+            FileOptions.Asynchronous);
+      }
+      catch (IOException exception) when (wait.Elapsed >= PublishLeaseTimeout)
+      {
+        throw new TimeoutException(
+            $"Timed out waiting for the repository publish-test lease at '{lockPath}'.",
+            exception);
+      }
+      catch (IOException)
+      {
+        await Task.Delay(PublishLeaseRetryDelay, cancellationToken).ConfigureAwait(false);
+      }
+    }
+  }
 
   public static async Task<PublishedElevatedHostResult> PublishAndRunAsync(
       bool useBundledCliPublishOptions,
       params string[] projectSegments)
   {
     string repositoryRoot = FindRepositoryRoot();
+    await using FileStream publishLease =
+        await AcquirePublishLeaseAsync(repositoryRoot).ConfigureAwait(false);
     string projectPath = Path.Combine([repositoryRoot, .. projectSegments]);
     string publishDirectory = Path.Combine(
         Path.GetTempPath(),
@@ -44,6 +91,10 @@ internal static class PublishedElevatedHostSmoke
           "--self-contained", "true",
           "-p:PublishSingleFile=true"
         ]);
+      }
+      else
+      {
+        publishArguments.AddRange(["-r", "win-x64"]);
       }
 
       TestProcessResult publish = await TestProcessRunner.RunAsync(

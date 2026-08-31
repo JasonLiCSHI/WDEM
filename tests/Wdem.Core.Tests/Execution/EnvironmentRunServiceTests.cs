@@ -2177,14 +2177,103 @@ public sealed class EnvironmentRunServiceTests
         CancellationToken.None);
 
     Assert.Equal(ExecutionOutcome.Failed, failed.Outcome);
+    Assert.Equal(0, failed.ResourceResults["git"].RetryCount);
     Assert.NotEqual(failed.RunId, retried.RunId);
     Assert.Equal(failed.RunId, retried.RetriedFromRunId);
     Assert.True(provider.DetectCalls >= 2);
     Assert.Equal(ExecutionOutcome.NotRequired, retried.ResourceResults["git"].Outcome);
+    Assert.Equal(1, retried.ResourceResults["git"].RetryCount);
     Assert.Equal(ComplianceStatus.Satisfied, retried.ResourceResults["git"].FinalCompliance);
     var approval = Assert.IsType<PlanApproval>(retried.PlanApproval);
     Assert.Equal(retried.Plan!.Fingerprint, approval.InitialPlanFingerprint);
     Assert.Equal(PlanApprovalSource.Retry, approval.Source);
+  }
+
+  [Fact]
+  public async Task RetryAsync_ConsecutiveFailuresIncrementRetryCount()
+  {
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      DetectState = resource => Missing(resource.Id),
+      ApplyResult = new ResourceApplyResult
+      {
+        ResourceId = "git",
+        Outcome = ApplyOutcome.Failed,
+        Error = ProviderError("git", "Installation failed.")
+      }
+    };
+    var (service, _) = CreateService(provider);
+    var first = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    var second = await service.RetryAsync(
+        first.RunId,
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "git" },
+        CancellationToken.None);
+    var third = await service.RetryAsync(
+        second.RunId,
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "git" },
+        CancellationToken.None);
+
+    Assert.Equal(0, first.ResourceResults["git"].RetryCount);
+    Assert.Equal(1, second.ResourceResults["git"].RetryCount);
+    Assert.Equal(2, third.ResourceResults["git"].RetryCount);
+  }
+
+  [Fact]
+  public async Task RetryAsync_RejectsExhaustedRetryCountWithDomainError()
+  {
+    var provider = new ScriptedProvider(Missing("git"));
+    var (service, store) = CreateService(provider);
+    var prior = FailedRun("git") with
+    {
+      ResourceResults = FailedRun("git").ResourceResults.ToDictionary(
+          pair => pair.Key,
+          pair => pair.Value with { RetryCount = int.MaxValue },
+          StringComparer.OrdinalIgnoreCase)
+    };
+    await store.CreateAsync(prior, CancellationToken.None);
+
+    var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => service.RetryAsync(
+        prior.RunId,
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "git" },
+        CancellationToken.None));
+
+    Assert.Contains("retry count", exception.Message, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("maximum", exception.Message, StringComparison.OrdinalIgnoreCase);
+    Assert.Single(store.SavedSnapshots);
+  }
+
+  [Fact]
+  public async Task RetryAsync_DoesNotIncrementDependencyRetryCount()
+  {
+    var provider = new ScriptedProvider(Missing("git"))
+    {
+      DetectState = resource => Missing(resource.Id),
+      ApplyForResourceOperation = (resource, _) => ValueTask.FromResult(
+          resource.Id == "git"
+              ? new ResourceApplyResult
+              {
+                ResourceId = resource.Id,
+                Outcome = ApplyOutcome.Failed,
+                Error = ProviderError(resource.Id, "Installation failed.")
+              }
+              : new ResourceApplyResult
+              {
+                ResourceId = resource.Id,
+                Outcome = ApplyOutcome.Succeeded
+              })
+    };
+    var (service, _) = CreateService(provider, Profile(includeDependentResource: true));
+    var first = await service.ApplyAsync(Request(), CancellationToken.None);
+
+    var retried = await service.RetryAsync(
+        first.RunId,
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "dependent" },
+        CancellationToken.None);
+
+    Assert.Equal(ExecutionState.Blocked, first.ResourceResults["dependent"].State);
+    Assert.Equal(0, retried.ResourceResults["git"].RetryCount);
+    Assert.Equal(1, retried.ResourceResults["dependent"].RetryCount);
   }
 
   [Fact]
@@ -3299,7 +3388,14 @@ public sealed class EnvironmentRunServiceTests
   {
     var provider = new ScriptedProvider(Satisfied("git", "2.52.1"));
     var (service, store) = CreateService(provider);
-    var interrupted = InterruptedRun();
+    var interruptedBase = InterruptedRun();
+    var interrupted = interruptedBase with
+    {
+      ResourceResults = interruptedBase.ResourceResults.ToDictionary(
+          pair => pair.Key,
+          pair => pair.Value with { RetryCount = 2 },
+          StringComparer.OrdinalIgnoreCase)
+    };
     await store.CreateAsync(interrupted, CancellationToken.None);
 
     var candidates = await service.FindRecoveryCandidatesAsync(CancellationToken.None);
@@ -3314,6 +3410,7 @@ public sealed class EnvironmentRunServiceTests
     Assert.NotNull(recovered.Plan);
     Assert.NotNull(recovered.PlanApproval);
     Assert.Equal(ExecutionOutcome.NotRequired, recovered.ResourceResults["git"].Outcome);
+    Assert.Equal(2, recovered.ResourceResults["git"].RetryCount);
     Assert.Equal(0, provider.ApplyCalls);
   }
 

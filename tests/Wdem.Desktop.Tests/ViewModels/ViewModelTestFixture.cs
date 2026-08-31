@@ -12,6 +12,8 @@ namespace Wdem.Desktop.Tests.ViewModels;
 
 internal static class ViewModelTestFixture
 {
+  internal static readonly TimeSpan AsyncSignalTimeout = TimeSpan.FromSeconds(30);
+
   internal static RunRequest Request() => new(
       "profiles/csharp-developer.yaml",
       new HashSet<string>(StringComparer.OrdinalIgnoreCase));

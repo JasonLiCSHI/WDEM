@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Wdem.Core.Execution;
 using Wdem.Core.Providers;
+using Wdem.Core.Runs;
 using Xunit;
 
 namespace Wdem.Core.Tests.Execution;
@@ -103,5 +104,16 @@ public sealed class ExecutionModelTests
     Assert.Equal("Installing", restored.Message);
     Assert.Null(restored.StepId);
     Assert.Equal(ProviderLogLevel.Info, restored.LogLevel);
+  }
+
+  [Fact]
+  public void ResourceResult_LegacyJsonWithoutRetryCountDefaultsToZero()
+  {
+    const string json = """{"ResourceId":"git","State":4}""";
+
+    var restored = JsonSerializer.Deserialize<ResourceResult>(json);
+
+    Assert.NotNull(restored);
+    Assert.Equal(0, restored.RetryCount);
   }
 }

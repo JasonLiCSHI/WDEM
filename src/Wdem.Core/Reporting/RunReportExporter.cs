@@ -258,6 +258,7 @@ public sealed class RunReportExporter : IRunReportExporter
       Text(result.ResourceId),
       result.State,
       result.Outcome,
+      result.RetryCount,
       result.FinalCompliance,
       result.DetectedBefore is null ? null : CreateDetectedState(result.DetectedBefore),
       result.DetectedAfter is null ? null : CreateDetectedState(result.DetectedAfter),
@@ -439,6 +440,7 @@ public sealed class RunReportExporter : IRunReportExporter
       markdown.Append("### ").AppendLine(MarkdownInline(result.ResourceId)).AppendLine();
       Field("State", result.State.ToString());
       Field("Outcome", result.Outcome?.ToString() ?? "Unknown");
+      Field("Retry count", result.RetryCount.ToString());
       Field("Compliance", result.FinalCompliance?.ToString() ?? "Unknown");
       Field("Detected before", DetectedVersions(result.DetectedBefore));
       Field("Detected after", DetectedVersions(result.DetectedAfter));
@@ -876,6 +878,7 @@ public sealed class RunReportExporter : IRunReportExporter
       string ResourceId,
       ExecutionState State,
       ExecutionOutcome? Outcome,
+      int RetryCount,
       ComplianceStatus? FinalCompliance,
       ReportDetectedState? DetectedBefore,
       ReportDetectedState? DetectedAfter,

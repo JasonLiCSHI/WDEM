@@ -234,12 +234,12 @@ function Get-StreamsFingerprint([string]$Path, [bool]$IsDirectory) {
             ForEach-Object { "$(ConvertTo-FingerprintField $_.Name)|$($_.Length)" } |
             Sort-Object)
     if (($metadataBefore -join "`n") -ne ($metadataAfter -join "`n")) {
-        throw "Retired state streams changed while they were being fingerprinted: $Path"
+        throw "The monitored path's streams changed while they were being fingerprinted: $Path"
     }
     return @($records | Sort-Object) -join ';'
 }
 
-function Get-LegacyTreeFingerprintOnce([string]$Path) {
+function Get-TreeFingerprintOnce([string]$Path) {
     $fullRoot = [IO.Path]::GetFullPath($Path)
     try {
         $rootAttributes = [IO.File]::GetAttributes($fullRoot)
@@ -252,7 +252,7 @@ function Get-LegacyTreeFingerprintOnce([string]$Path) {
     }
 
     if (($rootAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'The retired state root is a reparse point and cannot be monitored safely.'
+        throw "The monitored root is a reparse point and cannot be fingerprinted safely: $fullRoot"
     }
 
     $pending = New-Object 'System.Collections.Generic.Stack[string]'
@@ -283,7 +283,7 @@ function Get-LegacyTreeFingerprintOnce([string]$Path) {
                 $itemAfter.CreationTimeUtc.Ticks -ne $itemBefore.CreationTimeUtc.Ticks -or
                 $itemAfter.LastWriteTimeUtc.Ticks -ne $itemBefore.LastWriteTimeUtc.Ticks -or
                 $aclAfter -ne $aclBefore) {
-                throw "Retired state reparse point changed while it was being fingerprinted: $current"
+                throw "A monitored reparse point changed while it was being fingerprinted: $current"
             }
             $records.Add(
                 "R|$encodedPath|$([int]$attributes)|$($itemBefore.CreationTimeUtc.Ticks)|$($itemBefore.LastWriteTimeUtc.Ticks)|$(ConvertTo-FingerprintField $aclBefore)|$(ConvertTo-FingerprintField $target)")
@@ -302,7 +302,7 @@ function Get-LegacyTreeFingerprintOnce([string]$Path) {
                 $itemAfter.CreationTimeUtc.Ticks -ne $itemBefore.CreationTimeUtc.Ticks -or
                 $itemAfter.LastWriteTimeUtc.Ticks -ne $itemBefore.LastWriteTimeUtc.Ticks -or
                 $aclAfter -ne $aclBefore) {
-                throw "Retired state directory changed while it was being fingerprinted: $current"
+                throw "A monitored directory changed while it was being fingerprinted: $current"
             }
             $records.Add(
                 "D|$encodedPath|$([int]$attributes)|$($itemBefore.CreationTimeUtc.Ticks)|$($itemBefore.LastWriteTimeUtc.Ticks)|$(ConvertTo-FingerprintField $aclBefore)|$streamsFingerprint")
@@ -322,7 +322,7 @@ function Get-LegacyTreeFingerprintOnce([string]$Path) {
             $itemAfter.LastWriteTimeUtc.Ticks -ne $itemBefore.LastWriteTimeUtc.Ticks -or
             $itemAfter.Length -ne $itemBefore.Length -or
             $aclAfter -ne $aclBefore) {
-            throw "Retired state file changed while it was being fingerprinted: $current"
+            throw "A monitored file changed while it was being fingerprinted: $current"
         }
         $records.Add(
             "F|$encodedPath|$([int]$attributes)|$($itemBefore.CreationTimeUtc.Ticks)|$($itemBefore.LastWriteTimeUtc.Ticks)|$($itemBefore.Length)|$(ConvertTo-FingerprintField $aclBefore)|$streamsFingerprint")
@@ -331,11 +331,11 @@ function Get-LegacyTreeFingerprintOnce([string]$Path) {
     return 'PRESENT:' + (Get-TextSha256 @($records | Sort-Object))
 }
 
-function Get-LegacyTreeFingerprint([string]$Path) {
-    $first = Get-LegacyTreeFingerprintOnce $Path
-    $second = Get-LegacyTreeFingerprintOnce $Path
+function Get-TreeFingerprint([string]$Path) {
+    $first = Get-TreeFingerprintOnce $Path
+    $second = Get-TreeFingerprintOnce $Path
     if ($first -ne $second) {
-        throw 'The retired state root changed while its fingerprint was being stabilized.'
+        throw "The monitored tree changed while its fingerprint was being stabilized: $Path"
     }
     return $first
 }
@@ -367,93 +367,359 @@ function Get-PersistentEnvironmentFingerprint {
     return Get-TextSha256 $lines
 }
 
-$root = Split-Path $PSScriptRoot -Parent | Split-Path -Parent
-$tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("wdem-inspect-smoke-{0}" -f [Guid]::NewGuid().ToString('N'))
-$report = Join-Path $tempRoot 'inspect-report.json'
-$originalVsixPath = $env:WDEM_COMPANY_VSIX_PATH
-$originalVsixSha256 = $env:WDEM_COMPANY_VSIX_SHA256
-$hadVsixPath = Test-Path Env:WDEM_COMPANY_VSIX_PATH
-$hadVsixSha256 = Test-Path Env:WDEM_COMPANY_VSIX_SHA256
+function ConvertTo-NativeArgument([AllowEmptyString()][string]$Value) {
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') {
+        return $Value
+    }
 
-$registryBefore = Get-RegistryFingerprint
-$environmentBefore = Get-PersistentEnvironmentFingerprint
-$bootBefore = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
-$legacyRoot = Join-Path $env:LOCALAPPDATA 'WinHome'
-$legacyBefore = Get-LegacyTreeFingerprint $legacyRoot
+    $escaped = $Value -replace '(\\*)"', '$1$1\"'
+    $escaped = $escaped -replace '(\\+)$', '$1$1'
+    return '"' + $escaped + '"'
+}
 
-try {
-    New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
-    Remove-Item $report -ErrorAction SilentlyContinue
-    Remove-Item Env:WDEM_COMPANY_VSIX_PATH -ErrorAction SilentlyContinue
-    Remove-Item Env:WDEM_COMPANY_VSIX_SHA256 -ErrorAction SilentlyContinue
+function Stop-BoundedProcessTree(
+    [Diagnostics.Process]$Process,
+    [string]$Scenario) {
+    if ($Process.HasExited) {
+        return
+    }
 
-    Push-Location $root
+    $taskkill = [Diagnostics.Process]::new()
+    $taskkillStarted = $false
+    $standardOutput = $null
+    $standardError = $null
     try {
-        & dotnet run --project src\Wdem.Cli\Wdem.Cli.csproj -p:BuildInParallel=false -- inspect --profile profiles\csharp-developer.yaml --json --report $report
-        $inspectExitCode = $LASTEXITCODE
+        $taskkillStartInfo = [Diagnostics.ProcessStartInfo]::new()
+        $taskkillStartInfo.FileName = 'taskkill.exe'
+        $taskkillStartInfo.UseShellExecute = $false
+        $taskkillStartInfo.CreateNoWindow = $true
+        $taskkillStartInfo.RedirectStandardOutput = $true
+        $taskkillStartInfo.RedirectStandardError = $true
+        $taskkillStartInfo.Arguments = "/PID $($Process.Id) /T /F"
+        $taskkill.StartInfo = $taskkillStartInfo
+
+        if (-not $taskkill.Start()) {
+            throw "Could not start process-tree cleanup for Inspect scenario '$Scenario'."
+        }
+        $taskkillStarted = $true
+        $standardOutput = $taskkill.StandardOutput.ReadToEndAsync()
+        $standardError = $taskkill.StandardError.ReadToEndAsync()
+        $exitedInTime = $taskkill.WaitForExit(5000)
+        if (-not $exitedInTime) {
+            $taskkill.Kill()
+            if (-not $taskkill.WaitForExit(5000)) {
+                throw "Process-tree cleanup for Inspect scenario '$Scenario' could not be stopped."
+            }
+        }
+        $taskkillOutput = @(
+            $standardOutput.GetAwaiter().GetResult(),
+            $standardError.GetAwaiter().GetResult()) -join "`n"
+        $taskkillOutput = $taskkillOutput.Trim()
+        $outputDetail = if ([string]::IsNullOrWhiteSpace($taskkillOutput)) {
+            ''
+        }
+        else {
+            " Output: $taskkillOutput"
+        }
+        if (-not $exitedInTime) {
+            throw "Process-tree cleanup for Inspect scenario '$Scenario' exceeded its five-second timeout.$outputDetail"
+        }
+        if ($taskkill.ExitCode -ne 0 -and -not $Process.HasExited) {
+            throw "Process-tree cleanup for Inspect scenario '$Scenario' failed with exit code $($taskkill.ExitCode).$outputDetail"
+        }
+        if (-not $Process.WaitForExit(5000)) {
+            throw "WDEM Inspect scenario '$Scenario' did not terminate after its process tree was stopped."
+        }
     }
     finally {
-        Pop-Location
+        if ($taskkillStarted -and -not $taskkill.HasExited) {
+            try {
+                $taskkill.Kill()
+                [void]$taskkill.WaitForExit(5000)
+            }
+            catch {
+            }
+        }
+        $taskkill.Dispose()
+    }
+}
+
+function Invoke-BoundedInspect(
+    [string]$Root,
+    [string]$Profile,
+    [string]$Report,
+    [string]$Scenario,
+    [switch]$SelectCompanyVsExtension,
+    [Threading.Tasks.Task]$NetworkAttempt) {
+    $arguments = @(
+        'run',
+        '--project', 'src\Wdem.Cli\Wdem.Cli.csproj',
+        '-p:BuildInParallel=false',
+        '--',
+        'inspect',
+        '--profile', $Profile,
+        '--json',
+        '--report', $Report)
+    if ($SelectCompanyVsExtension) {
+        $arguments += @('--select', 'company-vs-extension')
     }
 
-    $legacyAfter = Get-LegacyTreeFingerprint $legacyRoot
-    if ($legacyAfter -ne $legacyBefore) {
-        throw 'Inspect changed the retired state root.'
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = 'dotnet'
+    $startInfo.WorkingDirectory = $Root
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.Arguments = (@(
+        $arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' ')
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $deadline = [DateTime]::UtcNow.AddMinutes(3)
+    $started = $false
+    $primaryError = $null
+    try {
+        if (-not $process.Start()) {
+            throw "Could not start WDEM Inspect scenario '$Scenario'."
+        }
+        $started = $true
+
+        while (-not $process.WaitForExit(50)) {
+            if ($null -ne $NetworkAttempt -and $NetworkAttempt.IsCompleted) {
+                if ($NetworkAttempt.Status -eq [Threading.Tasks.TaskStatus]::RanToCompletion) {
+                    $client = $NetworkAttempt.GetAwaiter().GetResult()
+                    $client.Dispose()
+                    throw "Inspect scenario '$Scenario' attempted a network connection for an acquisition-only source."
+                }
+
+                # Preserve unexpected accept failures; expected Stop failures are
+                # handled only by the listener's finally block.
+                $NetworkAttempt.GetAwaiter().GetResult()
+            }
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "WDEM Inspect scenario '$Scenario' exceeded its three-minute timeout."
+            }
+        }
+
+        if ($null -ne $NetworkAttempt -and $NetworkAttempt.IsCompleted) {
+            if ($NetworkAttempt.Status -eq [Threading.Tasks.TaskStatus]::RanToCompletion) {
+                $client = $NetworkAttempt.GetAwaiter().GetResult()
+                $client.Dispose()
+                throw "Inspect scenario '$Scenario' attempted a network connection for an acquisition-only source."
+            }
+            $NetworkAttempt.GetAwaiter().GetResult()
+        }
+        if ($process.ExitCode -ne 0) {
+            throw "WDEM Inspect scenario '$Scenario' failed with exit code $($process.ExitCode)."
+        }
+    }
+    catch {
+        $primaryError = $_
+        throw
+    }
+    finally {
+        try {
+            if ($started -and -not $process.HasExited) {
+                Stop-BoundedProcessTree -Process $process -Scenario $Scenario
+            }
+        }
+        catch {
+            if ($null -eq $primaryError) {
+                throw
+            }
+            Write-Warning "Inspect cleanup also failed: $($_.Exception.Message)"
+        }
+        finally {
+            $process.Dispose()
+        }
+    }
+}
+
+function Assert-InspectReport(
+    [string]$Report,
+    [string]$Scenario,
+    [bool]$ExpectCompanyVsExtension) {
+    if (-not (Test-Path $Report -PathType Leaf)) {
+        throw "WDEM Inspect scenario '$Scenario' did not create its JSON report."
     }
 
-    if ($inspectExitCode -ne 0) {
-        throw "WDEM inspect failed with exit code $inspectExitCode."
-    }
-    if (-not (Test-Path $report -PathType Leaf)) {
-        throw 'WDEM Inspect did not create its JSON report.'
-    }
-
-    $rawReport = Get-Content $report -Raw
+    $rawReport = Get-Content $Report -Raw
     $run = $rawReport | ConvertFrom-Json
     if ($run.mode -ine 'inspect') {
-        throw "Expected Inspect report mode, received '$($run.mode)'."
+        throw "Expected Inspect report mode for '$Scenario', received '$($run.mode)'."
     }
     if (-not $run.resourceResults.PSObject.Properties['git']) {
-        throw 'Git result was not reported.'
+        throw "Git result was not reported for '$Scenario'."
+    }
+    $vsixResult = $run.resourceResults.PSObject.Properties['company-vs-extension']
+    if ($ExpectCompanyVsExtension -and -not $vsixResult) {
+        throw "The selected VSIX result was not reported for '$Scenario'."
+    }
+    if (-not $ExpectCompanyVsExtension -and $vsixResult) {
+        throw "The optional VSIX was unexpectedly selected for '$Scenario'."
     }
     if ($rawReport -match '(?i)authorization\s*:\s*bearer|password\s*=|token\s*=') {
-        throw 'Inspect report is not redacted.'
+        throw "Inspect report for '$Scenario' is not redacted."
     }
 
     foreach ($property in $run.resourceResults.PSObject.Properties) {
         $result = $property.Value
         if (@($result.stepResults).Count -ne 0) {
-            throw "Inspect executed a resource step for '$($property.Name)'."
+            throw "Inspect executed a resource step for '$($property.Name)' in '$Scenario'."
         }
         if ($null -ne $result.detectedAfter) {
-            throw "Inspect performed post-Apply detection for '$($property.Name)'."
+            throw "Inspect performed post-Apply detection for '$($property.Name)' in '$Scenario'."
         }
         if ($null -ne $result.restartRequirement -and $result.restartRequirement -ine 'noRestart') {
-            throw "Inspect reported a restart for '$($property.Name)'."
+            throw "Inspect reported a restart for '$($property.Name)' in '$Scenario'."
         }
     }
     if (@($run.restartRequirements).Count -ne 0 -or @($run.restartReasons).Count -ne 0) {
-        throw 'Inspect reported a restart operation.'
+        throw "Inspect reported a restart operation for '$Scenario'."
+    }
+}
+
+function Get-InspectSafetySnapshot {
+    return [PSCustomObject]@{
+        Registry = Get-RegistryFingerprint
+        Environment = Get-PersistentEnvironmentFingerprint
+        Boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+        LegacyState = Get-TreeFingerprint (Join-Path $env:LOCALAPPDATA 'WinHome')
+        PlanArtifacts = Get-TreeFingerprint (Join-Path $env:ProgramData 'Wdem\PlanArtifacts')
+        SecureArtifacts = Get-TreeFingerprint (Join-Path $env:ProgramData 'Wdem\SecureArtifacts')
+        BootstrapperDownloads = Get-TreeFingerprint (Join-Path ([IO.Path]::GetTempPath()) 'wdem\visual-studio')
+    }
+}
+
+function Assert-InspectSafetySnapshot([PSCustomObject]$Before, [string]$Scenario) {
+    $after = Get-InspectSafetySnapshot
+    if ($after.LegacyState -ne $Before.LegacyState) {
+        throw "Inspect scenario '$Scenario' changed the retired state root."
+    }
+    if ($after.PlanArtifacts -ne $Before.PlanArtifacts) {
+        throw "Inspect scenario '$Scenario' staged or changed an elevated plan artifact."
+    }
+    if ($after.SecureArtifacts -ne $Before.SecureArtifacts) {
+        throw "Inspect scenario '$Scenario' staged or changed a secure artifact."
+    }
+    if ($after.BootstrapperDownloads -ne $Before.BootstrapperDownloads) {
+        throw "Inspect scenario '$Scenario' downloaded or changed a Visual Studio bootstrapper."
+    }
+    if ($after.Registry -ne $Before.Registry) {
+        throw "Inspect scenario '$Scenario' changed a persistent Registry installation scope."
+    }
+    if ($after.Environment -ne $Before.Environment) {
+        throw "Inspect scenario '$Scenario' changed a persistent Environment value."
+    }
+    if ($after.Boot -ne $Before.Boot) {
+        throw "Inspect scenario '$Scenario' crossed a machine restart boundary."
+    }
+}
+
+$root = Split-Path $PSScriptRoot -Parent | Split-Path -Parent
+$tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("wdem-inspect-smoke-{0}" -f [Guid]::NewGuid().ToString('N'))
+$optionalReport = Join-Path $tempRoot 'optional-unselected-report.json'
+$networkTrapReport = Join-Path $tempRoot 'acquisition-network-trap-report.json'
+$originalVsixPath = $env:WDEM_COMPANY_VSIX_PATH
+$originalVsixSha256 = $env:WDEM_COMPANY_VSIX_SHA256
+$hadVsixPath = Test-Path Env:WDEM_COMPANY_VSIX_PATH
+$hadVsixSha256 = Test-Path Env:WDEM_COMPANY_VSIX_SHA256
+
+try {
+    New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
+    Remove-Item Env:WDEM_COMPANY_VSIX_PATH -ErrorAction SilentlyContinue
+    Remove-Item Env:WDEM_COMPANY_VSIX_SHA256 -ErrorAction SilentlyContinue
+
+    $optionalBefore = Get-InspectSafetySnapshot
+    Invoke-BoundedInspect `
+        -Root $root `
+        -Profile (Join-Path $root 'profiles\csharp-developer.yaml') `
+        -Report $optionalReport `
+        -Scenario 'optional-unselected'
+    Assert-InspectReport $optionalReport 'optional-unselected' $false
+    Assert-InspectSafetySnapshot $optionalBefore 'optional-unselected'
+
+    $networkAttempted = $false
+    $networkTrap = $null
+    $networkAttempt = $null
+    try {
+        $networkTrap = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+        $networkTrap.Start()
+        $networkTrapPort = ([Net.IPEndPoint]$networkTrap.LocalEndpoint).Port
+        $networkAttempt = $networkTrap.AcceptTcpClientAsync()
+
+        $inspectProfile = Join-Path $tempRoot 'acquisition-network-trap-profile.yaml'
+        $bootstrapperSourceUrl = 'https://c2rsetup.officeapps.live.com/c2r/downloadVS.aspx?sku=community&channel=stable&version=VS18&source=WDEM&cid=2500'
+        $bootstrapperTrapUrl = "https://127.0.0.1:$networkTrapPort/wdem-inspect-must-not-download-bootstrapper.exe"
+        $profileText = Get-Content (Join-Path $root 'profiles\csharp-developer.yaml') -Raw
+        if (-not $profileText.Contains($bootstrapperSourceUrl)) {
+            throw 'The Visual Studio bootstrapper source URL drifted; the network trap profile was not created.'
+        }
+        $profileText = $profileText.Replace($bootstrapperSourceUrl, $bootstrapperTrapUrl)
+        if ($profileText.Contains($bootstrapperSourceUrl) -or -not $profileText.Contains($bootstrapperTrapUrl)) {
+            throw 'The Visual Studio bootstrapper URL was not replaced in the network trap profile.'
+        }
+        [IO.File]::WriteAllText($inspectProfile, $profileText, [Text.UTF8Encoding]::new($false))
+
+        # Both acquisition sources share the listener. The process monitor
+        # disposes an accepted client and terminates the scenario immediately.
+        $env:WDEM_COMPANY_VSIX_PATH = "https://127.0.0.1:$networkTrapPort/wdem-inspect-must-not-download.vsix"
+        $env:WDEM_COMPANY_VSIX_SHA256 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+        $networkBefore = Get-InspectSafetySnapshot
+        Invoke-BoundedInspect `
+            -Root $root `
+            -Profile $inspectProfile `
+            -Report $networkTrapReport `
+            -Scenario 'acquisition-network-trap' `
+            -SelectCompanyVsExtension `
+            -NetworkAttempt $networkAttempt
+        Assert-InspectReport $networkTrapReport 'acquisition-network-trap' $true
+        Assert-InspectSafetySnapshot $networkBefore 'acquisition-network-trap'
+    }
+    finally {
+        if ($null -ne $networkTrap) {
+            $networkTrap.Stop()
+        }
+        if ($null -ne $networkAttempt) {
+            try {
+                if (-not $networkAttempt.Wait(5000)) {
+                    throw 'The network trap accept did not reach a terminal state after the listener stopped.'
+                }
+            }
+            catch [AggregateException] {
+                $unexpected = @($_.Exception.Flatten().InnerExceptions | Where-Object {
+                    if ($_ -is [ObjectDisposedException]) {
+                        return $false
+                    }
+                    if ($_ -is [Net.Sockets.SocketException]) {
+                        return $_.SocketErrorCode -notin @(
+                            [Net.Sockets.SocketError]::Interrupted,
+                            [Net.Sockets.SocketError]::OperationAborted,
+                            [Net.Sockets.SocketError]::NotSocket)
+                    }
+                    return $true
+                })
+                if ($unexpected.Count -ne 0) {
+                    throw
+                }
+            }
+            if ($networkAttempt.Status -eq [Threading.Tasks.TaskStatus]::RanToCompletion) {
+                $client = $networkAttempt.GetAwaiter().GetResult()
+                $client.Dispose()
+                $networkAttempted = $true
+            }
+            elseif ($networkAttempt.Status -eq [Threading.Tasks.TaskStatus]::Canceled) {
+                throw 'The network trap accept was unexpectedly canceled.'
+            }
+        }
+    }
+    if ($networkAttempted) {
+        throw 'Inspect attempted a network connection for an acquisition-only source.'
     }
 
     if (-not (Test-Path (Join-Path $env:LOCALAPPDATA 'WDEM\runs') -PathType Container)) {
         throw 'WDEM did not persist Inspect state below %LOCALAPPDATA%\WDEM.'
     }
 
-    $registryAfter = Get-RegistryFingerprint
-    $environmentAfter = Get-PersistentEnvironmentFingerprint
-    $bootAfter = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
-    if ($registryAfter -ne $registryBefore) {
-        throw 'Inspect changed a persistent Registry installation or Environment scope.'
-    }
-    if ($environmentAfter -ne $environmentBefore) {
-        throw 'Inspect changed a persistent Environment value.'
-    }
-    if ($bootAfter -ne $bootBefore) {
-        throw 'Inspect crossed a machine restart boundary.'
-    }
-
-    Write-Host 'WDEM Inspect smoke passed without Apply-side effects.'
+    Write-Host 'WDEM Inspect smoke passed both scenarios without Apply-side effects.'
 }
 finally {
     if ($hadVsixPath) {

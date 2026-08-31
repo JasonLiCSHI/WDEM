@@ -128,7 +128,7 @@ public sealed class MainWindowViewModelTests
     recovery.SelectedCandidate = Assert.Single(recovery.Candidates);
 
     Task recovering = recovery.RecoverCommand.ExecuteAsync(null);
-    await service.RecoverStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.RecoverStarted.Task.WaitAsync(AsyncSignalTimeout);
     await recovery.RecoverCommand.ExecuteAsync(null);
 
     Assert.Equal(1, service.RecoverCalls);
@@ -203,7 +203,7 @@ public sealed class MainWindowViewModelTests
     recovery.SelectedCandidate = Assert.Single(recovery.Candidates);
 
     Task abandoning = recovery.AbandonCommand.ExecuteAsync(null);
-    await service.AbandonStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.AbandonStarted.Task.WaitAsync(AsyncSignalTimeout);
     await recovery.AbandonCommand.ExecuteAsync(null);
     await recovery.RecoverCommand.ExecuteAsync(null);
 
@@ -262,9 +262,9 @@ public sealed class MainWindowViewModelTests
         new RecordingDispatcher());
 
     Task initialization = main.InitializeAsync();
-    await service.RecoveryDiscoveryStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.RecoveryDiscoveryStarted.Task.WaitAsync(AsyncSignalTimeout);
     Task disposal = main.DisposeAsync().AsTask();
-    await service.RecoveryDiscoveryCancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.RecoveryDiscoveryCancellationObserved.Task.WaitAsync(AsyncSignalTimeout);
 
     await disposal;
     await initialization;
@@ -293,9 +293,9 @@ public sealed class MainWindowViewModelTests
     var recovery = Assert.IsType<RecoveryCandidatesViewModel>(main.CurrentPage);
 
     Task recovering = recovery.RecoverCommand.ExecuteAsync(null);
-    await service.RecoverStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.RecoverStarted.Task.WaitAsync(AsyncSignalTimeout);
     Task disposal = main.DisposeAsync().AsTask();
-    await service.RecoverCancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.RecoverCancellationObserved.Task.WaitAsync(AsyncSignalTimeout);
 
     await Task.WhenAll(disposal, recovering);
 
@@ -325,9 +325,9 @@ public sealed class MainWindowViewModelTests
     var recovery = Assert.IsType<RecoveryCandidatesViewModel>(main.CurrentPage);
 
     Task abandoning = recovery.AbandonCommand.ExecuteAsync(null);
-    await service.AbandonStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.AbandonStarted.Task.WaitAsync(AsyncSignalTimeout);
     Task disposal = main.DisposeAsync().AsTask();
-    await service.AbandonCancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.AbandonCancellationObserved.Task.WaitAsync(AsyncSignalTimeout);
 
     await Task.WhenAll(disposal, abandoning);
 
@@ -542,9 +542,9 @@ public sealed class MainWindowViewModelTests
     ResourceSelectionViewModel resources = main.ResourceSelection!;
 
     Task checking = ((AsyncRelayCommand)resources.CheckEnvironmentCommand).ExecuteAsync(null);
-    await catalog.LoadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await catalog.LoadStarted.Task.WaitAsync(AsyncSignalTimeout);
     Task disposing = main.DisposeAsync().AsTask();
-    await catalog.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await catalog.CancellationObserved.Task.WaitAsync(AsyncSignalTimeout);
 
     try
     {
@@ -586,7 +586,7 @@ public sealed class MainWindowViewModelTests
     var startCommand = (AsyncRelayCommand)resources.StartConfigurationCommand;
 
     Task checking = checkCommand.ExecuteAsync(null);
-    await service.InspectStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.InspectStarted.Task.WaitAsync(AsyncSignalTimeout);
     Task configuring = Task.CompletedTask;
 
     try
@@ -633,10 +633,10 @@ public sealed class MainWindowViewModelTests
 
     Task checking = ((AsyncRelayCommand)main.ResourceSelection!.CheckEnvironmentCommand)
         .ExecuteAsync(null);
-    await service.InspectStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.InspectStarted.Task.WaitAsync(AsyncSignalTimeout);
 
     Task disposing = main.DisposeAsync().AsTask();
-    await service.InspectionCancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.InspectionCancellationObserved.Task.WaitAsync(AsyncSignalTimeout);
 
     Assert.False(disposing.IsCompleted);
     service.ReleaseInspectionAfterCancellation.TrySetResult();
@@ -670,7 +670,7 @@ public sealed class MainWindowViewModelTests
 
     Task checking = ((AsyncRelayCommand)main.ResourceSelection!.CheckEnvironmentCommand)
         .ExecuteAsync(null);
-    await service.HeldInspectionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.HeldInspectionStarted.Task.WaitAsync(AsyncSignalTimeout);
     Task? disposing = null;
     var disposeCompletedDuringCleanupNotification = new TaskCompletionSource<bool>(
         TaskCreationOptions.RunContinuationsAsynchronously);
@@ -679,12 +679,12 @@ public sealed class MainWindowViewModelTests
       if (service.InspectionCleanupCompleted.Task.IsCompleted && disposing is not null)
       {
         disposeCompletedDuringCleanupNotification.TrySetResult(
-            disposing.Wait(TimeSpan.FromSeconds(5)));
+            disposing.Wait(AsyncSignalTimeout));
       }
     };
 
     disposing = main.DisposeAsync().AsTask();
-    await service.InspectionCancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.InspectionCancellationObserved.Task.WaitAsync(AsyncSignalTimeout);
 
     Assert.False(disposing.IsCompleted);
     service.ReleaseInspectionAfterCancellation.TrySetResult();
@@ -716,7 +716,7 @@ public sealed class MainWindowViewModelTests
 
     Task checking = ((AsyncRelayCommand)main.ResourceSelection!.CheckEnvironmentCommand)
         .ExecuteAsync(null);
-    await service.HeldInspectionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.HeldInspectionStarted.Task.WaitAsync(AsyncSignalTimeout);
     Task? disposing = null;
     var disposeCompletedDuringCleanupNotification = new TaskCompletionSource<bool>(
         TaskCreationOptions.RunContinuationsAsynchronously);
@@ -732,12 +732,12 @@ public sealed class MainWindowViewModelTests
       if (service.InspectionCleanupCompleted.Task.IsCompleted && disposing is not null)
       {
         disposeCompletedDuringCleanupNotification.TrySetResult(
-            disposing.Wait(TimeSpan.FromSeconds(5)));
+            disposing.Wait(AsyncSignalTimeout));
       }
     };
 
     disposing = main.DisposeAsync().AsTask();
-    await service.InspectionCancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.InspectionCancellationObserved.Task.WaitAsync(AsyncSignalTimeout);
 
     Assert.False(disposing.IsCompleted);
     service.ReleaseInspectionAfterCancellation.TrySetResult();
@@ -769,10 +769,10 @@ public sealed class MainWindowViewModelTests
     await main.ProfileSelection.SelectProfileCommand.ExecuteAsync(null);
     Task checking = ((AsyncRelayCommand)main.ResourceSelection!.CheckEnvironmentCommand)
         .ExecuteAsync(null);
-    await service.HeldInspectionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.HeldInspectionStarted.Task.WaitAsync(AsyncSignalTimeout);
 
     Task firstDispose = main.DisposeAsync().AsTask();
-    await service.InspectionCancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.InspectionCancellationObserved.Task.WaitAsync(AsyncSignalTimeout);
     Task secondDispose = main.DisposeAsync().AsTask();
 
     Assert.False(firstDispose.IsCompleted);
@@ -806,7 +806,7 @@ public sealed class MainWindowViewModelTests
         .ExecuteAsync(null);
     var plan = Assert.IsType<PlanViewModel>(main.CurrentPage);
     Task applying = plan.ApplyCommand.ExecuteAsync(null);
-    await service.EventsPublished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.EventsPublished.Task.WaitAsync(AsyncSignalTimeout);
     var monitor = Assert.IsType<ExecutionMonitorViewModel>(main.CurrentPage);
     service.ReleaseEvents.TrySetResult();
     await applying;
@@ -815,10 +815,10 @@ public sealed class MainWindowViewModelTests
 
     Task checking = ((AsyncRelayCommand)main.ResourceSelection.CheckEnvironmentCommand)
         .ExecuteAsync(null);
-    await service.HeldInspectionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.HeldInspectionStarted.Task.WaitAsync(AsyncSignalTimeout);
 
     Task firstDispose = main.DisposeAsync().AsTask();
-    await service.InspectionCancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.InspectionCancellationObserved.Task.WaitAsync(AsyncSignalTimeout);
     Task secondDispose = main.DisposeAsync().AsTask();
 
     Assert.False(firstDispose.IsCompleted);
@@ -855,7 +855,7 @@ public sealed class MainWindowViewModelTests
     var plan = Assert.IsType<PlanViewModel>(main.CurrentPage);
 
     Task refreshing = plan.InspectCommand.ExecuteAsync(null);
-    await service.HeldInspectionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.HeldInspectionStarted.Task.WaitAsync(AsyncSignalTimeout);
     Task competing = ((AsyncRelayCommand)resources.CheckEnvironmentCommand).ExecuteAsync(null);
 
     Assert.Equal(2, service.InspectCalls);
@@ -892,9 +892,9 @@ public sealed class MainWindowViewModelTests
     service.InspectResult = InspectRun(executable: false);
 
     Task refreshing = plan.InspectCommand.ExecuteAsync(null);
-    await service.HeldInspectionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.HeldInspectionStarted.Task.WaitAsync(AsyncSignalTimeout);
     Task disposing = main.DisposeAsync().AsTask();
-    await service.InspectionCancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.InspectionCancellationObserved.Task.WaitAsync(AsyncSignalTimeout);
 
     Assert.False(disposing.IsCompleted);
     service.ReleaseInspection.TrySetResult();
@@ -933,12 +933,12 @@ public sealed class MainWindowViewModelTests
     using var cancellation = new CancellationTokenSource();
 
     Task refreshing = plan.InitializeAsync(cancellation.Token);
-    await service.HeldInspectionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.HeldInspectionStarted.Task.WaitAsync(AsyncSignalTimeout);
     cancellation.Cancel();
     bool cancellationObserved;
     try
     {
-      await service.InspectionCancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(1));
+      await service.InspectionCancellationObserved.Task.WaitAsync(AsyncSignalTimeout);
       cancellationObserved = true;
     }
     catch (TimeoutException)
@@ -1128,7 +1128,7 @@ public sealed class MainWindowViewModelTests
     var initialCompletion = Assert.IsType<CompletionViewModel>(main.CurrentPage);
 
     Task retrying = initialCompletion.RetryFailedCommand.ExecuteAsync(null);
-    await service.RetryStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    await service.RetryStarted.Task.WaitAsync(AsyncSignalTimeout);
 
     Assert.Equal(initialCompletion.Run.RunId, service.RetriedRunId);
     Assert.Equal(["git"], service.RetriedResourceIds);

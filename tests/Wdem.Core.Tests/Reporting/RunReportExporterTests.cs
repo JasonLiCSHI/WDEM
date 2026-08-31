@@ -50,6 +50,30 @@ public sealed class RunReportExporterTests
   }
 
   [Fact]
+  public void ReportsIncludeResourceRetryCount()
+  {
+    var run = CreateTerminalRun("safe");
+    var results = run.ResourceResults.ToDictionary(
+        pair => pair.Key,
+        pair => pair.Key == "failed" ? pair.Value with { RetryCount = 3 } : pair.Value,
+        StringComparer.OrdinalIgnoreCase);
+    run = run with { ResourceResults = results };
+    var exporter = new RunReportExporter(new LogRedactor());
+
+    string json = exporter.ExportJson(run);
+    string markdown = exporter.ExportMarkdown(run);
+    using JsonDocument document = JsonDocument.Parse(json);
+
+    Assert.Equal(
+        3,
+        document.RootElement.GetProperty("resourceResults")
+            .GetProperty("failed")
+            .GetProperty("retryCount")
+            .GetInt32());
+    Assert.Contains("Retry count: 3", markdown, StringComparison.Ordinal);
+  }
+
+  [Fact]
   public void ReportsIncludeRedactedResourcePresentationMetadata()
   {
     const string secret = "resource-presentation-secret";
@@ -445,7 +469,7 @@ public sealed class RunReportExporterTests
         "id", "description", "action", "privilegeRequirement", "restartPolicy",
         "isDestructive", "reason");
     AssertPropertyNames(result,
-        "resourceId", "state", "outcome", "finalCompliance", "detectedBefore",
+        "resourceId", "state", "outcome", "retryCount", "finalCompliance", "detectedBefore",
         "detectedAfter", "progress", "message", "startedAtUtc", "endedAtUtc", "error",
         "restartRequirement", "stepResults");
     AssertPropertyNames(detected,

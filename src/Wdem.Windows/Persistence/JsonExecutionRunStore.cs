@@ -2451,6 +2451,11 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
 
   private static void ValidateResourceResult(ResourceResult result)
   {
+    if (result.RetryCount < 0)
+    {
+      throw new ArgumentException("A resource retry count cannot be negative.", nameof(result));
+    }
+
     ValidateEnum(result.State, "resource result state");
     ValidateOptionalEnum(result.Outcome, "resource result outcome");
     ValidateOptionalEnum(result.FinalCompliance, "final compliance");

@@ -200,6 +200,8 @@ public sealed class DesktopProjectTests
   {
     string projectPath = GetDesktopProjectPath();
     string repositoryRoot = Directory.GetParent(Directory.GetParent(Path.GetDirectoryName(projectPath)!)!.FullName)!.FullName;
+    await using FileStream publishLease =
+        await PublishedElevatedHostSmoke.AcquirePublishLeaseAsync(repositoryRoot);
     string testRoot = Path.Combine(
         Path.GetTempPath(),
         "wdem-desktop-profile-layout",
@@ -215,8 +217,8 @@ public sealed class DesktopProjectTests
           [
             "publish", projectPath,
             "-c", "Release",
+            "-r", "win-x64",
             "-o", publishDirectory,
-            "--no-restore",
             "--nologo",
             "--verbosity", "minimal",
             "-m:1"
@@ -259,6 +261,31 @@ public sealed class DesktopProjectTests
       {
       }
     }
+  }
+
+  [Fact]
+  public async Task PublishLeaseSerializesConcurrentPublishers()
+  {
+    string repositoryRoot = Directory.GetParent(
+        Directory.GetParent(Path.GetDirectoryName(GetDesktopProjectPath())!)!.FullName)!.FullName;
+    await using FileStream held =
+        await PublishedElevatedHostSmoke.AcquirePublishLeaseAsync(repositoryRoot);
+    using var blockedCancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+    {
+      await using FileStream blocked =
+          await PublishedElevatedHostSmoke.AcquirePublishLeaseAsync(
+              repositoryRoot,
+              blockedCancellation.Token);
+    });
+
+    await held.DisposeAsync();
+    using var acquisitionCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    await using FileStream acquired =
+        await PublishedElevatedHostSmoke.AcquirePublishLeaseAsync(
+            repositoryRoot,
+            acquisitionCancellation.Token);
   }
 
   private static string GetDesktopProjectPath()

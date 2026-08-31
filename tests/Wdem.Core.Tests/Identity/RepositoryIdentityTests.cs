@@ -166,10 +166,15 @@ public sealed class RepositoryIdentityTests
         @"(?ms)workflow_dispatch:\s+inputs:\s+tag_name:.*?required:\s*true",
         workflow);
     Assert.Matches(
-        @"(?ms)- uses: actions/checkout@v7\s+with:\s+ref:\s*\$\{\{ inputs\.tag_name \|\| github\.ref \}\}",
+        @"(?m)^[ \t]*-[ \t]+uses:[ \t]+actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1[ \t]+#[ \t]+v7\.0\.1[ \t]*\r?\n" +
+        @"[ \t]+with:[ \t]*\r?\n" +
+        @"[ \t]+ref:[ \t]+\$\{\{ inputs\.tag_name \|\| github\.ref \}\}[ \t]*\r?$",
         workflow);
     Assert.Matches(
-        @"uses: softprops/action-gh-release@[0-9a-f]{40}\s+# v3\.\d+\.\d+",
+        @"(?m)^[ \t]*uses:[ \t]+actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68[ \t]+#[ \t]+v6\.0\.0[ \t]*\r?$",
+        workflow);
+    Assert.Matches(
+        @"(?m)^[ \t]*uses:[ \t]+softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64[ \t]+#[ \t]+v3\.0\.3[ \t]*\r?$",
         workflow);
     Assert.Matches(
         @"tag_name:\s*\$\{\{ inputs\.tag_name \|\| github\.ref_name \}\}",
@@ -284,8 +289,21 @@ public sealed class RepositoryIdentityTests
     Assert.True(File.Exists(scriptPath), "Missing WDEM Inspect smoke script.");
     var script = File.ReadAllText(scriptPath);
 
-    Assert.Contains("Wdem.Cli.csproj", script, StringComparison.Ordinal);
-    Assert.Matches(@"(?i)\binspect\b.*--profile.*--json.*--report", script);
+    var boundedInspect = ExtractSection(
+        script,
+        "function Invoke-BoundedInspect(",
+        "function Assert-InspectReport(");
+    var arguments = NormalizeWhitespace(ExtractSection(
+        boundedInspect,
+        "    $arguments = @(",
+        "    if ($SelectCompanyVsExtension)"));
+
+    Assert.Equal(
+        "$arguments = @( 'run', '--project', 'src\\Wdem.Cli\\Wdem.Cli.csproj', " +
+        "'-p:BuildInParallel=false', '--', 'inspect', '--profile', $Profile, " +
+        "'--json', '--report', $Report)",
+        arguments);
+    Assert.DoesNotContain("'apply'", arguments, StringComparison.OrdinalIgnoreCase);
     Assert.DoesNotMatch(@"(?i)&?\s*[^\r\n]*Wdem(?:\.Cli)?(?:\.exe)?\s+apply\b", script);
     Assert.Contains("resourceResults", script, StringComparison.Ordinal);
     Assert.Contains("stepResults", script, StringComparison.Ordinal);
@@ -302,6 +320,204 @@ public sealed class RepositoryIdentityTests
   }
 
   [Fact]
+  public void InspectSmokeSeparatesOptionalUnsetAndNetworkTrapScenarios()
+  {
+    var script = File.ReadAllText(Path.Combine(
+        RepositoryRoot,
+        "testing",
+        "wdem",
+        "inspect-smoke.ps1"));
+
+    Assert.Contains("optional-unselected", script, StringComparison.Ordinal);
+    Assert.Contains("acquisition-network-trap", script, StringComparison.Ordinal);
+    Assert.Contains("Remove-Item Env:WDEM_COMPANY_VSIX_PATH", script, StringComparison.Ordinal);
+    Assert.Contains("Remove-Item Env:WDEM_COMPANY_VSIX_SHA256", script, StringComparison.Ordinal);
+    Assert.Contains("AcceptTcpClientAsync", script, StringComparison.Ordinal);
+    Assert.Contains("WaitForExit(50)", script, StringComparison.Ordinal);
+    Assert.Contains("$networkAttempt.Wait(5000)", script, StringComparison.Ordinal);
+    Assert.Contains("function Stop-BoundedProcessTree", script, StringComparison.Ordinal);
+    Assert.Contains("taskkill.exe", script, StringComparison.OrdinalIgnoreCase);
+    Assert.Matches(@"(?s)/PID.*\$Process\.Id.*/T.*/F", script);
+    Assert.Contains("RedirectStandardOutput = $true", script, StringComparison.Ordinal);
+    Assert.Contains("RedirectStandardError = $true", script, StringComparison.Ordinal);
+    Assert.Contains("StandardOutput.ReadToEndAsync()", script, StringComparison.Ordinal);
+    Assert.Contains("StandardError.ReadToEndAsync()", script, StringComparison.Ordinal);
+    Assert.Contains("$started = $false", script, StringComparison.Ordinal);
+    Assert.Contains("$started = $true", script, StringComparison.Ordinal);
+    Assert.Matches(
+        @"(?s)finally\s*\{.*if \(\$started\s+-and.*Stop-BoundedProcessTree.*finally\s*\{\s*\$process\.Dispose\(\)",
+        script);
+    Assert.Contains("$bootstrapperSourceUrl", script, StringComparison.Ordinal);
+    Assert.Contains("$bootstrapperTrapUrl", script, StringComparison.Ordinal);
+    Assert.Contains("Get-TreeFingerprint", script, StringComparison.Ordinal);
+    Assert.DoesNotContain("Get-LegacyTreeFingerprint", script, StringComparison.Ordinal);
+    Assert.DoesNotContain("Retired state streams changed", script, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void ContributingDocumentsBothNarrowProgramDataSecurityExceptions()
+  {
+    var guide = File.ReadAllText(Path.Combine(
+        RepositoryRoot,
+        "CONTRIBUTING.md"));
+    var planArtifacts = ExtractMarkdownBullet(
+        guide,
+        "%ProgramData%\\Wdem\\PlanArtifacts");
+    var secureArtifacts = ExtractMarkdownBullet(
+        guide,
+        "%ProgramData%\\Wdem\\SecureArtifacts");
+
+    Assert.Contains("cross-integrity", planArtifacts, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("verified VSIX plan artifacts", planArtifacts, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("revocation metadata", planArtifacts, StringComparison.OrdinalIgnoreCase);
+    Assert.DoesNotContain("SecureArtifacts", planArtifacts, StringComparison.Ordinal);
+
+    Assert.Contains("short-lived", secureArtifacts, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("ACL-restricted", secureArtifacts, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("verified executables", secureArtifacts, StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("VSIX", secureArtifacts, StringComparison.Ordinal);
+    Assert.Contains("Visual Studio configuration", secureArtifacts, StringComparison.OrdinalIgnoreCase);
+    Assert.DoesNotContain("PlanArtifacts", secureArtifacts, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void InspectSmokeTerminatesTheEntireProcessTreeAndPreservesStartFailures()
+  {
+    var script = File.ReadAllText(Path.Combine(
+        RepositoryRoot,
+        "testing",
+        "wdem",
+        "inspect-smoke.ps1"));
+    var mainScript = script.IndexOf(
+        "$root = Split-Path $PSScriptRoot",
+        StringComparison.Ordinal);
+    Assert.True(mainScript > 0, "Could not isolate the smoke process helpers.");
+
+    using var directory = new TemporaryDirectory();
+    var harnessPath = Path.Combine(directory.Path, "process-cleanup-harness.ps1");
+    var testRoot = directory.Path.Replace("'", "''", StringComparison.Ordinal);
+    var harness = script[..mainScript] + $$"""
+        $testRoot = '{{testRoot}}'
+        $rootProcess = $null
+        $childId = 0
+        try {
+            $startInfo = [Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = 'powershell.exe'
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.Arguments = '-NoLogo -NoProfile -Command "$childStartInfo = [Diagnostics.ProcessStartInfo]::new(); $childStartInfo.FileName = ''powershell.exe''; $childStartInfo.UseShellExecute = $false; $childStartInfo.CreateNoWindow = $true; $childStartInfo.Arguments = ''-NoLogo -NoProfile -Command Start-Sleep -Seconds 60''; $child = [Diagnostics.Process]::new(); try { $child.StartInfo = $childStartInfo; if (-not $child.Start()) { throw ''Could not start child process.'' }; [Console]::Out.WriteLine($child.Id); [Console]::Out.Flush(); $child.WaitForExit() } finally { $child.Dispose() }"'
+            $rootProcess = [Diagnostics.Process]::new()
+            $rootProcess.StartInfo = $startInfo
+            if (-not $rootProcess.Start()) { throw 'Could not start process-tree harness.' }
+            $childId = [int]$rootProcess.StandardOutput.ReadLine()
+
+            Stop-BoundedProcessTree -Process $rootProcess -Scenario 'process-tree-harness'
+            if (-not $rootProcess.HasExited) { throw 'The root process survived tree cleanup.' }
+            try {
+                $child = [Diagnostics.Process]::GetProcessById($childId)
+                try {
+                    if (-not $child.HasExited) { throw 'The child process survived tree cleanup.' }
+                }
+                finally {
+                    $child.Dispose()
+                }
+            }
+            catch [ArgumentException] {
+            }
+            Write-Output 'TREE_TERMINATED'
+        }
+        finally {
+            if ($null -ne $rootProcess) {
+                try {
+                    if (-not $rootProcess.HasExited) {
+                        & taskkill.exe /PID $rootProcess.Id /T /F | Out-Null
+                    }
+                }
+                catch {
+                }
+                $rootProcess.Dispose()
+            }
+        }
+
+        $missingRoot = Join-Path $testRoot 'missing-working-directory'
+        try {
+            Invoke-BoundedInspect `
+                -Root $missingRoot `
+                -Profile (Join-Path $testRoot 'missing-profile.yaml') `
+                -Report (Join-Path $testRoot 'missing-report.json') `
+                -Scenario 'start-failure-harness'
+            throw 'Expected Process.Start to fail.'
+        }
+        catch {
+            if ($_.Exception.Message -match 'No process is associated') {
+                throw 'Process cleanup replaced the original Process.Start failure.'
+            }
+            Write-Output 'START_FAILURE_PRESERVED'
+        }
+        """;
+    Assert.DoesNotContain(
+        "Start-Process powershell.exe",
+        harness,
+        StringComparison.OrdinalIgnoreCase);
+    Assert.Contains(
+        "$childStartInfo.CreateNoWindow = $true",
+        harness,
+        StringComparison.Ordinal);
+    Assert.Contains(
+        "$childStartInfo.UseShellExecute = $false",
+        harness,
+        StringComparison.Ordinal);
+    Assert.Contains(
+        "finally { $child.Dispose() }",
+        harness,
+        StringComparison.Ordinal);
+    File.WriteAllText(harnessPath, harness);
+
+    var result = RunProcess(
+        directory.Path,
+        "powershell",
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        harnessPath);
+
+    Assert.True(result.ExitCode == 0, result.Output);
+    Assert.Contains("TREE_TERMINATED", result.Output, StringComparison.Ordinal);
+    Assert.Contains("START_FAILURE_PRESERVED", result.Output, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void TestProjectsCentralizeTheCoverageCollector()
+  {
+    var propsPath = Path.Combine(RepositoryRoot, "tests", "Directory.Build.props");
+    Assert.True(File.Exists(propsPath), "Coverage collector configuration must be centralized.");
+
+    var props = XDocument.Load(propsPath);
+    var collector = Assert.Single(
+        props.Descendants("PackageReference"),
+        reference => reference.Attribute("Include")?.Value == "coverlet.collector");
+    Assert.Equal("10.0.1", collector.Attribute("Version")?.Value);
+    Assert.Equal("all", collector.Element("PrivateAssets")?.Value);
+    Assert.Equal(
+        "runtime; build; native; contentfiles; analyzers; buildtransitive",
+        collector.Element("IncludeAssets")?.Value);
+
+    foreach (var project in Directory.EnumerateFiles(
+                 Path.Combine(RepositoryRoot, "tests"),
+                 "*.csproj",
+                 SearchOption.AllDirectories))
+    {
+      var document = XDocument.Load(project);
+      Assert.DoesNotContain(
+          document.Descendants("PackageReference"),
+          reference => reference.Attribute("Include")?.Value == "coverlet.collector");
+    }
+  }
+
+  [Fact]
   public void InspectSmokeFingerprintsTheEntireRetiredStateRoot()
   {
     var script = File.ReadAllText(Path.Combine(
@@ -311,14 +527,14 @@ public sealed class RepositoryIdentityTests
         "inspect-smoke.ps1"));
 
     Assert.Contains(
-        "$legacyRoot = Join-Path $env:LOCALAPPDATA 'WinHome'",
+        "Get-TreeFingerprint (Join-Path $env:LOCALAPPDATA 'WinHome')",
         script,
         StringComparison.Ordinal);
     Assert.Matches(
-        @"\$legacyBefore\s*=\s*Get-LegacyTreeFingerprint\s+\$legacyRoot",
+        @"LegacyState\s*=\s*Get-TreeFingerprint\s+\(Join-Path\s+\$env:LOCALAPPDATA\s+'WinHome'\)",
         script);
     Assert.Matches(
-        @"\$legacyAfter\s*=\s*Get-LegacyTreeFingerprint\s+\$legacyRoot",
+        @"\$after\.LegacyState\s+-ne\s+\$Before\.LegacyState",
         script);
     Assert.DoesNotContain(
         "'WinHome\\Wdem\\runs'",
@@ -368,32 +584,32 @@ public sealed class RepositoryIdentityTests
         }
 
         Reset-LegacyRoot
-        $before = Get-LegacyTreeFingerprint $legacyRoot
+        $before = Get-TreeFingerprint $legacyRoot
         New-Item -ItemType Directory -Path $legacyRoot | Out-Null
         Set-Content -LiteralPath (Join-Path $legacyRoot 'state.json') -Value 'alpha'
-        Assert-FingerprintChanged $before (Get-LegacyTreeFingerprint $legacyRoot) 'creation outside Wdem/runs'
+        Assert-FingerprintChanged $before (Get-TreeFingerprint $legacyRoot) 'creation outside Wdem/runs'
 
         $state = Join-Path $legacyRoot 'state.json'
         $stableTime = [DateTime]::UtcNow.AddHours(-2)
         [IO.File]::WriteAllText($state, 'alpha')
         [IO.File]::SetLastWriteTimeUtc($state, $stableTime)
-        $before = Get-LegacyTreeFingerprint $legacyRoot
+        $before = Get-TreeFingerprint $legacyRoot
         [IO.File]::WriteAllText($state, 'bravo')
         [IO.File]::SetLastWriteTimeUtc($state, $stableTime)
-        Assert-FingerprintChanged $before (Get-LegacyTreeFingerprint $legacyRoot) 'same-length content change'
+        Assert-FingerprintChanged $before (Get-TreeFingerprint $legacyRoot) 'same-length content change'
 
-        $before = Get-LegacyTreeFingerprint $legacyRoot
+        $before = Get-TreeFingerprint $legacyRoot
         $creationTime = [IO.File]::GetCreationTimeUtc($state)
         [IO.File]::SetCreationTimeUtc($state, $creationTime.AddMinutes(-5))
-        Assert-FingerprintChanged $before (Get-LegacyTreeFingerprint $legacyRoot) 'creation-time change'
+        Assert-FingerprintChanged $before (Get-TreeFingerprint $legacyRoot) 'creation-time change'
 
-        $before = Get-LegacyTreeFingerprint $legacyRoot
+        $before = Get-TreeFingerprint $legacyRoot
         $acl = Get-Acl -LiteralPath $state
         $acl.SetAccessRuleProtection(-not $acl.AreAccessRulesProtected, $true)
         Set-Acl -LiteralPath $state -AclObject $acl
-        Assert-FingerprintChanged $before (Get-LegacyTreeFingerprint $legacyRoot) 'DACL change'
+        Assert-FingerprintChanged $before (Get-TreeFingerprint $legacyRoot) 'DACL change'
 
-        $before = Get-LegacyTreeFingerprint $legacyRoot
+        $before = Get-TreeFingerprint $legacyRoot
         $creationTime = [IO.File]::GetCreationTimeUtc($state)
         $writeTime = [IO.File]::GetLastWriteTimeUtc($state)
         $adsSupported = $true
@@ -407,22 +623,22 @@ public sealed class RepositoryIdentityTests
         if ($adsSupported) {
             [IO.File]::SetCreationTimeUtc($state, $creationTime)
             [IO.File]::SetLastWriteTimeUtc($state, $writeTime)
-            Assert-FingerprintChanged $before (Get-LegacyTreeFingerprint $legacyRoot) 'alternate data stream change'
+            Assert-FingerprintChanged $before (Get-TreeFingerprint $legacyRoot) 'alternate data stream change'
             Write-Output 'ADS mutation detected'
         }
 
-        $before = Get-LegacyTreeFingerprint $legacyRoot
+        $before = Get-TreeFingerprint $legacyRoot
         [IO.File]::SetLastWriteTimeUtc($state, $stableTime.AddMinutes(1))
-        Assert-FingerprintChanged $before (Get-LegacyTreeFingerprint $legacyRoot) 'write-time change'
+        Assert-FingerprintChanged $before (Get-TreeFingerprint $legacyRoot) 'write-time change'
 
-        $before = Get-LegacyTreeFingerprint $legacyRoot
+        $before = Get-TreeFingerprint $legacyRoot
         Move-Item -LiteralPath $state -Destination (Join-Path $legacyRoot 'renamed.json')
-        Assert-FingerprintChanged $before (Get-LegacyTreeFingerprint $legacyRoot) 'rename'
+        Assert-FingerprintChanged $before (Get-TreeFingerprint $legacyRoot) 'rename'
 
         $renamed = Join-Path $legacyRoot 'renamed.json'
-        $before = Get-LegacyTreeFingerprint $legacyRoot
+        $before = Get-TreeFingerprint $legacyRoot
         Remove-Item -LiteralPath $renamed
-        Assert-FingerprintChanged $before (Get-LegacyTreeFingerprint $legacyRoot) 'deletion'
+        Assert-FingerprintChanged $before (Get-TreeFingerprint $legacyRoot) 'deletion'
 
         Reset-LegacyRoot
         New-Item -ItemType Directory -Path $legacyRoot | Out-Null
@@ -432,20 +648,20 @@ public sealed class RepositoryIdentityTests
         Set-Content -LiteralPath $outsideState -Value 'alpha'
         $junction = Join-Path $legacyRoot 'external'
         New-Item -ItemType Junction -Path $junction -Target $outside | Out-Null
-        $before = Get-LegacyTreeFingerprint $legacyRoot
+        $before = Get-TreeFingerprint $legacyRoot
         Set-Content -LiteralPath $outsideState -Value 'changed outside legacy root'
-        $after = Get-LegacyTreeFingerprint $legacyRoot
+        $after = Get-TreeFingerprint $legacyRoot
         if ($before -ne $after) { throw 'Fingerprint followed a junction outside the legacy root.' }
 
         $outsideCreationTime = [IO.Directory]::GetCreationTimeUtc($outside)
         [IO.Directory]::SetCreationTimeUtc($outside, $outsideCreationTime.AddMinutes(-5))
-        $after = Get-LegacyTreeFingerprint $legacyRoot
+        $after = Get-TreeFingerprint $legacyRoot
         if ($before -ne $after) { throw 'Fingerprint followed junction target creation metadata.' }
 
         $outsideAcl = Get-Acl -LiteralPath $outside
         $outsideAcl.SetAccessRuleProtection(-not $outsideAcl.AreAccessRulesProtected, $true)
         Set-Acl -LiteralPath $outside -AclObject $outsideAcl
-        $after = Get-LegacyTreeFingerprint $legacyRoot
+        $after = Get-TreeFingerprint $legacyRoot
         if ($before -ne $after) { throw 'Fingerprint followed junction target access control.' }
         [IO.Directory]::Delete($junction)
         """;
@@ -499,7 +715,7 @@ public sealed class RepositoryIdentityTests
             Write-Output "SKIP DIRECTORY ADS: $($_.Exception.Message)"
         }
         if ($adsSupported) {
-            $before = Get-LegacyTreeFingerprint $legacyRoot
+            $before = Get-TreeFingerprint $legacyRoot
             $item = Get-Item -LiteralPath $stateDirectory -Force
             $attributes = [IO.FileAttributes]$item.Attributes
             $creationTime = [DateTime]$item.CreationTimeUtc
@@ -531,7 +747,7 @@ public sealed class RepositoryIdentityTests
                 (Get-AclFingerprint $legacyRoot) -ne $rootAclFingerprint) {
                 throw "Directory ADS test could not restore fingerprinted metadata: state=[$($restoredItem.Attributes),$($restoredItem.CreationTimeUtc.Ticks),$($restoredItem.LastWriteTimeUtc.Ticks),$((Get-AclFingerprint $stateDirectory) -eq $aclFingerprint)] expected=[$attributes,$($creationTime.Ticks),$($writeTime.Ticks),True]; root=[$($restoredRootItem.Attributes),$($restoredRootItem.CreationTimeUtc.Ticks),$($restoredRootItem.LastWriteTimeUtc.Ticks),$((Get-AclFingerprint $legacyRoot) -eq $rootAclFingerprint)] expected=[$rootAttributes,$($rootCreationTime.Ticks),$($rootWriteTime.Ticks),True]"
             }
-            $after = Get-LegacyTreeFingerprint $legacyRoot
+            $after = Get-TreeFingerprint $legacyRoot
             if ($before -eq $after) { throw 'Fingerprint missed directory alternate data stream change.' }
             Write-Output 'Directory ADS mutation detected'
         }
@@ -635,6 +851,26 @@ public sealed class RepositoryIdentityTests
 
   private static string NormalizeWhitespace(string value) =>
       string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+  private static string ExtractMarkdownBullet(string text, string marker)
+  {
+    var lines = text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+    var start = Array.FindIndex(
+        lines,
+        line => line.StartsWith("- ", StringComparison.Ordinal) &&
+            line.Contains(marker, StringComparison.Ordinal));
+    Assert.True(start >= 0, $"Missing Markdown bullet containing: {marker}");
+
+    var bullet = new List<string> { lines[start] };
+    for (var index = start + 1;
+         index < lines.Length && lines[index].StartsWith("  ", StringComparison.Ordinal);
+         index++)
+    {
+      bullet.Add(lines[index]);
+    }
+
+    return NormalizeWhitespace(string.Join('\n', bullet));
+  }
 
   private static string ExtractSection(string text, string startMarker, string endMarker)
   {

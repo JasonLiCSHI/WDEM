@@ -199,6 +199,19 @@ public sealed class EnvironmentRunService :
           nameof(resourceIds));
     }
 
+    if (prior.ResourceResults.Values.Any(result =>
+        requested.Contains(result.ResourceId) && result.RetryCount == int.MaxValue))
+    {
+      throw new InvalidOperationException(
+          "A resource retry count has reached the maximum supported value.");
+    }
+
+    var retryCounts = prior.ResourceResults.ToDictionary(
+        pair => pair.Key,
+        pair => requested.Contains(pair.Key)
+            ? checked(pair.Value.RetryCount + 1)
+            : pair.Value.RetryCount,
+        IdComparer);
     var request = new RunRequest(
         prior.ProfileSourcePath,
         prior.SelectedOptionalResourceIds);
@@ -211,7 +224,8 @@ public sealed class EnvironmentRunService :
             approvalSource: PlanApprovalSource.Retry,
             reviewedPlanFingerprint: null,
             cancellationToken,
-            approvalBoundary)
+            approvalBoundary,
+            retryCounts)
         .ConfigureAwait(false);
   }
 
@@ -344,7 +358,11 @@ public sealed class EnvironmentRunService :
               approvalSource: PlanApprovalSource.Retry,
               reviewedPlanFingerprint: null,
               cancellationToken,
-              approvalBoundary).ConfigureAwait(false);
+              approvalBoundary,
+              claimed.ResourceResults.ToDictionary(
+                  pair => pair.Key,
+                  pair => pair.Value.RetryCount,
+                  IdComparer)).ConfigureAwait(false);
     }
     catch (Exception executionException)
     {
@@ -477,7 +495,8 @@ public sealed class EnvironmentRunService :
       PlanApprovalSource? approvalSource,
       string? reviewedPlanFingerprint,
       CancellationToken cancellationToken,
-      PlanApprovalBoundary? approvalBoundary = null)
+      PlanApprovalBoundary? approvalBoundary = null,
+      IReadOnlyDictionary<string, int>? retryCounts = null)
   {
     ValidateRequest(request);
     cancellationToken.ThrowIfCancellationRequested();
@@ -586,7 +605,12 @@ public sealed class EnvironmentRunService :
                 "An apply run requires a controlled approval source."))
         : null;
 
-    var initialResults = CreateInitialResults(mode, plan, detected, compliance);
+    var initialResults = CreateInitialResults(
+        mode,
+        plan,
+        detected,
+        compliance,
+        retryCounts);
     var run = new ExecutionRun
     {
       RunId = Guid.NewGuid(),
@@ -758,7 +782,10 @@ public sealed class EnvironmentRunService :
   {
     var merged = scheduled.ToDictionary(
         pair => pair.Key,
-        pair => pair.Value,
+        pair => pair.Value with
+        {
+          RetryCount = persisted.GetValueOrDefault(pair.Key)?.RetryCount ?? pair.Value.RetryCount
+        },
         IdComparer);
     foreach (var pair in persisted)
     {
@@ -1590,7 +1617,8 @@ public sealed class EnvironmentRunService :
       RunMode mode,
       ExecutionPlan plan,
       IReadOnlyDictionary<string, DetectedState> detected,
-      IReadOnlyDictionary<string, ComplianceResult> compliance)
+      IReadOnlyDictionary<string, ComplianceResult> compliance,
+      IReadOnlyDictionary<string, int>? retryCounts)
   {
     return plan.Resources.ToDictionary(
         planned => planned.Definition.Id,
@@ -1602,6 +1630,7 @@ public sealed class EnvironmentRunService :
               Outcome = compliance[planned.Definition.Id].Status == ComplianceStatus.Satisfied
                   ? ExecutionOutcome.NotRequired
                   : ExecutionOutcome.Skipped,
+              RetryCount = retryCounts?.GetValueOrDefault(planned.Definition.Id) ?? 0,
               FinalCompliance = compliance[planned.Definition.Id].Status,
               DetectedBefore = detected[planned.Definition.Id],
               Progress = 1,
@@ -1611,6 +1640,7 @@ public sealed class EnvironmentRunService :
             {
               ResourceId = planned.Definition.Id,
               State = ExecutionState.Pending,
+              RetryCount = retryCounts?.GetValueOrDefault(planned.Definition.Id) ?? 0,
               FinalCompliance = compliance[planned.Definition.Id].Status,
               DetectedBefore = detected[planned.Definition.Id]
             },
@@ -2992,7 +3022,8 @@ public sealed class EnvironmentRunService :
         var previous = results.GetValueOrDefault(result.ResourceId);
         results[result.ResourceId] = result with
         {
-          DetectedBefore = result.DetectedBefore ?? previous?.DetectedBefore
+          DetectedBefore = result.DetectedBefore ?? previous?.DetectedBefore,
+          RetryCount = previous?.RetryCount ?? result.RetryCount
         };
         var next = _current with { ResourceResults = results };
         if (next.State == ExecutionState.Completed)

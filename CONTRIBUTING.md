@@ -19,12 +19,18 @@ and planning, or a disposable Windows VM for privileged end-to-end validation.
 
 The solution contains `Wdem.Core`, `Wdem.Windows`, `Wdem.Cli`,
 `Wdem.Desktop`, `Wdem.ElevatedHost`, the transition-source library, and their
-test projects. New UI belongs in WinUI 3 and uses code-behind; do not introduce
-WPF, a third-party UI framework, or MVVM infrastructure.
+test projects. New UI belongs in WinUI 3 and uses BCL-based MVVM; do not
+introduce WPF, a third-party UI framework, or third-party MVVM infrastructure.
 
 ## Product contracts
 
-- Product state belongs under `%LOCALAPPDATA%\WDEM`.
+- Ordinary product state belongs under `%LOCALAPPDATA%\WDEM`.
+- `%ProgramData%\Wdem\PlanArtifacts` is the narrow security exception used only
+  for ACL-restricted, cross-integrity handoff of verified VSIX plan artifacts
+  and their revocation metadata.
+- `%ProgramData%\Wdem\SecureArtifacts` is the narrow security exception used
+  only for short-lived, ACL-restricted staging of verified executables, VSIX
+  packages, and Visual Studio configuration files.
 - Profiles are supplied explicitly through `--profile`.
 - Product-specific profile variables use the `WDEM_` prefix; the shipped company
   VSIX uses `WDEM_COMPANY_VSIX_PATH` and `WDEM_COMPANY_VSIX_SHA256`.

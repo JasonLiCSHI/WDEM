@@ -37,6 +37,25 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task CreateAsync_RejectsNegativeResourceRetryCount()
+  {
+    var run = SampleRun();
+    run = run with
+    {
+      ResourceResults = run.ResourceResults.ToDictionary(
+          pair => pair.Key,
+          pair => pair.Value with { RetryCount = -1 },
+          StringComparer.OrdinalIgnoreCase)
+    };
+
+    var exception = await Assert.ThrowsAsync<ArgumentException>(
+        () => _store.CreateAsync(run, CancellationToken.None));
+
+    Assert.Contains("retry count", exception.Message, StringComparison.OrdinalIgnoreCase);
+    Assert.False(File.Exists(_store.SnapshotPath(run.RunId)));
+  }
+
+  [Fact]
   public async Task CreateAsync_ProtectsOriginalApprovedResourceAndKeepsPublicSnapshotRedacted()
   {
     var protector = new DeterministicApprovedResourceProtector();
@@ -2675,6 +2694,13 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
   public async Task CreateAndAppendLog_RoundTripsRunAndNeverPersistsSecrets()
   {
     var run = SampleRun();
+    run = run with
+    {
+      ResourceResults = run.ResourceResults.ToDictionary(
+          pair => pair.Key,
+          pair => pair.Value with { RetryCount = 3 },
+          StringComparer.OrdinalIgnoreCase)
+    };
     await _store.CreateAsync(run, CancellationToken.None);
     await _store.AppendLogAsync(
         run.RunId,
@@ -2707,6 +2733,7 @@ public sealed class JsonExecutionRunStoreTests : IDisposable
     Assert.Equal("git", Assert.Single(restored.Graph!.Nodes).Key);
     Assert.Equal("git", Assert.Single(restored.Plan!.Resources).Definition.Id);
     Assert.Equal("2.52.0", restored.ResourceResults["git"].DetectedBefore!.Version);
+    Assert.Equal(3, restored.ResourceResults["git"].RetryCount);
     Assert.True(Assert.Single(restored.ResourceResults["git"].StepResults).ProcessSucceeded);
     Assert.DoesNotContain("abc.def.ghi", log, StringComparison.Ordinal);
     Assert.DoesNotContain("summary-secret", log, StringComparison.Ordinal);
