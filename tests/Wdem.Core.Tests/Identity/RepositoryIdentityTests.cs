@@ -467,16 +467,41 @@ public sealed class RepositoryIdentityTests
         $rootProcess = $null
         $childId = 0
         try {
+            $sleeperScript = Join-Path $testRoot 'process-tree-sleeper.vbs'
+            $childIdPath = Join-Path $testRoot 'child.pid'
+            $sleeperSource = @(
+                'Set shell = CreateObject("WScript.Shell")'
+                'Set fso = CreateObject("Scripting.FileSystemObject")'
+                'If WScript.Arguments.Count > 0 And LCase(WScript.Arguments(0)) = "child" Then'
+                '  WScript.Sleep 60000'
+                '  WScript.Quit 0'
+                'End If'
+                'Set child = shell.Exec("wscript.exe //B //NoLogo " & Chr(34) & WScript.ScriptFullName & Chr(34) & " child")'
+                'Set pidFile = fso.CreateTextFile(WScript.Arguments(0), True)'
+                'pidFile.WriteLine child.ProcessID'
+                'pidFile.Close'
+                'Do While child.Status = 0'
+                '  WScript.Sleep 100'
+                'Loop'
+            )
+            Set-Content -LiteralPath $sleeperScript -Value $sleeperSource -Encoding Ascii
+
             $startInfo = [Diagnostics.ProcessStartInfo]::new()
-            $startInfo.FileName = 'powershell.exe'
+            $startInfo.FileName = 'wscript.exe'
             $startInfo.UseShellExecute = $false
             $startInfo.CreateNoWindow = $true
-            $startInfo.RedirectStandardOutput = $true
-            $startInfo.Arguments = '-NoLogo -NoProfile -Command "$childStartInfo = [Diagnostics.ProcessStartInfo]::new(); $childStartInfo.FileName = ''powershell.exe''; $childStartInfo.UseShellExecute = $false; $childStartInfo.CreateNoWindow = $true; $childStartInfo.Arguments = ''-NoLogo -NoProfile -Command Start-Sleep -Seconds 60''; $child = [Diagnostics.Process]::new(); try { $child.StartInfo = $childStartInfo; if (-not $child.Start()) { throw ''Could not start child process.'' }; [Console]::Out.WriteLine($child.Id); [Console]::Out.Flush(); $child.WaitForExit() } finally { $child.Dispose() }"'
+            $startInfo.Arguments = "//B //NoLogo `"$sleeperScript`" `"$childIdPath`""
             $rootProcess = [Diagnostics.Process]::new()
             $rootProcess.StartInfo = $startInfo
             if (-not $rootProcess.Start()) { throw 'Could not start process-tree harness.' }
-            $childId = [int]$rootProcess.StandardOutput.ReadLine()
+            $deadline = [DateTime]::UtcNow.AddSeconds(10)
+            while (-not (Test-Path -LiteralPath $childIdPath)) {
+                if ([DateTime]::UtcNow -ge $deadline) {
+                    throw 'Timed out waiting for the process-tree child.'
+                }
+                Start-Sleep -Milliseconds 25
+            }
+            $childId = [int](Get-Content -LiteralPath $childIdPath -Raw)
 
             Stop-BoundedProcessTree -Process $rootProcess -Scenario 'process-tree-harness'
             if (-not $rootProcess.HasExited) { throw 'The root process survived tree cleanup.' }
@@ -526,16 +551,20 @@ public sealed class RepositoryIdentityTests
         "Start-Process powershell.exe",
         harness,
         StringComparison.OrdinalIgnoreCase);
-    Assert.Contains(
-        "$childStartInfo.CreateNoWindow = $true",
+    Assert.DoesNotContain(
+        "$childStartInfo.FileName",
         harness,
         StringComparison.Ordinal);
     Assert.Contains(
-        "$childStartInfo.UseShellExecute = $false",
+        "$startInfo.FileName = 'wscript.exe'",
         harness,
         StringComparison.Ordinal);
     Assert.Contains(
-        "finally { $child.Dispose() }",
+        "WScript.Sleep 60000",
+        harness,
+        StringComparison.Ordinal);
+    Assert.Contains(
+        "shell.Exec",
         harness,
         StringComparison.Ordinal);
     File.WriteAllText(harnessPath, harness);
