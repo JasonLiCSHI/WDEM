@@ -22,6 +22,7 @@ public sealed record ResourceDefinition
   public string? Description { get; init; }
   public string? VersionConstraint { get; init; }
   public string? PreferredVersion { get; init; }
+  public string? ProfileSourcePath { get; init; }
   public IReadOnlyList<string> Dependencies { get; init; } = Array.Empty<string>();
   public IReadOnlyDictionary<string, string?> Parameters { get; init; } =
       new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);

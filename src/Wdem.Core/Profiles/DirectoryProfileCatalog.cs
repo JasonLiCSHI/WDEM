@@ -123,11 +123,23 @@ public sealed class DirectoryProfileCatalog : IProfileCatalog
     cancellationToken.ThrowIfCancellationRequested();
     return new ProfileLoadResult
     {
-      Profile = validation.Document?.Profile,
+      Profile = validation.Document is null
+          ? null
+          : BindProfileSource(validation.Document.Profile, sourcePath),
       SourcePath = sourcePath,
       Errors = validation.Errors
     };
   }
+
+  private static DeveloperProfile BindProfileSource(
+      DeveloperProfile profile,
+      string sourcePath) => profile with
+      {
+        Resources = profile.Resources.ToDictionary(
+            pair => pair.Key,
+            pair => pair.Value with { ProfileSourcePath = sourcePath },
+            StringComparer.OrdinalIgnoreCase)
+      };
 
   public async Task<IReadOnlyList<ProfileLoadResult>> LoadAllAsync(
       CancellationToken cancellationToken = default)

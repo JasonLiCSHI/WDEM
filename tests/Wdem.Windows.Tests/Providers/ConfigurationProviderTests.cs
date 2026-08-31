@@ -61,6 +61,45 @@ public sealed class ConfigurationProviderTests : IDisposable
   }
 
   [Fact]
+  public async Task ApplyAsync_DotSettingsResolvesSourceBesideExternalProfile()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var externalProfileDirectory = Path.Combine(_root, "external", "nested");
+    var sourcePath = Path.Combine(externalProfileDirectory, "settings", "team.DotSettings");
+    var destinationRoot = Path.Combine(_root, "user");
+    Directory.CreateDirectory(Path.GetDirectoryName(sourcePath)!);
+    var contents = Encoding.UTF8.GetBytes("external profile settings");
+    await File.WriteAllBytesAsync(sourcePath, contents);
+    var expectedHash = Convert.ToHexString(SHA256.HashData(contents));
+    var provider = new ReSharperSettingsProvider(
+        new ConfigurationSourceResolver(_root, profiles),
+        new ConfigurationImporter(),
+        new ComplianceEvaluator(),
+        destinationRoot);
+    var resource = Resource(
+        "resharper-settings",
+        "resharper-settings",
+        "file",
+        ["resharper"],
+        new Dictionary<string, string?>
+        {
+          ["sourcePath"] = Path.Combine("settings", "team.DotSettings"),
+          ["expectedSha256"] = expectedHash,
+          ["destinationPath"] = ReSharperRelativeDestination()
+        }) with
+    {
+      ProfileSourcePath = Path.Combine(externalProfileDirectory, "developer.yaml")
+    };
+    var detected = await provider.DetectAsync(resource, CancellationToken.None);
+    var plan = await provider.PlanAsync(resource, detected, CancellationToken.None);
+
+    var applied = await provider.ApplyAsync(resource, plan, null, CancellationToken.None);
+
+    Assert.Equal(ApplyOutcome.Succeeded, applied.Outcome);
+    Assert.Equal(contents, await File.ReadAllBytesAsync(ReSharperDestination(destinationRoot)));
+  }
+
+  [Fact]
   public async Task ApplyAsync_DotSettingsRejectsStaleNoOpPlan()
   {
     var profiles = Path.Combine(_root, "profiles");

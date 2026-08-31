@@ -36,6 +36,88 @@ public sealed class ConfigurationSourceResolverTests : IDisposable
   }
 
   [Fact]
+  public async Task ResolveAsync_ExternalProfileRelativeSourceUsesProfileDirectory()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var external = Path.Combine(_root, "external-team");
+    var profilePath = Path.Combine(external, "profile.yaml");
+    var source = Path.Combine(external, "settings", "team.DotSettings");
+    Directory.CreateDirectory(Path.GetDirectoryName(source)!);
+    var contents = Encoding.UTF8.GetBytes("external profile settings");
+    await File.WriteAllBytesAsync(source, contents);
+
+    var result = await new ConfigurationSourceResolver(_root, profiles).ResolveAsync(
+        Path.Combine("settings", "team.DotSettings"),
+        Convert.ToHexString(SHA256.HashData(contents)),
+        profilePath,
+        CancellationToken.None);
+
+    Assert.True(result.IsValid, result.Error?.Detail);
+    Assert.Equal(Path.GetFullPath(source), result.Source!.Path);
+  }
+
+  [Fact]
+  public async Task ResolveAsync_NestedProfileRelativeSourceUsesNestedProfileDirectory()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var nested = Path.Combine(_root, "team", "profiles", "backend");
+    var profilePath = Path.Combine(nested, "developer.yaml");
+    var source = Path.Combine(nested, "assets", "team.DotSettings");
+    Directory.CreateDirectory(Path.GetDirectoryName(source)!);
+    var contents = Encoding.UTF8.GetBytes("nested profile settings");
+    await File.WriteAllBytesAsync(source, contents);
+
+    var result = await new ConfigurationSourceResolver(_root, profiles).ResolveAsync(
+        Path.Combine("assets", "team.DotSettings"),
+        Convert.ToHexString(SHA256.HashData(contents)),
+        profilePath,
+        CancellationToken.None);
+
+    Assert.True(result.IsValid, result.Error?.Detail);
+    Assert.Equal(Path.GetFullPath(source), result.Source!.Path);
+  }
+
+  [Fact]
+  public async Task ResolveAsync_ProfileRelativeTraversalCannotEscapeExternalProfileDirectory()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var external = Path.Combine(_root, "external-team");
+    var profilePath = Path.Combine(external, "profile.yaml");
+    var source = Path.Combine(_root, "outside.DotSettings");
+    Directory.CreateDirectory(external);
+    var contents = Encoding.UTF8.GetBytes("outside settings");
+    await File.WriteAllBytesAsync(source, contents);
+
+    var result = await new ConfigurationSourceResolver(_root, profiles).ResolveAsync(
+        Path.Combine("..", "outside.DotSettings"),
+        Convert.ToHexString(SHA256.HashData(contents)),
+        profilePath,
+        CancellationToken.None);
+
+    Assert.False(result.IsValid);
+    Assert.Contains("permitted root", result.Error!.Detail, StringComparison.OrdinalIgnoreCase);
+  }
+
+  [Fact]
+  public async Task ResolveAsync_ApplicationAssetKeepsApplicationTrustedRootForExternalProfile()
+  {
+    var profiles = Path.Combine(_root, "profiles");
+    var source = Path.Combine(profiles, "assets", "team.DotSettings");
+    Directory.CreateDirectory(Path.GetDirectoryName(source)!);
+    var contents = Encoding.UTF8.GetBytes("application asset");
+    await File.WriteAllBytesAsync(source, contents);
+
+    var result = await new ConfigurationSourceResolver(_root, profiles).ResolveAsync(
+        Path.Combine("profiles", "assets", "team.DotSettings"),
+        Convert.ToHexString(SHA256.HashData(contents)),
+        Path.Combine(_root, "external-team", "profile.yaml"),
+        CancellationToken.None);
+
+    Assert.True(result.IsValid, result.Error?.Detail);
+    Assert.Equal(Path.GetFullPath(source), result.Source!.Path);
+  }
+
+  [Fact]
   public async Task ResolveAsync_LocalFileUriReturnsVerifiedImmutableSnapshot()
   {
     var profiles = Path.Combine(_root, "profiles");

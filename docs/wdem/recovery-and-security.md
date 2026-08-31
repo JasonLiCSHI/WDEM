@@ -13,16 +13,16 @@ work over an authenticated local named-pipe channel. Expect one consent prompt
 for an elevated phase. Never start the broker directly or approve an
 unexpected prompt.
 
-## Trust, hashes, and signatures
+## Trust and hashes
 
 WDEM binds file/HTTPS configuration inputs to explicit SHA-256 values and
 rechecks them before commit. It rejects mismatched hashes, unsafe path
-redirection, alternate data streams, untrusted bootstrapper signatures, VSIX
-identity mismatch, and a Visual Studio instance that changed after planning.
+redirection, alternate data streams, VSIX identity mismatch, and a Visual
+Studio instance that changed after planning.
 Use release `SHA256SUMS.txt` before extraction and profile `expectedSha256`
-values for configuration inputs. Hashes prove byte identity; Authenticode
-signature policy additionally establishes the trusted publisher where a
-provider requires it.
+values for configuration inputs. Hashes prove byte identity. The current MVP
+does not claim Authenticode publisher validation; a future provider that adds
+such a policy must enforce it in addition to the required content hash.
 
 ## Redaction
 

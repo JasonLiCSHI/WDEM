@@ -364,6 +364,25 @@ public sealed class ResourceDefinitionTests
   }
 
   [Fact]
+  public void Fingerprint_ProfileSourcePathChangesHash()
+  {
+    var resource = new ResourceDefinition
+    {
+      Id = "settings",
+      Type = "resharper-settings",
+      Provider = "file",
+      ProfileSourcePath = Path.GetFullPath("profiles/developer.yaml")
+    };
+
+    Assert.NotEqual(
+        ResourceDefinitionFingerprint.Create(resource),
+        ResourceDefinitionFingerprint.Create(resource with
+        {
+          ProfileSourcePath = Path.GetFullPath("external/developer.yaml")
+        }));
+  }
+
+  [Fact]
   public void ApprovedFingerprint_CoversOriginalDefinitionAndExecutableSteps()
   {
     var resource = new ResourceDefinition

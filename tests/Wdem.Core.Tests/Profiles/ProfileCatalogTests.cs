@@ -68,7 +68,11 @@ public sealed class ProfileCatalogTests
         result.Profile.Resources["company-vsix"].Parameters["path"]);
     Assert.Equal("Git", result.Profile.Resources["git"].DisplayName);
     Assert.Equal("Distributed version control", result.Profile.Resources["git"].Description);
-    Assert.Equal(Path.GetFullPath(Path.Combine(TestDataDirectory, "valid-csharp.yaml")), result.SourcePath);
+    var expectedSourcePath = Path.GetFullPath(
+        Path.Combine(TestDataDirectory, "valid-csharp.yaml"));
+    Assert.Equal(expectedSourcePath, result.SourcePath);
+    Assert.All(result.Profile.Resources.Values, resource =>
+        Assert.Equal(expectedSourcePath, resource.ProfileSourcePath));
   }
 
   [Fact]

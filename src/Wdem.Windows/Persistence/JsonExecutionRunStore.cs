@@ -3500,6 +3500,9 @@ public sealed class JsonExecutionRunStore : IExecutionRunStore, IApprovedResourc
       PreferredVersion = definition.PreferredVersion is null
           ? null
           : _redactor.Redact(definition.PreferredVersion),
+      ProfileSourcePath = definition.ProfileSourcePath is null
+          ? null
+          : _redactor.Redact(definition.ProfileSourcePath),
       Dependencies = definition.Dependencies.Select(_redactor.Redact).ToArray(),
       Parameters = definition.Parameters.ToDictionary(
           pair => _redactor.Redact(pair.Key),

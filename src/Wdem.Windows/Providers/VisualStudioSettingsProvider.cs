@@ -175,6 +175,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     var source = await _sourceResolver.ResolveAsync(
         Get(resource, SourcePathParameter)!,
         Get(resource, ExpectedSha256Parameter)!,
+        resource.ProfileSourcePath,
         cancellationToken).ConfigureAwait(false);
     if (!source.IsValid)
     {
@@ -371,6 +372,7 @@ public sealed class VisualStudioSettingsProvider : IResourceProvider
     var source = await _sourceResolver.ResolveAsync(
         Get(resource, SourcePathParameter)!,
         Get(resource, ExpectedSha256Parameter)!,
+        resource.ProfileSourcePath,
         cancellationToken).ConfigureAwait(false);
     if (!source.IsValid)
     {

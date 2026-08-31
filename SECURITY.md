@@ -18,7 +18,7 @@ within five business days, and coordinate disclosure after a fix is available.
 
 ## Product security boundary
 
-WDEM uses a narrowly scoped UAC broker, content hashes and signature checks,
+WDEM uses a narrowly scoped UAC broker, mandatory content-hash verification,
 log/report redaction, atomic configuration writes, cancellation finalization,
 and mandatory fresh detection/planning before Apply. See
 [recovery and security](docs/wdem/recovery-and-security.md) for the user-facing

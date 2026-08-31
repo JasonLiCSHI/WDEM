@@ -21,6 +21,11 @@ public static class ResourceDefinitionFingerprint
 
     Append(canonical, resource.VersionConstraint);
     Append(canonical, resource.PreferredVersion);
+    if (resource.ProfileSourcePath is not null)
+    {
+      Append(canonical, resource.ProfileSourcePath);
+    }
+
     Append(canonical, resource.PrivilegeRequirement.ToString());
     Append(canonical, resource.RestartPolicy.ToString());
 

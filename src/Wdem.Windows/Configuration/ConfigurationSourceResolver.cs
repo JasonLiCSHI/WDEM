@@ -42,9 +42,16 @@ public sealed class ConfigurationSourceResolver
     _afterSourceDirectoryLeased = afterSourceDirectoryLeased;
   }
 
+  public Task<ConfigurationSourceResolution> ResolveAsync(
+      string source,
+      string expectedSha256,
+      CancellationToken cancellationToken) =>
+      ResolveAsync(source, expectedSha256, null, cancellationToken);
+
   public async Task<ConfigurationSourceResolution> ResolveAsync(
       string source,
       string expectedSha256,
+      string? profileSourcePath,
       CancellationToken cancellationToken)
   {
     cancellationToken.ThrowIfCancellationRequested();
@@ -60,7 +67,7 @@ public sealed class ConfigurationSourceResolver
 
     try
     {
-      var path = ResolvePath(source, out var requiredRoot);
+      var path = ResolvePath(source, profileSourcePath, out var requiredRoot);
       if (HasAlternateDataStream(path))
       {
         return Failure("NTFS alternate data stream configuration sources are not supported.");
@@ -120,7 +127,10 @@ public sealed class ConfigurationSourceResolver
     }
   }
 
-  private string ResolvePath(string source, out string? requiredRoot)
+  private string ResolvePath(
+      string source,
+      string? profileSourcePath,
+      out string? requiredRoot)
   {
     if (Path.IsPathFullyQualified(source))
     {
@@ -152,8 +162,11 @@ public sealed class ConfigurationSourceResolver
       return Path.GetFullPath(Path.Combine(_applicationRoot, normalized));
     }
 
-    requiredRoot = _profileRoot;
-    return Path.GetFullPath(Path.Combine(_profileRoot, normalized));
+    requiredRoot = profileSourcePath is null
+        ? _profileRoot
+        : Path.GetDirectoryName(Path.GetFullPath(profileSourcePath)) ?? throw new IOException(
+            "The profile source directory is invalid.");
+    return Path.GetFullPath(Path.Combine(requiredRoot, normalized));
   }
 
   private static bool LooksLikeUri(string value)
