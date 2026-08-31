@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "id": "csharp-developer",
+  "version": "1.0.0",
+  "displayName": "C# Developer",
+  "description": "A minimal C# developer workstation.",
+  "tasks": {
+    "git": {
+      "displayName": "Git",
+      "description": "Distributed version control client used by the remaining developer tools.",
+      "required": true,
+      "dependsOn": [],
+      "version": ">= 2.50",
+      "preferredVersion": "2.52.0",
+      "source": "Git.Git",
+      "detect": {
+        "displayName": "Detect Git version",
+        "executable": "git",
+        "arguments": ["--version"],
+        "versionPattern": "git version (?<version>\\d+(?:\\.\\d+)+(?:\\.[a-zA-Z0-9]+)*)"
+      },
+      "apply": {
+        "displayName": "Install Git with WinGet",
+        "executable": "winget",
+        "arguments": ["install", "--id", "{source}", "--exact", "--version", "{preferredVersion}", "--accept-package-agreements", "--accept-source-agreements", "--silent"]
+      }
+    },
+    "dotnet-sdk": {
+      "displayName": ".NET SDK",
+      "description": "The .NET SDK required to build and run C# projects.",
+      "required": true,
+      "dependsOn": [],
+      "version": ">= 10.0",
+      "preferredVersion": "10.0.100",
+      "source": "Microsoft.DotNet.SDK.10",
+      "detect": {
+        "displayName": "Detect .NET SDK version",
+        "executable": "dotnet",
+        "arguments": ["--version"],
+        "versionPattern": "(?<version>\\d+(?:\\.\\d+)+)"
+      },
+      "apply": {
+        "displayName": "Install .NET SDK with WinGet",
+        "executable": "winget",
+        "arguments": ["install", "--id", "{source}", "--exact", "--accept-package-agreements", "--accept-source-agreements", "--silent"]
+      }
+    },
+    "visual-studio": {
+      "displayName": "Visual Studio 2022 Community",
+      "description": "Optional Visual Studio IDE; post-install verification is declared as a normal workflow step.",
+      "required": false,
+      "dependsOn": ["dotnet-sdk"],
+      "source": "Microsoft.VisualStudio.2022.Community",
+      "detect": {
+        "displayName": "Detect Visual Studio",
+        "executable": "winget",
+        "arguments": ["list", "--id", "{source}", "--exact", "--accept-source-agreements"]
+      },
+      "apply": {
+        "displayName": "Install Visual Studio with WinGet",
+        "executable": "winget",
+        "arguments": ["install", "--id", "{source}", "--exact", "--accept-package-agreements", "--accept-source-agreements", "--silent"]
+      },
+      "post": [
+        {
+          "displayName": "Verify the installed Visual Studio package",
+          "executable": "winget",
+          "arguments": ["list", "--id", "{source}", "--exact", "--accept-source-agreements"]
+        }
+      ]
+    },
+    "resharper": {
+      "displayName": "JetBrains ReSharper",
+      "description": "Optional Visual Studio extension installed after its IDE dependency.",
+      "required": false,
+      "dependsOn": ["visual-studio"],
+      "source": "JetBrains.ReSharper",
+      "detect": {
+        "displayName": "Detect ReSharper",
+        "executable": "winget",
+        "arguments": ["list", "--id", "{source}", "--exact", "--accept-source-agreements"]
+      },
+      "apply": {
+        "displayName": "Install ReSharper with WinGet",
+        "executable": "winget",
+        "arguments": ["install", "--id", "{source}", "--exact", "--accept-package-agreements", "--accept-source-agreements", "--silent"]
+      }
+    }
+  }
+}

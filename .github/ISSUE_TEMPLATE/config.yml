@@ -1,8 +1,0 @@
-blank_issues_enabled: false
-contact_links:
-  - name: 💬 GitHub Discussions
-    url: https://github.com/DotDev262/WinHome/discussions
-    about: Please use discussions for questions or support.
-  - name: 🌈 GSSOC 2026 Guidelines
-    url: https://github.com/DotDev262/WinHome/blob/main/CONTRIBUTING.md
-    about: Read our contribution guide before opening an issue.

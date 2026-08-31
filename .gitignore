@@ -22,10 +22,8 @@
 *.snk
 *.DS_Store
 
-# WinHome Specific
-winhome.state.json
-config.yaml
-files/
+# WDEM runtime data
+*.jsonl
 coverage/
 TestResults/
 appsettings.Development.json
@@ -40,12 +38,5 @@ devenv.lock.json
 # DevContainers
 !.devcontainer/
 
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.gemini/
-gha-creds-*.json
-node_modules/
 .worktrees/
+artifacts/

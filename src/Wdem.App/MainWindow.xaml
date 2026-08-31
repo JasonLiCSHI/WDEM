@@ -1,0 +1,633 @@
+<Window x:Class="Wdem.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:Wdem.App"
+        Title="{DynamicResource WindowTitle}"
+        Width="1180" Height="790" MinWidth="980" MinHeight="680"
+        Background="#F3F5F7"
+        FontFamily="Segoe UI Variable Text, Segoe UI"
+        FontSize="13"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True"
+        TextOptions.TextFormattingMode="Display"
+        Closing="Window_Closing"
+        WindowStartupLocation="CenterScreen">
+  <Window.Resources>
+    <SolidColorBrush x:Key="Ink" Color="#242424" />
+    <SolidColorBrush x:Key="Muted" Color="#61666B" />
+    <SolidColorBrush x:Key="Line" Color="#DFE3E7" />
+    <SolidColorBrush x:Key="Accent" Color="#0F6CBD" />
+    <SolidColorBrush x:Key="SurfaceMuted" Color="#F8F9FA" />
+    <LinearGradientBrush x:Key="BrandGradient" StartPoint="0,0" EndPoint="1,1">
+      <GradientStop Color="#0F6CBD" Offset="0" />
+      <GradientStop Color="#2B88D8" Offset="0.55" />
+      <GradientStop Color="#00A4A6" Offset="1" />
+    </LinearGradientBrush>
+
+    <Style x:Key="Card" TargetType="Border">
+      <Setter Property="Background" Value="White" />
+      <Setter Property="BorderBrush" Value="{StaticResource Line}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="Effect">
+        <Setter.Value>
+          <DropShadowEffect Color="#102A43" BlurRadius="18" ShadowDepth="2" Opacity="0.075" />
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="ButtonBase" TargetType="Button">
+      <Setter Property="MinHeight" Value="32" />
+      <Setter Property="Padding" Value="14,5" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Root" CornerRadius="6"
+                    Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Root" Property="Opacity" Value="0.9" />
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="Root" Property="Opacity" Value="0.78" />
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="Root" Property="Opacity" Value="0.4" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource ButtonBase}">
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="Background" Value="{StaticResource Accent}" />
+      <Setter Property="BorderBrush" Value="{StaticResource Accent}" />
+    </Style>
+    <Style x:Key="SecondaryButton" TargetType="Button" BasedOn="{StaticResource ButtonBase}">
+      <Setter Property="Foreground" Value="{StaticResource Ink}" />
+      <Setter Property="Background" Value="#FBFBFB" />
+      <Setter Property="BorderBrush" Value="#C8CDD2" />
+    </Style>
+    <Style x:Key="DangerButton" TargetType="Button" BasedOn="{StaticResource ButtonBase}">
+      <Setter Property="Foreground" Value="#C42B1C" />
+      <Setter Property="Background" Value="#FFF8F7" />
+      <Setter Property="BorderBrush" Value="#F1B8B3" />
+    </Style>
+    <Style x:Key="SmallButton" TargetType="Button" BasedOn="{StaticResource SecondaryButton}">
+      <Setter Property="MinHeight" Value="28" />
+      <Setter Property="Padding" Value="10,4" />
+      <Setter Property="FontSize" Value="12" />
+    </Style>
+    <Style x:Key="SmallDangerButton" TargetType="Button" BasedOn="{StaticResource DangerButton}">
+      <Setter Property="MinHeight" Value="28" />
+      <Setter Property="Padding" Value="10,4" />
+      <Setter Property="FontSize" Value="12" />
+    </Style>
+
+    <Style TargetType="ComboBox">
+      <Setter Property="Height" Value="35" />
+      <Setter Property="Padding" Value="9,5" />
+      <Setter Property="Background" Value="#F8F9FA" />
+      <Setter Property="BorderBrush" Value="#C8CDD2" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+
+    <Style TargetType="ProgressBar">
+      <Setter Property="Height" Value="7" />
+      <Setter Property="Foreground" Value="{StaticResource Accent}" />
+      <Setter Property="Background" Value="#E6E8EA" />
+      <Setter Property="BorderThickness" Value="0" />
+    </Style>
+
+    <Style x:Key="ProfileStatusShell" TargetType="Border">
+      <Setter Property="Background" Value="#F3F7FB" />
+      <Setter Property="BorderBrush" Value="#D2E4F5" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="7" />
+      <Setter Property="Padding" Value="10,7" />
+      <Style.Triggers>
+        <DataTrigger Binding="{Binding Actions.Mode}" Value="{x:Static local:WorkspaceMode.Unavailable}">
+          <Setter Property="Background" Value="#FDEBEC" />
+          <Setter Property="BorderBrush" Value="#F2B8BB" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding Actions.Mode}" Value="{x:Static local:WorkspaceMode.AwaitingTrust}">
+          <Setter Property="Background" Value="#FFF4CE" />
+          <Setter Property="BorderBrush" Value="#E8D48B" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding Actions.Mode}" Value="{x:Static local:WorkspaceMode.Ready}">
+          <Setter Property="Background" Value="#E8F5EE" />
+          <Setter Property="BorderBrush" Value="#B7E0C7" />
+        </DataTrigger>
+      </Style.Triggers>
+    </Style>
+
+    <Style x:Key="ProfileStatusGlyph" TargetType="TextBlock">
+      <Setter Property="Text" Value="…" />
+      <Setter Property="Foreground" Value="#0F6CBD" />
+      <Setter Property="FontSize" Value="15" />
+      <Setter Property="FontWeight" Value="Bold" />
+      <Setter Property="HorizontalAlignment" Value="Center" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Style.Triggers>
+        <DataTrigger Binding="{Binding Actions.Mode}" Value="{x:Static local:WorkspaceMode.Unavailable}">
+          <Setter Property="Text" Value="!" />
+          <Setter Property="Foreground" Value="#C42B1C" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding Actions.Mode}" Value="{x:Static local:WorkspaceMode.AwaitingTrust}">
+          <Setter Property="Text" Value="!" />
+          <Setter Property="Foreground" Value="#8A6D00" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding Actions.Mode}" Value="{x:Static local:WorkspaceMode.Ready}">
+          <Setter Property="Text" Value="✓" />
+          <Setter Property="Foreground" Value="#107C41" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding Actions.Mode}" Value="{x:Static local:WorkspaceMode.Inspecting}">
+          <Setter Property="Text" Value="↻" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding Actions.Mode}" Value="{x:Static local:WorkspaceMode.Running}">
+          <Setter Property="Text" Value="↻" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding Actions.Mode}" Value="{x:Static local:WorkspaceMode.Cancelling}">
+          <Setter Property="Text" Value="■" />
+          <Setter Property="Foreground" Value="#C42B1C" />
+        </DataTrigger>
+      </Style.Triggers>
+    </Style>
+
+    <Style x:Key="TaskStatusPill" TargetType="Border">
+      <Setter Property="Background" Value="#F1F2F4" />
+      <Setter Property="BorderBrush" Value="#DEE1E4" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="Padding" Value="9,4" />
+      <Setter Property="HorizontalAlignment" Value="Left" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Style.Triggers>
+        <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.Running}">
+          <Setter Property="Background" Value="#EAF3FC" />
+          <Setter Property="BorderBrush" Value="#B7D7F2" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.Cancelling}">
+          <Setter Property="Background" Value="#FFF4CE" />
+          <Setter Property="BorderBrush" Value="#E8D48B" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.Satisfied}">
+          <Setter Property="Background" Value="#E8F5EE" />
+          <Setter Property="BorderBrush" Value="#B7E0C7" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.Succeeded}">
+          <Setter Property="Background" Value="#E8F5EE" />
+          <Setter Property="BorderBrush" Value="#B7E0C7" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.UpgradeRequired}">
+          <Setter Property="Background" Value="#FDEBEC" />
+          <Setter Property="BorderBrush" Value="#F2B8BB" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.NeedsAttention}">
+          <Setter Property="Background" Value="#FDEBEC" />
+          <Setter Property="BorderBrush" Value="#F2B8BB" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.Failed}">
+          <Setter Property="Background" Value="#FDEBEC" />
+          <Setter Property="BorderBrush" Value="#F2B8BB" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.Blocked}">
+          <Setter Property="Background" Value="#FDEBEC" />
+          <Setter Property="BorderBrush" Value="#F2B8BB" />
+        </DataTrigger>
+      </Style.Triggers>
+    </Style>
+
+    <Style x:Key="TaskStatusText" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="#5F6368" />
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Style.Triggers>
+        <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.Running}">
+          <Setter Property="Foreground" Value="#0F6CBD" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.Cancelling}">
+          <Setter Property="Foreground" Value="#8A6D00" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.Satisfied}">
+          <Setter Property="Foreground" Value="#107C41" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.Succeeded}">
+          <Setter Property="Foreground" Value="#107C41" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.UpgradeRequired}">
+          <Setter Property="Foreground" Value="#C42B1C" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.NeedsAttention}">
+          <Setter Property="Foreground" Value="#C42B1C" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.Failed}">
+          <Setter Property="Foreground" Value="#C42B1C" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.Blocked}">
+          <Setter Property="Foreground" Value="#C42B1C" />
+        </DataTrigger>
+      </Style.Triggers>
+    </Style>
+
+    <Style x:Key="DetectedVersionText" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource Ink}" />
+      <Style.Triggers>
+        <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.UpgradeRequired}">
+          <Setter Property="Foreground" Value="#C42B1C" />
+          <Setter Property="FontWeight" Value="SemiBold" />
+          <Setter Property="TextDecorations" Value="Strikethrough" />
+        </DataTrigger>
+      </Style.Triggers>
+    </Style>
+
+    <Style x:Key="UpgradeVersionText" TargetType="TextBlock" BasedOn="{StaticResource DetectedVersionText}">
+      <Setter Property="Visibility" Value="Collapsed" />
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Style.Triggers>
+        <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.UpgradeRequired}">
+          <Setter Property="Visibility" Value="Visible" />
+        </DataTrigger>
+      </Style.Triggers>
+    </Style>
+  </Window.Resources>
+
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="68" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+      <RowDefinition Height="60" />
+      <RowDefinition Height="174" />
+    </Grid.RowDefinitions>
+
+    <Border Grid.Row="0" Background="#FFFFFF" BorderBrush="#D9DEE3"
+            BorderThickness="0,0,0,1" Padding="20,0">
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+        <Border Width="36" Height="36" CornerRadius="9" Background="{StaticResource BrandGradient}"
+                VerticalAlignment="Center">
+          <TextBlock Text="W" Foreground="White" FontWeight="SemiBold" FontSize="18"
+                     HorizontalAlignment="Center" VerticalAlignment="Center" />
+        </Border>
+        <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
+          <TextBlock Text="WDEM" Foreground="{StaticResource Ink}" FontSize="18" FontWeight="SemiBold" />
+          <TextBlock Text="{DynamicResource AppSubtitle}" Foreground="{StaticResource Muted}"
+                     FontSize="11" Margin="0,2,0,0" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <Border Grid.Row="1" Style="{StaticResource Card}" Margin="14,10,14,0" Padding="14,10">
+      <Grid>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="300" />
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <TextBlock Grid.Row="0" Grid.Column="0" Text="{DynamicResource ProfileLabel}"
+                   Foreground="{StaticResource Muted}" FontWeight="SemiBold" FontSize="11" />
+        <ComboBox x:Name="ProfileComboBox" Grid.Row="1" Grid.Column="0" Margin="0,5,16,0"
+                  ItemsSource="{Binding Profiles}" DisplayMemberPath="DisplayName"
+                  SelectionChanged="Profile_SelectionChanged"
+                  IsEnabled="{Binding Actions.CanChooseProfile}" />
+        <Border Grid.Row="1" Grid.Column="1" Style="{StaticResource ProfileStatusShell}"
+                Height="35" VerticalAlignment="Center" Margin="4,5,16,0" Padding="10,5">
+          <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+            <Border Width="22" Height="22" CornerRadius="11" Background="#FFFFFF"
+                    Margin="0,0,9,0">
+              <TextBlock Style="{StaticResource ProfileStatusGlyph}" />
+            </Border>
+            <TextBlock x:Name="ProfileSummaryText" Text="{DynamicResource ReadySummary}"
+                       Foreground="{StaticResource Ink}" FontWeight="SemiBold"
+                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+          </StackPanel>
+        </Border>
+        <Button x:Name="RefreshProfilesButton" Grid.Row="1" Grid.Column="2" Height="35"
+                Margin="0,5,0,0" VerticalAlignment="Center"
+                Content="{DynamicResource RefreshButton}" Click="RefreshProfiles_Click"
+                Style="{StaticResource SecondaryButton}"
+                IsEnabled="{Binding Actions.CanRefresh}" />
+      </Grid>
+    </Border>
+
+    <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" Margin="14,10,14,0">
+      <StackPanel>
+        <Border Style="{StaticResource Card}" Padding="0,0,0,7">
+          <StackPanel>
+            <Grid Margin="16,12,16,9">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <StackPanel Orientation="Horizontal">
+                <Border Background="#EAF3FC" CornerRadius="10" Padding="9,3" Margin="0,0,10,0">
+                  <TextBlock Text="{DynamicResource RequiredBadge}" Foreground="#0F6CBD"
+                             FontSize="11" FontWeight="Bold" />
+                </Border>
+                <TextBlock Text="{DynamicResource RequiredTitle}" Foreground="{StaticResource Ink}"
+                           FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" />
+              </StackPanel>
+              <TextBlock Grid.Column="1" Text="{DynamicResource RequiredHint}"
+                         Foreground="{StaticResource Muted}" FontSize="12" VerticalAlignment="Center" />
+            </Grid>
+            <ItemsControl ItemsSource="{Binding RequiredTasks}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <Border Background="#FAFBFC" BorderBrush="#E3E6E9" BorderThickness="1"
+                          CornerRadius="8" Margin="12,0,12,7" Padding="14,10">
+                    <Grid>
+                      <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                      </Grid.RowDefinitions>
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="2*" />
+                        <ColumnDefinition Width="1.1*" />
+                        <ColumnDefinition Width="140" />
+                        <ColumnDefinition Width="125" />
+                        <ColumnDefinition Width="Auto" />
+                      </Grid.ColumnDefinitions>
+                      <StackPanel Grid.Column="0">
+                        <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource Ink}"
+                                   FontWeight="SemiBold" />
+                        <TextBlock Text="{Binding Id}" Foreground="{StaticResource Muted}"
+                                   FontFamily="Cascadia Mono, Consolas" FontSize="11" Margin="0,3,0,0" />
+                        <TextBlock Text="{Binding Description}" Foreground="{StaticResource Muted}"
+                                   FontSize="11" Margin="0,4,12,0" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding PipelineSummary}" Foreground="#0F6CBD"
+                                   FontSize="10" Margin="0,4,0,0" />
+                      </StackPanel>
+                      <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                        <TextBlock Foreground="{StaticResource Muted}" FontSize="11">
+                          <Run Text="{DynamicResource DependenciesLabel}" /><Run Text=": " /><Run Text="{Binding Dependencies}" />
+                        </TextBlock>
+                        <TextBlock Foreground="{StaticResource Muted}" FontSize="11" Margin="0,3,0,0">
+                          <Run Text="{DynamicResource SourceFieldLabel}" /><Run Text=": " /><Run Text="{Binding Source}" />
+                        </TextBlock>
+                      </StackPanel>
+                      <Border Grid.Column="2" Style="{StaticResource TaskStatusPill}">
+                        <StackPanel Orientation="Horizontal">
+                          <TextBlock Text="{Binding StatusGlyph}" Style="{StaticResource TaskStatusText}"
+                                     FontWeight="Bold" Margin="0,0,5,0" />
+                          <TextBlock Text="{Binding Status}" Style="{StaticResource TaskStatusText}" />
+                        </StackPanel>
+                      </Border>
+                      <TextBlock Grid.Column="3" Text="{Binding DetectedVersionDisplay}"
+                                 Style="{StaticResource UpgradeVersionText}" />
+                      <Grid Grid.Column="3" Margin="0,0,16,0" VerticalAlignment="Center">
+                        <Grid.Style>
+                          <Style TargetType="Grid">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                            <Style.Triggers>
+                              <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.Running}">
+                                <Setter Property="Visibility" Value="Visible" />
+                              </DataTrigger>
+                            </Style.Triggers>
+                          </Style>
+                        </Grid.Style>
+                        <Grid.RowDefinitions><RowDefinition /><RowDefinition /></Grid.RowDefinitions>
+                        <ProgressBar Value="{Binding Percent}" Maximum="100" />
+                        <TextBlock Grid.Row="1" Foreground="{StaticResource Muted}"
+                                   FontSize="10" HorizontalAlignment="Right" Margin="0,3,0,0">
+                          <Run Text="{Binding Stage}" /><Run Text=" · " /><Run Text="{Binding Percent}" /><Run Text="%" />
+                        </TextBlock>
+                      </Grid>
+                      <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Content="{DynamicResource StartTaskButton}" Tag="{Binding}"
+                                Click="StartTask_Click" Style="{StaticResource SmallButton}" Margin="0,0,6,0"
+                                IsEnabled="{Binding CanStart}" />
+                        <Button Content="{DynamicResource CancelTaskButton}" Tag="{Binding}"
+                                Click="CancelTask_Click" Style="{StaticResource SmallDangerButton}"
+                                IsEnabled="{Binding CanCancel}" />
+                      </StackPanel>
+                      <Expander Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="5" Margin="0,9,0,0"
+                                Header="{DynamicResource TaskDetailsHeader}">
+                        <Border Background="#FFFFFF" BorderBrush="#DDE2E6" BorderThickness="1"
+                                CornerRadius="7" Padding="12,9" Margin="0,5,0,0">
+                          <StackPanel>
+                            <WrapPanel Margin="0,0,0,7">
+                              <TextBlock Margin="0,0,22,3"><Run Text="{DynamicResource VersionConstraintLabel}" /><Run Text=": " /><Run Text="{Binding VersionConstraint}" /></TextBlock>
+                              <TextBlock Margin="0,0,22,3"><Run Text="{DynamicResource PreferredVersionLabel}" /><Run Text=": " /><Run Text="{Binding PreferredVersion}" /></TextBlock>
+                              <StackPanel Orientation="Horizontal" Margin="0,0,22,3">
+                                <TextBlock Text="{DynamicResource DetectedVersionLabel}" />
+                                <TextBlock Text=": " />
+                                <TextBlock Text="{Binding DetectedVersionDisplay}" Style="{StaticResource DetectedVersionText}" />
+                              </StackPanel>
+                            </WrapPanel>
+                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource DetectLabel}" /><Run Text=": " /><Run Text="{Binding DetectDetails}" /></TextBlock>
+                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PreLabel}" /><Run Text=": " /><Run Text="{Binding PreDetails}" /></TextBlock>
+                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource ApplyLabel}" /><Run Text=": " /><Run Text="{Binding ApplyDetails}" /></TextBlock>
+                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PostLabel}" /><Run Text=": " /><Run Text="{Binding PostDetails}" /></TextBlock>
+                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource VerifyLabel}" /><Run Text=": " /><Run Text="{Binding VerifyDetails}" /></TextBlock>
+                            <TextBlock TextWrapping="Wrap" Margin="0,7,0,2" Foreground="{StaticResource Muted}"><Run FontWeight="SemiBold" Text="{DynamicResource LastResultLabel}" /><Run Text=": " /><Run Text="{Binding LastResult}" /></TextBlock>
+                          </StackPanel>
+                        </Border>
+                      </Expander>
+                    </Grid>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+        </Border>
+
+        <Border Style="{StaticResource Card}" Margin="0,10,0,0" Padding="0,0,0,7">
+          <StackPanel>
+            <Grid Margin="16,12,16,9">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <StackPanel Orientation="Horizontal">
+                <Border Background="#F2F3F5" CornerRadius="10" Padding="9,3" Margin="0,0,10,0">
+                  <TextBlock Text="{DynamicResource OptionalBadge}" Foreground="#50555A"
+                             FontSize="11" FontWeight="Bold" />
+                </Border>
+                <TextBlock Text="{DynamicResource OptionalTitle}" Foreground="{StaticResource Ink}"
+                           FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" />
+              </StackPanel>
+              <TextBlock Grid.Column="1" Text="{DynamicResource OptionalHint}"
+                         Foreground="{StaticResource Muted}" FontSize="12" VerticalAlignment="Center" />
+            </Grid>
+            <ItemsControl ItemsSource="{Binding OptionalTasks}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <Border Background="#FAFBFC" BorderBrush="#E3E6E9" BorderThickness="1"
+                          CornerRadius="8" Margin="12,0,12,7" Padding="14,10">
+                    <Grid>
+                      <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                      </Grid.RowDefinitions>
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="34" />
+                        <ColumnDefinition Width="2*" />
+                        <ColumnDefinition Width="1.1*" />
+                        <ColumnDefinition Width="140" />
+                        <ColumnDefinition Width="125" />
+                        <ColumnDefinition Width="Auto" />
+                      </Grid.ColumnDefinitions>
+                      <CheckBox Grid.Column="0" IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                VerticalAlignment="Center" HorizontalAlignment="Center"
+                                IsEnabled="{Binding IsSelectionEnabled}" />
+                      <StackPanel Grid.Column="1">
+                        <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource Ink}"
+                                   FontWeight="SemiBold" />
+                        <TextBlock Text="{Binding Id}" Foreground="{StaticResource Muted}"
+                                   FontFamily="Cascadia Mono, Consolas" FontSize="11" Margin="0,3,0,0" />
+                        <TextBlock Text="{Binding Description}" Foreground="{StaticResource Muted}"
+                                   FontSize="11" Margin="0,4,12,0" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding PipelineSummary}" Foreground="#0F6CBD"
+                                   FontSize="10" Margin="0,4,0,0" />
+                      </StackPanel>
+                      <StackPanel Grid.Column="2" VerticalAlignment="Center">
+                        <TextBlock Foreground="{StaticResource Muted}" FontSize="11">
+                          <Run Text="{DynamicResource DependenciesLabel}" /><Run Text=": " /><Run Text="{Binding Dependencies}" />
+                        </TextBlock>
+                        <TextBlock Foreground="{StaticResource Muted}" FontSize="11" Margin="0,3,0,0">
+                          <Run Text="{DynamicResource SourceFieldLabel}" /><Run Text=": " /><Run Text="{Binding Source}" />
+                        </TextBlock>
+                      </StackPanel>
+                      <Border Grid.Column="3" Style="{StaticResource TaskStatusPill}">
+                        <StackPanel Orientation="Horizontal">
+                          <TextBlock Text="{Binding StatusGlyph}" Style="{StaticResource TaskStatusText}"
+                                     FontWeight="Bold" Margin="0,0,5,0" />
+                          <TextBlock Text="{Binding Status}" Style="{StaticResource TaskStatusText}" />
+                        </StackPanel>
+                      </Border>
+                      <TextBlock Grid.Column="4" Text="{Binding DetectedVersionDisplay}"
+                                 Style="{StaticResource UpgradeVersionText}" />
+                      <Grid Grid.Column="4" Margin="0,0,16,0" VerticalAlignment="Center">
+                        <Grid.Style>
+                          <Style TargetType="Grid">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                            <Style.Triggers>
+                              <DataTrigger Binding="{Binding VisualState}" Value="{x:Static local:TaskVisualState.Running}">
+                                <Setter Property="Visibility" Value="Visible" />
+                              </DataTrigger>
+                            </Style.Triggers>
+                          </Style>
+                        </Grid.Style>
+                        <Grid.RowDefinitions><RowDefinition /><RowDefinition /></Grid.RowDefinitions>
+                        <ProgressBar Value="{Binding Percent}" Maximum="100" />
+                        <TextBlock Grid.Row="1" Foreground="{StaticResource Muted}"
+                                   FontSize="10" HorizontalAlignment="Right" Margin="0,3,0,0">
+                          <Run Text="{Binding Stage}" /><Run Text=" · " /><Run Text="{Binding Percent}" /><Run Text="%" />
+                        </TextBlock>
+                      </Grid>
+                      <StackPanel Grid.Column="5" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Content="{DynamicResource StartTaskButton}" Tag="{Binding}"
+                                Click="StartTask_Click" Style="{StaticResource SmallButton}" Margin="0,0,6,0"
+                                IsEnabled="{Binding CanStart}" />
+                        <Button Content="{DynamicResource CancelTaskButton}" Tag="{Binding}"
+                                Click="CancelTask_Click" Style="{StaticResource SmallDangerButton}"
+                                IsEnabled="{Binding CanCancel}" />
+                      </StackPanel>
+                      <Expander Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="5" Margin="0,9,0,0"
+                                Header="{DynamicResource TaskDetailsHeader}">
+                        <Border Background="#FFFFFF" BorderBrush="#DDE2E6" BorderThickness="1"
+                                CornerRadius="7" Padding="12,9" Margin="0,5,0,0">
+                          <StackPanel>
+                            <WrapPanel Margin="0,0,0,7">
+                              <TextBlock Margin="0,0,22,3"><Run Text="{DynamicResource VersionConstraintLabel}" /><Run Text=": " /><Run Text="{Binding VersionConstraint}" /></TextBlock>
+                              <TextBlock Margin="0,0,22,3"><Run Text="{DynamicResource PreferredVersionLabel}" /><Run Text=": " /><Run Text="{Binding PreferredVersion}" /></TextBlock>
+                              <StackPanel Orientation="Horizontal" Margin="0,0,22,3">
+                                <TextBlock Text="{DynamicResource DetectedVersionLabel}" />
+                                <TextBlock Text=": " />
+                                <TextBlock Text="{Binding DetectedVersionDisplay}" Style="{StaticResource DetectedVersionText}" />
+                              </StackPanel>
+                            </WrapPanel>
+                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource DetectLabel}" /><Run Text=": " /><Run Text="{Binding DetectDetails}" /></TextBlock>
+                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PreLabel}" /><Run Text=": " /><Run Text="{Binding PreDetails}" /></TextBlock>
+                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource ApplyLabel}" /><Run Text=": " /><Run Text="{Binding ApplyDetails}" /></TextBlock>
+                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PostLabel}" /><Run Text=": " /><Run Text="{Binding PostDetails}" /></TextBlock>
+                            <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource VerifyLabel}" /><Run Text=": " /><Run Text="{Binding VerifyDetails}" /></TextBlock>
+                            <TextBlock TextWrapping="Wrap" Margin="0,7,0,2" Foreground="{StaticResource Muted}"><Run FontWeight="SemiBold" Text="{DynamicResource LastResultLabel}" /><Run Text=": " /><Run Text="{Binding LastResult}" /></TextBlock>
+                          </StackPanel>
+                        </Border>
+                      </Expander>
+                    </Grid>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+        </Border>
+      </StackPanel>
+    </ScrollViewer>
+
+    <Border Grid.Row="3" Style="{StaticResource Card}" Margin="14,8,14,0" Padding="12,8">
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <StackPanel Orientation="Horizontal">
+          <Button x:Name="StartAllButton" Content="{DynamicResource StartAllButton}" Click="StartAll_Click"
+                  Style="{StaticResource PrimaryButton}" Margin="0,0,8,0"
+                  IsEnabled="{Binding CanStartAll}" />
+          <Button x:Name="CancelAllButton" Content="{DynamicResource CancelAllButton}" Click="CancelAll_Click"
+                  Style="{StaticResource DangerButton}" Margin="0,0,8,0"
+                  IsEnabled="{Binding CanCancelAll}" />
+          <Button x:Name="RetryButton" Content="{DynamicResource RetryButton}" Click="Retry_Click"
+                  Style="{StaticResource SecondaryButton}"
+                  IsEnabled="{Binding Actions.CanRetry}" />
+        </StackPanel>
+        <TextBlock x:Name="RunSummaryText" Grid.Column="1" Text="{DynamicResource ReadySummary}"
+                   Foreground="{StaticResource Muted}" Margin="18,0" VerticalAlignment="Center"
+                   TextTrimming="CharacterEllipsis" />
+        <Button x:Name="InspectButton" Grid.Column="2" Content="{DynamicResource InspectButton}" Click="Inspect_Click"
+                Style="{StaticResource SecondaryButton}"
+                IsEnabled="{Binding Actions.CanInspect}" />
+      </Grid>
+    </Border>
+
+    <Border Grid.Row="4" Margin="14,8,14,14" CornerRadius="9" Background="#17202B"
+            BorderBrush="#2D3947" BorderThickness="1" ClipToBounds="True">
+      <Grid>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="39" />
+          <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <Grid Margin="14,0">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <TextBlock Text="{DynamicResource LiveLogTitle}" Foreground="White" FontWeight="SemiBold"
+                     VerticalAlignment="Center" />
+          <TextBlock Grid.Column="1" Text="{Binding LogPath}" Foreground="#A8B3C2" FontSize="11"
+                     Margin="14,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+          <Button Grid.Column="2" Content="{DynamicResource OpenLogsButton}" Click="OpenLogs_Click"
+                  Style="{StaticResource SmallButton}" VerticalAlignment="Center" />
+        </Grid>
+        <TextBox x:Name="LogTextBox" Grid.Row="1" IsReadOnly="True"
+                 FontFamily="Cascadia Mono, Consolas" FontSize="11"
+                 Foreground="#D6DEE8" Background="#111821" BorderThickness="0" Padding="13,9"
+                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                 TextWrapping="NoWrap" />
+      </Grid>
+    </Border>
+  </Grid>
+</Window>

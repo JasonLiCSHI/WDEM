@@ -1,0 +1,10 @@
+{
+  "profiles": [
+    {
+      "id": "csharp-developer",
+      "version": "1.0.0",
+      "displayName": "C# Developer",
+      "description": "A minimal C# developer workstation."
+    }
+  ]
+}

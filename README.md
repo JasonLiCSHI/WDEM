@@ -1,456 +1,237 @@
 <div align="center">
 
-# 🪟 WinHome
+# WDEM
 
-<img src="./.github/banner.png" alt="WinHome Banner" width="80%">
+### Declare your Windows development environment. Let the workflow do the rest.
 
-A declarative, portable, idempotent **Infrastructure-as-Code tool for Windows**
-powered by modern, dependency-free, single-file .NET.
+一份 Profile，描述整台 Windows 开发工作站。<br>
+WDEM 将软件、版本与配置步骤编排为可检查、可取消、可重试的 Task DAG。
 
----
+[![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
+[![.NET](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
+[![WPF](https://img.shields.io/badge/UI-WPF-0C54C2)](https://learn.microsoft.com/dotnet/desktop/wpf/)
+[![License](https://img.shields.io/badge/License-MIT-2EA44F)](LICENSE)
 
-### 🔰 Project Badges
-
-[![CI](https://img.shields.io/github/actions/workflow/status/DotDev262/WinHome/ci.yml?branch=main&label=CI&logo=github)](https://github.com/DotDev262/WinHome/actions/workflows/ci.yml)
-[![Release Build](https://img.shields.io/github/actions/workflow/status/DotDev262/WinHome/release.yaml?label=release%20build&logo=github)](https://github.com/DotDev262/WinHome/actions/workflows/release.yaml)
-[![Docs](https://img.shields.io/github/actions/workflow/status/DotDev262/WinHome/docs.yml?label=docs&logo=github-pages&color=blue)](https://github.com/DotDev262/WinHome/actions/workflows/docs.yml)
-[![Code Coverage](https://img.shields.io/badge/coverage-see%20CI-lightgrey?logo=codecov)](https://github.com/DotDev262/WinHome/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/DotDev262/WinHome?label=latest&logo=github)](https://github.com/DotDev262/WinHome/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/DotDev262/WinHome/total?color=blue&logo=github)](https://github.com/DotDev262/WinHome/releases)
-[![Stars](https://img.shields.io/github/stars/DotDev262/WinHome?style=social)](https://github.com/DotDev262/WinHome/stargazers)
-[![License](https://img.shields.io/github/license/DotDev262/WinHome)](./LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4?logo=windows)]()
-[![.NET](https://img.shields.io/badge/.NET-10.0-512BD4?logo=dotnet)](https://dotnet.microsoft.com/)
+**Declarative Profiles · Task DAG · Workflow Pipeline · CLI + GUI**
 
 </div>
 
 ---
 
-## 💬 Community & Support
+## Why WDEM?
 
-*   **GitHub Discussions:** The best place for "How do I...?" questions and community support. **[Join the conversation!](https://github.com/DotDev262/WinHome/discussions)**
-*   **Issues:** For bug reports and feature requests. **[Open a new issue using our templates.](https://github.com/DotDev262/WinHome/issues/new/choose)**
-*   **GSSOC 2026:** Participants should check our **[Contributing Guide](./CONTRIBUTING.md)** for program-specific instructions.
+搭建开发环境不应该是一份会过期的安装清单，也不应该把每个软件硬编码进工具。
 
----
+WDEM 把 Visual Studio、ReSharper、Git、.NET SDK 以及未来的任何工具都视为普通 Task。Profile 负责声明“需要什么”，Core 负责计算依赖和执行顺序，Windows Runtime 负责安全执行。新增软件、调整版本或增加安装后配置，通常只需修改 Profile。
 
-I built WinHome to create a **lightweight, dependency-free configuration tool** that runs **natively on Windows** as a **single-file EXE** — no Python, Ruby, or agent installations required. This project was heavily inspired by NixOS's `home-manager` but tailored specifically for the Windows ecosystem.
-
-WinHome focuses on the real needs of **Windows developers**, including:
-
-- First-class **Winget** support
-- Deep **WSL** provisioning
-- Native **Registry tweaks** and system settings
-
-The goal is to make Windows environment automation as simple, fast, and reliable as possible.
-
----
-
-## 📋 Prerequisites
-
-Before using WinHome, ensure your environment meets the following requirements:
-
-*   **Operating System:** Windows 10 (Version 1809 or higher) or Windows 11.
-*   **Privileges:** Must be executed with **Administrator** privileges to modify system settings and install packages.
-*   **Internet Connection:** Required for downloading packages and updates.
-
----
-
-## 🚀 Installation
-
-WinHome ships as a **self-contained single EXE** (no .NET runtime needed), compatible with all Windows x64 systems.
-
-### Method 1: Manual Download
-
-1. Visit the [**Releases Page**](https://github.com/DotDev262/WinHome/releases/latest)
-2. Download **WinHome.exe**
-3. Run it from PowerShell or CMD
-
-### Method 2: Quick Install (PowerShell One-Liner)
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "iwr -useb https://github.com/DotDev262/WinHome/releases/latest/download/WinHome.exe -OutFile WinHome.exe"
-
-```
-
-### Method 3: winget *(coming soon)*
-
-> Once WinHome is published to the Windows Package Manager repository, you will be able to install it with:
-
-```powershell
-# Coming soon — pending winget submission
-winget install DotDev262.WinHome
-```
-
-### Method 4: Scoop *(coming soon)*
-
-> Once the Scoop bucket is published:
-
-```powershell
-# Coming soon — pending Scoop bucket submission
-scoop bucket add winhome https://github.com/DotDev262/scoop-winhome
-scoop install winhome
-```
-
-### Method 5: Chocolatey *(coming soon)*
-
-> Once the Chocolatey package is published:
-
-```powershell
-# Coming soon — pending Chocolatey package approval
-choco install winhome
-```
-
-> **Post-Install Note:** For easier global access, we recommend moving `WinHome.exe` to a folder included in your system's `PATH` environment variable (e.g., `C:\Users\<User>\bin`).
-
----
-
-## 🔧 How It Works & Configuration Wiki
-
-WinHome reads a declarative `config.yaml` that defines your desired system state.
-A built-in **Reconciliation Engine** compares it to the live system and ensures everything matches.
-
-* Tracks system state in `winhome.state.json`
-* Detects and corrects configuration drift
-* Fully idempotent — run it once or 100 times: *the result is identical*
-
-For a detailed breakdown of all configuration options, refer to the [Configuration Wiki](./docs/config.md).
-
-For complete, real-world setup examples (Developer, Minimalist, Gamer), see the [Configuration Cookbook](./docs/cookbook.md).
-
-For common development environment setup examples, see the [Configuration Recipes](./docs/configuration-recipes.md).
-
-### ⚠️ Secrets & Security Warning
-
-**Do not commit `config.yaml` to public repositories** if it contains sensitive information such as API tokens, passwords, or private environment variables. We recommend using a private repository or `.gitignore` for configurations containing secrets.
-
----
-
-## ✨ Features
-
-### 📦 Universal Package Management
-
-* Winget (with auto-install support)
-* Scoop
-* Chocolatey
-
-### 🐧 WSL Management
-
-* Auto-install and configure distros
-* Run post-provision scripts
-* Kernel settings and version management
-
-### 🔗 Dotfiles Sync
-
-### ⚙️ System Configuration
-
-### 🛡️ Safe Dry-Run Mode
-
-### 🔄 Deterministic Idempotency
-
----
-
-## 🛡️ Security & Reliability
-
-WinHome implements enterprise-grade security controls to prevent common infrastructure automation pitfalls.
-
-
-### 🔒 Context Awareness (RegistryGuard)
-WinHome actively detects if it is running as `SYSTEM` (common in CI/CD or Scheduled Tasks) and **blocks attempts to modify `HKEY_CURRENT_USER`**. This prevents the "Admin Context Trap" where settings are accidentally applied to the LocalSystem profile instead of the logged-in user.
-
-### 💾 Crash Resilience (Write-Through State)
-The state engine uses a **Write-Through** pattern. Every successful action (e.g., installing an app, applying a registry key) is immediately flushed to disk (`winhome.state.json`). If the process crashes or is terminated (Ctrl+C), your progress is saved, and the next run will resume correctly without "zombie" state issues.
-
-### 📦 Plugin Sandboxing
-External plugins (Bun, Uv) run in a sandboxed process with strict limits:
-*   **Memory Limit:** 10MB max output buffer to prevent OOM attacks.
-*   **Time Limit:** 30-second execution timeout to prevent hangs.
-*   **Isolation:** Plugins communicate strictly via JSON over Stdin/Stdout.
-
----
-
-## 🗺️ Roadmap / Planned Features
-
-This roadmap is a living document that outlines the project's future direction. It will be updated with new features and ideas as the project evolves.
-
-### Core Features & System Integration
-- [x] ~~Windows Services management~~
-- [x] ~~Scheduled Tasks provisioning~~
-- [x] ~~Add Chocolatey uninstall support~~
-- [x] **Winget Auto-Install**: Automatically installs Winget if missing.
-- [x] **Plugin Architecture**: Redesign the core to support external providers for services and package managers.
-- [x] **VSCode Plugin**: Automatically sync settings and extensions using the new plugin architecture.
-- [ ] **Resource Dependencies**: Introduce a `dependsOn:` attribute to control execution order.
-- [ ] **Transactional Rollbacks**: Implement logic to automatically undo changes on a failed run.
-- [ ] **Windows Container Support**: Add features for provisioning and managing Windows containers.
-- [ ] **Hyper-V VM Provisioning**: Introduce capabilities for managing local Hyper-V virtual machines.
-
-### Developer Experience (DevEx) & Tooling
-- [x] ~~State diff viewer (`--diff`)~~
-- [x] **Enhanced Logging**: Filtered, real-time output for package managers.
-- [x] **Configuration Schema Validation**: Validate `config.yaml` against a formal schema to provide better error messages.
-- [ ] **Advanced State Management**: Add CLI commands to view, backup, and restore system state.
-- [ ] **Structured Output**: Add a `--json` flag for machine-readable output of run results.
-- [ ] **GUI Mode**: Develop a simple graphical user interface for non-technical users.
-- [x] **Profile-based PATH Overrides**: Allow different profiles to have unique PATH environment variables.
-- [ ] **"Generate" Function**: Add a command to generate a `config.yaml` file from the current state of a live system.
-- [ ] **DSL**: Evolve the configuration into a more powerful Domain-Specific Language (similar to Nix).
-
-### Code Quality & Automation
-- [x] ~~Mocked tests for registry operations~~
-- [x] **Containerized Acceptance Tests**: Build a full acceptance test suite that runs inside a clean Windows container.
-- [x] **Native GitHub Actions Testing**: End-to-end testing on real Windows VMs.
-- [x] **Complete Unit Test Coverage**: Ensure all services and managers have comprehensive unit tests.
-- [x] **Refactor Core Logic**: Decouple `Program.cs` and simplify the Dependency Injection setup.
-- [ ] **Publish Docs to GitHub Pages**: Automate the publishing of the `/docs` directory to a professional documentation website.
-- [ ] **Automate Release Notes**: Use tools like `release-drafter` to auto-generate changelogs for new releases.
-- [ ] **Formalize Contribution Process**: Create a `CONTRIBUTING.md` file and GitHub templates for issues and PRs.
-
-## 📅 Version Roadmap
-
-Here is a tentative plan for upcoming releases.
-
-### v1.1 — The Quality & DX Release
-*Focus: Internal refactoring, test coverage, and developer experience.*
-- [x] **Complete Unit Test Coverage**:
-  - [x] `DotfileService`
-  - [x] `WslService`
-  - [x] `GitService`
-  - [x] `EnvironmentService`
-  - [x] `WingetService`
-  - [x] `ScoopService`
-  - [x] `ChocolateyService`
-  - [x] `RegistryService`
-  - [x] `SystemSettingsService`
-  - [x] `ScheduledTaskService`
-  - [x] `WindowsServiceManager`
-- [x] **Refactor Core Logic**:
-  - [x] Simplify Dependency Injection in `Program.cs`.
-  - [x] Decouple `Program.cs` by moving logic into dedicated `CliBuilder` and `AppHost` classes.
-- [x] **Logging & Testability**:
-  - [x] Introduce a proper `ILogger` service (Console/JSON).
-  - [x] Support `WINHOME_CONFIG_PATH` environment variable.
-  - [x] Implement distinct exit codes for automation.
-- [x] **Validation & Automation**:
-  - [x] Add Configuration Schema Validation (JSON Schema).
-  - [x] Finalize Containerized Acceptance Test Suite.
-- [x] **Formalize Contribution Process** (`CONTRIBUTING.md`, templates).
-
-### v1.2 — The Plugins & Extensibility Release
-*Focus: Redesigning the core for extensibility and adding community-requested features.*
-- [x] **Plugin Architecture**: Redesign the core to support external providers for services and package managers.
-- [x] **VSCode Plugin**: Implement VSCode settings and extension sync as the first official plugin.
-- [x] **Vim/Neovim Plugin**: Configure plugins and settings for Vim/Neovim.
-- [x] **Obsidian Plugin**: Manage settings and community plugins across your Obsidian vaults.
-- [x] **Oh My Posh Plugin**: Manage PowerShell terminal prompt themes.
-- [x] **Config Generator (`winhome generate`)**: Scan the system and create a `config.yaml` based on installed apps and settings.
-- [x] **Advanced State Management** (`state list`, `state backup`, `state restore`).
-- [x] **Secret Reference Logic**: Add support for referencing secrets from environment variables or secure vaults.
-- [x] **Self-Update Mechanism**: Allow `WinHome` to update itself to the latest version.
-- [x] **Security Hardening Presets**: Add pre-defined configurations for locking down Windows security settings.
-- [x] **Automation**:
-  - [x] Publish Docs to GitHub Pages (DocFx).
-  - [x] Automate Release Notes (`release-drafter`).
-- [x] **Structured Output**: Finalize `--json` integration for all modules.
-
-### v2.0 — The Architecture Release
-*Focus: Major architectural changes to support long-term power and reliability.*
-- [ ] Implement Resource Dependencies (`dependsOn:`)
-- [ ] Implement Transactional Rollbacks on failure
-- [ ] Evolve configuration towards a true DSL
-
----
-
-## 🏗️ Technical Architecture
-
-Built with modern .NET engineering patterns:
-
-* **Dependency Injection** (`Microsoft.Extensions.Hosting`)
-* **Strategy Pattern** across package managers
-* **Testable Core** via abstractions (Registry, FS, Processes)
-* **Cross-Platform Dev**: Can be developed/unit-tested on Linux & macOS.
-* **CI/CD** via GitHub Actions (SingleFile & Native builds)
-
----
-
-## 📘 Usage
-
-```
-.\WinHome.exe [options]
-```
-
-### Options
-
-* `--config <path>`
-* `--dry-run`, `-d`
-* `--profile <name>`
-* `--debug`
-* `--diff`
-
----
-
-## 🧩 Configuration Example (`config.yaml`)
-
-```yaml
-version: "1.0"
-
-apps:
-  - id: "Microsoft.PowerToys"
-    manager: "winget"
-  - id: "neovim"
-    manager: "scoop"
-
-dotfiles:
-  - src: "./files/.gitconfig"
-    target: "~/.gitconfig"
-
-envVars:
-  - variable: "EDITOR"
-    value: "nvim"
-    action: "set"
-  - variable: "Path"
-    value: "%USERPROFILE%\bin"
-    action: "append"
-
-registryTweaks:
-  - path: "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-    name: "HideFileExt"
-    value: 0
-    type: "dword"
-
-systemSettings:
-  showFileExtensions: true
-  darkMode: true
-  taskbarAlignment: "left"
-
-git:
-  userName: "John Doe"
-  userEmail: "john.doe@example.com"
-  settings:
-    "core.editor": "code --wait"
-    "init.defaultBranch": "main"
-
-wsl:
-  update: true
-  defaultDistro: "Debian"
-  defaultVersion: 2
-  distros:
-    - name: "Ubuntu-20.04"
-    - name: "Debian"
-
-profiles:
-  work:
-    git:
-      userName: "John Doe (Work)"
-      userEmail: "john.doe@work.com"
-    envVars:
-      - variable: "EDITOR"
-        value: "code"
-        action: "set"
-      - variable: "Path"
-        value: "%USERPROFILE%\work\bin"
-        action: "append"
-```
-
----
-
-## 🗑️ Uninstallation
-
-WinHome is fully portable. To uninstall it:
-
-1.  Delete the `WinHome.exe` file.
-2.  Delete the state file `winhome.state.json` (located in the same directory).
-
-No registry keys or hidden folders are left behind by the tool itself.
-
----
-
-## ❓ Troubleshooting
-For a comprehensive troubleshooting guide, see [Troubleshooting](docs/troubleshooting.md).
-
-**"Winget not recognized"**
-> Ensure the **App Installer** is updated from the Microsoft Store. WinHome attempts to use the system-level Winget.
-
-**PowerShell Script Errors**
-> If you encounter execution policy errors, try running `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser` in an administrative PowerShell window.
-
----
-
-## 🤝 Contributing
-
-Contributions, discussions, and feature ideas are welcome! WinHome is an open-source project and we'd love your help to make it better.
-
-### 📖 Contribution Resources
-
-| Resource | Description |
+| 传统安装脚本 | WDEM |
 |---|---|
-| [Contributing Guide](./CONTRIBUTING.md) | Full guide: branching, commit style, PR process |
-| [GSSOC 2026 Instructions](./CONTRIBUTING.md#-gssoc-2026-participants) | Program-specific labels & tracking info |
-| [Configuration Wiki](./docs/config.md) | Understand WinHome's configuration schema |
-| [Configuration Cookbook](./docs/cookbook.md) | Real-world `config.yaml` examples |
-| [Configuration Recipes](./docs/configuration-recipes.md) | Ready-to-use development environment setup recipes |
-| [Testing Guide](./docs/testing.md) | How to write and run tests |
-| [Cross-Platform Dev](./docs/cross-platform-dev.md) | Developing on Linux/macOS |
-| [Security Guide](./docs/security.md) | Security practices and guidelines |
-| [Troubleshooting](./docs/troubleshooting.md) | Common issues and solutions |
-| [GitHub Discussions](https://github.com/DotDev262/WinHome/discussions) | Community Q&A and ideas |
-| [Open Issues](https://github.com/DotDev262/WinHome/issues) | Find something to work on |
+| 命令与流程耦合 | Profile 与执行引擎分离 |
+| 不清楚本机是否已满足要求 | 启动后自动 Detect 并校验版本 |
+| 手工维护执行顺序 | 根据依赖构建并验证 DAG |
+| 取消后可能继续执行后续命令 | 停止当前进程树并阻断不安全的下游 |
+| GUI 与 CLI 各写一套规则 | 两个入口共享同一 Core、状态与报告 |
 
-### 🚀 Quick Start for Contributors
+## How it works
 
-1. **Fork** the repository → [Fork WinHome](https://github.com/DotDev262/WinHome/fork)
-2. **Clone** your fork and create a branch: `git checkout -b <issue-number>-short-description`
-3. **Build**: `dotnet build WinHome.sln`
-4. **Test**: `dotnet test WinHome.sln`
-5. **Format**: `dotnet format WinHome.sln` (required before submitting)
-6. **Open a Pull Request** and link it to the relevant issue (`Closes #<issue-number>`)
+```mermaid
+flowchart LR
+    S["Release-defined<br/>HTTPS Profile Source"] --> C["Validated<br/>last-known-good cache"]
+    S --> P["Profile parser<br/>& content trust"]
+    C -. offline fallback .-> P
+    P --> G["Selected Tasks<br/>& DAG"]
+    G --> W["Detect → Pre → Apply<br/>→ Post → Verify"]
+    W --> R["Windows runtime"]
+    W --> O["Snapshots · Progress<br/>JSONL logs · Report"]
+    O --> CLI["CLI"]
+    O --> GUI["WPF GUI"]
+```
 
-> 💡 **GSSOC 2026 participants:** Please read the [Contributing Guide](./CONTRIBUTING.md) for program-specific instructions on PR labels and leaderboard tracking.
+Task 的状态是执行事实的唯一来源。引擎先让 Task 进入合法状态，再执行对应 Activity；Activity 的结果继续驱动状态变化。GUI 只响应快照中的 `CanStart`、`CanCancel` 和 `CanSelect`，不复制工作流规则。
 
-Please open an [Issue](https://github.com/DotDev262/WinHome/issues/new/choose) or [Pull Request](https://github.com/DotDev262/WinHome/pulls) on GitHub.
+```text
+Pending → Ready → Detecting → RunningPre → Applying → RunningPost → Verifying
+                            ↘ Satisfied                         ↘ Succeeded
+Running → Cancelling → Cancelled       dependency failure → Blocked
+```
 
-<!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-<!-- ALL-CONTRIBUTORS-BADGE:END -->
+## Core capabilities
 
-### ✨ Contributors
+- **声明式 Profile** — 定义 Task 元数据、Required/Optional、依赖、来源、版本约束及阶段命令。
+- **确定性 Task DAG** — 自动补齐依赖、去重、拓扑排序，并在执行前报告循环依赖。
+- **完整生命周期** — 严格执行 `Detect → Pre → Apply → Post → Verify`；重试从 Detect 重新开始。
+- **版本感知** — 支持精确版本、通配版本、最低版本和版本范围；低于最低版本时明确要求升级。
+- **响应式控制** — 单个 Task 与整个计划均可开始或取消，按钮能力由 Core 状态投影产生。
+- **安全取消** — 终止当前命令的完整进程树，停止新 Activity，并阻断依赖该 Task 的下游。
+- **远程优先** — 发行版在代码中固定一个 HTTPS Source；网络故障时回退到已验证的最后一次有效缓存。
+- **显式信任** — 远程或缓存 Profile 在运行 Detect/Apply 命令前，必须获得用户对当前内容哈希的确认。
+- **统一体验** — WPF 与 CLI 共享 `Wdem.Core`、`Wdem.Windows`、进度模型和最终报告。
+- **可追溯日志** — 每个 Session 写入独立 JSONL 日志，记录计划、阶段、stdout、stderr 与结果。
 
-Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
+## A Profile is the product definition
 
-<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
-<!-- markdownlint-disable -->
-<table>
-  <tbody>
-    <tr>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/DotDev262"><img src="https://github.com/DotDev262.png" width="100px;" alt="DotDev262"/><br /><sub><b>DotDev262</b></sub></a><br /><a href="https://github.com/DotDev262/WinHome/commits?author=DotDev262" title="Code">💻</a> <a href="#design-DotDev262" title="Design">🎨</a> <a href="#ideas-DotDev262" title="Ideas">🤔</a> <a href="https://github.com/DotDev262/WinHome/commits?author=DotDev262" title="Documentation">📖</a></td>
-    </tr>
-  </tbody>
-</table>
+下面的 Task 声明了最低版本、来源、检测方式、安装命令以及安装前后的配置。命令采用 executable + argument array，WDEM 不拼接 Shell 命令字符串。
 
-<!-- markdownlint-restore -->
-<!-- ALL-CONTRIBUTORS-LIST:END -->
+```json
+{
+  "schemaVersion": 1,
+  "id": "csharp-developer",
+  "version": "1.0.0",
+  "displayName": "C# Developer",
+  "description": "A focused C# workstation profile",
+  "tasks": {
+    "git": {
+      "displayName": "Git",
+      "description": "Version control client",
+      "required": true,
+      "dependsOn": [],
+      "version": ">= 2.50",
+      "preferredVersion": "2.52.0",
+      "source": "Git.Git",
+      "detect": {
+        "displayName": "Detect Git version",
+        "executable": "git",
+        "arguments": ["--version"],
+        "versionPattern": "git version (?<version>\\d+(?:\\.\\d+)+)"
+      },
+      "pre": [
+        {
+          "displayName": "Prepare configuration",
+          "executable": "powershell",
+          "arguments": ["-NoProfile", "-File", "prepare-git.ps1"]
+        }
+      ],
+      "apply": {
+        "displayName": "Install Git with WinGet",
+        "executable": "winget",
+        "arguments": ["install", "--id", "{source}", "--exact", "--silent"]
+      },
+      "post": [
+        {
+          "displayName": "Apply team defaults",
+          "executable": "powershell",
+          "arguments": ["-NoProfile", "-File", "configure-git.ps1"]
+        }
+      ]
+    }
+  }
+}
+```
 
-This project follows the [all-contributors](https://github.com/all-contributors/all-contributors) specification. Contributions of any kind welcome!
+`source` 可表达 WinGet ID、URL、文件路径或企业源标识；`{source}` 与 `{preferredVersion}` 可用于参数。Schema 通过 `schemaVersion` 演进，新的执行机制则通过 `ITaskRuntime` adapter 扩展，Core 不认识具体软件。
 
----
+完整约束见 [MVP 需求基线](docs/MVP_REQUIREMENTS.md)，模块边界与状态模型见 [架构说明](docs/ARCHITECTURE.md)。
 
-## 🙏 This Is Possible Thanks To
+## Get started
 
-WinHome stands on the shoulders of incredible open-source technologies:
+### GUI
 
-* **Microsoft .NET**
-* **Winget / Scoop / Chocolatey**
-* **YAML**
-* **GitHub Actions**
-* **PowerShell**
+从开始菜单启动 WDEM。应用会自动：
 
-And most importantly, the open-source community. ❤️
+1. 从发行版固定的 Source 加载首个 Profile；
+2. 请求确认当前 Profile 内容；
+3. 检测本地环境并区分 Required 与 Optional Task；
+4. 展示依赖、Pre/Post、目标版本、实时进度和详细输出；
+5. 根据 Task 快照启用开始、取消与选择操作。
 
+界面语言与安装时选择保持一致：English 安装显示完整英文界面，简体中文安装显示完整中文界面。
 
-📘 For detailed security guidance and best practices, see the [Security Guide](./docs/security.md).
+### CLI
 
+```powershell
+# 查看可用 Profile
+wdem profiles
 
----
+# 检查当前环境
+wdem inspect --profile csharp-developer
 
-## 📄 License
+# 应用 Required Task 和选中的 Optional Task
+wdem apply --profile csharp-developer --select visual-studio,resharper
 
-Released under the **MIT License**.
+# 运行单个 Task 及其依赖
+wdem apply --profile csharp-developer --task resharper
+
+# 审查 Profile 后，用于非交互执行并允许一次重试
+wdem apply --profile csharp-developer --yes --retries 1 --trust-profile
+```
+
+CLI 使用 `Ctrl+C` 安全取消。用户主动取消不会触发自动重试；已经满足版本约束的 Task 不会重复安装。
+
+## Install
+
+WDEM 提供 Windows x64 自包含安装程序，目标计算机无需预装 .NET SDK 或 .NET Desktop Runtime。
+
+```text
+WDEM-<version>-win-x64-setup.exe
+```
+
+安装程序支持简体中文和 English，可选择桌面快捷方式及把 `wdem.exe` 加入用户 PATH，并在 Windows“已安装的应用”中提供标准卸载入口。默认安装至：
+
+```text
+%LOCALAPPDATA%\Programs\WDEM
+```
+
+### Build the installer
+
+需要 .NET 10 SDK 与 Inno Setup 6：
+
+```powershell
+pwsh .\build\Build-Installer.ps1 -Version 0.1.0
+```
+
+输出到 `artifacts/installer/`，同时生成 SHA-256 校验文件。安装包不会内置 `profiles/`。
+
+## Security and recovery
+
+| Concern | MVP guarantee |
+|---|---|
+| Profile transport | Source 与重定向只允许 HTTPS，单文档默认不超过 1 MiB |
+| Command trust | Profile 内容首次出现或哈希变化后必须重新确认 |
+| Process invocation | 参数通过 `ProcessStartInfo.ArgumentList` 传递 |
+| Cancellation | Task 先进入 `Cancelling`，进程树退出后才进入 `Cancelled` |
+| Downstream safety | 失败或取消会阻断依赖项，不影响无关 Task |
+| Recovery | GUI 可重试失败计划，CLI 支持 `--retries N`；每次从 Detect 开始 |
+| Cache integrity | 只有完成解析与校验的远程内容才会原子更新缓存 |
+| Diagnostics | 日志默认保存至 `%LOCALAPPDATA%\Wdem\logs`，不可写时降级到 `%TEMP%\Wdem\logs` |
+
+## Source and cache model
+
+GUI 与 CLI 不提供 Source 编辑入口。每个发行版在代码中选择一个 HTTPS Profile Source；当前默认契约为：
+
+```text
+https://raw.githubusercontent.com/JasonLiCSHI/WDEM/main/profiles/
+```
+
+仓库中的 [`profiles/`](profiles/) 是该远程 Source 的发布内容，不会进入安装包。发布版本前必须确保目标分支已部署 `index.json` 与对应 Profile；如果远程内容尚未发布且本机没有有效缓存，应用不会执行任何 Profile 命令。
+
+```text
+%LOCALAPPDATA%\Wdem\cache\profiles    last-known-good cache
+%LOCALAPPDATA%\Wdem\settings.json     content-hash trust records
+%LOCALAPPDATA%\Wdem\logs              JSONL session logs
+```
+
+## MVP scope
+
+当前版本刻意保持小而可靠：采用确定性的顺序 DAG 调度，不包含并行执行、自动 UAC 提升、回滚/卸载、重启续跑、Profile 市场、私有认证源或跨平台支持。这些能力可在现有 Profile、Graph、Workflow、Runtime seam 上继续演进，而无需向 Core 加入产品专用逻辑。
+
+## Develop
+
+```powershell
+dotnet build Wdem.slnx
+dotnet test Wdem.slnx
+dotnet run --project src/Wdem.App/Wdem.App.csproj
+dotnet run --project src/Wdem.Cli/Wdem.Cli.csproj -- profiles
+```
+
+| Project | Responsibility |
+|---|---|
+| `Wdem.Core` | Profile、版本约束、DAG、Workflow、状态快照与报告 |
+| `Wdem.Windows` | Windows 进程执行、输出转发、进程树取消、缓存、信任与日志 |
+| `Wdem.Cli` | 命令行交互、计划确认、重试与终端展示 |
+| `Wdem.App` | WPF 工作台、本地化、Task 详情与响应式状态映射 |
+
+请先阅读 [AGENTS.md](AGENTS.md) 了解产品边界与验证要求。
+
+## License
+
+WDEM is released under the [MIT License](LICENSE).
