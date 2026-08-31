@@ -10,7 +10,11 @@ namespace Wdem.Windows.Security;
 internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirectoryPolicy
 {
   private const int ErrorAlreadyExists = 183;
+  private const int ErrorNotAllAssigned = 1300;
   private const uint ErrorSuccess = 0;
+  private const uint TokenQuery = 0x0008;
+  private const uint TokenAdjustPrivileges = 0x0020;
+  private const uint SePrivilegeEnabled = 0x00000002;
   private const uint ReadControl = 0x00020000;
   private const uint GenericRead = 0x80000000;
   private const uint GenericWrite = 0x40000000;
@@ -22,6 +26,7 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
   private const uint FileFlagBackupSemantics = 0x02000000;
   private const uint FileFlagOpenReparsePoint = 0x00200000;
   private const uint LockFileExclusiveLock = 0x00000002;
+  private static readonly object RestorePrivilegeGate = new();
   internal const string RevocationLedgerFileName = ".wdem-vsix-revocations";
   private readonly string _rootPath;
 
@@ -803,6 +808,7 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
     SafeFileHandle? handle = null;
     try
     {
+      using var restorePrivilege = EnableRestorePrivilegeForOwner(security);
       var attributes = new SecurityAttributes
       {
         Length = Marshal.SizeOf<SecurityAttributes>(),
@@ -1030,6 +1036,7 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
     var descriptorHandle = GCHandle.Alloc(descriptor, GCHandleType.Pinned);
     try
     {
+      using var restorePrivilege = EnableRestorePrivilegeForOwner(security);
       var attributes = new SecurityAttributes
       {
         Length = Marshal.SizeOf<SecurityAttributes>(),
@@ -1040,7 +1047,9 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
         var error = Marshal.GetLastWin32Error();
         if (error != ErrorAlreadyExists || !allowExisting)
         {
-          throw new Win32Exception(error, $"Could not create restricted directory '{path}'.");
+          throw new Win32Exception(
+              error,
+              $"Could not create restricted directory '{path}' (Win32 error {error}).");
         }
       }
     }
@@ -1048,6 +1057,18 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
     {
       descriptorHandle.Free();
     }
+  }
+
+  private static IDisposable? EnableRestorePrivilegeForOwner(ObjectSecurity security)
+  {
+    var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier ??
+        throw new SecurityException("The requested object owner is unavailable.");
+    using var identity = WindowsIdentity.GetCurrent();
+    var currentUser = identity.User ??
+        throw new InvalidOperationException("The current Windows user SID is unavailable.");
+    return owner.Equals(currentUser)
+        ? null
+        : RestorePrivilegeScope.Enable();
   }
 
   private static void ValidateRestrictedDirectory(
@@ -1292,6 +1313,144 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
     public bool InheritHandle;
   }
 
+  [StructLayout(LayoutKind.Sequential)]
+  private struct Luid
+  {
+    public uint LowPart;
+    public int HighPart;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct TokenPrivileges
+  {
+    public uint PrivilegeCount;
+    public Luid Luid;
+    public uint Attributes;
+  }
+
+  private sealed class RestorePrivilegeScope(
+      SafeAccessTokenHandle token,
+      TokenPrivileges previousState) : IDisposable
+  {
+    private SafeAccessTokenHandle? _token = token;
+    private readonly TokenPrivileges _previousState = previousState;
+
+    public static RestorePrivilegeScope Enable()
+    {
+      Monitor.Enter(RestorePrivilegeGate);
+      try
+      {
+        if (!NativeMethods.OpenProcessToken(
+                NativeMethods.GetCurrentProcess(),
+                TokenAdjustPrivileges | TokenQuery,
+                out var token))
+        {
+          throw new Win32Exception(
+              Marshal.GetLastWin32Error(),
+              "The current process token could not be opened for owner assignment.");
+        }
+
+        try
+        {
+          if (!NativeMethods.LookupPrivilegeValue(
+                  null,
+                  "SeRestorePrivilege",
+                  out var restorePrivilege))
+          {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "The restore privilege identifier could not be resolved.");
+          }
+
+          var requestedState = new TokenPrivileges
+          {
+            PrivilegeCount = 1,
+            Luid = restorePrivilege,
+            Attributes = SePrivilegeEnabled
+          };
+          if (!NativeMethods.AdjustTokenPrivileges(
+                  token,
+                  disableAllPrivileges: false,
+                  ref requestedState,
+                  (uint)Marshal.SizeOf<TokenPrivileges>(),
+                  out var previousState,
+                  out _))
+          {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "The restore privilege could not be enabled for owner assignment.");
+          }
+
+          var error = Marshal.GetLastWin32Error();
+          if (error == ErrorNotAllAssigned)
+          {
+            throw new SecurityException(
+                "The current process token does not hold the restore privilege required for owner assignment.");
+          }
+
+          if (error != 0)
+          {
+            throw new Win32Exception(
+                error,
+                "The restore privilege could not be enabled for owner assignment.");
+          }
+
+          var scope = new RestorePrivilegeScope(token, previousState);
+          token = null!;
+          return scope;
+        }
+        finally
+        {
+          token?.Dispose();
+        }
+      }
+      catch
+      {
+        Monitor.Exit(RestorePrivilegeGate);
+        throw;
+      }
+    }
+
+    public void Dispose()
+    {
+      var token = Interlocked.Exchange(ref _token, null);
+      if (token is null)
+      {
+        return;
+      }
+
+      try
+      {
+        var previousState = _previousState;
+        if (!NativeMethods.AdjustTokenPrivileges(
+                token,
+                disableAllPrivileges: false,
+                ref previousState,
+                (uint)Marshal.SizeOf<TokenPrivileges>(),
+                out _,
+                out _))
+        {
+          throw new Win32Exception(
+              Marshal.GetLastWin32Error(),
+              "The restore privilege state could not be restored.");
+        }
+
+        var error = Marshal.GetLastWin32Error();
+        if (error != 0)
+        {
+          throw new Win32Exception(
+              error,
+              "The restore privilege state could not be restored.");
+        }
+      }
+      finally
+      {
+        token.Dispose();
+        Monitor.Exit(RestorePrivilegeGate);
+      }
+    }
+  }
+
   private enum FileInfoByHandleClass
   {
     FileAttributeTagInfo = 9
@@ -1321,6 +1480,33 @@ internal sealed class WindowsPlanArtifactDirectoryPolicy : ISecureArtifactDirect
 
   private static class NativeMethods
   {
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetCurrentProcess();
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool OpenProcessToken(
+        IntPtr processHandle,
+        uint desiredAccess,
+        out SafeAccessTokenHandle tokenHandle);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool LookupPrivilegeValue(
+        string? systemName,
+        string name,
+        out Luid luid);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool AdjustTokenPrivileges(
+        SafeAccessTokenHandle tokenHandle,
+        [MarshalAs(UnmanagedType.Bool)] bool disableAllPrivileges,
+        ref TokenPrivileges newState,
+        uint bufferLength,
+        out TokenPrivileges previousState,
+        out uint returnLength);
+
     [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode,
         SetLastError = true)]
     public static extern SafeFileHandle CreateFile(
