@@ -22,6 +22,21 @@ public sealed class RepositoryIdentityTests
   }
 
   [Fact]
+  public void DevContainerConfigurationIsTrackedAsARegularFile()
+  {
+    var result = RunProcess(
+        RepositoryRoot,
+        "git",
+        "ls-files",
+        "-s",
+        "--",
+        ".devcontainer.json");
+
+    Assert.Equal(0, result.ExitCode);
+    Assert.StartsWith("100644 ", result.Output, StringComparison.Ordinal);
+  }
+
+  [Fact]
   public void ProductGuidesDescribeCurrentSupportedHostsAndDistribution()
   {
     var guide = NormalizeWhitespace(File.ReadAllText(Path.Combine(
