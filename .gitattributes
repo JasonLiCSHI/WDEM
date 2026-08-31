@@ -1,4 +1,4 @@
-* whitespace=cr-at-eol
+* text=auto eol=lf whitespace=cr-at-eol
 
 # Hash-pinned configuration assets must remain byte-for-byte stable.
 profiles/assets/** text eol=lf

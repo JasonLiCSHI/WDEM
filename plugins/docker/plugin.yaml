@@ -14,4 +14,3 @@ install_info:
     winget: 'Docker.DockerDesktop'
     scoop: 'docker-desktop'
     choco: 'docker-desktop'
-

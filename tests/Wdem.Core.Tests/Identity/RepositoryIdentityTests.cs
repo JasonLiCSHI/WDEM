@@ -37,6 +37,21 @@ public sealed class RepositoryIdentityTests
   }
 
   [Fact]
+  public void SourceCheckoutEnforcesLfAcrossPlatforms()
+  {
+    var result = RunProcess(
+        RepositoryRoot,
+        "git",
+        "check-attr",
+        "eol",
+        "--",
+        "src/Wdem.LegacySource/Engine.cs");
+
+    Assert.Equal(0, result.ExitCode);
+    Assert.EndsWith("eol: lf", result.Output.Trim(), StringComparison.Ordinal);
+  }
+
+  [Fact]
   public void ProductGuidesDescribeCurrentSupportedHostsAndDistribution()
   {
     var guide = NormalizeWhitespace(File.ReadAllText(Path.Combine(
