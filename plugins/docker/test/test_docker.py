@@ -1,229 +1,140 @@
-
-import sys
-import os
+import importlib.util
+import io
 import json
+import os
 import tempfile
 import unittest
-from unittest.mock import patch
 from pathlib import Path
-import io
+from unittest.mock import patch
 
-# 7. Test file with sys.path.append (not sys.path.insert(0))
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
-import plugin
+_PLUGIN_PATH = Path(__file__).parents[1] / "src" / "plugin.py"
+_SPEC = importlib.util.spec_from_file_location("docker_compose_plugin", _PLUGIN_PATH)
+if _SPEC is None or _SPEC.loader is None:
+    raise RuntimeError(f"Could not load Docker Compose plugin from {_PLUGIN_PATH}")
+plugin = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(plugin)
+
 
 class TestDockerComposePlugin(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.mock_home = Path(self.temp_dir.name)
-        
+        self.config_path = Path(self.temp_dir.name) / ".docker" / "config.json"
+
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    @patch("sys.stdin", io.StringIO(""))
-    def test_empty_stdin(self):
-        with patch("sys.stdout", new_callable=io.StringIO) as fake_out:
-            with self.assertRaises(SystemExit):
-                plugin.main()
-            self.assertIn("Empty stdin", fake_out.getvalue())
+    def invoke_main(self, input_text):
+        with (
+            patch("sys.stdin", io.StringIO(input_text)),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            plugin.main()
+        return json.loads(stdout.getvalue())
 
-    @patch("plugin.get_config_path")
-    def test_check_installed(self, mock_path):
-        mock_path.return_value = self.mock_home / ".docker" / "config.json"
-        req = {"requestId": "test-req", "action": "check_installed"}
-        
-        with patch("sys.stdin", io.StringIO(json.dumps(req))):
-            with patch("sys.stdout", new_callable=io.StringIO) as fake_out:
-                plugin.main()
-                self.assertEqual(fake_out.getvalue().strip(), "true")
+    def test_empty_stdin_returns_json_error(self):
+        response = self.invoke_main("")
 
-    @patch("plugin.get_config_path")
-    def test_apply_settings(self, mock_path):
-        config_file = self.mock_home / ".docker" / "config.json"
-        mock_path.return_value = config_file
-        
-        # Setup existing mocked config
-        config_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(config_file, "w", encoding="utf-8") as f:
-            json.dump({"wslEngine": True, "compose": {"projectName": "old_name"}}, f)
-            
-        req = {
-            "requestId": "req-123",
-            "action": "apply",
+        self.assertEqual("unknown", response["requestId"])
+        self.assertIn("input", response["error"].lower())
+        self.assertNotIn("success", response)
+        self.assertNotIn("data", response)
+
+    def test_invalid_json_returns_json_error(self):
+        response = self.invoke_main("{not-json")
+
+        self.assertEqual("unknown", response["requestId"])
+        self.assertIn("invalid json", response["error"].lower())
+        self.assertNotIn("success", response)
+        self.assertNotIn("data", response)
+
+    def test_check_installed_returns_bool_and_main_wraps_it(self):
+        with patch.object(plugin.shutil, "which", return_value="/usr/bin/docker"):
+            self.assertIs(plugin.check_installed(), True)
+            response = self.invoke_main(json.dumps({"requestId": "req-1", "command": "check_installed"}))
+
+        self.assertEqual({"requestId": "req-1", "installed": True}, response)
+
+    def test_apply_deep_merges_compose_settings_from_args(self):
+        self.config_path.parent.mkdir(parents=True)
+        self.config_path.write_text(
+            json.dumps(
+                {
+                    "auths": {"registry.example": {}},
+                    "compose": {
+                        "projectName": "old-name",
+                        "nested": {"preserved": True},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        request = {
+            "requestId": "req-2",
+            "command": "apply",
             "args": {
                 "settings": {
-                    "experimental": True,
-                    "projectName": "new_name",
-                    "profiles": ["dev", "debug"]
+                    "projectName": "new-name",
+                    "nested": {"enabled": True},
                 },
-                "dryRun": False
-            }
-        }
-        
-        with patch("sys.stdin", io.StringIO(json.dumps(req))):
-            with patch("sys.stdout", new_callable=io.StringIO) as fake_out:
-                plugin.main()
-                out = json.loads(fake_out.getvalue())
-                
-                # Check protocol constraints
-                self.assertEqual(out.get("requestId"), "req-123")
-                self.assertNotIn("success", out)
-                self.assertNotIn("data", out)
-                
-        # Verify JSON state & Deep Merge behavior
-        with open(config_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            self.assertTrue(data["wslEngine"]) # Original non-compose key preserved
-            self.assertEqual(data["compose"]["projectName"], "new_name")
-            self.assertTrue(data["compose"]["experimental"])
-            self.assertEqual(data["compose"]["profiles"], ["dev", "debug"])
-        
-        # Verify POSIX trailing newline
-        with open(config_file, "rb") as f:
-            content = f.read()
-            self.assertTrue(content.endswith(b"\n"))
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-import json
-import os
-import sys
-import tempfile
-import unittest
-from unittest.mock import patch
-
-# Add src directory to path to import plugin
-_src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../src"))
-sys.path.append(_src_path)
-import plugin
-
-sys.path.remove(_src_path)
-
-
-class TestDockerPlugin(unittest.TestCase):
-    def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.config_path = os.path.join(self.temp_dir.name, "settings.json")
-
-    def tearDown(self):
-        self.temp_dir.cleanup()
-
-    @patch("plugin.shutil.which")
-    def test_check_installed(self, mock_which):
-        mock_which.return_value = "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe"
-
-        response = plugin.check_installed({}, "req-1")
-
-        self.assertTrue(response["success"])
-        self.assertTrue(response["data"])
-        mock_which.assert_called()
-
-    def test_merge_settings(self):
-        target = {
-            "wslEngineEnabled": False,
-            "proxies": {"httpProxy": "http://oldproxy:80"},
-            "registryMirrors": ["https://old.mirror"],
+                "dryRun": False,
+            },
+            "context": {"dryRun": True},
         }
 
-        source = {
-            "wslEngineEnabled": True,
-            "experimental": True,
-            "proxies": {"httpsProxy": "http://newproxy:443"},
-            "registryMirrors": ["https://new.mirror"],
-        }
+        with patch.object(plugin, "get_config_path", return_value=self.config_path):
+            response = self.invoke_main(json.dumps(request))
 
-        changed = plugin.merge_settings(target, source)
+        self.assertEqual({"requestId": "req-2", "changed": True}, response)
+        config = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertIn("registry.example", config["auths"])
+        self.assertEqual("new-name", config["compose"]["projectName"])
+        self.assertTrue(config["compose"]["nested"]["preserved"])
+        self.assertTrue(config["compose"]["nested"]["enabled"])
+        self.assertTrue(self.config_path.read_bytes().endswith(b"\n"))
 
-        self.assertTrue(changed)
-        self.assertTrue(target["wslEngineEnabled"])
-        self.assertTrue(target["experimental"])
+    def test_dry_run_reports_change_without_writing(self):
+        self.config_path.parent.mkdir(parents=True)
+        self.config_path.write_text(
+            json.dumps({"compose": {"projectName": "old-name"}}),
+            encoding="utf-8",
+        )
+        before = self.config_path.read_bytes()
 
-        # Nested dicts should merge
-        self.assertEqual(target["proxies"]["httpProxy"], "http://oldproxy:80")
-        self.assertEqual(target["proxies"]["httpsProxy"], "http://newproxy:443")
+        with patch.object(plugin, "get_config_path", return_value=self.config_path):
+            response = plugin.apply_config(
+                {
+                    "settings": {"projectName": "new-name"},
+                    "dryRun": True,
+                }
+            )
 
-        # Arrays should overwrite
-        self.assertEqual(target["registryMirrors"], ["https://new.mirror"])
+        self.assertEqual({"changed": True}, response)
+        self.assertEqual(before, self.config_path.read_bytes())
 
-    @patch("plugin.get_config_path")
-    def test_apply_config_dry_run(self, mock_get_path):
-        mock_get_path.return_value = self.config_path
+    def test_apply_uses_atomic_replace(self):
+        with (
+            patch.object(plugin, "get_config_path", return_value=self.config_path),
+            patch.object(
+                plugin.tempfile,
+                "mkstemp",
+                wraps=tempfile.mkstemp,
+            ) as make_temporary,
+            patch.object(plugin.os, "replace", wraps=os.replace) as replace,
+        ):
+            response = plugin.apply_config({"settings": {"projectName": "atomic"}, "dryRun": False})
 
-        # Write initial config
-        with open(self.config_path, "w", encoding="utf-8") as f:
-            json.dump({"wslEngineEnabled": False}, f)
+        self.assertEqual({"changed": True}, response)
+        make_temporary.assert_called_once()
+        replace.assert_called_once()
 
-        args = {"settings": {"wslEngineEnabled": True}}
+    def test_missing_request_id_uses_unknown(self):
+        response = self.invoke_main(json.dumps({"command": "unsupported"}))
 
-        # Dry run
-        response = plugin.apply_config(args, {"dryRun": True}, "req-2")
-        self.assertTrue(response["success"])
-        self.assertTrue(response["changed"])
-
-        # Verify file was NOT changed
-        with open(self.config_path, "r", encoding="utf-8") as f:
-            content = json.load(f)
-        self.assertFalse(content["wslEngineEnabled"])
-
-    @patch("plugin.get_config_path")
-    def test_apply_config_real_run(self, mock_get_path):
-        mock_get_path.return_value = self.config_path
-
-        args = {"settings": {"kubernetes": {"enabled": True}}}
-
-        # Real run on missing file (should create it)
-        response = plugin.apply_config(args, {"dryRun": False}, "req-3")
-        self.assertTrue(response["success"])
-        self.assertTrue(response["changed"])
-
-        # Verify file WAS created and changed
-        with open(self.config_path, "r", encoding="utf-8") as f:
-            content = json.load(f)
-        self.assertTrue(content["kubernetes"]["enabled"])
-
-    @patch("plugin.get_config_path")
-    def test_apply_config_no_changes(self, mock_get_path):
-        mock_get_path.return_value = self.config_path
-
-        # Write initial config
-        with open(self.config_path, "w", encoding="utf-8") as f:
-            json.dump({"kubernetes": {"enabled": True}}, f)
-
-        args = {"settings": {"kubernetes": {"enabled": True}}}
-
-        # Real run but no actual differences
-        response = plugin.apply_config(args, {"dryRun": False}, "req-4")
-        self.assertTrue(response["success"])
-        self.assertFalse(response["changed"])
-
-    @patch("plugin.get_config_path")
-    def test_read_corrupted_config(self, mock_get_path):
-        mock_get_path.return_value = self.config_path
-
-        # Write corrupted config
-        with open(self.config_path, "w", encoding="utf-8") as f:
-            f.write("{ invalid json")
-
-        args = {"settings": {"wslEngineEnabled": True}}
-
-        # Should back up corrupted and apply new
-        response = plugin.apply_config(args, {"dryRun": False}, "req-5")
-        self.assertTrue(response["success"])
-        self.assertTrue(response["changed"])
-
-        # Verify file WAS reset and written
-        with open(self.config_path, "r", encoding="utf-8") as f:
-            content = json.load(f)
-        self.assertTrue(content["wslEngineEnabled"])
-
-        # Verify backup was created
-        dir_name = os.path.dirname(self.config_path)
-        backups = [f for f in os.listdir(dir_name) if f.startswith("settings.json.corrupted.")]
-        self.assertEqual(len(backups), 1)
+        self.assertEqual("unknown", response["requestId"])
+        self.assertIn("unsupported", response["error"])
+        self.assertNotIn("success", response)
+        self.assertNotIn("data", response)
 
 
 if __name__ == "__main__":
     unittest.main()
-

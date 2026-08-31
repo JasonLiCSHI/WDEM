@@ -1,7 +1,6 @@
 name: docker-compose
 version: 1.0.0
 
-type: config_provider
 description: Manage Docker Compose CLI configuration settings (v2)
 
 type: python
