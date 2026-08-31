@@ -110,7 +110,7 @@ public sealed class EnvironmentManagerTests
 
     Assert.Equal(TaskOutcome.Succeeded, report.Tasks["b"].Outcome);
     Assert.Collection(
-        updates.Where(update => update.TaskId == "b"),
+        updates.Where(update => update.TaskId == "b" && update.ActivityId is null),
         update => Assert.Equal(TaskExecutionState.Ready, update.State),
         update =>
         {

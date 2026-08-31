@@ -12,7 +12,8 @@
 - The release selects one HTTPS Profile Source in code; GUI and CLI do not expose Source editing or selection.
 - Profiles are fetched remote-first and only the last-known-good cache is local; the installer must not bundle `profiles/`.
 - Remote Profiles require explicit user trust before Detect or Apply executes commands.
-- Workflow order is Detect, Pre, Apply, Post, Verify. A retry starts again at Detect.
+- Schema v1 uses the default Detect, Pre, Apply, Post, Verify workflow. Schema v2 may compose a bounded state graph whose states run Entry, Residence, and Exit Activities. A retry creates a fresh workflow at its declared initial state.
+- Runtime state belongs to the Core state machine and projects stable Task state and capabilities to CLI and WPF; clients must not interpret or recreate the state graph.
 - Cancellation must stop the current process tree and prevent unsafe downstream execution.
 
 ## Validation

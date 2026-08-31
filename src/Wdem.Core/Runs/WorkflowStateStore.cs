@@ -1,12 +1,13 @@
 using System.Collections.ObjectModel;
 using Wdem.Core.Graph;
 using Wdem.Core.Profiles;
+using Wdem.Core.Workflows;
 
 namespace Wdem.Core.Runs;
 
 /// <summary>
-/// Owns the authoritative workflow/task state and publishes immutable projections.
-/// Activity code can only execute after a successful state transition through this module.
+/// Owns authoritative runtime state and publishes immutable Task projections.
+/// Only the workflow state machine can move a Task between runtime states.
 /// </summary>
 internal sealed class WorkflowStateStore
 {
@@ -21,6 +22,7 @@ internal sealed class WorkflowStateStore
   public WorkflowStateStore(
       EnvironmentProfile profile,
       TaskGraph graph,
+      IReadOnlyDictionary<string, TaskWorkflowDefinition> workflows,
       IProgress<WorkflowProgress>? progress,
       IProgress<WorkflowUpdate>? updates)
   {
@@ -33,11 +35,14 @@ internal sealed class WorkflowStateStore
             task.Required,
             planned.Contains(task.Id),
             planned.Contains(task.Id) ? TaskExecutionState.Pending : TaskExecutionState.NotSelected,
+            RuntimeStateId: null,
             Stage: null,
             Percent: 0,
             Outcome: null,
+            ActivityId: null,
+            ActivityLocation: null,
             ActivityIndex: 0,
-            ActivityCount: 2 + task.Pre.Count + task.Post.Count + (task.Apply is null ? 0 : 1)),
+            ActivityCount: workflows[task.Id].ActivityCount),
         StringComparer.Ordinal);
     _runState = planned.Count == 0 ? WorkflowRunState.Completed : WorkflowRunState.Running;
     _snapshot = CreateSnapshotLocked();
@@ -54,9 +59,12 @@ internal sealed class WorkflowStateStore
     }
   }
 
-  public static WorkflowSnapshot CreateReadySnapshot(EnvironmentProfile profile)
+  public static WorkflowSnapshot CreateReadySnapshot(
+      EnvironmentProfile profile,
+      IReadOnlyDictionary<string, TaskWorkflowDefinition> workflows)
   {
     ArgumentNullException.ThrowIfNull(profile);
+    ArgumentNullException.ThrowIfNull(workflows);
     var tasks = profile.Tasks.Values.ToDictionary(
         task => task.Id,
         task => new WorkflowTaskSnapshot(
@@ -67,7 +75,7 @@ internal sealed class WorkflowStateStore
             Outcome: null,
             IsPlanned: false,
             ActivityIndex: 0,
-            ActivityCount: 2 + task.Pre.Count + task.Post.Count + (task.Apply is null ? 0 : 1),
+            ActivityCount: workflows[task.Id].ActivityCount,
             new TaskCapabilities(
                 CanStart: true,
                 CanCancel: false,
@@ -89,9 +97,19 @@ internal sealed class WorkflowStateStore
       {
         return false;
       }
+      if (current.IsCompleted || current.State != TaskExecutionState.Pending)
+      {
+        throw new InvalidOperationException($"Task '{taskId}' cannot become ready from {current.State}.");
+      }
 
-      EnsureTransition(current.State, TaskExecutionState.Ready);
-      _tasks[taskId] = current with { State = TaskExecutionState.Ready };
+      _tasks[taskId] = current with
+      {
+        State = TaskExecutionState.Ready,
+        RuntimeStateId = null,
+        Stage = null,
+        ActivityId = null,
+        ActivityLocation = null
+      };
       update = AdvanceLocked(CreateProgressLocked(taskId));
     }
 
@@ -99,10 +117,46 @@ internal sealed class WorkflowStateStore
     return true;
   }
 
-  public bool EnterActivity(
+  public bool EnterState(
       string taskId,
-      TaskExecutionState state,
-      string stage,
+      string runtimeStateId,
+      TaskExecutionState taskState,
+      string displayName)
+  {
+    WorkflowUpdate update;
+    lock (_gate)
+    {
+      var current = GetTaskLocked(taskId);
+      if (current.State == TaskExecutionState.Cancelling)
+      {
+        return false;
+      }
+      if (current.IsCompleted)
+      {
+        throw new InvalidOperationException($"Completed task '{taskId}' cannot enter a workflow state.");
+      }
+
+      _tasks[taskId] = current with
+      {
+        State = taskState,
+        RuntimeStateId = runtimeStateId,
+        Stage = displayName,
+        ActivityId = null,
+        ActivityLocation = null
+      };
+      update = AdvanceLocked(CreateProgressLocked(taskId));
+    }
+
+    Publish(update);
+    return true;
+  }
+
+  public bool BeginActivity(
+      string taskId,
+      string runtimeStateId,
+      TaskExecutionState taskState,
+      WorkflowActivity activity,
+      WorkflowActivityLocation location,
       int activityIndex)
   {
     WorkflowUpdate update;
@@ -113,16 +167,22 @@ internal sealed class WorkflowStateStore
       {
         return false;
       }
+      if (current.IsCompleted || !string.Equals(current.RuntimeStateId, runtimeStateId, StringComparison.Ordinal))
+      {
+        throw new InvalidOperationException(
+            $"Task '{taskId}' is not residing in workflow state '{runtimeStateId}'.");
+      }
 
-      EnsureTransition(current.State, state);
       var percent = current.ActivityCount == 0
           ? 0
           : Math.Clamp((activityIndex - 1) * 100 / current.ActivityCount, 0, 99);
       _tasks[taskId] = current with
       {
-        State = state,
-        Stage = stage,
+        State = taskState,
+        Stage = activity.DisplayName,
         Percent = percent,
+        ActivityId = activity.Id,
+        ActivityLocation = location,
         ActivityIndex = activityIndex
       };
       update = AdvanceLocked(CreateProgressLocked(taskId));
@@ -132,14 +192,17 @@ internal sealed class WorkflowStateStore
     return true;
   }
 
-  public TaskOutcome CompleteTask(string taskId, TaskOutcome outcome)
+  public TaskOutcome CompleteTask(
+      string taskId,
+      TaskOutcome outcome,
+      string? runtimeStateId = null)
   {
     WorkflowUpdate update;
     TaskOutcome effectiveOutcome;
     lock (_gate)
     {
       var current = GetTaskLocked(taskId);
-      if (current.IsTerminal)
+      if (current.IsCompleted)
       {
         return current.Outcome ?? outcome;
       }
@@ -156,13 +219,15 @@ internal sealed class WorkflowStateStore
         TaskOutcome.Blocked => TaskExecutionState.Blocked,
         _ => TaskExecutionState.NotSelected
       };
-      EnsureTransition(current.State, terminalState);
       _tasks[taskId] = current with
       {
         State = terminalState,
+        RuntimeStateId = runtimeStateId ?? current.RuntimeStateId,
         Stage = null,
         Percent = 100,
         Outcome = effectiveOutcome,
+        ActivityId = null,
+        ActivityLocation = null,
         ActivityIndex = current.ActivityCount
       };
       CompleteWorkflowIfTerminalLocked();
@@ -182,14 +247,11 @@ internal sealed class WorkflowStateStore
     lock (_gate)
     {
       var current = GetTaskLocked(taskId);
-      var change = new WorkflowProgress(
-          taskId,
-          current.State,
-          current.Stage,
-          current.Percent,
-          current.Outcome,
-          message,
-          stream);
+      var change = CreateProgressLocked(taskId) with
+      {
+        Message = message,
+        OutputStream = stream
+      };
       update = AdvanceLocked(change);
     }
 
@@ -207,8 +269,13 @@ internal sealed class WorkflowStateStore
         return false;
       }
 
-      EnsureTransition(current.State, TaskExecutionState.Cancelling);
-      _tasks[taskId] = current with { State = TaskExecutionState.Cancelling };
+      _tasks[taskId] = current with
+      {
+        State = TaskExecutionState.Cancelling,
+        Stage = null,
+        ActivityId = null,
+        ActivityLocation = null
+      };
       update = AdvanceLocked(CreateProgressLocked(taskId));
     }
 
@@ -229,10 +296,15 @@ internal sealed class WorkflowStateStore
       _runState = WorkflowRunState.Cancelling;
       foreach (var (taskId, current) in _tasks.ToArray())
       {
-        if (current.IsPlanned && IsCancellable(current.State))
+        if (current.IsPlanned && IsCancellable(current))
         {
-          EnsureTransition(current.State, TaskExecutionState.Cancelling);
-          _tasks[taskId] = current with { State = TaskExecutionState.Cancelling };
+          _tasks[taskId] = current with
+          {
+            State = TaskExecutionState.Cancelling,
+            Stage = null,
+            ActivityId = null,
+            ActivityLocation = null
+          };
         }
       }
 
@@ -262,25 +334,28 @@ internal sealed class WorkflowStateStore
         new ReadOnlyDictionary<string, WorkflowTaskSnapshot>(tasks));
   }
 
-  private WorkflowTaskSnapshot CreateTaskSnapshotLocked(string taskId, TaskState task)
-  {
-    var idle = _runState is WorkflowRunState.Ready or WorkflowRunState.Completed;
-    return new WorkflowTaskSnapshot(
-        taskId,
-        task.State,
-        task.Stage,
-        task.Percent,
-        task.Outcome,
-        task.IsPlanned,
-        task.ActivityIndex,
-        task.ActivityCount,
-        new TaskCapabilities(
-            CanStart: idle,
-            CanCancel: _runState == WorkflowRunState.Running &&
-                task.IsPlanned &&
-                IsCancellable(task.State),
-            CanSelect: idle && !task.Required));
-  }
+  private WorkflowTaskSnapshot CreateTaskSnapshotLocked(string taskId, TaskState task) =>
+      new WorkflowTaskSnapshot(
+          taskId,
+          task.State,
+          task.Stage,
+          task.Percent,
+          task.Outcome,
+          task.IsPlanned,
+          task.ActivityIndex,
+          task.ActivityCount,
+          new TaskCapabilities(
+              CanStart: _runState is WorkflowRunState.Ready or WorkflowRunState.Completed,
+              CanCancel: _runState == WorkflowRunState.Running &&
+                  task.IsPlanned &&
+                  IsCancellable(task),
+              CanSelect: (_runState is WorkflowRunState.Ready or WorkflowRunState.Completed) &&
+                  !task.Required))
+      {
+        RuntimeStateId = task.RuntimeStateId,
+        ActivityId = task.ActivityId,
+        ActivityLocation = task.ActivityLocation
+      };
 
   private WorkflowProgress CreateProgressLocked(string taskId)
   {
@@ -290,12 +365,17 @@ internal sealed class WorkflowStateStore
         task.State,
         task.Stage,
         task.Percent,
-        task.Outcome);
+        task.Outcome)
+    {
+      RuntimeStateId = task.RuntimeStateId,
+      ActivityId = task.ActivityId,
+      ActivityLocation = task.ActivityLocation
+    };
   }
 
   private void CompleteWorkflowIfTerminalLocked()
   {
-    if (_tasks.Values.Where(task => task.IsPlanned).All(task => task.IsTerminal))
+    if (_tasks.Values.Where(task => task.IsPlanned).All(task => task.IsCompleted))
     {
       _runState = WorkflowRunState.Completed;
     }
@@ -315,71 +395,22 @@ internal sealed class WorkflowStateStore
     _updates?.Report(update);
   }
 
-  private static bool IsCancellable(TaskExecutionState state) => state is
-      TaskExecutionState.Pending or
-      TaskExecutionState.Ready or
-      TaskExecutionState.Detecting or
-      TaskExecutionState.RunningPre or
-      TaskExecutionState.Applying or
-      TaskExecutionState.RunningPost or
-      TaskExecutionState.Verifying;
-
-  private static void EnsureTransition(TaskExecutionState from, TaskExecutionState to)
-  {
-    var allowed = (from, to) switch
-    {
-      (TaskExecutionState.Pending, TaskExecutionState.Ready) => true,
-      (TaskExecutionState.Pending, TaskExecutionState.Cancelling) => true,
-      (TaskExecutionState.Pending, TaskExecutionState.Blocked) => true,
-      (TaskExecutionState.Ready, TaskExecutionState.Detecting) => true,
-      (TaskExecutionState.Ready, TaskExecutionState.Cancelling) => true,
-      (TaskExecutionState.Ready, TaskExecutionState.Failed) => true,
-      (TaskExecutionState.Detecting, TaskExecutionState.Satisfied) => true,
-      (TaskExecutionState.Detecting, TaskExecutionState.RunningPre) => true,
-      (TaskExecutionState.Detecting, TaskExecutionState.Applying) => true,
-      (TaskExecutionState.Detecting, TaskExecutionState.Failed) => true,
-      (TaskExecutionState.Detecting, TaskExecutionState.Cancelling) => true,
-      (TaskExecutionState.RunningPre, TaskExecutionState.RunningPre) => true,
-      (TaskExecutionState.RunningPre, TaskExecutionState.Applying) => true,
-      (TaskExecutionState.RunningPre, TaskExecutionState.Failed) => true,
-      (TaskExecutionState.RunningPre, TaskExecutionState.Cancelling) => true,
-      (TaskExecutionState.Applying, TaskExecutionState.RunningPost) => true,
-      (TaskExecutionState.Applying, TaskExecutionState.Verifying) => true,
-      (TaskExecutionState.Applying, TaskExecutionState.Failed) => true,
-      (TaskExecutionState.Applying, TaskExecutionState.Cancelling) => true,
-      (TaskExecutionState.RunningPost, TaskExecutionState.RunningPost) => true,
-      (TaskExecutionState.RunningPost, TaskExecutionState.Verifying) => true,
-      (TaskExecutionState.RunningPost, TaskExecutionState.Failed) => true,
-      (TaskExecutionState.RunningPost, TaskExecutionState.Cancelling) => true,
-      (TaskExecutionState.Verifying, TaskExecutionState.Succeeded) => true,
-      (TaskExecutionState.Verifying, TaskExecutionState.Failed) => true,
-      (TaskExecutionState.Verifying, TaskExecutionState.Cancelling) => true,
-      (TaskExecutionState.Cancelling, TaskExecutionState.Cancelled) => true,
-      _ => false
-    };
-
-    if (!allowed)
-    {
-      throw new InvalidOperationException($"Invalid task state transition: {from} -> {to}.");
-    }
-  }
+  private static bool IsCancellable(TaskState task) =>
+      !task.IsCompleted && task.State != TaskExecutionState.Cancelling;
 
   private sealed record TaskState(
       bool Required,
       bool IsPlanned,
       TaskExecutionState State,
+      string? RuntimeStateId,
       string? Stage,
       int Percent,
       TaskOutcome? Outcome,
+      string? ActivityId,
+      WorkflowActivityLocation? ActivityLocation,
       int ActivityIndex,
       int ActivityCount)
   {
-    public bool IsTerminal => State is
-        TaskExecutionState.NotSelected or
-        TaskExecutionState.Satisfied or
-        TaskExecutionState.Succeeded or
-        TaskExecutionState.Failed or
-        TaskExecutionState.Cancelled or
-        TaskExecutionState.Blocked;
+    public bool IsCompleted => !IsPlanned || Outcome is not null;
   }
 }

@@ -1,4 +1,6 @@
 using Wdem.Core.Profiles;
+using Wdem.Core.Runs;
+using Wdem.Core.Workflows;
 using Xunit;
 
 namespace Wdem.Core.Tests;
@@ -109,11 +111,100 @@ public sealed class ProfileParserTests
   public void Parse_RejectsUnsupportedSchemaVersion()
   {
     var document = ValidProfile.TrimStart();
-    var json = "{ \"schemaVersion\": 2," + document[1..];
+    var json = "{ \"schemaVersion\": 3," + document[1..];
 
     var exception = Assert.Throws<FormatException>(() => ProfileParser.Parse(json));
 
     Assert.Contains("schemaVersion", exception.Message);
+  }
+
+  [Fact]
+  public void Parse_SchemaVersionTwoBuildsDeclarativeStateWorkflow()
+  {
+    const string json = """
+      {
+        "schemaVersion": 2,
+        "id": "custom-workflow",
+        "version": "1.0.0",
+        "displayName": "Custom workflow",
+        "tasks": {
+          "tool": {
+            "displayName": "Tool",
+            "required": true,
+            "detect": { "executable": "tool", "arguments": ["detect"] },
+            "apply": { "executable": "tool", "arguments": ["apply"] },
+            "workflow": {
+              "initialState": "prepare",
+              "maxTransitions": 20,
+              "states": [
+                {
+                  "id": "prepare",
+                  "displayName": "Prepare tool",
+                  "taskState": "Running",
+                  "entry": [
+                    {
+                      "id": "enter-prepare",
+                      "phase": "prepare",
+                      "executable": "tool",
+                      "arguments": ["enter"]
+                    }
+                  ],
+                  "residence": [
+                    {
+                      "id": "configure",
+                      "phase": "configure",
+                      "executable": "tool",
+                      "arguments": ["configure"]
+                    }
+                  ],
+                  "exit": [
+                    {
+                      "id": "leave-prepare",
+                      "phase": "prepare",
+                      "executable": "tool",
+                      "arguments": ["exit"]
+                    }
+                  ],
+                  "transitions": [
+                    { "target": "done", "condition": "activitiesSucceeded" }
+                  ]
+                },
+                {
+                  "id": "done",
+                  "taskState": "Succeeded",
+                  "outcome": "Succeeded"
+                }
+              ]
+            }
+          }
+        }
+      }
+      """;
+
+    var profile = ProfileParser.Parse(json);
+
+    Assert.Equal(2, profile.SchemaVersion);
+    var workflow = Assert.IsType<TaskWorkflowDefinition>(profile.Tasks["tool"].Workflow);
+    Assert.Equal("prepare", workflow.InitialStateId);
+    Assert.Equal(20, workflow.MaxTransitions);
+    var prepare = workflow.States["prepare"];
+    Assert.Equal(TaskExecutionState.Running, prepare.TaskState);
+    Assert.Single(prepare.EntryActivities);
+    Assert.Single(prepare.ResidenceActivities);
+    Assert.Single(prepare.ExitActivities);
+    Assert.IsType<CommandWorkflowActivity>(prepare.ResidenceActivities[0]);
+  }
+
+  [Fact]
+  public void Parse_RejectsDeclarativeWorkflowInSchemaVersionOne()
+  {
+    var json = ValidProfile.Replace(
+        "\"apply\": {",
+        "\"workflow\": { \"initialState\": \"done\", \"states\": [] }, \"apply\": {");
+
+    var exception = Assert.Throws<FormatException>(() => ProfileParser.Parse(json));
+
+    Assert.Contains("schemaVersion 2", exception.Message);
   }
 
   private const string ValidProfile = """

@@ -18,7 +18,8 @@ Release-defined HTTPS Profile Source
  Optional selection ──> Task DAG
                            │
                            v
-              Detect → Pre* → Apply → Post* → Verify
+                Task state-machine graph
+               Entry · Residence · Exit
                            │
                 progress / output / report
                     │               │
@@ -30,7 +31,7 @@ Release-defined HTTPS Profile Source
 - `ProfileCatalog` is the external seam for remote configuration. Its public API is limited to `ListAsync` and `LoadAsync`; HTTPS enforcement, redirect validation, size limits, UTF-8 decoding, atomic caching, offline fallback, and ID validation remain internal.
 - `ProfileParser` converts versioned JSON into one domain model, so callers never handle JSON details.
 - `TaskGraph` encapsulates Required/Optional selection, dependency closure, deduplication, topological sorting, and cycle detection.
-- `EnvironmentManager.StartApply` encapsulates phase ordering, failure propagation, cancellation, and reporting.
+- `EnvironmentManager.StartApply` compiles or selects a per-Task state graph and encapsulates graph execution, failure propagation, cancellation, and reporting.
 - `ITaskRuntime` is the execution seam. The current Windows adapter starts an executable with an argument array directly. Future script downloaders, elevation brokers, or remote executors can be introduced here without teaching the DAG about specific products.
 
 ## Profile Source and cache
@@ -54,18 +55,25 @@ The installer does not contain `profiles/`. That repository directory is the con
 
 ## Profile and runtime extensibility
 
-Profile Schema v1 covers every MVP requirement: Profile version, Task description, Required/Optional behavior, dependencies, version requirements, preferred version, source, Detect/Pre/Apply/Post commands, human-readable step names, and Detect reuse for Verify. Commands always use an executable plus an argument array; shell command strings are never concatenated.
+Profile Schema v1 covers the compact default workflow: Profile version, Task description, Required/Optional behavior, dependencies, version requirements, preferred version, source, Detect/Pre/Apply/Post commands, human-readable step names, and Detect reuse for Verify. It is compiled into a state graph rather than handled by a separate runner. Commands always use an executable plus an argument array; shell command strings are never concatenated.
+
+Profile Schema v2 optionally declares a Task `workflow`. A workflow names an initial state, a transition limit, and states. Every state maps to a stable `TaskExecutionState`, owns ordered Entry, Residence, and Exit Activity collections, and declares ordered transitions or a terminal outcome. Built-in declarative conditions cover Activity success/failure and detected compliance. The parser rejects missing initial states, duplicate state IDs, dangling targets, non-terminal states without transitions, and terminal states with transitions.
 
 Extension happens at two levels:
 
 - new software, parameters, versions, and post-install configuration require only Profile changes;
-- new execution mechanisms use an `ITaskRuntime` adapter, while declaration-format changes use a new `schemaVersion`.
+- new execution mechanisms use an `ITaskRuntime` adapter;
+- new in-process work derives from `WorkflowActivity`;
+- new workflow factories implement `ITaskWorkflowProvider`, and code-defined transitions may use custom predicates;
+- declaration-format changes use a new `schemaVersion`.
 
 The current engine is a deterministic sequential DAG scheduler. Parallel scheduling, persistent checkpoints, transactional rollback, restart resume, and signature policies are not implemented. These belong in future modules rather than as product-specific logic in Core.
 
 ## Task-driven state and reactive UI
 
-Core's `WorkflowStateMachine` is the single source of truth for Task execution. It does not run a command and record an event afterward. A Task must first make a legal transition into `Detecting`, `RunningPre`, `Applying`, `RunningPost`, or `Verifying`; only then does the corresponding Activity call the Runtime. The Activity result drives the next transition. The primary path is:
+Core's `WorkflowStateMachine` is the single source of truth for execution. For each DAG Task, it owns the current runtime state ID, enters that state, and only then executes its ordered Entry, Residence, and Exit Activities. Residence results are evaluated by ordered transition predicates, and the selected target becomes the next runtime state. The transition limit prevents accidental infinite cycles.
+
+`DefaultTaskWorkflowProvider` compiles Schema v1 into the familiar path:
 
 ```text
 Pending → Ready → Detecting → RunningPre* → Applying → RunningPost* → Verifying
@@ -75,11 +83,13 @@ Any active state ─→ Failed / Cancelling → Cancelled
 Dependency failure or cancellation ─→ Blocked
 ```
 
-`WorkflowStateStore` validates transitions and publishes immutable `WorkflowSnapshot` values with monotonically increasing `Revision` numbers. Each `WorkflowTaskSnapshot` carries its phase, progress, result, Activity index, and `CanStart`, `CanCancel`, and `CanSelect` capabilities. Starting or cancelling a Workflow reprojects the capabilities of every Task.
+Schema v2 may replace that path with any validated bounded graph. Runtime states are intentionally separate from presentation states: every `TaskWorkflowState` projects one stable `TaskExecutionState`. This mapping lets the graph evolve without teaching WPF or CLI about state IDs or transitions.
+
+`WorkflowStateStore` publishes immutable `WorkflowSnapshot` values with monotonically increasing `Revision` numbers. Each `WorkflowTaskSnapshot` carries the runtime state ID, projected Task state, Activity ID and location, progress, result, Activity index, and `CanStart`, `CanCancel`, and `CanSelect` capabilities. Starting or cancelling a Workflow reprojects the capabilities of every Task.
 
 WPF does not maintain an active-Task collection or interpret execution flow. It maps Task snapshots into presentation state and binds directly to their capabilities. Start All and Cancel All aggregate the corresponding Task capabilities. A small workspace state still handles Profile loading, trust, and inspection because they occur outside the Task Workflow.
 
-CLI, WPF, and JSONL logging consume the same Core updates. Cancellation first moves a Task to `Cancelling` and disables duplicate actions. The Task becomes `Cancelled` only after the Runtime has stopped its process tree. Even if a Runtime command wins a cancellation race and returns success, the Workflow does not continue to Verify or start downstream Tasks.
+CLI, WPF, and JSONL logging consume the same Core updates. Cancellation first moves a Task to `Cancelling` and disables duplicate actions. The Task becomes `Cancelled` only after the Runtime has stopped its process tree. Even if a Runtime command wins a cancellation race and returns success, the state machine does not run Exit Activities, take another transition, or start downstream Tasks. Custom Activities must honor the supplied cancellation token; command Activities delegate cancellation to the Windows Runtime, which terminates the process tree.
 
 Core classifies Detect results as `Missing`, `UpgradeRequired`, `VersionMismatch`, or `Satisfied`. A detected version below a lower-bound requirement such as `>= 2.50` produces `UpgradeRequired`, and both CLI and WPF consume that same result. Presentation state distinguishes `Pending`, `Running`, `Satisfied`, `UpgradeRequired`, `NeedsAttention`, `Succeeded`, `Failed`, `Cancelled`, and `Blocked`. Version failures and blocked or failed Tasks use warning styling. All phase progress comes from `WorkflowProgress`, allowing future Runtime adapters to report finer-grained progress without changing UI button rules.
 

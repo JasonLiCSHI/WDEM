@@ -2,17 +2,19 @@ using Wdem.Core.Graph;
 using Wdem.Core.Profiles;
 using Wdem.Core.Runtime;
 using Wdem.Core.Tasks;
+using Wdem.Core.Workflows;
 
 namespace Wdem.Core.Runs;
 
 /// <summary>
-/// Drives task state transitions. Entering an activity state is the only path that
-/// invokes its command; the activity result determines the next transition.
+/// Executes arbitrary task state graphs. Runtime state always changes before an
+/// Entry, Residence, or Exit Activity runs, and is projected to Task state by the graph.
 /// </summary>
 internal sealed class WorkflowStateMachine(
     EnvironmentProfile profile,
     TaskGraph graph,
     ITaskRuntime runtime,
+    IReadOnlyDictionary<string, TaskWorkflowDefinition> workflows,
     IReadOnlyDictionary<string, CancellationTokenSource> taskCancellationSources,
     CancellationToken allCancellationToken,
     WorkflowStateStore state)
@@ -47,7 +49,10 @@ internal sealed class WorkflowStateMachine(
         continue;
       }
 
-      reports[taskId] = await RunTaskAsync(task, taskCancellationSources[taskId].Token);
+      reports[taskId] = await RunTaskAsync(
+          task,
+          workflows[taskId],
+          taskCancellationSources[taskId].Token);
     }
 
     return new RunReport(reports);
@@ -55,6 +60,7 @@ internal sealed class WorkflowStateMachine(
 
   private async Task<TaskReport> RunTaskAsync(
       TaskDefinition task,
+      TaskWorkflowDefinition workflow,
       CancellationToken taskCancellationToken)
   {
     var steps = new List<StepReport>();
@@ -62,7 +68,9 @@ internal sealed class WorkflowStateMachine(
         allCancellationToken,
         taskCancellationToken);
     var token = linkedCancellation.Token;
-    var activityIndex = 0;
+    var activityCounter = new ActivityCounter();
+    var transitionsTaken = 0;
+    var runtimeStateId = workflow.InitialStateId;
 
     try
     {
@@ -72,86 +80,127 @@ internal sealed class WorkflowStateMachine(
         throw new OperationCanceledException(token);
       }
 
-      var detect = await EnterAndRunActivityAsync(
-          task,
-          TaskExecutionState.Detecting,
-          "detect",
-          task.Detect,
-          ++activityIndex,
-          token);
-      steps.Add(detect);
-
-      if (TaskComplianceEvaluator.Evaluate(task, detect).State == TaskComplianceState.Satisfied)
+      while (true)
       {
-        var outcome = state.CompleteTask(task.Id, TaskOutcome.NotRequired);
-        return new TaskReport(task.Id, outcome, steps, Error: null);
-      }
+        token.ThrowIfCancellationRequested();
+        var runtimeState = workflow.States[runtimeStateId];
+        var hasLifecycleActivities = runtimeState.ActivityCount > 0;
 
-      foreach (var pre in task.Pre)
-      {
-        var preStep = await EnterAndRunActivityAsync(
-            task,
-            TaskExecutionState.RunningPre,
-            "pre",
-            pre,
-            ++activityIndex,
-            token);
-        steps.Add(preStep);
-        if (preStep.ExitCode != 0)
+        if (runtimeState.IsTerminal && !hasLifecycleActivities)
         {
-          return Fail(task.Id, steps, "Pre step failed.");
+          var terminalOutcome = state.CompleteTask(
+              task.Id,
+              runtimeState.TerminalOutcome!.Value,
+              runtimeState.Id);
+          return new TaskReport(
+              task.Id,
+              terminalOutcome,
+              steps,
+              terminalOutcome == TaskOutcome.Failed ? runtimeState.TerminalError : null);
         }
-      }
 
-      if (task.Apply is null)
-      {
-        return Fail(task.Id, steps, "Task has no apply command.");
-      }
-
-      var apply = await EnterAndRunActivityAsync(
-          task,
-          TaskExecutionState.Applying,
-          "apply",
-          task.Apply,
-          ++activityIndex,
-          token);
-      steps.Add(apply);
-      if (apply.ExitCode != 0)
-      {
-        return Fail(task.Id, steps, "Apply step failed.");
-      }
-
-      foreach (var post in task.Post)
-      {
-        var postStep = await EnterAndRunActivityAsync(
-            task,
-            TaskExecutionState.RunningPost,
-            "post",
-            post,
-            ++activityIndex,
-            token);
-        steps.Add(postStep);
-        if (postStep.ExitCode != 0)
+        if (!state.EnterState(
+            task.Id,
+            runtimeState.Id,
+            runtimeState.TaskState,
+            runtimeState.DisplayName))
         {
-          return Fail(task.Id, steps, "Post step failed.");
+          token.ThrowIfCancellationRequested();
+          throw new OperationCanceledException(token);
         }
-      }
 
-      var verify = await EnterAndRunActivityAsync(
-          task,
-          TaskExecutionState.Verifying,
-          "verify",
-          task.Detect,
-          ++activityIndex,
-          token);
-      steps.Add(verify);
-      if (TaskComplianceEvaluator.Evaluate(task, verify).State != TaskComplianceState.Satisfied)
-      {
-        return Fail(task.Id, steps, "Verify failed.");
-      }
+        var activityResults = new List<WorkflowActivityResult>();
+        var entered = await RunActivitiesAsync(
+            task,
+            runtimeState,
+            runtimeState.EntryActivities,
+            WorkflowActivityLocation.Entry,
+            activityCounter,
+            activityResults,
+            steps,
+            token);
+        if (entered)
+        {
+          await RunActivitiesAsync(
+              task,
+              runtimeState,
+              runtimeState.ResidenceActivities,
+              WorkflowActivityLocation.Residence,
+              activityCounter,
+              activityResults,
+              steps,
+              token);
+        }
 
-      var succeededOutcome = state.CompleteTask(task.Id, TaskOutcome.Succeeded);
-      return new TaskReport(task.Id, succeededOutcome, steps, Error: null);
+        if (runtimeState.IsTerminal)
+        {
+          var exited = await RunActivitiesAsync(
+              task,
+              runtimeState,
+              runtimeState.ExitActivities,
+              WorkflowActivityLocation.Exit,
+              activityCounter,
+              activityResults,
+              steps,
+              token);
+          var failedResult = activityResults.LastOrDefault(result => !result.Succeeded);
+          var requestedOutcome = exited && failedResult is null
+              ? runtimeState.TerminalOutcome!.Value
+              : TaskOutcome.Failed;
+          var outcome = state.CompleteTask(task.Id, requestedOutcome, runtimeState.Id);
+          return new TaskReport(
+              task.Id,
+              outcome,
+              steps,
+              outcome == TaskOutcome.Failed
+                  ? failedResult?.Error ?? runtimeState.TerminalError ?? "Terminal state Activity failed."
+                  : null);
+        }
+
+        var transitionContext = new TaskWorkflowTransitionContext(
+            task,
+            runtimeState,
+            activityResults);
+        var transition = runtimeState.Transitions.FirstOrDefault(candidate =>
+            candidate.IsMatch(transitionContext));
+        if (transition is null)
+        {
+          return Fail(
+              task.Id,
+              steps,
+              $"No transition matched workflow state '{runtimeState.Id}'.");
+        }
+
+        transitionsTaken++;
+        if (transitionsTaken > workflow.MaxTransitions)
+        {
+          return Fail(
+              task.Id,
+              steps,
+              $"Workflow exceeded the transition limit of {workflow.MaxTransitions}.");
+        }
+
+        var exitResults = new List<WorkflowActivityResult>();
+        var exitedState = await RunActivitiesAsync(
+            task,
+            runtimeState,
+            runtimeState.ExitActivities,
+            WorkflowActivityLocation.Exit,
+            activityCounter,
+            exitResults,
+            steps,
+            token);
+        if (!exitedState)
+        {
+          return Fail(
+              task.Id,
+              steps,
+              exitResults.LastOrDefault(result => !result.Succeeded)?.Error ??
+                  $"Exit Activity failed in workflow state '{runtimeState.Id}'.");
+        }
+
+        runtimeStateId = transition.TargetStateId;
+      }
     }
     catch (OperationCanceledException)
     {
@@ -164,32 +213,53 @@ internal sealed class WorkflowStateMachine(
     }
   }
 
-  private async Task<StepReport> EnterAndRunActivityAsync(
+  private async Task<bool> RunActivitiesAsync(
       TaskDefinition task,
-      TaskExecutionState executionState,
-      string phase,
-      CommandDefinition command,
-      int activityIndex,
+      TaskWorkflowState runtimeState,
+      IReadOnlyList<WorkflowActivity> activities,
+      WorkflowActivityLocation location,
+      ActivityCounter activityCounter,
+      ICollection<WorkflowActivityResult> results,
+      ICollection<StepReport> steps,
       CancellationToken cancellationToken)
   {
-    if (!state.EnterActivity(task.Id, executionState, phase, activityIndex))
+    foreach (var activity in activities)
     {
+      activityCounter.Value++;
+      if (!state.BeginActivity(
+          task.Id,
+          runtimeState.Id,
+          runtimeState.TaskState,
+          activity,
+          location,
+          activityCounter.Value))
+      {
+        cancellationToken.ThrowIfCancellationRequested();
+        throw new OperationCanceledException(cancellationToken);
+      }
+
       cancellationToken.ThrowIfCancellationRequested();
-      throw new OperationCanceledException(cancellationToken);
+      var context = new WorkflowActivityContext(
+          task,
+          runtimeState.Id,
+          location,
+          runtime,
+          output => state.PublishOutput(task.Id, output.Message, output.Stream));
+      var result = await activity.ExecuteAsync(context, cancellationToken)
+          ?? throw new InvalidOperationException($"Activity '{activity.Id}' returned no result.");
+      if (result.Step is { } step)
+      {
+        steps.Add(step);
+      }
+      results.Add(result);
+      cancellationToken.ThrowIfCancellationRequested();
+      if (!result.Succeeded)
+      {
+        return false;
+      }
     }
 
-    cancellationToken.ThrowIfCancellationRequested();
-    var invocation = new CommandInvocation(
-        task.Id,
-        phase,
-        command,
-        task.Source,
-        task.PreferredVersion);
-    var output = new CallbackProgress<CommandOutput>(line =>
-        state.PublishOutput(task.Id, line.Message, line.Stream));
-    var result = await runtime.RunAsync(invocation, output, cancellationToken);
-    cancellationToken.ThrowIfCancellationRequested();
-    return new StepReport(phase, result.ExitCode, result.Stdout, result.Stderr);
+    return true;
   }
 
   private TaskReport Fail(string taskId, IReadOnlyList<StepReport> steps, string error)
@@ -211,8 +281,8 @@ internal sealed class WorkflowStateMachine(
               TaskOutcome.Cancelled or
               TaskOutcome.Blocked);
 
-  private sealed class CallbackProgress<T>(Action<T> callback) : IProgress<T>
+  private sealed class ActivityCounter
   {
-    public void Report(T value) => callback(value);
+    public int Value { get; set; }
   }
 }

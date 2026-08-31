@@ -13,7 +13,8 @@ Remote Profile Source / offline cache
             ↓
          Task DAG
             ↓
- Detect → Plan → Pre → Apply → Post → Verify → Report
+   Plan → Task state machine → Report
+          Entry · Residence · Exit
 ```
 
 Visual Studio, ReSharper, Git, and the .NET SDK are ordinary Profile Tasks. Core contains no product-specific installation logic.
@@ -32,6 +33,9 @@ Visual Studio, ReSharper, Git, and the .NET SDK are ordinary Profile Tasks. Core
 - Support Profile metadata: unique ID, version, display name, and description.
 - Support Task metadata: ID, display name, description, Required/Optional, dependencies, version requirement, preferred version, and source.
 - Support Task detection and apply commands, `pre`/`post` commands, and a version extraction rule.
+- Compile Schema v1 Tasks into the standard Detect/Pre/Apply/Post/Verify state graph.
+- Allow Schema v2 Tasks to declare a bounded state graph with Entry, Residence, and Exit command Activities.
+- Project runtime state into stable Task state and capabilities consumed by both CLI and GUI.
 - Represent command arguments as arrays and launch executables directly without implicit shell concatenation.
 - Support `{source}` and `{preferredVersion}` command-argument placeholders.
 - Select Required Tasks automatically and prevent deselection.
@@ -136,7 +140,7 @@ Every remote Profile Source contains an `index.json` and one `<id>.json` file pe
 - Cached content remains remote content and requires the same trust confirmation before execution.
 - IDs allow only letters, digits, dots, underscores, and hyphens to prevent path traversal.
 
-### 3.2 Task rules
+### 3.2 Schema v1 Task rules
 
 - `detect` is required, and the Profile author guarantees that it is read-only.
 - `apply` is required for installable Required and selectable Tasks.
@@ -147,6 +151,16 @@ Every remote Profile Source contains an `index.json` and one `<id>.json` file pe
 - `versionPattern` must expose a named `version` capture group.
 - Without a version requirement, compliance depends only on successful detection.
 
+### 3.3 Schema v2 workflow rules
+
+- A Task may declare `workflow.initialState`, `workflow.maxTransitions`, and a non-empty `workflow.states` array.
+- Every state has a unique `id`, a projected `taskState`, ordered `entry`, `residence`, and `exit` command Activity arrays, and either transitions or a terminal `outcome`.
+- A transition names a target state and one built-in condition: `always`, `activitiesSucceeded`, `activitiesFailed`, `taskSatisfied`, or `taskNotSatisfied`.
+- State Entry runs first, Residence runs while the state is active, a matching transition is selected, and Exit runs before the target state is entered.
+- Activity failure may select a recovery transition. An Exit failure fails the Task because the transition cannot complete safely.
+- The state graph must reject duplicate or missing states, dangling targets, invalid Task-state projections, and unbounded execution past `maxTransitions`.
+- Code extensions may derive from `WorkflowActivity`, supply custom transition predicates, or implement `ITaskWorkflowProvider`; these extensions must preserve cancellation and immutable Task snapshots.
+
 ## 4. Core business rules
 
 1. A Profile is the configuration entry point, and a Task is the only scheduling unit.
@@ -156,7 +170,7 @@ Every remote Profile Source contains an `index.json` and one `<id>.json` file pe
 5. Detection failure and a missing Task are distinct results.
 6. Inspect never invokes an `apply` command.
 7. Apply exit code zero means only that the Apply phase completed; the Task succeeds only when Verify satisfies the version requirement.
-8. Apply and retry must regenerate the plan from fresh detection results.
+8. Apply and retry must regenerate the plan and create fresh Task workflows at their declared initial states; the Schema v1 initial state is Detect.
 9. Starting one Task automatically includes and first executes any unsatisfied dependencies.
 10. Cancelling one Task terminates its active process tree. Dependents become `Blocked`, while unrelated Tasks may continue.
 11. Cancel All terminates the active process tree and prevents any new Task from starting.
@@ -187,7 +201,7 @@ The minimum single-window interface contains:
 - automatic local detection after Profile loading;
 - overall progress, current Task phase, command-level progress, live logs, and final statistics.
 
-The Core state machine moves a Task into Detecting/Pre/Applying/Post/Verifying before running its corresponding Activity. Activity results drive subsequent transitions. Task snapshots directly expose start, cancel, and selection capabilities. The GUI only reacts to these capabilities, and global start/cancel actions only aggregate them. If the Source is unavailable, only refresh is enabled. After cancellation is requested, duplicate cancellation is disabled immediately, and the Task becomes Cancelled only after its process tree exits.
+The Core state machine enters a runtime state before running its Entry, Residence, and Exit Activities. Activity results drive subsequent transitions, and each runtime state projects a stable Task state. Task snapshots directly expose start, cancel, and selection capabilities. The GUI only reacts to projected Task state and capabilities; it never interprets transitions. Global start/cancel actions only aggregate Task capabilities. If the Source is unavailable, only refresh is enabled. After cancellation is requested, duplicate cancellation is disabled immediately, and the Task becomes Cancelled only after its process tree exits.
 
 Apply must present the execution plan before it begins.
 
@@ -202,6 +216,9 @@ Apply must present the execution plan before it begins.
 - A satisfied Task is marked `NotRequired`.
 - Apply detects again afterward and fails the Task if verification does not pass.
 - `pre`, `apply`, and `post` run strictly in order, followed by Verify.
+- Schema v2 runs state Entry, Residence, and Exit Activities in order and follows the first matching transition.
+- Runtime state IDs and Activity locations are projected through progress, snapshots, and reports.
+- Cancelling a custom workflow prevents Exit Activities, further transitions, and downstream Tasks from executing.
 - Downstream Tasks do not execute after an upstream failure.
 - Cancelling one Task stops its process tree and blocks dependents; Cancel All prevents all subsequent Tasks from starting.
 - Starting one Task automatically handles its dependencies.
@@ -218,7 +235,8 @@ Apply must present the execution plan before it begins.
 | Profile | `ProfileParser.Parse` | JSON, fields, commands, references, and version validation |
 | Version | `VersionConstraint.Parse/IsSatisfiedBy` | Four expression forms and version comparison |
 | Task DAG | `TaskGraph.Build` | Selection, dependency closure, deduplication, cycle detection, and topological sorting |
-| Environment Run | `EnvironmentManager.StartApply` | Detect/Pre/Apply/Post/Verify, blocking, cancellation, and reporting |
+| Task Workflow | `ITaskWorkflowProvider`, `WorkflowActivity` | state validation, lifecycle Activities, transition selection, projection, and limits |
+| Environment Run | `EnvironmentManager.StartApply` | DAG scheduling, blocking, cancellation, and reporting |
 | Windows Runtime | `ITaskRuntime` | Safe argument passing, process output, process-tree cancellation, and version extraction |
 
 Tests validate behavior exclusively through these seams.

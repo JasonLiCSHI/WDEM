@@ -1,7 +1,9 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Wdem.Core.Runs;
 using Wdem.Core.Tasks;
 using Wdem.Core.Versions;
+using Wdem.Core.Workflows;
 
 namespace Wdem.Core.Profiles;
 
@@ -29,7 +31,7 @@ public static class ProfileParser
 
     var id = Required(dto.Id, "Profile id");
     var schemaVersion = dto.SchemaVersion ?? 1;
-    if (schemaVersion != 1)
+    if (schemaVersion is not (1 or 2))
     {
       throw new FormatException($"Unsupported Profile schemaVersion '{schemaVersion}'.");
     }
@@ -55,6 +57,21 @@ public static class ProfileParser
         VersionConstraint.Parse(versionConstraint);
       }
 
+      if (schemaVersion == 1 && taskDto.Workflow is not null)
+      {
+        throw new FormatException(
+            $"Task '{taskId}' workflow requires Profile schemaVersion 2.");
+      }
+
+      var detect = Command(taskDto.Detect, $"Task '{taskId}' detect");
+      var pre = Commands(taskDto.Pre, $"Task '{taskId}' pre");
+      var apply = taskDto.Apply is null
+          ? null
+          : Command(taskDto.Apply, $"Task '{taskId}' apply");
+      var post = Commands(taskDto.Post, $"Task '{taskId}' post");
+      var workflow = taskDto.Workflow is null
+          ? null
+          : Workflow(taskDto.Workflow, $"Task '{taskId}' workflow");
       var task = new TaskDefinition(
           taskId,
           Required(taskDto.DisplayName, $"Task '{taskId}' displayName"),
@@ -63,11 +80,12 @@ public static class ProfileParser
           versionConstraint,
           Optional(taskDto.PreferredVersion),
           Optional(taskDto.Source),
-          Command(taskDto.Detect, $"Task '{taskId}' detect"),
-          Commands(taskDto.Pre, $"Task '{taskId}' pre"),
-          taskDto.Apply is null ? null : Command(taskDto.Apply, $"Task '{taskId}' apply"),
-          Commands(taskDto.Post, $"Task '{taskId}' post"),
-          Optional(taskDto.Description));
+          detect,
+          pre,
+          apply,
+          post,
+          Optional(taskDto.Description),
+          workflow);
 
       tasks.Add(taskId, task);
     }
@@ -105,6 +123,126 @@ public static class ProfileParser
     return commands
         .Select((command, index) => Command(command, $"{field}[{index}]"))
         .ToArray();
+  }
+
+  private static TaskWorkflowDefinition Workflow(TaskWorkflowDto workflow, string field)
+  {
+    var initialState = Required(workflow.InitialState, $"{field} initialState");
+    if (workflow.States is null || workflow.States.Count == 0)
+    {
+      throw new FormatException($"{field} must declare at least one state.");
+    }
+
+    try
+    {
+      var states = workflow.States.Select((state, index) =>
+          WorkflowState(state, $"{field} states[{index}]")).ToArray();
+      return new TaskWorkflowDefinition(
+          initialState,
+          states,
+          workflow.MaxTransitions ?? 1024);
+    }
+    catch (ArgumentException exception)
+    {
+      throw new FormatException($"{field} is invalid: {exception.Message}", exception);
+    }
+  }
+
+  private static TaskWorkflowState WorkflowState(TaskWorkflowStateDto? state, string field)
+  {
+    if (state is null)
+    {
+      throw new FormatException($"{field} must contain a state object.");
+    }
+
+    var id = Required(state.Id, $"{field} id");
+    var taskStateText = Required(state.TaskState, $"{field} taskState");
+    if (!Enum.TryParse<TaskExecutionState>(taskStateText, ignoreCase: true, out var taskState) ||
+        taskState is TaskExecutionState.NotSelected or
+            TaskExecutionState.Pending or
+            TaskExecutionState.Ready or
+            TaskExecutionState.Cancelling)
+    {
+      throw new FormatException($"{field} taskState '{taskStateText}' is not a runtime projection.");
+    }
+
+    TaskOutcome? terminalOutcome = null;
+    if (Optional(state.Outcome) is { } outcomeText)
+    {
+      if (!Enum.TryParse<TaskOutcome>(outcomeText, ignoreCase: true, out var outcome))
+      {
+        throw new FormatException($"{field} outcome '{outcomeText}' is invalid.");
+      }
+      terminalOutcome = outcome;
+    }
+
+    var transitions = (state.Transitions ?? [])
+        .Select((transition, index) => WorkflowTransition(
+            transition,
+            $"{field} transitions[{index}]"))
+        .ToArray();
+    return new TaskWorkflowState(
+        id,
+        taskState,
+        entryActivities: WorkflowActivities(state.Entry, $"{field} entry"),
+        residenceActivities: WorkflowActivities(state.Residence, $"{field} residence"),
+        exitActivities: WorkflowActivities(state.Exit, $"{field} exit"),
+        transitions: transitions,
+        terminalOutcome: terminalOutcome,
+        displayName: Optional(state.DisplayName),
+        terminalError: Optional(state.Error));
+  }
+
+  private static IReadOnlyList<WorkflowActivity> WorkflowActivities(
+      IReadOnlyList<WorkflowActivityDto?>? activities,
+      string field) =>
+      activities is null
+          ? Array.Empty<WorkflowActivity>()
+          : activities.Select((activity, index) => WorkflowActivity(
+              activity,
+              $"{field}[{index}]")).ToArray();
+
+  private static WorkflowActivity WorkflowActivity(WorkflowActivityDto? activity, string field)
+  {
+    if (activity is null)
+    {
+      throw new FormatException($"{field} must contain an Activity object.");
+    }
+
+    var id = Required(activity.Id, $"{field} id");
+    var phase = Required(activity.Phase, $"{field} phase");
+    var command = Command(
+        new CommandDto
+        {
+          DisplayName = activity.DisplayName,
+          Executable = activity.Executable,
+          Arguments = activity.Arguments,
+          VersionPattern = activity.VersionPattern
+        },
+        field);
+    return new CommandWorkflowActivity(id, phase, command, Optional(activity.DisplayName));
+  }
+
+  private static TaskWorkflowTransition WorkflowTransition(
+      TaskWorkflowTransitionDto? transition,
+      string field)
+  {
+    if (transition is null)
+    {
+      throw new FormatException($"{field} must contain a transition object.");
+    }
+
+    var target = Required(transition.Target, $"{field} target");
+    var condition = Required(transition.Condition, $"{field} condition");
+    return condition.ToLowerInvariant() switch
+    {
+      "always" => TaskWorkflowTransition.Always(target),
+      "activitiessucceeded" => TaskWorkflowTransition.WhenActivitiesSucceeded(target),
+      "activitiesfailed" => TaskWorkflowTransition.WhenActivitiesFailed(target),
+      "tasksatisfied" => TaskWorkflowTransition.WhenTaskSatisfied(target),
+      "tasknotsatisfied" => TaskWorkflowTransition.WhenTaskNotSatisfied(target),
+      _ => throw new FormatException($"{field} condition '{condition}' is invalid.")
+    };
   }
 
   private static CommandDefinition Command(CommandDto? command, string field)
@@ -203,6 +341,8 @@ public static class ProfileParser
     public CommandDto? Apply { get; init; }
 
     public List<CommandDto?>? Post { get; init; }
+
+    public TaskWorkflowDto? Workflow { get; init; }
   }
 
   private sealed class CommandDto
@@ -214,5 +354,57 @@ public static class ProfileParser
     public List<string?>? Arguments { get; init; }
 
     public string? VersionPattern { get; init; }
+  }
+
+  private sealed class TaskWorkflowDto
+  {
+    public string? InitialState { get; init; }
+
+    public int? MaxTransitions { get; init; }
+
+    public List<TaskWorkflowStateDto?>? States { get; init; }
+  }
+
+  private sealed class TaskWorkflowStateDto
+  {
+    public string? Id { get; init; }
+
+    public string? DisplayName { get; init; }
+
+    public string? TaskState { get; init; }
+
+    public List<WorkflowActivityDto?>? Entry { get; init; }
+
+    public List<WorkflowActivityDto?>? Residence { get; init; }
+
+    public List<WorkflowActivityDto?>? Exit { get; init; }
+
+    public List<TaskWorkflowTransitionDto?>? Transitions { get; init; }
+
+    public string? Outcome { get; init; }
+
+    public string? Error { get; init; }
+  }
+
+  private sealed class WorkflowActivityDto
+  {
+    public string? Id { get; init; }
+
+    public string? Phase { get; init; }
+
+    public string? DisplayName { get; init; }
+
+    public string? Executable { get; init; }
+
+    public List<string?>? Arguments { get; init; }
+
+    public string? VersionPattern { get; init; }
+  }
+
+  private sealed class TaskWorkflowTransitionDto
+  {
+    public string? Target { get; init; }
+
+    public string? Condition { get; init; }
   }
 }
