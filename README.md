@@ -4,8 +4,8 @@
 
 ### Declare your Windows development environment. Let the workflow do the rest.
 
-一份 Profile，描述整台 Windows 开发工作站。<br>
-WDEM 将软件、版本与配置步骤编排为可检查、可取消、可重试的 Task DAG。
+Describe an entire Windows development workstation with one Profile.<br>
+WDEM turns software, version, and configuration requirements into an observable, cancellable, and retryable Task DAG.
 
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
 [![.NET](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
@@ -20,17 +20,17 @@ WDEM 将软件、版本与配置步骤编排为可检查、可取消、可重试
 
 ## Why WDEM?
 
-搭建开发环境不应该是一份会过期的安装清单，也不应该把每个软件硬编码进工具。
+Setting up a development environment should not depend on an installation checklist that becomes obsolete, nor should every product be hard-coded into the manager.
 
-WDEM 把 Visual Studio、ReSharper、Git、.NET SDK 以及未来的任何工具都视为普通 Task。Profile 负责声明“需要什么”，Core 负责计算依赖和执行顺序，Windows Runtime 负责安全执行。新增软件、调整版本或增加安装后配置，通常只需修改 Profile。
+WDEM treats Visual Studio, ReSharper, Git, the .NET SDK, and every future tool as ordinary Tasks. A Profile declares what the workstation needs, Core computes dependencies and execution order, and the Windows Runtime executes each command safely. Adding software, changing a version, or introducing post-install configuration usually requires only a Profile change.
 
-| 传统安装脚本 | WDEM |
+| Traditional installation scripts | WDEM |
 |---|---|
-| 命令与流程耦合 | Profile 与执行引擎分离 |
-| 不清楚本机是否已满足要求 | 启动后自动 Detect 并校验版本 |
-| 手工维护执行顺序 | 根据依赖构建并验证 DAG |
-| 取消后可能继续执行后续命令 | 停止当前进程树并阻断不安全的下游 |
-| GUI 与 CLI 各写一套规则 | 两个入口共享同一 Core、状态与报告 |
+| Commands and orchestration are coupled | Profiles are separate from the execution engine |
+| Local compliance is unclear | Detect runs automatically and validates installed versions |
+| Execution order is maintained manually | Dependencies form a validated DAG |
+| Cancellation may leave downstream commands running | The active process tree is stopped and unsafe downstream work is blocked |
+| GUI and CLI duplicate business rules | Both clients share the same Core, state, and reports |
 
 ## How it works
 
@@ -47,7 +47,7 @@ flowchart LR
     O --> GUI["WPF GUI"]
 ```
 
-Task 的状态是执行事实的唯一来源。引擎先让 Task 进入合法状态，再执行对应 Activity；Activity 的结果继续驱动状态变化。GUI 只响应快照中的 `CanStart`、`CanCancel` 和 `CanSelect`，不复制工作流规则。
+Task state is the single source of execution truth. The engine first moves a Task into a valid state, then runs the corresponding Activity. The Activity result drives the next transition. The GUI only reacts to `CanStart`, `CanCancel`, and `CanSelect` values in immutable snapshots; it does not duplicate workflow rules.
 
 ```text
 Pending → Ready → Detecting → RunningPre → Applying → RunningPost → Verifying
@@ -57,20 +57,20 @@ Running → Cancelling → Cancelled       dependency failure → Blocked
 
 ## Core capabilities
 
-- **声明式 Profile** — 定义 Task 元数据、Required/Optional、依赖、来源、版本约束及阶段命令。
-- **确定性 Task DAG** — 自动补齐依赖、去重、拓扑排序，并在执行前报告循环依赖。
-- **完整生命周期** — 严格执行 `Detect → Pre → Apply → Post → Verify`；重试从 Detect 重新开始。
-- **版本感知** — 支持精确版本、通配版本、最低版本和版本范围；低于最低版本时明确要求升级。
-- **响应式控制** — 单个 Task 与整个计划均可开始或取消，按钮能力由 Core 状态投影产生。
-- **安全取消** — 终止当前命令的完整进程树，停止新 Activity，并阻断依赖该 Task 的下游。
-- **远程优先** — 发行版在代码中固定一个 HTTPS Source；网络故障时回退到已验证的最后一次有效缓存。
-- **显式信任** — 远程或缓存 Profile 在运行 Detect/Apply 命令前，必须获得用户对当前内容哈希的确认。
-- **统一体验** — WPF 与 CLI 共享 `Wdem.Core`、`Wdem.Windows`、进度模型和最终报告。
-- **可追溯日志** — 每个 Session 写入独立 JSONL 日志，记录计划、阶段、stdout、stderr 与结果。
+- **Declarative Profiles** — Define Task metadata, Required/Optional behavior, dependencies, sources, version requirements, and phase commands.
+- **Deterministic Task DAG** — Expand dependency closure, remove duplicates, produce a topological order, and report cycles before execution.
+- **Complete lifecycle** — Enforce `Detect → Pre → Apply → Post → Verify`; every retry starts again at Detect.
+- **Version awareness** — Support exact, wildcard, minimum, and range requirements, with an explicit upgrade state below the minimum version.
+- **Reactive controls** — Start or cancel one Task or the entire plan; Core projects every available action from workflow state.
+- **Safe cancellation** — Terminate the complete active process tree, prevent new Activities, and block Tasks that depend on the cancelled Task.
+- **Remote-first Profiles** — Each release fixes one HTTPS Source in code and falls back to a validated last-known-good cache on network failure.
+- **Explicit trust** — Remote and cached Profiles require approval for their current content hash before Detect or Apply can run commands.
+- **One execution model** — WPF and CLI share `Wdem.Core`, `Wdem.Windows`, progress events, and final reports.
+- **Traceable logs** — Each Session writes a dedicated JSONL log containing the plan, phases, stdout, stderr, and results.
 
 ## A Profile is the product definition
 
-下面的 Task 声明了最低版本、来源、检测方式、安装命令以及安装前后的配置。命令采用 executable + argument array，WDEM 不拼接 Shell 命令字符串。
+The Task below declares a minimum version, source, detection strategy, installation command, and pre/post configuration. Commands use an executable plus an argument array; WDEM never concatenates shell command strings.
 
 ```json
 {
@@ -118,54 +118,54 @@ Running → Cancelling → Cancelled       dependency failure → Blocked
 }
 ```
 
-`source` 可表达 WinGet ID、URL、文件路径或企业源标识；`{source}` 与 `{preferredVersion}` 可用于参数。Schema 通过 `schemaVersion` 演进，新的执行机制则通过 `ITaskRuntime` adapter 扩展，Core 不认识具体软件。
+`source` may identify a WinGet package, URL, file path, or enterprise source. `{source}` and `{preferredVersion}` are available as argument placeholders. The format evolves through `schemaVersion`, while new execution mechanisms plug in through an `ITaskRuntime` adapter. Core never needs product-specific knowledge.
 
-完整约束见 [MVP 需求基线](docs/MVP_REQUIREMENTS.md)，模块边界与状态模型见 [架构说明](docs/ARCHITECTURE.md)。
+See the [MVP requirements](docs/MVP_REQUIREMENTS.md) for complete constraints and the [architecture guide](docs/ARCHITECTURE.md) for module boundaries and the state model.
 
 ## Get started
 
 ### GUI
 
-从开始菜单启动 WDEM。应用会自动：
+Launch WDEM from the Start menu. The application automatically:
 
-1. 从发行版固定的 Source 加载首个 Profile；
-2. 请求确认当前 Profile 内容；
-3. 检测本地环境并区分 Required 与 Optional Task；
-4. 展示依赖、Pre/Post、目标版本、实时进度和详细输出；
-5. 根据 Task 快照启用开始、取消与选择操作。
+1. loads the first Profile from the release-defined Source;
+2. asks the user to trust the current Profile content;
+3. detects the local environment and separates Required from Optional Tasks;
+4. presents dependencies, Pre/Post steps, target versions, live progress, and detailed output;
+5. enables start, cancel, and selection actions from the latest Task snapshots.
 
-界面语言与安装时选择保持一致：English 安装显示完整英文界面，简体中文安装显示完整中文界面。
+The UI follows the language selected during installation. An English installation uses a fully English interface; a Simplified Chinese installation uses a fully Chinese interface.
 
 ### CLI
 
 ```powershell
-# 查看可用 Profile
+# List available Profiles
 wdem profiles
 
-# 检查当前环境
+# Inspect the current environment
 wdem inspect --profile csharp-developer
 
-# 应用 Required Task 和选中的 Optional Task
+# Apply Required Tasks and selected Optional Tasks
 wdem apply --profile csharp-developer --select visual-studio,resharper
 
-# 运行单个 Task 及其依赖
+# Run one Task and its dependency closure
 wdem apply --profile csharp-developer --task resharper
 
-# 审查 Profile 后，用于非交互执行并允许一次重试
+# Run non-interactively after reviewing the Profile, with one retry
 wdem apply --profile csharp-developer --yes --retries 1 --trust-profile
 ```
 
-CLI 使用 `Ctrl+C` 安全取消。用户主动取消不会触发自动重试；已经满足版本约束的 Task 不会重复安装。
+Use `Ctrl+C` to cancel safely. User cancellation never triggers an automatic retry, and a Task whose version requirement is already satisfied is not reinstalled.
 
 ## Install
 
-WDEM 提供 Windows x64 自包含安装程序，目标计算机无需预装 .NET SDK 或 .NET Desktop Runtime。
+WDEM ships as a self-contained Windows x64 installer. The target computer does not need the .NET SDK or .NET Desktop Runtime.
 
 ```text
 WDEM-<version>-win-x64-setup.exe
 ```
 
-安装程序支持简体中文和 English，可选择桌面快捷方式及把 `wdem.exe` 加入用户 PATH，并在 Windows“已安装的应用”中提供标准卸载入口。默认安装至：
+The installer supports English and Simplified Chinese, optional desktop shortcuts, and adding `wdem.exe` to the user PATH. It also registers a standard uninstall entry in Windows Installed Apps. The default location is:
 
 ```text
 %LOCALAPPDATA%\Programs\WDEM
@@ -173,36 +173,36 @@ WDEM-<version>-win-x64-setup.exe
 
 ### Build the installer
 
-需要 .NET 10 SDK 与 Inno Setup 6：
+Install the .NET 10 SDK and Inno Setup 6, then run:
 
 ```powershell
 pwsh .\build\Build-Installer.ps1 -Version 0.1.0
 ```
 
-输出到 `artifacts/installer/`，同时生成 SHA-256 校验文件。安装包不会内置 `profiles/`。
+Output is written to `artifacts/installer/` together with a SHA-256 checksum. The installer never bundles `profiles/`.
 
 ## Security and recovery
 
 | Concern | MVP guarantee |
 |---|---|
-| Profile transport | Source 与重定向只允许 HTTPS，单文档默认不超过 1 MiB |
-| Command trust | Profile 内容首次出现或哈希变化后必须重新确认 |
-| Process invocation | 参数通过 `ProcessStartInfo.ArgumentList` 传递 |
-| Cancellation | Task 先进入 `Cancelling`，进程树退出后才进入 `Cancelled` |
-| Downstream safety | 失败或取消会阻断依赖项，不影响无关 Task |
-| Recovery | GUI 可重试失败计划，CLI 支持 `--retries N`；每次从 Detect 开始 |
-| Cache integrity | 只有完成解析与校验的远程内容才会原子更新缓存 |
-| Diagnostics | 日志默认保存至 `%LOCALAPPDATA%\Wdem\logs`，不可写时降级到 `%TEMP%\Wdem\logs` |
+| Profile transport | Sources and redirects must use HTTPS; one document is limited to 1 MiB by default |
+| Command trust | New Profile content, including any hash change, must be explicitly approved |
+| Process invocation | Arguments are passed through `ProcessStartInfo.ArgumentList` |
+| Cancellation | A Task enters `Cancelling` first and becomes `Cancelled` only after its process tree exits |
+| Downstream safety | Failure or cancellation blocks dependents without affecting unrelated Tasks |
+| Recovery | The GUI can retry a failed plan and the CLI accepts `--retries N`; each retry starts at Detect |
+| Cache integrity | Only fully parsed and validated remote content atomically updates the cache |
+| Diagnostics | Logs default to `%LOCALAPPDATA%\Wdem\logs` and fall back to `%TEMP%\Wdem\logs` if needed |
 
 ## Source and cache model
 
-GUI 与 CLI 不提供 Source 编辑入口。每个发行版在代码中选择一个 HTTPS Profile Source；当前默认契约为：
+The GUI and CLI do not expose Source editing. Each release selects one HTTPS Profile Source in code. The current default contract is:
 
 ```text
 https://raw.githubusercontent.com/JasonLiCSHI/WDEM/main/profiles/
 ```
 
-仓库中的 [`profiles/`](profiles/) 是该远程 Source 的发布内容，不会进入安装包。发布版本前必须确保目标分支已部署 `index.json` 与对应 Profile；如果远程内容尚未发布且本机没有有效缓存，应用不会执行任何 Profile 命令。
+The repository [`profiles/`](profiles/) directory is the content published by that remote Source; it is not packaged in the installer. Before a release, `index.json` and its referenced Profiles must be deployed to the target branch. If the remote content has not been published and no valid cache exists, WDEM will not execute any Profile command.
 
 ```text
 %LOCALAPPDATA%\Wdem\cache\profiles    last-known-good cache
@@ -212,7 +212,7 @@ https://raw.githubusercontent.com/JasonLiCSHI/WDEM/main/profiles/
 
 ## MVP scope
 
-当前版本刻意保持小而可靠：采用确定性的顺序 DAG 调度，不包含并行执行、自动 UAC 提升、回滚/卸载、重启续跑、Profile 市场、私有认证源或跨平台支持。这些能力可在现有 Profile、Graph、Workflow、Runtime seam 上继续演进，而无需向 Core 加入产品专用逻辑。
+The current release is intentionally small and dependable. It uses deterministic sequential DAG scheduling and does not yet include parallel execution, automatic UAC elevation, rollback or uninstall, resume after restart, a Profile marketplace, authenticated private sources, or cross-platform support. Those capabilities can evolve on the existing Profile, Graph, Workflow, and Runtime seams without adding product-specific logic to Core.
 
 ## Develop
 
@@ -225,12 +225,12 @@ dotnet run --project src/Wdem.Cli/Wdem.Cli.csproj -- profiles
 
 | Project | Responsibility |
 |---|---|
-| `Wdem.Core` | Profile、版本约束、DAG、Workflow、状态快照与报告 |
-| `Wdem.Windows` | Windows 进程执行、输出转发、进程树取消、缓存、信任与日志 |
-| `Wdem.Cli` | 命令行交互、计划确认、重试与终端展示 |
-| `Wdem.App` | WPF 工作台、本地化、Task 详情与响应式状态映射 |
+| `Wdem.Core` | Profiles, version requirements, DAG construction, Workflow state, snapshots, and reports |
+| `Wdem.Windows` | Windows process execution, output forwarding, process-tree cancellation, cache, trust, and logs |
+| `Wdem.Cli` | Command-line interaction, plan confirmation, retries, and terminal presentation |
+| `Wdem.App` | Localized WPF workbench, Task details, and reactive state projection |
 
-请先阅读 [AGENTS.md](AGENTS.md) 了解产品边界与验证要求。
+Read [AGENTS.md](AGENTS.md) before contributing to understand the product boundaries and validation requirements.
 
 ## License
 
