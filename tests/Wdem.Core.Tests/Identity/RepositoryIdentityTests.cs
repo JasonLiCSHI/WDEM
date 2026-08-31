@@ -258,6 +258,42 @@ public sealed class RepositoryIdentityTests
   }
 
   [Fact]
+  public void ProductIdentityScriptAcceptsCrLfReleaseWorkflow()
+  {
+    using var repository = new TemporaryDirectory();
+    var scriptDirectory = Path.Combine(repository.Path, "testing", "wdem");
+    var workflowDirectory = Path.Combine(repository.Path, ".github", "workflows");
+    Directory.CreateDirectory(scriptDirectory);
+    Directory.CreateDirectory(workflowDirectory);
+    File.Copy(
+        Path.Combine(RepositoryRoot, "testing", "wdem", "assert-product-identity.ps1"),
+        Path.Combine(scriptDirectory, "assert-product-identity.ps1"));
+
+    var workflow = File.ReadAllText(Path.Combine(
+        RepositoryRoot,
+        ".github",
+        "workflows",
+        "release.yaml"));
+    File.WriteAllText(
+        Path.Combine(workflowDirectory, "release.yaml"),
+        workflow.Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace("\n", "\r\n", StringComparison.Ordinal));
+
+    Assert.Equal(0, RunProcess(repository.Path, "git", "init").ExitCode);
+    Assert.Equal(0, RunProcess(repository.Path, "git", "add", ".").ExitCode);
+
+    var result = RunProcess(
+        repository.Path,
+        "pwsh",
+        "-NoLogo",
+        "-NoProfile",
+        "-File",
+        Path.Combine(scriptDirectory, "assert-product-identity.ps1"));
+
+    Assert.True(result.ExitCode == 0, result.Output);
+  }
+
+  [Fact]
   public void AcceptanceChecklistRecordsAutomatedAndCleanMachineEvidence()
   {
     var checklistPath = Path.Combine(

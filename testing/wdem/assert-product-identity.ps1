@@ -16,7 +16,7 @@ foreach ($required in 'Wdem.sln', 'Wdem-win-x64.zip', 'SHA256SUMS.txt', 'THIRD-P
 
 $desktopPublish = [regex]::Match(
     $release,
-    '(?m)^\s*dotnet publish[^\r\n]*Wdem\.Desktop[^\r\n]*$')
+    '(?m)^\s*dotnet publish[^\r\n]*Wdem\.Desktop[^\r\n]*\r?$')
 if (-not $desktopPublish.Success) {
     throw 'Release workflow does not publish the WinUI desktop host.'
 }
