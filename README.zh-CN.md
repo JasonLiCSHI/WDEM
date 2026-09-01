@@ -233,6 +233,8 @@ WDEM-<version>-win-x64-setup.exe
 %LOCALAPPDATA%\Programs\WDEM
 ```
 
+环境 Task 会安装和配置计算机级软件，因此 WDEM 必须以管理员权限运行。请右键单击 GUI 并选择**以管理员身份运行**，或者先打开管理员权限的命令提示符、PowerShell 或 Windows Terminal，再运行 `wdem.exe`。GUI 和 CLI 在非管理员进程中都不会加载或执行 Task。
+
 ### 构建安装程序
 
 安装 .NET 10 SDK 和 Inno Setup 6，然后运行：
@@ -303,6 +305,18 @@ dotnet run --project src/Wdem.Cli/Wdem.Cli.csproj -- profiles
 | `Wdem.Windows` | Windows 进程执行、输出转发、进程树取消、缓存、信任和日志 |
 | `Wdem.Cli` | 命令行交互、计划确认、重试和终端展示 |
 | `Wdem.App` | 本地化 WPF 工作台、Task 详情和响应式状态投影 |
+
+### 内置 Agent Skill
+
+WDEM 将贡献规范作为 [Agent Skill](.agents/skills/wdem-development/SKILL.md) 随仓库提供，让编码 Agent 在修改代码前直接理解架构，不必在每次会话中重新推断规则。
+
+| Agent | 自动发现入口 |
+|---|---|
+| Codex | [`.agents/skills/wdem-development`](.agents/skills/wdem-development/SKILL.md) |
+| Claude Code | [`.claude/skills/wdem-development`](.claude/skills/wdem-development/SKILL.md) |
+| GitHub Copilot | [`.github/skills/wdem-development`](.github/skills/wdem-development/SKILL.md) |
+
+该 Skill 覆盖分层职责、Profile 与 Workflow 语义、安全终止进程树、管理员权限、安装器诊断、验证、打包和发布纪律。所有发现入口最终指向 `.agents/skills/` 中的唯一规范正文，保证不同 Agent 获得一致指导。[评估用例](.agents/skills/wdem-development/evals/evals.json)则覆盖安装器故障恢复、声明式 Task 扩展和响应式 UI 状态联动。
 
 贡献前请阅读 [AGENTS.md](AGENTS.md)，了解产品边界和验证要求。
 

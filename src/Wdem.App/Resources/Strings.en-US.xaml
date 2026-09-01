@@ -66,6 +66,8 @@
   <sys:String x:Key="BlockedStatus">Blocked</sys:String>
   <sys:String x:Key="NotCompliantStatus">Missing or non-compliant</sys:String>
   <sys:String x:Key="MessageTitle">WDEM</sys:String>
+  <sys:String x:Key="AdministratorRequiredTitle">Administrator privileges required</sys:String>
+  <sys:String x:Key="AdministratorRequiredMessage">WDEM cannot run without administrator privileges. Close this application, then right-click WDEM and select “Run as administrator”.</sys:String>
   <sys:String x:Key="CatalogErrorTitle">Unable to load profiles</sys:String>
   <sys:String x:Key="SourceUnavailableSummary">Profiles are unavailable; check the network and retry.</sys:String>
   <sys:String x:Key="LoadErrorTitle">Unable to load Profile</sys:String>

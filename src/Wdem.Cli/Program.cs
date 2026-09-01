@@ -5,6 +5,7 @@ using Wdem.Windows.Configuration;
 using Wdem.Windows.Logging;
 using Wdem.Windows.Processes;
 using Wdem.Windows.Runtime;
+using Wdem.Windows.Security;
 
 namespace Wdem.Cli;
 
@@ -12,6 +13,13 @@ public static class Program
 {
   public static async Task<int> Main(string[] args)
   {
+    if (!AdministratorRequirement.IsSatisfied())
+    {
+      Console.Error.WriteLine(
+          "Administrator privileges are required. Reopen Command Prompt, PowerShell, or Windows Terminal as administrator and run WDEM again.");
+      return AdministratorRequirement.AccessDeniedExitCode;
+    }
+
     if (args.Length == 0 || args[0] is "-h" or "--help")
     {
       PrintHelp();

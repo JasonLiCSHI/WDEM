@@ -53,6 +53,7 @@ Visual Studio, ReSharper, Git, and the .NET SDK are ordinary Profile Tasks. Core
 - Provide CLI `inspect` and `apply` commands.
 - Provide a WPF GUI for loading a Profile, selecting Tasks, inspecting, applying, cancelling, and reviewing results.
 - Make CLI and GUI share the same Core and Windows Task Runtime.
+- Require an elevated administrator process at GUI and CLI startup; show a clear instruction and exit before loading or executing Tasks when elevation is absent.
 
 ### 2.2 Not included
 

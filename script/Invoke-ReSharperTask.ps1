@@ -97,8 +97,13 @@ try {
                     throw "ReSharper installer integrity check failed. Expected $Sha256 but received $actualHash."
                 }
 
-                & $installerPath '/Silent=True'
-                $installerExitCode = $LASTEXITCODE
+                $installerProcess = Start-Process `
+                    -FilePath $installerPath `
+                    -ArgumentList @('/Silent=True') `
+                    -NoNewWindow `
+                    -Wait `
+                    -PassThru
+                $installerExitCode = $installerProcess.ExitCode
                 if ($installerExitCode -notin @(0, 1641, 3010)) {
                     throw "ReSharper Installer failed with exit code $installerExitCode."
                 }
