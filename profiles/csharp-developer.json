@@ -1,90 +1,167 @@
 {
   "schemaVersion": 1,
   "id": "csharp-developer",
-  "version": "1.0.0",
-  "displayName": "C# Developer",
-  "description": "A minimal C# developer workstation.",
+  "version": "2.0.0",
+  "displayName": "Visual Studio Professional + ReSharper",
+  "description": "A focused Visual Studio Professional 2026 workstation with ReSharper and managed configuration.",
   "tasks": {
-    "git": {
-      "displayName": "Git",
-      "description": "Distributed version control client used by the remaining developer tools.",
+    "visual-studio-professional": {
+      "displayName": "Visual Studio Professional 2026",
+      "description": "Installs Visual Studio Professional from Microsoft and applies the bundled .vsconfig during setup.",
       "required": true,
       "dependsOn": [],
-      "version": ">= 2.50",
-      "preferredVersion": "2.52.0",
-      "source": "Git.Git",
+      "version": ">= 18.9.2",
+      "preferredVersion": "18.9.2",
+      "source": "https://aka.ms/vs/18/stable/vs_professional.exe",
       "detect": {
-        "displayName": "Detect Git version",
-        "executable": "git",
-        "arguments": ["--version"],
-        "versionPattern": "git version (?<version>\\d+(?:\\.\\d+)+(?:\\.[a-zA-Z0-9]+)*)"
+        "displayName": "Check Visual Studio Professional version",
+        "executable": "powershell.exe",
+        "arguments": [
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          "{appDirectory}\\Script\\Invoke-VisualStudioProfessionalTask.ps1",
+          "-Action",
+          "Detect"
+        ],
+        "versionPattern": "Visual Studio Professional version (?<version>\\d+(?:\\.\\d+)+)"
       },
+      "pre": [
+        {
+          "displayName": "Validate Visual Studio source, host state, and configuration",
+          "executable": "powershell.exe",
+          "arguments": [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "{appDirectory}\\Script\\Invoke-VisualStudioProfessionalTask.ps1",
+            "-Action",
+            "Pre",
+            "-SourceUri",
+            "{source}",
+            "-ConfigPath",
+            "{appDirectory}\\Settings\\.vsconfig"
+          ]
+        }
+      ],
       "apply": {
-        "displayName": "Install Git with WinGet",
-        "executable": "winget",
-        "arguments": ["install", "--id", "{source}", "--exact", "--version", "{preferredVersion}", "--accept-package-agreements", "--accept-source-agreements", "--silent"]
-      }
-    },
-    "dotnet-sdk": {
-      "displayName": ".NET SDK",
-      "description": "The .NET SDK required to build and run C# projects.",
-      "required": true,
-      "dependsOn": [],
-      "version": ">= 10.0",
-      "preferredVersion": "10.0.100",
-      "source": "Microsoft.DotNet.SDK.10",
-      "detect": {
-        "displayName": "Detect .NET SDK version",
-        "executable": "dotnet",
-        "arguments": ["--version"],
-        "versionPattern": "(?<version>\\d+(?:\\.\\d+)+)"
-      },
-      "apply": {
-        "displayName": "Install .NET SDK with WinGet",
-        "executable": "winget",
-        "arguments": ["install", "--id", "{source}", "--exact", "--accept-package-agreements", "--accept-source-agreements", "--silent"]
-      }
-    },
-    "visual-studio": {
-      "displayName": "Visual Studio 2022 Community",
-      "description": "Optional Visual Studio IDE; post-install verification is declared as a normal workflow step.",
-      "required": false,
-      "dependsOn": ["dotnet-sdk"],
-      "source": "Microsoft.VisualStudio.2022.Community",
-      "detect": {
-        "displayName": "Detect Visual Studio",
-        "executable": "winget",
-        "arguments": ["list", "--id", "{source}", "--exact", "--accept-source-agreements"]
-      },
-      "apply": {
-        "displayName": "Install Visual Studio with WinGet",
-        "executable": "winget",
-        "arguments": ["install", "--id", "{source}", "--exact", "--accept-package-agreements", "--accept-source-agreements", "--silent"]
+        "displayName": "Install Visual Studio Professional with .vsconfig",
+        "executable": "powershell.exe",
+        "arguments": [
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          "{appDirectory}\\Script\\Invoke-VisualStudioProfessionalTask.ps1",
+          "-Action",
+          "Apply",
+          "-SourceUri",
+          "{source}",
+          "-ConfigPath",
+          "{appDirectory}\\Settings\\.vsconfig"
+        ]
       },
       "post": [
         {
-          "displayName": "Verify the installed Visual Studio package",
-          "executable": "winget",
-          "arguments": ["list", "--id", "{source}", "--exact", "--accept-source-agreements"]
+          "displayName": "Verify declared Visual Studio components",
+          "executable": "powershell.exe",
+          "arguments": [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "{appDirectory}\\Script\\Invoke-VisualStudioProfessionalTask.ps1",
+            "-Action",
+            "Post",
+            "-ConfigPath",
+            "{appDirectory}\\Settings\\.vsconfig"
+          ]
         }
       ]
     },
     "resharper": {
       "displayName": "JetBrains ReSharper",
-      "description": "Optional Visual Studio extension installed after its IDE dependency.",
-      "required": false,
-      "dependsOn": ["visual-studio"],
-      "source": "JetBrains.ReSharper",
+      "description": "Installs ReSharper from JetBrains for Visual Studio Professional 2026 and applies the bundled global settings.",
+      "required": true,
+      "dependsOn": ["visual-studio-professional"],
+      "version": ">= 2026.1.0.1",
+      "preferredVersion": "2026.2.1",
+      "source": "https://download.jetbrains.com/resharper/dotUltimate.2026.2.1/JetBrains.ReSharper.2026.2.1.web.exe",
       "detect": {
-        "displayName": "Detect ReSharper",
-        "executable": "winget",
-        "arguments": ["list", "--id", "{source}", "--exact", "--accept-source-agreements"]
+        "displayName": "Check ReSharper version",
+        "executable": "powershell.exe",
+        "arguments": [
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          "{appDirectory}\\Script\\Invoke-ReSharperTask.ps1",
+          "-Action",
+          "Detect"
+        ],
+        "versionPattern": "JetBrains ReSharper version (?<version>\\d+(?:\\.\\d+)+)"
       },
+      "pre": [
+        {
+          "displayName": "Validate ReSharper source, integrity, and Visual Studio host",
+          "executable": "powershell.exe",
+          "arguments": [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "{appDirectory}\\Script\\Invoke-ReSharperTask.ps1",
+            "-Action",
+            "Pre",
+            "-SourceUri",
+            "{source}",
+            "-Sha256",
+            "c1f330ff9d9faafcf46c13b646a4b8e09acfe982c7e9de4e9a5fae2ac7f15fc8"
+          ]
+        }
+      ],
       "apply": {
-        "displayName": "Install ReSharper with WinGet",
-        "executable": "winget",
-        "arguments": ["install", "--id", "{source}", "--exact", "--accept-package-agreements", "--accept-source-agreements", "--silent"]
-      }
+        "displayName": "Install ReSharper silently",
+        "executable": "powershell.exe",
+        "arguments": [
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          "{appDirectory}\\Script\\Invoke-ReSharperTask.ps1",
+          "-Action",
+          "Apply",
+          "-SourceUri",
+          "{source}",
+          "-Sha256",
+          "c1f330ff9d9faafcf46c13b646a4b8e09acfe982c7e9de4e9a5fae2ac7f15fc8"
+        ]
+      },
+      "post": [
+        {
+          "displayName": "Apply ReSharper global settings",
+          "executable": "powershell.exe",
+          "arguments": [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "{appDirectory}\\Script\\Apply-ReSharperSettings.ps1",
+            "-SettingsPath",
+            "{appDirectory}\\Settings\\CT.DotSettings"
+          ]
+        }
+      ]
     }
   }
 }

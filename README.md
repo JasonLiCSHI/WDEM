@@ -118,7 +118,7 @@ The Task below declares a minimum version, source, detection strategy, installat
 }
 ```
 
-`source` may identify a WinGet package, URL, file path, or enterprise source. `{source}` and `{preferredVersion}` are available as argument placeholders. Schema v1 stays the compact choice for the standard lifecycle.
+`source` may identify a WinGet package, URL, file path, or enterprise source. `{source}`, `{preferredVersion}`, and the installed runtime asset root `{appDirectory}` are available as argument placeholders. Schema v1 stays the compact choice for the standard lifecycle.
 
 Schema v2 adds declarative state composition when a Task needs branching, recovery, or a non-standard lifecycle:
 
@@ -211,7 +211,7 @@ WDEM ships as a self-contained Windows x64 installer. The target computer does n
 WDEM-<version>-win-x64-setup.exe
 ```
 
-The installer supports English and Simplified Chinese, optional desktop shortcuts, and adding `wdem.exe` to the user PATH. It also registers a standard uninstall entry in Windows Installed Apps. The default location is:
+The installer supports English and Simplified Chinese, optional desktop shortcuts, and adding `wdem.exe` to the user PATH. It installs the shared Task scripts and their versioned settings beside the GUI and CLI, and registers a standard uninstall entry in Windows Installed Apps. The default location is:
 
 ```text
 %LOCALAPPDATA%\Programs\WDEM
@@ -225,7 +225,7 @@ Install the .NET 10 SDK and Inno Setup 6, then run:
 pwsh .\build\Build-Installer.ps1 -Version 0.1.0
 ```
 
-Output is written to `artifacts/installer/` together with a SHA-256 checksum. The installer never bundles `profiles/`.
+Output is written to `artifacts/installer/` together with a SHA-256 checksum. `Script/` and `Settings/` are included as runtime assets; the installer never bundles `profiles/`.
 
 ## Security and recovery
 

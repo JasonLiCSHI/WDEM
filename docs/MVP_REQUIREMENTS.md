@@ -37,7 +37,7 @@ Visual Studio, ReSharper, Git, and the .NET SDK are ordinary Profile Tasks. Core
 - Allow Schema v2 Tasks to declare a bounded state graph with Entry, Residence, and Exit command Activities.
 - Project runtime state into stable Task state and capabilities consumed by both CLI and GUI.
 - Represent command arguments as arrays and launch executables directly without implicit shell concatenation.
-- Support `{source}` and `{preferredVersion}` command-argument placeholders.
+- Support `{source}`, `{preferredVersion}`, and `{appDirectory}` command placeholders.
 - Select Required Tasks automatically and prevent deselection.
 - Allow users to select Optional Tasks.
 - Add dependencies automatically, remove duplicates, detect cycles, and topologically sort the graph.

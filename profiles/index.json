@@ -2,9 +2,9 @@
   "profiles": [
     {
       "id": "csharp-developer",
-      "version": "1.0.0",
-      "displayName": "C# Developer",
-      "description": "A minimal C# developer workstation."
+      "version": "2.0.0",
+      "displayName": "Visual Studio Professional + ReSharper",
+      "description": "A focused Visual Studio Professional 2026 workstation with ReSharper and managed configuration."
     }
   ]
 }

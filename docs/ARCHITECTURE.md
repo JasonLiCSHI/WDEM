@@ -112,4 +112,4 @@ Task capability matrix:
 
 ## Release
 
-`build/Build-Installer.ps1` publishes WPF and CLI as self-contained Windows x64 single-file applications and uses Inno Setup to create a bilingual installer. The installer persists the selected language but does not copy any Profile. On first launch, WDEM creates user settings and connects to the remote Source.
+`build/Build-Installer.ps1` publishes WPF and CLI as self-contained Windows x64 single-file applications and uses Inno Setup to create a bilingual installer. It installs the repository's `Script/` and `Settings/` directories as shared runtime assets beside both executables, persists the selected language, and does not copy any Profile. On first launch, WDEM creates user settings and connects to the remote Source.
