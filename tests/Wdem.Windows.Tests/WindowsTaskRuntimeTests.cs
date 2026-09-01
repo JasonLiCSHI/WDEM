@@ -48,18 +48,18 @@ public sealed class WindowsTaskRuntimeTests
         "tool",
         "apply",
         new CommandDefinition(
-            @"{appDirectory}\Script\tool.exe",
-            [@"{appDirectory}\Settings\tool.json", "{source}", "{preferredVersion}"]),
+            @"{appDirectory}\script\tool.exe",
+            [@"{appDirectory}\settings\tool.json", "{source}", "{preferredVersion}"]),
         Source: "https://vendor.example/tool.exe",
         PreferredVersion: "1.2.3");
 
     await runtime.RunAsync(invocation, output: null, CancellationToken.None);
 
     Assert.NotNull(processRunner.Request);
-    Assert.Equal(@"C:\Program Files\WDEM\Script\tool.exe", processRunner.Request.FileName);
+    Assert.Equal(@"C:\Program Files\WDEM\script\tool.exe", processRunner.Request.FileName);
     Assert.Equal(
         [
-          @"C:\Program Files\WDEM\Settings\tool.json",
+          @"C:\Program Files\WDEM\settings\tool.json",
           "https://vendor.example/tool.exe",
           "1.2.3"
         ],

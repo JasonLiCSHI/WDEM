@@ -1,4 +1,4 @@
-# Settings
+# Runtime settings
 
 Store version-controlled configuration files used by WDEM Task Activities in this directory.
 

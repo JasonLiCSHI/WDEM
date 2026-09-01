@@ -241,7 +241,7 @@ Install the .NET 10 SDK and Inno Setup 6, then run:
 pwsh .\build\Build-Installer.ps1 -Version 0.1.0
 ```
 
-Output is written to `artifacts/installer/` together with a SHA-256 checksum. `Script/` and `Settings/` are included as runtime assets; the installer never bundles `profiles/`.
+Output is written to `artifacts/installer/` together with a SHA-256 checksum. `script/` and `settings/` are included as runtime assets; the installer never bundles `profiles/`.
 
 Maintainers publish a release by pushing a semantic version tag such as `v0.1.0`. GitHub Actions tests the solution, builds the release payload, and attaches the installer and checksum to the matching GitHub Release.
 

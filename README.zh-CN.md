@@ -241,7 +241,7 @@ WDEM-<version>-win-x64-setup.exe
 pwsh .\build\Build-Installer.ps1 -Version 0.1.0
 ```
 
-产物及其 SHA-256 校验文件会写入 `artifacts/installer/`。`Script/` 和 `Settings/` 会作为运行时资源打包；安装程序永远不会捆绑 `profiles/`。
+产物及其 SHA-256 校验文件会写入 `artifacts/installer/`。`script/` 和 `settings/` 会作为运行时资源打包；安装程序永远不会捆绑 `profiles/`。
 
 维护者可以通过推送 `v0.1.0` 这样的语义版本标签发布新版本。GitHub Actions 会测试解决方案、构建发布产物，并将安装程序和校验文件附加到对应 GitHub Release。
 

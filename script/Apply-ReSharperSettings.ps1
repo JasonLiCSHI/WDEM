@@ -10,7 +10,7 @@ $ErrorActionPreference = 'Stop'
 
 try {
     if ([string]::IsNullOrWhiteSpace($SettingsPath)) {
-        $SettingsPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'Settings\CT.DotSettings'
+        $SettingsPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'settings\CT.DotSettings'
     }
 
     if ([string]::IsNullOrWhiteSpace($TargetPath)) {

@@ -27,7 +27,7 @@ function Get-VsWherePath {
 
 function Get-Configuration {
     if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
-        $script:ConfigPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'Settings\.vsconfig'
+        $script:ConfigPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'settings\.vsconfig'
     }
 
     $resolvedPath = (Resolve-Path -LiteralPath $ConfigPath -ErrorAction Stop).Path
