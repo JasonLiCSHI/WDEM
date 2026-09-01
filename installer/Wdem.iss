@@ -19,6 +19,7 @@ AppPublisher=WDEM Contributors
 AppPublisherURL=https://github.com/JasonLiCSHI/WDEM
 AppSupportURL=https://github.com/JasonLiCSHI/WDEM/issues
 AppUpdatesURL=https://github.com/JasonLiCSHI/WDEM/releases
+SetupIconFile=..\src\Wdem.App\Assets\Wdem.ico
 DefaultDirName={localappdata}\Programs\WDEM
 DefaultGroupName=WDEM
 DisableProgramGroupPage=yes

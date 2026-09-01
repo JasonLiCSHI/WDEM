@@ -9,7 +9,7 @@ namespace Wdem.App.Tests;
 public sealed class TaskCardBindingTests
 {
   [Fact]
-  public void TaskCard_RendersReadOnlyDetailsWithoutBindingErrors()
+  public void MainWindow_RendersBrandedTaskCardWithoutBindingErrors()
   {
     Exception? renderingError = null;
     var thread = new Thread(() =>
@@ -25,6 +25,7 @@ public sealed class TaskCardBindingTests
         });
 
         var window = new MainWindow();
+        Assert.NotNull(window.Icon);
         window.Measure(new Size(1200, 800));
         window.Arrange(new Rect(0, 0, 1200, 800));
         var taskList = FindRequiredTaskList(window);
