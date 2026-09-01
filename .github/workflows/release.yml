@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish installer
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Resolve release version
+        shell: pwsh
+        run: |
+          $version = '${{ github.ref_name }}' -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Release tag must use v<major>.<minor>.<patch>; received '${{ github.ref_name }}'."
+          }
+          "WDEM_VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress --yes
+
+      - name: Test
+        shell: pwsh
+        run: dotnet test Wdem.slnx --configuration Release
+
+      - name: Build installer
+        shell: pwsh
+        run: ./build/Build-Installer.ps1 -Version $env:WDEM_VERSION
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WDEM-${{ env.WDEM_VERSION }}-win-x64
+          path: |
+            artifacts/installer/WDEM-${{ env.WDEM_VERSION }}-win-x64-setup.exe
+            artifacts/installer/WDEM-${{ env.WDEM_VERSION }}-win-x64-setup.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $installer = "artifacts/installer/WDEM-$env:WDEM_VERSION-win-x64-setup.exe"
+          $checksum = "$installer.sha256"
+          gh release view '${{ github.ref_name }}' --repo $env:GITHUB_REPOSITORY 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload '${{ github.ref_name }}' $installer $checksum --clobber --repo $env:GITHUB_REPOSITORY
+          }
+          else {
+            gh release create '${{ github.ref_name }}' $installer $checksum `
+              --verify-tag `
+              --title "WDEM $env:WDEM_VERSION" `
+              --generate-notes `
+              --repo $env:GITHUB_REPOSITORY
+          }
+          if ($LASTEXITCODE -ne 0) {
+            throw 'GitHub Release publication failed.'
+          }

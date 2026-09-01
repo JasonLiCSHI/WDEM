@@ -10,6 +10,7 @@ WDEM turns software, version, and configuration requirements into an observable,
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
 [![.NET](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![WPF](https://img.shields.io/badge/UI-WPF-0C54C2)](https://learn.microsoft.com/dotnet/desktop/wpf/)
+[![Release](https://img.shields.io/github/v/release/JasonLiCSHI/WDEM?display_name=tag&sort=semver)](https://github.com/JasonLiCSHI/WDEM/releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-2EA44F)](LICENSE)
 
 **Declarative Profiles · Task DAG · Workflow Pipeline · CLI + GUI**
@@ -207,6 +208,8 @@ Use `Ctrl+C` to cancel safely. User cancellation never triggers an automatic ret
 
 WDEM ships as a self-contained Windows x64 installer. The target computer does not need the .NET SDK or .NET Desktop Runtime.
 
+Download the installer and its SHA-256 checksum from the [latest GitHub Release](https://github.com/JasonLiCSHI/WDEM/releases/latest).
+
 ```text
 WDEM-<version>-win-x64-setup.exe
 ```
@@ -226,6 +229,8 @@ pwsh .\build\Build-Installer.ps1 -Version 0.1.0
 ```
 
 Output is written to `artifacts/installer/` together with a SHA-256 checksum. `Script/` and `Settings/` are included as runtime assets; the installer never bundles `profiles/`.
+
+Maintainers publish a release by pushing a semantic version tag such as `v0.1.0`. GitHub Actions tests the solution, builds the release payload, and attaches the installer and checksum to the matching GitHub Release.
 
 ## Security and recovery
 
