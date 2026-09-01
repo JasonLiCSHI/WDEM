@@ -1,29 +1,40 @@
 <div align="center">
 
+<p><strong>English</strong> · <a href="./README.zh-CN.md">简体中文</a></p>
+
 # WDEM
 
-### Declare your Windows development environment. Let the workflow do the rest.
+### One Profile is all you need.
 
-Describe an entire Windows development workstation with one Profile.<br>
-WDEM turns software, version, and configuration requirements into an observable, cancellable, and retryable Task DAG.
+Machines drift. Checklists rot. WDEM turns a Windows workstation into a declarative workflow.<br>
+Describe the destination once; let the Task DAG take care of the journey.
 
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
 [![.NET](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![WPF](https://img.shields.io/badge/UI-WPF-0C54C2)](https://learn.microsoft.com/dotnet/desktop/wpf/)
+[![CI](https://github.com/JasonLiCSHI/WDEM/actions/workflows/ci.yml/badge.svg)](https://github.com/JasonLiCSHI/WDEM/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/JasonLiCSHI/WDEM?display_name=tag&sort=semver)](https://github.com/JasonLiCSHI/WDEM/releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-2EA44F)](LICENSE)
 
-**Declarative Profiles · Task DAG · Workflow Pipeline · CLI + GUI**
+**Profile says what · DAG decides when · Workflow knows how · Runtime executes safely**
+
+<p>
+  <a href="https://github.com/JasonLiCSHI/WDEM/releases/latest"><strong>Download WDEM</strong></a>
+  · <a href="#a-profile-is-the-product-definition">Meet the Profile</a>
+  · <a href="./docs/ARCHITECTURE.md">Read the architecture</a>
+</p>
 
 </div>
 
 ---
 
-## Why WDEM?
+> Installers are imperative. Environments should be declarative.
+
+## Stop babysitting installers
 
 Setting up a development environment should not depend on an installation checklist that becomes obsolete, nor should every product be hard-coded into the manager.
 
-WDEM treats Visual Studio, ReSharper, Git, the .NET SDK, and every future tool as ordinary Tasks. A Profile declares what the workstation needs, Core computes dependencies and execution order, and the Windows Runtime executes each command safely. Adding software, changing a version, or introducing post-install configuration usually requires only a Profile change.
+WDEM treats Visual Studio, ReSharper, Git, the .NET SDK, and every future tool as ordinary Tasks—not special cases. A Profile declares what the workstation needs, Core computes dependencies and execution order, and the Windows Runtime executes each command safely. Adding software, changing a version, or introducing post-install configuration usually requires only a Profile change.
 
 | Traditional installation scripts | WDEM |
 |---|---|
@@ -34,6 +45,8 @@ WDEM treats Visual Studio, ReSharper, Git, the .NET SDK, and every future tool a
 | GUI and CLI duplicate business rules | Both clients share the same Core, state, and reports |
 
 ## How it works
+
+The short version: **Profile → Tasks → DAG → Workflow → a workstation you can explain.**
 
 ```mermaid
 flowchart LR
