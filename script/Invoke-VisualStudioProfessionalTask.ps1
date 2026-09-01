@@ -37,9 +37,28 @@ function Get-Configuration {
         throw "Visual Studio configuration '$resolvedPath' does not declare any components."
     }
 
+    $extensions = @()
+    $extensionsProperty = $configuration.PSObject.Properties['extensions']
+    if ($null -ne $extensionsProperty) {
+        $extensions = @($extensionsProperty.Value | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+
+    foreach ($extension in $extensions) {
+        $extensionUri = $null
+        if (-not [Uri]::TryCreate(
+                [string] $extension,
+                [UriKind]::Absolute,
+                [ref] $extensionUri) -or
+            $extensionUri.Scheme -ne 'https' -or
+            $extensionUri.Host -ne 'marketplace.visualstudio.com') {
+            throw "Visual Studio extension must use the official Marketplace HTTPS endpoint: '$extension'."
+        }
+    }
+
     return [pscustomobject]@{
         Path = $resolvedPath
         Components = $components
+        Extensions = $extensions
     }
 }
 
@@ -112,6 +131,11 @@ try {
                     '--config'
                     ('"{0}"' -f $configuration.Path)
                 )
+                if ($configuration.Extensions.Count -gt 0) {
+                    # Required by Visual Studio Installer when a .vsconfig imports
+                    # extensions programmatically in quiet or passive mode.
+                    $installerArguments += '--allowUnsignedExtensions'
+                }
                 $installerProcess = Start-Process `
                     -FilePath $bootstrapperPath `
                     -ArgumentList $installerArguments `
