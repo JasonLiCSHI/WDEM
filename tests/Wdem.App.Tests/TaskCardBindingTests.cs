@@ -9,6 +9,17 @@ namespace Wdem.App.Tests;
 public sealed class TaskCardBindingTests
 {
   [Fact]
+  public void TaskRow_ListsPreAndPostActivitiesByDisplayName()
+  {
+    var row = new TaskRow(CreateTask());
+
+    var pre = Assert.Single(row.PreActivities);
+    Assert.Equal("Prepare the test environment", pre.DisplayName);
+    var post = Assert.Single(row.PostActivities);
+    Assert.Equal("Verify the test environment", post.DisplayName);
+  }
+
+  [Fact]
   public void MainWindow_RendersBrandedTaskCardWithoutBindingErrors()
   {
     Exception? renderingError = null;
@@ -80,8 +91,20 @@ public sealed class TaskCardBindingTests
           PreferredVersion: "1.0.0",
           Source: "https://example.test/tool.exe",
           Detect: new CommandDefinition("tool.exe", ["--version"]),
-          Pre: [],
+          Pre:
+          [
+            new CommandDefinition(
+                "prepare.exe",
+                ["--quiet"],
+                DisplayName: "Prepare the test environment")
+          ],
           Apply: new CommandDefinition("installer.exe", ["--quiet"]),
-          Post: [],
+          Post:
+          [
+            new CommandDefinition(
+                "verify.exe",
+                ["--installed"],
+                DisplayName: "Verify the test environment")
+          ],
           Description: "Exercises the task card bindings.");
 }

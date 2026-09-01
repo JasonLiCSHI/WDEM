@@ -268,6 +268,16 @@ https://raw.githubusercontent.com/JasonLiCSHI/WDEM/main/profiles/
 
 The repository [`profiles/`](profiles/) directory is the content published by that remote Source; it is not packaged in the installer. Before a release, `index.json` and its referenced Profiles must be deployed to the target branch. If the remote content has not been published and no valid cache exists, WDEM will not execute any Profile command.
 
+### Replace the Profile Source
+
+WDEM intentionally treats the Source as a release decision, not a user setting. To publish a build backed by another HTTPS host or GitHub repository:
+
+1. Publish a directory containing `index.json` and every `<profile-id>.json` referenced by that index. Each document must be reachable with a direct HTTPS `GET` request.
+2. In [`WdemUserSettingsStore.cs`](src/Wdem.Windows/Configuration/WdemUserSettingsStore.cs), change `OfficialSourceUrl` to that directory URL. Change `OfficialSourceId` to a new stable identifier when changing the source authority, and update the `WDEM Official` display name if appropriate.
+3. Confirm the URL resolves as `<base-url>/index.json`, then run `dotnet test Wdem.slnx` and `dotnet build Wdem.slnx` before publishing a new installer.
+
+The base URL may include a Git branch, tag, or release path and may be written with or without a trailing `/`; WDEM normalizes it. Prefer a protected branch for continuously delivered Profiles or an immutable tag for release-pinned Profiles. Cache directories are isolated by Source ID. Trust is bound to both the Source ID and the Profile content hash, so Profiles from a new Source—or modified command-bearing content—must be explicitly trusted before Detect or Apply can run commands.
+
 ```text
 %LOCALAPPDATA%\Wdem\cache\profiles    last-known-good cache
 %LOCALAPPDATA%\Wdem\settings.json     content-hash trust records

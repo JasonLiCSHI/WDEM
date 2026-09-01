@@ -268,6 +268,16 @@ https://raw.githubusercontent.com/JasonLiCSHI/WDEM/main/profiles/
 
 仓库中的 [`profiles/`](profiles/) 是该远程 Source 发布的内容，不会打进安装包。发布前必须把 `index.json` 及其引用的 Profiles 部署到目标分支。如果远程内容尚未发布并且不存在有效缓存，WDEM 不会执行任何 Profile 命令。
 
+### 替换 Profile Source
+
+WDEM 刻意将 Source 作为发版决策，而不是用户设置。若要发布使用其他 HTTPS 主机或 GitHub 仓库的版本：
+
+1. 发布一个包含 `index.json` 以及该索引引用的所有 `<profile-id>.json` 的目录；每个文件都必须能够通过直接的 HTTPS `GET` 请求访问。
+2. 在 [`WdemUserSettingsStore.cs`](src/Wdem.Windows/Configuration/WdemUserSettingsStore.cs) 中，把 `OfficialSourceUrl` 改为该目录的 URL。切换 Source 的管理方时，应将 `OfficialSourceId` 改为一个新的、稳定的标识符；如有需要，也应更新 `WDEM Official` 显示名称。
+3. 确认 `<base-url>/index.json` 可以访问，然后在发布新安装包前运行 `dotnet test Wdem.slnx` 和 `dotnet build Wdem.slnx`。
+
+Base URL 可以指向 Git 分支、Tag 或 Release 路径，末尾是否带 `/` 均可，WDEM 会自动规范化。持续交付 Profile 时建议使用受保护分支；需要让 Profile 与软件版本严格绑定时建议使用不可变 Tag。缓存按 Source ID 隔离；信任同时绑定 Source ID 与 Profile 内容哈希，因此来自新 Source 的 Profile 或命令内容发生变化的 Profile，都必须先由用户明确授权，Detect 或 Apply 才能执行命令。
+
 ```text
 %LOCALAPPDATA%\Wdem\cache\profiles    last-known-good 缓存
 %LOCALAPPDATA%\Wdem\settings.json     内容哈希信任记录

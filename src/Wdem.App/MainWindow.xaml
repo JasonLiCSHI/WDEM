@@ -262,6 +262,36 @@
         </DataTrigger>
       </Style.Triggers>
     </Style>
+
+    <DataTemplate x:Key="TaskActivityRowTemplate">
+      <Border Background="#F3F7FB" BorderBrush="#D9E7F4" BorderThickness="1"
+              CornerRadius="6" Padding="10,5" Margin="0,2">
+        <Grid MinHeight="22">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="*" />
+          </Grid.ColumnDefinitions>
+          <Border Background="#E4F0FA" CornerRadius="8" Padding="7,2"
+                  VerticalAlignment="Center">
+            <TextBlock Text="{Binding PhaseLabel}" Foreground="{StaticResource Accent}"
+                       FontSize="10" FontWeight="Bold" />
+          </Border>
+          <TextBlock Grid.Column="1" Text="{Binding DisplayName}" Foreground="{StaticResource Ink}"
+                     FontSize="11" Margin="9,0,0,0" VerticalAlignment="Center"
+                     TextWrapping="Wrap" />
+        </Grid>
+      </Border>
+    </DataTemplate>
+
+    <Style x:Key="TaskActivityList" TargetType="ItemsControl">
+      <Setter Property="ItemTemplate" Value="{StaticResource TaskActivityRowTemplate}" />
+      <Setter Property="Margin" Value="0,0,0,7" />
+      <Style.Triggers>
+        <Trigger Property="HasItems" Value="False">
+          <Setter Property="Visibility" Value="Collapsed" />
+        </Trigger>
+      </Style.Triggers>
+    </Style>
   </Window.Resources>
 
   <Grid>
@@ -307,9 +337,16 @@
         <TextBlock Grid.Row="0" Grid.Column="0" Text="{DynamicResource ProfileLabel}"
                    Foreground="{StaticResource Muted}" FontWeight="SemiBold" FontSize="11" />
         <ComboBox x:Name="ProfileComboBox" Grid.Row="1" Grid.Column="0" Margin="0,5,16,0"
-                  ItemsSource="{Binding Profiles}" DisplayMemberPath="DisplayName"
+                  Height="Auto" MinHeight="35"
+                  ItemsSource="{Binding Profiles}"
                   SelectionChanged="Profile_SelectionChanged"
-                  IsEnabled="{Binding Actions.CanChooseProfile}" />
+                  IsEnabled="{Binding Actions.CanChooseProfile}">
+          <ComboBox.ItemTemplate>
+            <DataTemplate>
+              <TextBlock Text="{Binding DisplayName}" TextWrapping="Wrap" />
+            </DataTemplate>
+          </ComboBox.ItemTemplate>
+        </ComboBox>
         <Border Grid.Row="1" Grid.Column="1" Style="{StaticResource ProfileStatusShell}"
                 Height="35" VerticalAlignment="Center" Margin="4,5,16,0" Padding="10,5">
           <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -359,6 +396,9 @@
                       <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                       </Grid.RowDefinitions>
                       <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="2*" />
@@ -367,7 +407,10 @@
                         <ColumnDefinition Width="125" />
                         <ColumnDefinition Width="Auto" />
                       </Grid.ColumnDefinitions>
-                      <StackPanel Grid.Column="0">
+                      <ItemsControl Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="5"
+                                    ItemsSource="{Binding PreActivities}"
+                                    Style="{StaticResource TaskActivityList}" />
+                      <StackPanel Grid.Row="1" Grid.Column="0">
                         <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource Ink}"
                                    FontWeight="SemiBold" />
                         <TextBlock Text="{Binding Id}" Foreground="{StaticResource Muted}"
@@ -377,24 +420,21 @@
                         <TextBlock Text="{Binding PipelineSummary}" Foreground="#0F6CBD"
                                    FontSize="10" Margin="0,4,0,0" />
                       </StackPanel>
-                      <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                        <TextBlock Foreground="{StaticResource Muted}" FontSize="11">
+                      <StackPanel Grid.Row="1" Grid.Column="1" VerticalAlignment="Center">
+                        <TextBlock Foreground="{StaticResource Muted}" FontSize="11" TextWrapping="Wrap">
                           <Run Text="{DynamicResource DependenciesLabel}" /><Run Text=": " /><Run Text="{Binding Dependencies, Mode=OneWay}" />
                         </TextBlock>
-                        <TextBlock Foreground="{StaticResource Muted}" FontSize="11" Margin="0,3,0,0">
-                          <Run Text="{DynamicResource SourceFieldLabel}" /><Run Text=": " /><Run Text="{Binding Source, Mode=OneWay}" />
-                        </TextBlock>
                       </StackPanel>
-                      <Border Grid.Column="2" Style="{StaticResource TaskStatusPill}">
+                      <Border Grid.Row="1" Grid.Column="2" Style="{StaticResource TaskStatusPill}">
                         <StackPanel Orientation="Horizontal">
                           <TextBlock Text="{Binding StatusGlyph}" Style="{StaticResource TaskStatusText}"
                                      FontWeight="Bold" Margin="0,0,5,0" />
                           <TextBlock Text="{Binding Status}" Style="{StaticResource TaskStatusText}" />
                         </StackPanel>
                       </Border>
-                      <TextBlock Grid.Column="3" Text="{Binding DetectedVersionDisplay}"
+                      <TextBlock Grid.Row="1" Grid.Column="3" Text="{Binding DetectedVersionDisplay}"
                                  Style="{StaticResource UpgradeVersionText}" />
-                      <Grid Grid.Column="3" Margin="0,0,16,0" VerticalAlignment="Center">
+                      <Grid Grid.Row="1" Grid.Column="3" Margin="0,0,16,0" VerticalAlignment="Center">
                         <Grid.Style>
                           <Style TargetType="Grid">
                             <Setter Property="Visibility" Value="Collapsed" />
@@ -412,7 +452,7 @@
                           <Run Text="{Binding Stage, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding Percent, Mode=OneWay}" /><Run Text="%" />
                         </TextBlock>
                       </Grid>
-                      <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center">
+                      <StackPanel Grid.Row="1" Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center">
                         <Button Content="{DynamicResource StartTaskButton}" Tag="{Binding}"
                                 Click="StartTask_Click" Style="{StaticResource SmallButton}" Margin="0,0,6,0"
                                 IsEnabled="{Binding CanStart}" />
@@ -420,7 +460,20 @@
                                 Click="CancelTask_Click" Style="{StaticResource SmallDangerButton}"
                                 IsEnabled="{Binding CanCancel}" />
                       </StackPanel>
-                      <Expander Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="5" Margin="0,9,0,0"
+                      <Grid Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="5" Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                          <ColumnDefinition Width="Auto" />
+                          <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="{DynamicResource SourceFieldLabel}" Foreground="{StaticResource Muted}"
+                                   FontSize="11" FontWeight="SemiBold" Margin="0,0,5,0" />
+                        <TextBlock Grid.Column="1" Text="{Binding Source}" Foreground="{StaticResource Muted}"
+                                   FontSize="11" TextWrapping="Wrap" />
+                      </Grid>
+                      <ItemsControl Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="5"
+                                    ItemsSource="{Binding PostActivities}"
+                                    Style="{StaticResource TaskActivityList}" Margin="0,7,0,0" />
+                      <Expander Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="5" Margin="0,9,0,0"
                                 Header="{DynamicResource TaskDetailsHeader}">
                         <Border Background="#FFFFFF" BorderBrush="#DDE2E6" BorderThickness="1"
                                 CornerRadius="7" Padding="12,9" Margin="0,5,0,0">
@@ -502,6 +555,9 @@
                       <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                       </Grid.RowDefinitions>
                       <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="34" />
@@ -511,10 +567,13 @@
                         <ColumnDefinition Width="125" />
                         <ColumnDefinition Width="Auto" />
                       </Grid.ColumnDefinitions>
-                      <CheckBox Grid.Column="0" IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                      <ItemsControl Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="5"
+                                    ItemsSource="{Binding PreActivities}"
+                                    Style="{StaticResource TaskActivityList}" />
+                      <CheckBox Grid.Row="1" Grid.Column="0" IsChecked="{Binding IsSelected, Mode=TwoWay}"
                                 VerticalAlignment="Center" HorizontalAlignment="Center"
                                 IsEnabled="{Binding IsSelectionEnabled}" />
-                      <StackPanel Grid.Column="1">
+                      <StackPanel Grid.Row="1" Grid.Column="1">
                         <TextBlock Text="{Binding DisplayName}" Foreground="{StaticResource Ink}"
                                    FontWeight="SemiBold" />
                         <TextBlock Text="{Binding Id}" Foreground="{StaticResource Muted}"
@@ -524,24 +583,21 @@
                         <TextBlock Text="{Binding PipelineSummary}" Foreground="#0F6CBD"
                                    FontSize="10" Margin="0,4,0,0" />
                       </StackPanel>
-                      <StackPanel Grid.Column="2" VerticalAlignment="Center">
-                        <TextBlock Foreground="{StaticResource Muted}" FontSize="11">
+                      <StackPanel Grid.Row="1" Grid.Column="2" VerticalAlignment="Center">
+                        <TextBlock Foreground="{StaticResource Muted}" FontSize="11" TextWrapping="Wrap">
                           <Run Text="{DynamicResource DependenciesLabel}" /><Run Text=": " /><Run Text="{Binding Dependencies, Mode=OneWay}" />
                         </TextBlock>
-                        <TextBlock Foreground="{StaticResource Muted}" FontSize="11" Margin="0,3,0,0">
-                          <Run Text="{DynamicResource SourceFieldLabel}" /><Run Text=": " /><Run Text="{Binding Source, Mode=OneWay}" />
-                        </TextBlock>
                       </StackPanel>
-                      <Border Grid.Column="3" Style="{StaticResource TaskStatusPill}">
+                      <Border Grid.Row="1" Grid.Column="3" Style="{StaticResource TaskStatusPill}">
                         <StackPanel Orientation="Horizontal">
                           <TextBlock Text="{Binding StatusGlyph}" Style="{StaticResource TaskStatusText}"
                                      FontWeight="Bold" Margin="0,0,5,0" />
                           <TextBlock Text="{Binding Status}" Style="{StaticResource TaskStatusText}" />
                         </StackPanel>
                       </Border>
-                      <TextBlock Grid.Column="4" Text="{Binding DetectedVersionDisplay}"
+                      <TextBlock Grid.Row="1" Grid.Column="4" Text="{Binding DetectedVersionDisplay}"
                                  Style="{StaticResource UpgradeVersionText}" />
-                      <Grid Grid.Column="4" Margin="0,0,16,0" VerticalAlignment="Center">
+                      <Grid Grid.Row="1" Grid.Column="4" Margin="0,0,16,0" VerticalAlignment="Center">
                         <Grid.Style>
                           <Style TargetType="Grid">
                             <Setter Property="Visibility" Value="Collapsed" />
@@ -559,7 +615,7 @@
                           <Run Text="{Binding Stage, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding Percent, Mode=OneWay}" /><Run Text="%" />
                         </TextBlock>
                       </Grid>
-                      <StackPanel Grid.Column="5" Orientation="Horizontal" VerticalAlignment="Center">
+                      <StackPanel Grid.Row="1" Grid.Column="5" Orientation="Horizontal" VerticalAlignment="Center">
                         <Button Content="{DynamicResource StartTaskButton}" Tag="{Binding}"
                                 Click="StartTask_Click" Style="{StaticResource SmallButton}" Margin="0,0,6,0"
                                 IsEnabled="{Binding CanStart}" />
@@ -567,7 +623,20 @@
                                 Click="CancelTask_Click" Style="{StaticResource SmallDangerButton}"
                                 IsEnabled="{Binding CanCancel}" />
                       </StackPanel>
-                      <Expander Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="5" Margin="0,9,0,0"
+                      <Grid Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="5" Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                          <ColumnDefinition Width="Auto" />
+                          <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="{DynamicResource SourceFieldLabel}" Foreground="{StaticResource Muted}"
+                                   FontSize="11" FontWeight="SemiBold" Margin="0,0,5,0" />
+                        <TextBlock Grid.Column="1" Text="{Binding Source}" Foreground="{StaticResource Muted}"
+                                   FontSize="11" TextWrapping="Wrap" />
+                      </Grid>
+                      <ItemsControl Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="5"
+                                    ItemsSource="{Binding PostActivities}"
+                                    Style="{StaticResource TaskActivityList}" Margin="0,7,0,0" />
+                      <Expander Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="5" Margin="0,9,0,0"
                                 Header="{DynamicResource TaskDetailsHeader}">
                         <Border Background="#FFFFFF" BorderBrush="#DDE2E6" BorderThickness="1"
                                 CornerRadius="7" Padding="12,9" Margin="0,5,0,0">

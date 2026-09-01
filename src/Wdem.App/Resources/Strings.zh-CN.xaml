@@ -19,8 +19,12 @@
   <sys:String x:Key="DetectedVersionLabel">检测版本</sys:String>
   <sys:String x:Key="DetectLabel">Detect 检测</sys:String>
   <sys:String x:Key="PreLabel">Pre 前置步骤</sys:String>
+  <sys:String x:Key="PreActivityBadge">前置</sys:String>
+  <sys:String x:Key="PreActivityFallback">前置步骤 {0}</sys:String>
   <sys:String x:Key="ApplyLabel">Apply 执行</sys:String>
   <sys:String x:Key="PostLabel">Post 后置步骤</sys:String>
+  <sys:String x:Key="PostActivityBadge">后置</sys:String>
+  <sys:String x:Key="PostActivityFallback">后置步骤 {0}</sys:String>
   <sys:String x:Key="VerifyLabel">Verify 验证</sys:String>
   <sys:String x:Key="NoSteps">无</sys:String>
   <sys:String x:Key="NoCommand">未声明</sys:String>

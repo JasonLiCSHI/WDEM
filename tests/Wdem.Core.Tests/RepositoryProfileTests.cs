@@ -14,6 +14,7 @@ public sealed class RepositoryProfileTests
     var profile = ProfileParser.Parse(File.ReadAllText(profilePath));
 
     Assert.Equal("2.0.0", profile.Version);
+    Assert.Equal("Csharp developer", profile.DisplayName);
     Assert.Equal(2, profile.Tasks.Count);
 
     var visualStudio = profile.Tasks["visual-studio-professional"];
@@ -38,6 +39,7 @@ public sealed class RepositoryProfileTests
     var entry = Assert.Single(index.RootElement.GetProperty("profiles").EnumerateArray());
     Assert.Equal(profile.Id, entry.GetProperty("id").GetString());
     Assert.Equal(profile.Version, entry.GetProperty("version").GetString());
+    Assert.Equal(profile.DisplayName, entry.GetProperty("displayName").GetString());
   }
 
   private static string FindRepositoryRoot()
