@@ -378,10 +378,10 @@
                       </StackPanel>
                       <StackPanel Grid.Column="1" VerticalAlignment="Center">
                         <TextBlock Foreground="{StaticResource Muted}" FontSize="11">
-                          <Run Text="{DynamicResource DependenciesLabel}" /><Run Text=": " /><Run Text="{Binding Dependencies}" />
+                          <Run Text="{DynamicResource DependenciesLabel}" /><Run Text=": " /><Run Text="{Binding Dependencies, Mode=OneWay}" />
                         </TextBlock>
                         <TextBlock Foreground="{StaticResource Muted}" FontSize="11" Margin="0,3,0,0">
-                          <Run Text="{DynamicResource SourceFieldLabel}" /><Run Text=": " /><Run Text="{Binding Source}" />
+                          <Run Text="{DynamicResource SourceFieldLabel}" /><Run Text=": " /><Run Text="{Binding Source, Mode=OneWay}" />
                         </TextBlock>
                       </StackPanel>
                       <Border Grid.Column="2" Style="{StaticResource TaskStatusPill}">
@@ -408,7 +408,7 @@
                         <ProgressBar Value="{Binding Percent}" Maximum="100" />
                         <TextBlock Grid.Row="1" Foreground="{StaticResource Muted}"
                                    FontSize="10" HorizontalAlignment="Right" Margin="0,3,0,0">
-                          <Run Text="{Binding Stage}" /><Run Text=" · " /><Run Text="{Binding Percent}" /><Run Text="%" />
+                          <Run Text="{Binding Stage, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding Percent, Mode=OneWay}" /><Run Text="%" />
                         </TextBlock>
                       </Grid>
                       <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center">
@@ -425,8 +425,8 @@
                                 CornerRadius="7" Padding="12,9" Margin="0,5,0,0">
                           <StackPanel>
                             <WrapPanel Margin="0,0,0,7">
-                              <TextBlock Margin="0,0,22,3"><Run Text="{DynamicResource VersionConstraintLabel}" /><Run Text=": " /><Run Text="{Binding VersionConstraint}" /></TextBlock>
-                              <TextBlock Margin="0,0,22,3"><Run Text="{DynamicResource PreferredVersionLabel}" /><Run Text=": " /><Run Text="{Binding PreferredVersion}" /></TextBlock>
+                              <TextBlock Margin="0,0,22,3"><Run Text="{DynamicResource VersionConstraintLabel}" /><Run Text=": " /><Run Text="{Binding VersionConstraint, Mode=OneWay}" /></TextBlock>
+                              <TextBlock Margin="0,0,22,3"><Run Text="{DynamicResource PreferredVersionLabel}" /><Run Text=": " /><Run Text="{Binding PreferredVersion, Mode=OneWay}" /></TextBlock>
                               <StackPanel Orientation="Horizontal" Margin="0,0,22,3">
                                 <TextBlock Text="{DynamicResource DetectedVersionLabel}" />
                                 <TextBlock Text=": " />
@@ -443,11 +443,11 @@
                                   </Style.Triggers>
                                 </Style>
                               </StackPanel.Style>
-                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource DetectLabel}" /><Run Text=": " /><Run Text="{Binding DetectDetails}" /></TextBlock>
-                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PreLabel}" /><Run Text=": " /><Run Text="{Binding PreDetails}" /></TextBlock>
-                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource ApplyLabel}" /><Run Text=": " /><Run Text="{Binding ApplyDetails}" /></TextBlock>
-                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PostLabel}" /><Run Text=": " /><Run Text="{Binding PostDetails}" /></TextBlock>
-                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource VerifyLabel}" /><Run Text=": " /><Run Text="{Binding VerifyDetails}" /></TextBlock>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource DetectLabel}" /><Run Text=": " /><Run Text="{Binding DetectDetails, Mode=OneWay}" /></TextBlock>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PreLabel}" /><Run Text=": " /><Run Text="{Binding PreDetails, Mode=OneWay}" /></TextBlock>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource ApplyLabel}" /><Run Text=": " /><Run Text="{Binding ApplyDetails, Mode=OneWay}" /></TextBlock>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PostLabel}" /><Run Text=": " /><Run Text="{Binding PostDetails, Mode=OneWay}" /></TextBlock>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource VerifyLabel}" /><Run Text=": " /><Run Text="{Binding VerifyDetails, Mode=OneWay}" /></TextBlock>
                             </StackPanel>
                             <TextBlock TextWrapping="Wrap" Margin="0,2">
                               <TextBlock.Style>
@@ -460,9 +460,9 @@
                                   </Style.Triggers>
                                 </Style>
                               </TextBlock.Style>
-                              <Run FontWeight="SemiBold" Text="{DynamicResource WorkflowLabel}" /><Run Text=":&#x0a;" /><Run Text="{Binding WorkflowDetails}" />
+                              <Run FontWeight="SemiBold" Text="{DynamicResource WorkflowLabel}" /><Run Text=":&#x0a;" /><Run Text="{Binding WorkflowDetails, Mode=OneWay}" />
                             </TextBlock>
-                            <TextBlock TextWrapping="Wrap" Margin="0,7,0,2" Foreground="{StaticResource Muted}"><Run FontWeight="SemiBold" Text="{DynamicResource LastResultLabel}" /><Run Text=": " /><Run Text="{Binding LastResult}" /></TextBlock>
+                            <TextBlock TextWrapping="Wrap" Margin="0,7,0,2" Foreground="{StaticResource Muted}"><Run FontWeight="SemiBold" Text="{DynamicResource LastResultLabel}" /><Run Text=": " /><Run Text="{Binding LastResult, Mode=OneWay}" /></TextBlock>
                           </StackPanel>
                         </Border>
                       </Expander>
@@ -525,10 +525,10 @@
                       </StackPanel>
                       <StackPanel Grid.Column="2" VerticalAlignment="Center">
                         <TextBlock Foreground="{StaticResource Muted}" FontSize="11">
-                          <Run Text="{DynamicResource DependenciesLabel}" /><Run Text=": " /><Run Text="{Binding Dependencies}" />
+                          <Run Text="{DynamicResource DependenciesLabel}" /><Run Text=": " /><Run Text="{Binding Dependencies, Mode=OneWay}" />
                         </TextBlock>
                         <TextBlock Foreground="{StaticResource Muted}" FontSize="11" Margin="0,3,0,0">
-                          <Run Text="{DynamicResource SourceFieldLabel}" /><Run Text=": " /><Run Text="{Binding Source}" />
+                          <Run Text="{DynamicResource SourceFieldLabel}" /><Run Text=": " /><Run Text="{Binding Source, Mode=OneWay}" />
                         </TextBlock>
                       </StackPanel>
                       <Border Grid.Column="3" Style="{StaticResource TaskStatusPill}">
@@ -555,7 +555,7 @@
                         <ProgressBar Value="{Binding Percent}" Maximum="100" />
                         <TextBlock Grid.Row="1" Foreground="{StaticResource Muted}"
                                    FontSize="10" HorizontalAlignment="Right" Margin="0,3,0,0">
-                          <Run Text="{Binding Stage}" /><Run Text=" · " /><Run Text="{Binding Percent}" /><Run Text="%" />
+                          <Run Text="{Binding Stage, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding Percent, Mode=OneWay}" /><Run Text="%" />
                         </TextBlock>
                       </Grid>
                       <StackPanel Grid.Column="5" Orientation="Horizontal" VerticalAlignment="Center">
@@ -572,8 +572,8 @@
                                 CornerRadius="7" Padding="12,9" Margin="0,5,0,0">
                           <StackPanel>
                             <WrapPanel Margin="0,0,0,7">
-                              <TextBlock Margin="0,0,22,3"><Run Text="{DynamicResource VersionConstraintLabel}" /><Run Text=": " /><Run Text="{Binding VersionConstraint}" /></TextBlock>
-                              <TextBlock Margin="0,0,22,3"><Run Text="{DynamicResource PreferredVersionLabel}" /><Run Text=": " /><Run Text="{Binding PreferredVersion}" /></TextBlock>
+                              <TextBlock Margin="0,0,22,3"><Run Text="{DynamicResource VersionConstraintLabel}" /><Run Text=": " /><Run Text="{Binding VersionConstraint, Mode=OneWay}" /></TextBlock>
+                              <TextBlock Margin="0,0,22,3"><Run Text="{DynamicResource PreferredVersionLabel}" /><Run Text=": " /><Run Text="{Binding PreferredVersion, Mode=OneWay}" /></TextBlock>
                               <StackPanel Orientation="Horizontal" Margin="0,0,22,3">
                                 <TextBlock Text="{DynamicResource DetectedVersionLabel}" />
                                 <TextBlock Text=": " />
@@ -590,11 +590,11 @@
                                   </Style.Triggers>
                                 </Style>
                               </StackPanel.Style>
-                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource DetectLabel}" /><Run Text=": " /><Run Text="{Binding DetectDetails}" /></TextBlock>
-                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PreLabel}" /><Run Text=": " /><Run Text="{Binding PreDetails}" /></TextBlock>
-                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource ApplyLabel}" /><Run Text=": " /><Run Text="{Binding ApplyDetails}" /></TextBlock>
-                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PostLabel}" /><Run Text=": " /><Run Text="{Binding PostDetails}" /></TextBlock>
-                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource VerifyLabel}" /><Run Text=": " /><Run Text="{Binding VerifyDetails}" /></TextBlock>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource DetectLabel}" /><Run Text=": " /><Run Text="{Binding DetectDetails, Mode=OneWay}" /></TextBlock>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PreLabel}" /><Run Text=": " /><Run Text="{Binding PreDetails, Mode=OneWay}" /></TextBlock>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource ApplyLabel}" /><Run Text=": " /><Run Text="{Binding ApplyDetails, Mode=OneWay}" /></TextBlock>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource PostLabel}" /><Run Text=": " /><Run Text="{Binding PostDetails, Mode=OneWay}" /></TextBlock>
+                              <TextBlock TextWrapping="Wrap" Margin="0,2"><Run FontWeight="SemiBold" Text="{DynamicResource VerifyLabel}" /><Run Text=": " /><Run Text="{Binding VerifyDetails, Mode=OneWay}" /></TextBlock>
                             </StackPanel>
                             <TextBlock TextWrapping="Wrap" Margin="0,2">
                               <TextBlock.Style>
@@ -607,9 +607,9 @@
                                   </Style.Triggers>
                                 </Style>
                               </TextBlock.Style>
-                              <Run FontWeight="SemiBold" Text="{DynamicResource WorkflowLabel}" /><Run Text=":&#x0a;" /><Run Text="{Binding WorkflowDetails}" />
+                              <Run FontWeight="SemiBold" Text="{DynamicResource WorkflowLabel}" /><Run Text=":&#x0a;" /><Run Text="{Binding WorkflowDetails, Mode=OneWay}" />
                             </TextBlock>
-                            <TextBlock TextWrapping="Wrap" Margin="0,7,0,2" Foreground="{StaticResource Muted}"><Run FontWeight="SemiBold" Text="{DynamicResource LastResultLabel}" /><Run Text=": " /><Run Text="{Binding LastResult}" /></TextBlock>
+                            <TextBlock TextWrapping="Wrap" Margin="0,7,0,2" Foreground="{StaticResource Muted}"><Run FontWeight="SemiBold" Text="{DynamicResource LastResultLabel}" /><Run Text=": " /><Run Text="{Binding LastResult, Mode=OneWay}" /></TextBlock>
                           </StackPanel>
                         </Border>
                       </Expander>
