@@ -17,6 +17,9 @@ public sealed class DefaultProcessRunnerTests
         "script",
         "Invoke-VisualStudioProfessionalTask.ps1");
     var configPath = Path.Combine(repositoryRoot, "settings", ".vsconfig");
+    var capturedArgumentsPath = Path.Combine(
+        Path.GetTempPath(),
+        $"WDEM-fake-vs-arguments-{Guid.NewGuid():N}.txt");
     var payload = $$"""
         function Get-Process {
             param([string] $Name, $ErrorAction)
@@ -25,21 +28,37 @@ public sealed class DefaultProcessRunnerTests
         }
         function Invoke-WebRequest {
             param($Uri, $OutFile, $MaximumRedirection)
-            Add-Type -TypeDefinition 'using System; public static class FakeInstaller { [STAThread] public static void Main(string[] args) { Environment.Exit(23); } }' -OutputAssembly $OutFile -OutputType WindowsApplication
+            Add-Type -TypeDefinition 'using System; using System.IO; public static class FakeInstaller { [STAThread] public static void Main(string[] args) { File.WriteAllLines(Environment.GetEnvironmentVariable("WDEM_FAKE_ARGS_PATH"), args); Environment.Exit(23); } }' -OutputAssembly $OutFile -OutputType WindowsApplication
         }
+        $env:WDEM_FAKE_ARGS_PATH = '{{EscapePowerShellLiteral(capturedArgumentsPath)}}'
         & '{{EscapePowerShellLiteral(scriptPath)}}' -Action Apply -SourceUri 'https://aka.ms/fake-vs-installer' -ConfigPath '{{EscapePowerShellLiteral(configPath)}}'
         """;
-    var result = await RunPowerShellAsync(payload);
 
-    Assert.Equal(1, result.ExitCode);
-    Assert.Contains("Visual Studio Installer failed with exit code 23", result.StandardError);
-    Assert.DoesNotContain(
-        "LASTEXITCODE",
-        result.StandardError,
-        StringComparison.OrdinalIgnoreCase);
-    Assert.Contains(
-        "Downloading the Visual Studio Professional bootstrapper",
-        result.StandardOutput);
+    try
+    {
+      var result = await RunPowerShellAsync(payload);
+      var installerArguments = await File.ReadAllLinesAsync(capturedArgumentsPath);
+
+      Assert.Equal(1, result.ExitCode);
+      Assert.Contains("Visual Studio Installer failed with exit code 23", result.StandardError);
+      Assert.DoesNotContain(
+          "LASTEXITCODE",
+          result.StandardError,
+          StringComparison.OrdinalIgnoreCase);
+      Assert.Contains(
+          "Downloading the Visual Studio Professional bootstrapper",
+          result.StandardOutput);
+      Assert.Contains("--quiet", installerArguments);
+      Assert.Contains("--wait", installerArguments);
+      Assert.Contains("--norestart", installerArguments);
+      Assert.Contains("--config", installerArguments);
+      Assert.Contains(configPath, installerArguments);
+      Assert.Contains("--allowUnsignedExtensions", installerArguments);
+    }
+    finally
+    {
+      File.Delete(capturedArgumentsPath);
+    }
   }
 
   [Fact]
