@@ -63,8 +63,8 @@ Source: "{#PublishRoot}\app\Wdem.App.exe"; DestDir: "{app}"; Flags: ignoreversio
 Source: "{#PublishRoot}\cli\Wdem.Cli.exe"; DestDir: "{app}"; DestName: "wdem.exe"; Flags: ignoreversion
 Source: "{#PublishRoot}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PublishRoot}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#PublishRoot}\Script\*"; DestDir: "{app}\Script"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#PublishRoot}\Settings\*"; DestDir: "{app}\Settings"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishRoot}\script\*"; DestDir: "{app}\script"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishRoot}\settings\*"; DestDir: "{app}\settings"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\WDEM"; Filename: "{app}\Wdem.App.exe"; WorkingDir: "{app}"

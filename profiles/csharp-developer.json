@@ -22,7 +22,7 @@
           "-ExecutionPolicy",
           "Bypass",
           "-File",
-          "{appDirectory}\\Script\\Invoke-VisualStudioProfessionalTask.ps1",
+          "{appDirectory}\\script\\Invoke-VisualStudioProfessionalTask.ps1",
           "-Action",
           "Detect"
         ],
@@ -38,13 +38,13 @@
             "-ExecutionPolicy",
             "Bypass",
             "-File",
-            "{appDirectory}\\Script\\Invoke-VisualStudioProfessionalTask.ps1",
+            "{appDirectory}\\script\\Invoke-VisualStudioProfessionalTask.ps1",
             "-Action",
             "Pre",
             "-SourceUri",
             "{source}",
             "-ConfigPath",
-            "{appDirectory}\\Settings\\.vsconfig"
+            "{appDirectory}\\settings\\.vsconfig"
           ]
         }
       ],
@@ -57,13 +57,13 @@
           "-ExecutionPolicy",
           "Bypass",
           "-File",
-          "{appDirectory}\\Script\\Invoke-VisualStudioProfessionalTask.ps1",
+          "{appDirectory}\\script\\Invoke-VisualStudioProfessionalTask.ps1",
           "-Action",
           "Apply",
           "-SourceUri",
           "{source}",
           "-ConfigPath",
-          "{appDirectory}\\Settings\\.vsconfig"
+          "{appDirectory}\\settings\\.vsconfig"
         ]
       },
       "post": [
@@ -76,11 +76,11 @@
             "-ExecutionPolicy",
             "Bypass",
             "-File",
-            "{appDirectory}\\Script\\Invoke-VisualStudioProfessionalTask.ps1",
+            "{appDirectory}\\script\\Invoke-VisualStudioProfessionalTask.ps1",
             "-Action",
             "Post",
             "-ConfigPath",
-            "{appDirectory}\\Settings\\.vsconfig"
+            "{appDirectory}\\settings\\.vsconfig"
           ]
         }
       ]
@@ -102,7 +102,7 @@
           "-ExecutionPolicy",
           "Bypass",
           "-File",
-          "{appDirectory}\\Script\\Invoke-ReSharperTask.ps1",
+          "{appDirectory}\\script\\Invoke-ReSharperTask.ps1",
           "-Action",
           "Detect"
         ],
@@ -118,7 +118,7 @@
             "-ExecutionPolicy",
             "Bypass",
             "-File",
-            "{appDirectory}\\Script\\Invoke-ReSharperTask.ps1",
+            "{appDirectory}\\script\\Invoke-ReSharperTask.ps1",
             "-Action",
             "Pre",
             "-SourceUri",
@@ -137,7 +137,7 @@
           "-ExecutionPolicy",
           "Bypass",
           "-File",
-          "{appDirectory}\\Script\\Invoke-ReSharperTask.ps1",
+          "{appDirectory}\\script\\Invoke-ReSharperTask.ps1",
           "-Action",
           "Apply",
           "-SourceUri",
@@ -156,9 +156,9 @@
             "-ExecutionPolicy",
             "Bypass",
             "-File",
-            "{appDirectory}\\Script\\Apply-ReSharperSettings.ps1",
+            "{appDirectory}\\script\\Apply-ReSharperSettings.ps1",
             "-SettingsPath",
-            "{appDirectory}\\Settings\\CT.DotSettings"
+            "{appDirectory}\\settings\\CT.DotSettings"
           ]
         }
       ]

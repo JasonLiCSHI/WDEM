@@ -61,8 +61,8 @@ Invoke-DotnetPublish -Project (Join-Path $repoRoot 'src\Wdem.Cli\Wdem.Cli.csproj
 
 Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') -Destination $publishRoot
 Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination $publishRoot
-Copy-Item -LiteralPath (Join-Path $repoRoot 'Script') -Destination $publishRoot -Recurse
-Copy-Item -LiteralPath (Join-Path $repoRoot 'Settings') -Destination $publishRoot -Recurse
+Copy-Item -LiteralPath (Join-Path $repoRoot 'script') -Destination $publishRoot -Recurse
+Copy-Item -LiteralPath (Join-Path $repoRoot 'settings') -Destination $publishRoot -Recurse
 
 $innoCompiler = Get-Command ISCC.exe -ErrorAction SilentlyContinue
 if ($null -eq $innoCompiler) {
