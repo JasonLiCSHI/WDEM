@@ -66,6 +66,8 @@
   <sys:String x:Key="BlockedStatus">已阻断</sys:String>
   <sys:String x:Key="NotCompliantStatus">未安装或版本不符</sys:String>
   <sys:String x:Key="MessageTitle">WDEM</sys:String>
+  <sys:String x:Key="AdministratorRequiredTitle">需要管理员权限</sys:String>
+  <sys:String x:Key="AdministratorRequiredMessage">WDEM 无法在非管理员权限下运行。请关闭软件，然后右键单击 WDEM 并选择“以管理员身份运行”。</sys:String>
   <sys:String x:Key="CatalogErrorTitle">无法加载 Profile</sys:String>
   <sys:String x:Key="SourceUnavailableSummary">Profile 暂时不可用；请检查网络后重试。</sys:String>
   <sys:String x:Key="LoadErrorTitle">无法加载 Profile</sys:String>

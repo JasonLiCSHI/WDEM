@@ -1,0 +1,23 @@
+{
+  "skill_name": "wdem-development",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "The latest WDEM JSONL log says Visual Studio Apply failed because $LASTEXITCODE was never set, then ReSharper became Blocked. Diagnose and fix it without running a real installer.",
+      "expected_output": "Identifies the Windows PowerShell GUI-process exit-code issue, adds a deterministic fake-installer regression test, waits on an explicit process handle, preserves process-tree cancellation, and verifies the full solution.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Add Git as an optional WDEM task with a minimum version, official source, Detect, Pre, Apply, Post, and Verify behavior. Make it appear in both GUI and CLI.",
+      "expected_output": "Implements Git as Profile data and generic scripts/settings if needed, does not add a Git provider to Core, relies on the shared parser/DAG/workflow/runtime, and adds focused schema/runtime tests.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "The WPF Start and Cancel buttons are getting out of sync with individual Task buttons. Fix the interaction and make future workflow states extensible.",
+      "expected_output": "Keeps runtime state and capability projection in Core, makes WPF react to Task capabilities without hard-coded state-graph interpretation, checks plan/task linkage, and adds focused UI binding or state-projection tests.",
+      "files": []
+    }
+  ]
+}

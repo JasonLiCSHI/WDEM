@@ -1,5 +1,11 @@
 # WDEM contributor guide
 
+## Project skill
+
+- Use `.agents/skills/wdem-development/SKILL.md` for WDEM implementation, diagnosis, review, testing, packaging, and release work.
+- Read the skill before making changes so product boundaries, workflow semantics, cancellation, and release validation remain consistent.
+- `.agents/skills/` is the canonical Skill source. `.claude/skills/` and `.github/skills/` contain discovery entry points for Claude Code and GitHub Copilot; keep substantive instructions in the canonical Skill only.
+
 ## Product boundary
 
 - WDEM is a declarative Windows environment manager built around Profile, Task DAG, and Workflow.

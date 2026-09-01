@@ -233,6 +233,8 @@ The installer supports English and Simplified Chinese, optional desktop shortcut
 %LOCALAPPDATA%\Programs\WDEM
 ```
 
+WDEM must run with administrator privileges because environment Tasks install and configure machine-level software. Start the GUI with **Run as administrator**, or open an elevated Command Prompt, PowerShell, or Windows Terminal before using `wdem.exe`. Both clients refuse to load or execute Tasks from a non-elevated process.
+
 ### Build the installer
 
 Install the .NET 10 SDK and Inno Setup 6, then run:
@@ -303,6 +305,18 @@ dotnet run --project src/Wdem.Cli/Wdem.Cli.csproj -- profiles
 | `Wdem.Windows` | Windows process execution, output forwarding, process-tree cancellation, cache, trust, and logs |
 | `Wdem.Cli` | Command-line interaction, plan confirmation, retries, and terminal presentation |
 | `Wdem.App` | Localized WPF workbench, Task details, and reactive state projection |
+
+### Built-in Agent Skill
+
+WDEM ships its contributor contract as an [Agent Skill](.agents/skills/wdem-development/SKILL.md), so coding agents can understand the architecture before changing it instead of rediscovering the rules in every session.
+
+| Agent | Discovery entry point |
+|---|---|
+| Codex | [`.agents/skills/wdem-development`](.agents/skills/wdem-development/SKILL.md) |
+| Claude Code | [`.claude/skills/wdem-development`](.claude/skills/wdem-development/SKILL.md) |
+| GitHub Copilot | [`.github/skills/wdem-development`](.github/skills/wdem-development/SKILL.md) |
+
+The Skill covers layer ownership, Profile and Workflow semantics, safe process-tree cancellation, administrator requirements, installer diagnostics, validation, packaging, and release discipline. All discovery entry points resolve to the canonical `.agents/skills/` copy, keeping the guidance consistent across agents. Its [evaluation set](.agents/skills/wdem-development/evals/evals.json) exercises installer failure recovery, declarative Task additions, and reactive UI state handling.
 
 Read [AGENTS.md](AGENTS.md) before contributing to understand the product boundaries and validation requirements.
 

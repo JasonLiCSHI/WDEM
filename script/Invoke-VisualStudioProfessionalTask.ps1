@@ -105,8 +105,20 @@ try {
             try {
                 Write-Output 'Downloading the Visual Studio Professional bootstrapper from Microsoft.'
                 Invoke-WebRequest -Uri $SourceUri -OutFile $bootstrapperPath -MaximumRedirection 10
-                & $bootstrapperPath --quiet --wait --norestart --config $configuration.Path
-                $installerExitCode = $LASTEXITCODE
+                $installerArguments = @(
+                    '--quiet'
+                    '--wait'
+                    '--norestart'
+                    '--config'
+                    ('"{0}"' -f $configuration.Path)
+                )
+                $installerProcess = Start-Process `
+                    -FilePath $bootstrapperPath `
+                    -ArgumentList $installerArguments `
+                    -NoNewWindow `
+                    -Wait `
+                    -PassThru
+                $installerExitCode = $installerProcess.ExitCode
                 if ($installerExitCode -notin @(0, 1641, 3010)) {
                     throw "Visual Studio Installer failed with exit code $installerExitCode."
                 }
