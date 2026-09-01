@@ -19,8 +19,12 @@
   <sys:String x:Key="DetectedVersionLabel">Detected version</sys:String>
   <sys:String x:Key="DetectLabel">Detect</sys:String>
   <sys:String x:Key="PreLabel">Pre steps</sys:String>
+  <sys:String x:Key="PreActivityBadge">PRE</sys:String>
+  <sys:String x:Key="PreActivityFallback">Pre step {0}</sys:String>
   <sys:String x:Key="ApplyLabel">Apply</sys:String>
   <sys:String x:Key="PostLabel">Post steps</sys:String>
+  <sys:String x:Key="PostActivityBadge">POST</sys:String>
+  <sys:String x:Key="PostActivityFallback">Post step {0}</sys:String>
   <sys:String x:Key="VerifyLabel">Verify</sys:String>
   <sys:String x:Key="NoSteps">None</sys:String>
   <sys:String x:Key="NoCommand">Not declared</sys:String>

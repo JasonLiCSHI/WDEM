@@ -807,11 +807,19 @@ public sealed class TaskRow : INotifyPropertyChanged
         ? "—"
         : FormatWorkflow(definition.Workflow);
     DetectDetails = FormatCommand(definition.Detect);
+    PreActivities = CreateActivityRows(
+        definition.Pre,
+        I18n.Get("PreActivityBadge"),
+        "PreActivityFallback");
     PreDetails = FormatCommands(definition.Pre);
     ApplyDetails = definition.Apply is null
         ? I18n.Get("NoCommand")
         : FormatCommand(definition.Apply);
     PostDetails = FormatCommands(definition.Post);
+    PostActivities = CreateActivityRows(
+        definition.Post,
+        I18n.Get("PostActivityBadge"),
+        "PostActivityFallback");
     VerifyDetails = $"{I18n.Get("VerifyUsesDetect")}: {FormatCommand(definition.Detect)}";
   }
 
@@ -855,11 +863,15 @@ public sealed class TaskRow : INotifyPropertyChanged
 
   public string DetectDetails { get; }
 
+  public IReadOnlyList<TaskActivityRow> PreActivities { get; }
+
   public string PreDetails { get; }
 
   public string ApplyDetails { get; }
 
   public string PostDetails { get; }
+
+  public IReadOnlyList<TaskActivityRow> PostActivities { get; }
 
   public string VerifyDetails { get; }
 
@@ -1036,6 +1048,18 @@ public sealed class TaskRow : INotifyPropertyChanged
               Environment.NewLine,
               commands.Select((command, index) => $"{index + 1}. {FormatCommand(command)}"));
 
+  private static IReadOnlyList<TaskActivityRow> CreateActivityRows(
+      IReadOnlyList<CommandDefinition> commands,
+      string phaseLabel,
+      string fallbackResourceKey) =>
+      commands
+          .Select((command, index) => new TaskActivityRow(
+              phaseLabel,
+              string.IsNullOrWhiteSpace(command.DisplayName)
+                  ? I18n.Format(fallbackResourceKey, index + 1)
+                  : command.DisplayName))
+          .ToArray();
+
   private static string FormatCommand(CommandDefinition command)
   {
     var invocation = string.Join(
@@ -1056,3 +1080,5 @@ public sealed class TaskRow : INotifyPropertyChanged
   private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
       PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 }
+
+public sealed record TaskActivityRow(string PhaseLabel, string DisplayName);
