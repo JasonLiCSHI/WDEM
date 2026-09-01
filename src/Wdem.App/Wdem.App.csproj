@@ -3,9 +3,13 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <ApplicationIcon>Assets\Wdem.ico</ApplicationIcon>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="Assets\Wdem.ico" />
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Wdem.Core\Wdem.Core.csproj" />
     <ProjectReference Include="..\Wdem.Windows\Wdem.Windows.csproj" />

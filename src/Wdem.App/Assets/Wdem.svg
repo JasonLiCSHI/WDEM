@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="WDEM application icon">
+  <defs>
+    <linearGradient id="background" x1="160" y1="120" x2="864" y2="904" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2AA0F2" />
+      <stop offset="0.52" stop-color="#1478C9" />
+      <stop offset="1" stop-color="#0B5CAB" />
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="218" fill="url(#background)" />
+  <path d="M240 300 L350 720 L512 450 L674 720 L784 300"
+        fill="none" stroke="#FFFFFF" stroke-width="104"
+        stroke-linecap="round" stroke-linejoin="round" />
+  <circle cx="350" cy="720" r="26" fill="#7DD3FC" />
+  <circle cx="512" cy="450" r="26" fill="#7DD3FC" />
+  <circle cx="674" cy="720" r="26" fill="#7DD3FC" />
+</svg>
