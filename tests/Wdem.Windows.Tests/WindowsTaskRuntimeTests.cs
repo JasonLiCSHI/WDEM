@@ -39,6 +39,33 @@ public sealed class WindowsTaskRuntimeTests
         });
   }
 
+  [Fact]
+  public async Task RunAsync_ExpandsInstalledAssetDirectoryInExecutableAndArguments()
+  {
+    var processRunner = new CapturingProcessRunner();
+    var runtime = new WindowsTaskRuntime(processRunner, @"C:\Program Files\WDEM");
+    var invocation = new CommandInvocation(
+        "tool",
+        "apply",
+        new CommandDefinition(
+            @"{appDirectory}\Script\tool.exe",
+            [@"{appDirectory}\Settings\tool.json", "{source}", "{preferredVersion}"]),
+        Source: "https://vendor.example/tool.exe",
+        PreferredVersion: "1.2.3");
+
+    await runtime.RunAsync(invocation, output: null, CancellationToken.None);
+
+    Assert.NotNull(processRunner.Request);
+    Assert.Equal(@"C:\Program Files\WDEM\Script\tool.exe", processRunner.Request.FileName);
+    Assert.Equal(
+        [
+          @"C:\Program Files\WDEM\Settings\tool.json",
+          "https://vendor.example/tool.exe",
+          "1.2.3"
+        ],
+        processRunner.Request.Arguments);
+  }
+
   private sealed class OutputProcessRunner : IProcessRunner
   {
     public Task<ProcessResult> RunAsync(
@@ -49,6 +76,20 @@ public sealed class WindowsTaskRuntimeTests
       output?.Report(new ProcessOutput(WorkflowOutputStream.StandardOutput, "normal"));
       output?.Report(new ProcessOutput(WorkflowOutputStream.StandardError, "problem"));
       return Task.FromResult(new ProcessResult(true, 0, "normal", "problem"));
+    }
+  }
+
+  private sealed class CapturingProcessRunner : IProcessRunner
+  {
+    public ProcessRequest? Request { get; private set; }
+
+    public Task<ProcessResult> RunAsync(
+        ProcessRequest request,
+        IProgress<ProcessOutput>? output,
+        CancellationToken cancellationToken)
+    {
+      Request = request;
+      return Task.FromResult(new ProcessResult(true, 0, "", ""));
     }
   }
 
