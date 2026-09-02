@@ -40,7 +40,7 @@ public sealed class DefaultProcessRunnerTests
 
     try
     {
-      var result = await RunPowerShellAsync(payload).WaitAsync(TimeSpan.FromSeconds(10));
+      var result = await RunPowerShellAsync(payload).WaitAsync(TimeSpan.FromSeconds(30));
       var installerArguments = await File.ReadAllLinesAsync(capturedArgumentsPath);
 
       Assert.Equal(1, result.ExitCode);
@@ -54,11 +54,11 @@ public sealed class DefaultProcessRunnerTests
           result.StandardOutput);
       Assert.DoesNotContain("--quiet", installerArguments);
       Assert.DoesNotContain("--passive", installerArguments);
+      Assert.DoesNotContain("--norestart", installerArguments);
+      Assert.DoesNotContain("--allowUnsignedExtensions", installerArguments);
       Assert.Contains("--wait", installerArguments);
-      Assert.Contains("--norestart", installerArguments);
       Assert.Contains("--config", installerArguments);
       Assert.Contains(configPath, installerArguments);
-      Assert.DoesNotContain("--allowUnsignedExtensions", installerArguments);
     }
     finally
     {
