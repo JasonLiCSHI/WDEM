@@ -9,10 +9,10 @@ public sealed class FakeRuntime : ITaskRuntime
   private readonly ConcurrentDictionary<
       (string taskId, string phase),
       Func<IProgress<CommandOutput>?, CancellationToken, Task<CommandResult>>> _handlers = new();
+  private readonly ConcurrentDictionary<
+      (string taskId, string phase),
+      TaskCompletionSource> _startSignals = new();
   private readonly ConcurrentQueue<(string taskId, string phase)> _invocations = new();
-  private readonly object _gate = new();
-  private readonly SemaphoreSlim _startSignal = new(0);
-  private (string taskId, string phase)? _lastStart;
   private Action<CommandInvocation>? _onInvocation;
 
   public FakeRuntime WithDetect(string taskId, int exitCode, string stdout = "", string stderr = "") =>
@@ -54,6 +54,16 @@ public sealed class FakeRuntime : ITaskRuntime
         return new CommandResult(0, Stdout: "", Stderr: "");
       });
 
+  public FakeRuntime WithApplyThatWaitsFor(
+      string taskId,
+      Task completion,
+      int exitCode = 0) =>
+      With(taskId, "apply", async (_, token) =>
+      {
+        await completion.WaitAsync(token);
+        return new CommandResult(exitCode, Stdout: "", Stderr: "");
+      });
+
   public FakeRuntime WithApplyThatReturnsAfterCancellation(string taskId) =>
       With(taskId, "apply", async (_, token) =>
       {
@@ -71,21 +81,23 @@ public sealed class FakeRuntime : ITaskRuntime
         return new CommandResult(0, Stdout: "", Stderr: "");
       });
 
-  public async Task WaitForCommandStartAsync(string taskId, string phase)
+  public Task WaitForCommandStartAsync(string taskId, string phase)
   {
-    while (true)
+    var key = (taskId, phase);
+    if (_invocations.Contains(key))
     {
-      (string taskId, string phase)? current;
-      lock (_gate)
-      {
-        current = _lastStart;
-      }
-      if (current is not null && current.Value.taskId == taskId && current.Value.phase == phase)
-      {
-        return;
-      }
-      await _startSignal.WaitAsync();
+      return Task.CompletedTask;
     }
+
+    var signal = _startSignals.GetOrAdd(
+        key,
+        _ => new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+    if (_invocations.Contains(key))
+    {
+      signal.TrySetResult();
+    }
+
+    return signal.Task;
   }
 
   private FakeRuntime With(
@@ -102,12 +114,12 @@ public sealed class FakeRuntime : ITaskRuntime
       IProgress<CommandOutput>? output,
       CancellationToken cancellationToken)
   {
-    _invocations.Enqueue((invocation.TaskId, invocation.Phase));
-    lock (_gate)
-    {
-      _lastStart = (invocation.TaskId, invocation.Phase);
-    }
-    _startSignal.Release();
+    var key = (invocation.TaskId, invocation.Phase);
+    _invocations.Enqueue(key);
+    _startSignals.GetOrAdd(
+        key,
+        _ => new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously))
+        .TrySetResult();
     _onInvocation?.Invoke(invocation);
 
     if (_handlers.TryGetValue((invocation.TaskId, invocation.Phase), out var handler))

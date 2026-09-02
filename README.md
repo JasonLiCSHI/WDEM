@@ -9,6 +9,8 @@
 Machines drift. Checklists rot. WDEM turns a Windows workstation into a declarative workflow.<br>
 Describe the destination once; let the Task DAG take care of the journey.
 
+**The north star: Terraform-grade planning and convergence with a Dev Box-grade experience for Windows workstations.**
+
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
 [![.NET](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![WPF](https://img.shields.io/badge/UI-WPF-0C54C2)](https://learn.microsoft.com/dotnet/desktop/wpf/)
@@ -72,7 +74,7 @@ Running → Cancelling → Cancelled       dependency failure → Blocked
 ## Core capabilities
 
 - **Declarative Profiles** — Define Task metadata, Required/Optional behavior, dependencies, sources, version requirements, and phase commands.
-- **Deterministic Task DAG** — Expand dependency closure, remove duplicates, produce a topological order, and report cycles before execution.
+- **Dependency-aware Task DAG** — Expand dependency closure, reject cycles, run independent Tasks concurrently, and start dependents only after their prerequisites succeed.
 - **Composable lifecycle** — Schema v1 compiles to `Detect → Pre → Apply → Post → Verify`; Schema v2 can declare an arbitrary bounded state graph with Entry, Residence, and Exit Activities.
 - **Version awareness** — Support exact, wildcard, minimum, and range requirements, with an explicit upgrade state below the minimum version.
 - **Reactive controls** — Start or cancel one Task or the entire plan; Core projects every available action from workflow state.
@@ -240,12 +242,12 @@ WDEM must run with administrator privileges because environment Tasks install an
 Install the .NET 10 SDK and Inno Setup 6, then run:
 
 ```powershell
-pwsh .\build\Build-Installer.ps1 -Version 0.1.0
+pwsh .\build\Build-Installer.ps1 -Version 0.1.1
 ```
 
 Output is written to `artifacts/installer/` together with a SHA-256 checksum. `script/` and `settings/` are included as runtime assets; the installer never bundles `profiles/`.
 
-Maintainers publish a release by pushing a semantic version tag such as `v0.1.0`. GitHub Actions tests the solution, builds the release payload, and attaches the installer and checksum to the matching GitHub Release.
+Maintainers publish a release by pushing a semantic version tag such as `v0.1.1`. GitHub Actions tests the solution, builds the release payload, and attaches the installer and checksum to the matching GitHub Release.
 
 ## Security and recovery
 
@@ -286,9 +288,25 @@ The base URL may include a Git branch, tag, or release path and may be written w
 %LOCALAPPDATA%\Wdem\logs              JSONL session logs
 ```
 
+## Roadmap: Terraform discipline, Dev Box experience
+
+WDEM's destination is a Windows environment convergence engine: previewable and reproducible like Terraform, approachable and centrally distributable like Microsoft Dev Box. The comparison guides the product model; WDEM remains a local-first Windows tool, and software such as Visual Studio or ReSharper remains an ordinary declarative Task rather than a Core provider.
+
+| Milestone | Outcome | Planned capabilities |
+|---|---|---|
+| **0.1.1 · Execution foundation** | A safe, observable local workflow | Trusted remote Profiles, Required/Optional selection, dependency-aware parallel DAG execution, composable Task state machines, process-tree cancellation, CLI/WPF parity, and JSONL audit logs |
+| **0.2 · Plan before Apply** | Make every change reviewable | Immutable Plan model; `NoOp`, `Create`, `Upgrade`, `Reconfigure`, and `Blocked` changes; JSON export; GUI approval diff; Profile content fingerprint checked again at Apply |
+| **0.3 · State and recovery** | Survive interruption without pretending cache is truth | Atomic desired/observed State, execution journal, state locking, restart/reboot continuation, read-only drift detection, and fresh Detect before every Plan or Apply |
+| **0.4 · Reproducible Profiles** | Compose environments without copy-and-paste | Typed inputs, validated outputs and Task references, modules/includes, organization and user layers, source/version lock file with hashes, and explicit Schema migration |
+| **0.5 · Extensible runtime** | Add installation mechanisms without product-specific Core logic | Generic executable, MSI/MSIX, archive/download, and WinGet adapters; timeouts, retry/backoff, reboot-required outcomes, concurrency limits, and exclusive resource locks |
+| **0.6 · Team catalogs** | Bring the Dev Box self-service model to shared Windows setups | Git-backed signed Catalogs, approved publishers, organization policy, headless image/VM provisioning, compliance export, and optional Azure Dev Box integration outside Core |
+| **1.0 · Trusted contract** | A stable base for personal and enterprise use | Profile/package trust chain, code-signed installer, SBOM, Credential Manager/Key Vault secret references, audit guarantees, and documented Schema compatibility policy |
+
+The near-term order is deliberate: **Plan → execution journal and recovery → Profile composition and lock → runtime adapters → organization Catalog**. A marketplace, arbitrary remote plugins, full transactional rollback, a central fleet control plane, and cross-platform support stay out until these foundations are dependable.
+
 ## MVP scope
 
-The current release is intentionally small and dependable. It uses deterministic sequential DAG scheduling and does not yet include parallel execution, automatic UAC elevation, rollback or uninstall, resume after restart, a Profile marketplace, authenticated private sources, or cross-platform support. Those capabilities can evolve on the existing Profile, Graph, Workflow, and Runtime seams without adding product-specific logic to Core.
+The current release is intentionally small and dependable. Its dependency-aware DAG scheduler runs independent Tasks concurrently while preserving dependency and per-Task Activity order. It does not yet include automatic UAC elevation, rollback or uninstall, resume after restart, a Profile marketplace, authenticated private sources, or cross-platform support. Those capabilities can evolve on the existing Profile, Graph, Workflow, and Runtime seams without adding product-specific logic to Core.
 
 ## Develop
 

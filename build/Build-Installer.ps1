@@ -2,7 +2,7 @@
 param(
     [Parameter()]
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '0.1.0',
+    [string]$Version = '0.1.1',
 
     [Parameter()]
     [ValidateSet('win-x64')]

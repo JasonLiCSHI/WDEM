@@ -9,28 +9,89 @@ namespace Wdem.Core.Tests;
 public sealed class EnvironmentManagerTests
 {
   [Fact]
+  public async Task Apply_IndependentTasksStartConcurrently()
+  {
+    var profile = ProfileParser.Parse(ProfileJson);
+    var graph = TaskGraph.Build(profile, rootTaskIds: ["a", "b"]);
+    var runtime = new FakeRuntime()
+        .WithDetect("a", exitCode: 1)
+        .WithDetect("b", exitCode: 1)
+        .WithApplyThatWaitsForCancellation("a")
+        .WithApplyThatWaitsForCancellation("b");
+    var run = EnvironmentManager.StartApply(profile, graph, runtime);
+
+    try
+    {
+      await Task.WhenAll(
+          runtime.WaitForCommandStartAsync("a", "apply"),
+          runtime.WaitForCommandStartAsync("b", "apply"))
+          .WaitAsync(TimeSpan.FromSeconds(5));
+    }
+    finally
+    {
+      run.CancelAll();
+      await run.Completion;
+    }
+
+    Assert.Equal(TaskOutcome.Cancelled, run.Snapshot.Tasks["a"].Outcome);
+    Assert.Equal(TaskOutcome.Cancelled, run.Snapshot.Tasks["b"].Outcome);
+  }
+
+  [Fact]
+  public async Task Apply_DependentTaskWaitsForSuccessfulDependency()
+  {
+    var profile = ProfileParser.Parse(ProfileJson);
+    var graph = TaskGraph.Build(profile, rootTaskIds: ["c"]);
+    var finishDependency = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var runtime = new FakeRuntime()
+        .WithDetect("a", exitCode: 1)
+        .WithDetect("c", exitCode: 1)
+        .WithApplyThatWaitsFor("a", finishDependency.Task)
+        .WithApplyThatWaitsForCancellation("c");
+    var run = EnvironmentManager.StartApply(profile, graph, runtime);
+
+    await runtime.WaitForCommandStartAsync("a", "apply");
+    Assert.DoesNotContain(runtime.Invocations, invocation => invocation.taskId == "c");
+
+    finishDependency.SetResult();
+    await runtime.WaitForCommandStartAsync("c", "apply")
+        .WaitAsync(TimeSpan.FromSeconds(5));
+    run.CancelAll();
+    var report = await run.Completion;
+
+    Assert.Equal(TaskOutcome.Succeeded, report.Tasks["a"].Outcome);
+    Assert.Equal(TaskOutcome.Cancelled, report.Tasks["c"].Outcome);
+  }
+
+  [Fact]
   public async Task Apply_CancelTask_BlocksDependentsButContinuesIndependentTasks()
   {
     var profile = ProfileParser.Parse(ProfileJson);
     var graph = TaskGraph.Build(profile, rootTaskIds: ["a", "b", "c"]);
+    var finishIndependentTask = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
 
     var runtime = new FakeRuntime()
         .WithDetect("a", exitCode: 1)
         .WithDetect("b", exitCode: 1)
         .WithDetect("c", exitCode: 1)
         .WithApplyThatWaitsForCancellation("a")
-        .WithApply("b", exitCode: 0)
+        .WithApplyThatWaitsFor("b", finishIndependentTask.Task)
         .WithApply("c", exitCode: 0);
 
     var run = EnvironmentManager.StartApply(profile, graph, runtime);
 
-    await runtime.WaitForCommandStartAsync("a", "apply");
+    await Task.WhenAll(
+        runtime.WaitForCommandStartAsync("a", "apply"),
+        runtime.WaitForCommandStartAsync("b", "apply"));
     run.CancelTask("a");
 
     Assert.Equal(WorkflowRunState.Running, run.Snapshot.State);
     Assert.Equal(TaskExecutionState.Cancelling, run.Snapshot.Tasks["a"].State);
     Assert.False(run.Snapshot.Tasks["a"].CanCancel);
     Assert.True(run.Snapshot.Tasks["b"].CanCancel);
+    finishIndependentTask.SetResult();
 
     var report = await run.Completion;
 
@@ -66,13 +127,13 @@ public sealed class EnvironmentManagerTests
   public async Task Apply_CancelAll_DoesNotStartNewTasks()
   {
     var profile = ProfileParser.Parse(ProfileJson);
-    var graph = TaskGraph.Build(profile, rootTaskIds: ["a", "b"]);
+    var graph = TaskGraph.Build(profile, rootTaskIds: ["c"]);
 
     var runtime = new FakeRuntime()
         .WithDetect("a", exitCode: 1)
-        .WithDetect("b", exitCode: 1)
+        .WithDetect("c", exitCode: 1)
         .WithApplyThatWaitsForCancellation("a")
-        .WithApply("b", exitCode: 0);
+        .WithApply("c", exitCode: 0);
 
     var run = EnvironmentManager.StartApply(profile, graph, runtime);
 
@@ -89,8 +150,8 @@ public sealed class EnvironmentManagerTests
     var report = await run.Completion;
 
     Assert.Equal(TaskOutcome.Cancelled, report.Tasks["a"].Outcome);
-    Assert.Equal(TaskOutcome.Cancelled, report.Tasks["b"].Outcome);
-    Assert.DoesNotContain(runtime.Invocations, invocation => invocation.taskId == "b");
+    Assert.Equal(TaskOutcome.Cancelled, report.Tasks["c"].Outcome);
+    Assert.DoesNotContain(runtime.Invocations, invocation => invocation.taskId == "c");
     Assert.Equal(WorkflowRunState.Completed, run.Snapshot.State);
     Assert.All(run.Snapshot.Tasks.Values, task => Assert.True(task.IsTerminal));
   }
@@ -180,6 +241,34 @@ public sealed class EnvironmentManagerTests
     Assert.Equal(WorkflowRunState.Completed, run.Snapshot.State);
     Assert.Equal(TaskExecutionState.Succeeded, run.Snapshot.Tasks["b"].State);
     Assert.Equal(TaskOutcome.Succeeded, run.Snapshot.Tasks["b"].Outcome);
+  }
+
+  [Fact]
+  public async Task Apply_ParallelTaskUpdatesArePublishedInRevisionOrder()
+  {
+    var profile = ProfileParser.Parse(ProfileJson);
+    var graph = TaskGraph.Build(profile, rootTaskIds: ["a", "b"]);
+    var runtime = new FakeRuntime()
+        .WithDetect("a", exitCode: 1)
+        .WithDetect("b", exitCode: 1)
+        .WithApplyThatWaitsForCancellation("a")
+        .WithApplyThatWaitsForCancellation("b");
+    var updates = new List<WorkflowUpdate>();
+    var run = EnvironmentManager.StartApply(
+        profile,
+        graph,
+        runtime,
+        updates: new InlineProgress<WorkflowUpdate>(updates.Add));
+
+    await Task.WhenAll(
+        runtime.WaitForCommandStartAsync("a", "apply"),
+        runtime.WaitForCommandStartAsync("b", "apply"));
+    run.CancelAll();
+    await run.Completion;
+
+    Assert.Equal(
+        Enumerable.Range(1, updates.Count).Select(revision => (long)revision),
+        updates.Select(update => update.Snapshot.Revision));
   }
 
   [Fact]

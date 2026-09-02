@@ -21,41 +21,50 @@ internal sealed class WorkflowStateMachine(
 {
   public async Task<RunReport> RunAsync()
   {
-    var reports = new Dictionary<string, TaskReport>(StringComparer.Ordinal);
+    var scheduledTasks = new Dictionary<string, Task<TaskReport>>(StringComparer.Ordinal);
 
     foreach (var taskId in graph.OrderedTaskIds)
     {
       var task = profile.Tasks[taskId];
-      if (allCancellationToken.IsCancellationRequested ||
-          taskCancellationSources[taskId].IsCancellationRequested)
-      {
-        state.CompleteTask(taskId, TaskOutcome.Cancelled);
-        reports[taskId] = new TaskReport(
-            taskId,
-            TaskOutcome.Cancelled,
-            Steps: Array.Empty<StepReport>(),
-            Error: null);
-        continue;
-      }
-
-      if (IsBlockedByDependency(task, reports))
-      {
-        state.CompleteTask(taskId, TaskOutcome.Blocked);
-        reports[taskId] = new TaskReport(
-            taskId,
-            TaskOutcome.Blocked,
-            Steps: Array.Empty<StepReport>(),
-            Error: null);
-        continue;
-      }
-
-      reports[taskId] = await RunTaskAsync(
+      var dependencies = task.DependsOn
+          .Select(dependencyId => scheduledTasks[dependencyId])
+          .ToArray();
+      scheduledTasks.Add(taskId, RunAfterDependenciesAsync(
           task,
           workflows[taskId],
-          taskCancellationSources[taskId].Token);
+          dependencies,
+          taskCancellationSources[taskId].Token));
     }
 
-    return new RunReport(reports);
+    var reports = await Task.WhenAll(
+        graph.OrderedTaskIds.Select(taskId => scheduledTasks[taskId]));
+    return new RunReport(graph.OrderedTaskIds
+        .Zip(reports)
+        .ToDictionary(pair => pair.First, pair => pair.Second, StringComparer.Ordinal));
+  }
+
+  private async Task<TaskReport> RunAfterDependenciesAsync(
+      TaskDefinition task,
+      TaskWorkflowDefinition workflow,
+      IReadOnlyList<Task<TaskReport>> dependencyTasks,
+      CancellationToken taskCancellationToken)
+  {
+    // Allow every ready node in the DAG to be scheduled before any synchronous
+    // Activity implementation can occupy the caller's thread.
+    await Task.Yield();
+
+    var dependencies = await Task.WhenAll(dependencyTasks);
+    if (allCancellationToken.IsCancellationRequested || taskCancellationToken.IsCancellationRequested)
+    {
+      return CompleteWithoutSteps(task.Id, TaskOutcome.Cancelled);
+    }
+
+    if (IsBlockedByDependency(dependencies))
+    {
+      return CompleteWithoutSteps(task.Id, TaskOutcome.Blocked);
+    }
+
+    return await RunTaskAsync(task, workflow, taskCancellationToken);
   }
 
   private async Task<TaskReport> RunTaskAsync(
@@ -272,11 +281,18 @@ internal sealed class WorkflowStateMachine(
         outcome == TaskOutcome.Failed ? error : null);
   }
 
-  private static bool IsBlockedByDependency(
-      TaskDefinition task,
-      Dictionary<string, TaskReport> reports) =>
-      task.DependsOn.Any(dependencyId =>
-          reports.TryGetValue(dependencyId, out var dependency) &&
+  private TaskReport CompleteWithoutSteps(string taskId, TaskOutcome outcome)
+  {
+    var effectiveOutcome = state.CompleteTask(taskId, outcome);
+    return new TaskReport(
+        taskId,
+        effectiveOutcome,
+        Steps: Array.Empty<StepReport>(),
+        Error: null);
+  }
+
+  private static bool IsBlockedByDependency(IEnumerable<TaskReport> dependencies) =>
+      dependencies.Any(dependency =>
           dependency.Outcome is TaskOutcome.Failed or
               TaskOutcome.Cancelled or
               TaskOutcome.Blocked);

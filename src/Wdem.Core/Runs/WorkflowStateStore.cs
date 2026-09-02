@@ -15,9 +15,11 @@ internal sealed class WorkflowStateStore
   private readonly Dictionary<string, TaskState> _tasks;
   private readonly IProgress<WorkflowProgress>? _progress;
   private readonly IProgress<WorkflowUpdate>? _updates;
+  private readonly Queue<WorkflowUpdate> _pendingPublications = new();
   private WorkflowRunState _runState;
   private WorkflowSnapshot _snapshot;
   private long _revision;
+  private bool _isPublishing;
 
   public WorkflowStateStore(
       EnvironmentProfile profile,
@@ -89,7 +91,6 @@ internal sealed class WorkflowStateStore
 
   public bool MakeReady(string taskId)
   {
-    WorkflowUpdate update;
     lock (_gate)
     {
       var current = GetTaskLocked(taskId);
@@ -110,10 +111,10 @@ internal sealed class WorkflowStateStore
         ActivityId = null,
         ActivityLocation = null
       };
-      update = AdvanceLocked(CreateProgressLocked(taskId));
+      AdvanceLocked(CreateProgressLocked(taskId));
     }
 
-    Publish(update);
+    PublishPending();
     return true;
   }
 
@@ -123,7 +124,6 @@ internal sealed class WorkflowStateStore
       TaskExecutionState taskState,
       string displayName)
   {
-    WorkflowUpdate update;
     lock (_gate)
     {
       var current = GetTaskLocked(taskId);
@@ -144,10 +144,10 @@ internal sealed class WorkflowStateStore
         ActivityId = null,
         ActivityLocation = null
       };
-      update = AdvanceLocked(CreateProgressLocked(taskId));
+      AdvanceLocked(CreateProgressLocked(taskId));
     }
 
-    Publish(update);
+    PublishPending();
     return true;
   }
 
@@ -159,7 +159,6 @@ internal sealed class WorkflowStateStore
       WorkflowActivityLocation location,
       int activityIndex)
   {
-    WorkflowUpdate update;
     lock (_gate)
     {
       var current = GetTaskLocked(taskId);
@@ -185,10 +184,10 @@ internal sealed class WorkflowStateStore
         ActivityLocation = location,
         ActivityIndex = activityIndex
       };
-      update = AdvanceLocked(CreateProgressLocked(taskId));
+      AdvanceLocked(CreateProgressLocked(taskId));
     }
 
-    Publish(update);
+    PublishPending();
     return true;
   }
 
@@ -197,7 +196,6 @@ internal sealed class WorkflowStateStore
       TaskOutcome outcome,
       string? runtimeStateId = null)
   {
-    WorkflowUpdate update;
     TaskOutcome effectiveOutcome;
     lock (_gate)
     {
@@ -231,10 +229,10 @@ internal sealed class WorkflowStateStore
         ActivityIndex = current.ActivityCount
       };
       CompleteWorkflowIfTerminalLocked();
-      update = AdvanceLocked(CreateProgressLocked(taskId));
+      AdvanceLocked(CreateProgressLocked(taskId));
     }
 
-    Publish(update);
+    PublishPending();
     return effectiveOutcome;
   }
 
@@ -243,24 +241,21 @@ internal sealed class WorkflowStateStore
       string message,
       WorkflowOutputStream stream)
   {
-    WorkflowUpdate update;
     lock (_gate)
     {
-      var current = GetTaskLocked(taskId);
       var change = CreateProgressLocked(taskId) with
       {
         Message = message,
         OutputStream = stream
       };
-      update = AdvanceLocked(change);
+      AdvanceLocked(change);
     }
 
-    Publish(update);
+    PublishPending();
   }
 
   public bool RequestCancelTask(string taskId)
   {
-    WorkflowUpdate update;
     lock (_gate)
     {
       var current = GetTaskLocked(taskId);
@@ -276,16 +271,15 @@ internal sealed class WorkflowStateStore
         ActivityId = null,
         ActivityLocation = null
       };
-      update = AdvanceLocked(CreateProgressLocked(taskId));
+      AdvanceLocked(CreateProgressLocked(taskId));
     }
 
-    Publish(update);
+    PublishPending();
     return true;
   }
 
   public bool RequestCancelAll()
   {
-    WorkflowUpdate update;
     lock (_gate)
     {
       if (_runState != WorkflowRunState.Running)
@@ -308,18 +302,18 @@ internal sealed class WorkflowStateStore
         }
       }
 
-      update = AdvanceLocked(change: null);
+      AdvanceLocked(change: null);
     }
 
-    Publish(update);
+    PublishPending();
     return true;
   }
 
-  private WorkflowUpdate AdvanceLocked(WorkflowProgress? change)
+  private void AdvanceLocked(WorkflowProgress? change)
   {
     _revision++;
     _snapshot = CreateSnapshotLocked();
-    return new WorkflowUpdate(_snapshot, change);
+    _pendingPublications.Enqueue(new WorkflowUpdate(_snapshot, change));
   }
 
   private WorkflowSnapshot CreateSnapshotLocked()
@@ -386,13 +380,49 @@ internal sealed class WorkflowStateStore
           ? task
           : throw new ArgumentException($"Unknown task id '{taskId}'.", nameof(taskId));
 
-  private void Publish(WorkflowUpdate update)
+  private void PublishPending()
   {
-    if (update.Change is { } change)
+    lock (_gate)
     {
-      _progress?.Report(change);
+      if (_isPublishing)
+      {
+        return;
+      }
+
+      _isPublishing = true;
     }
-    _updates?.Report(update);
+
+    try
+    {
+      while (true)
+      {
+        WorkflowUpdate update;
+        lock (_gate)
+        {
+          if (_pendingPublications.Count == 0)
+          {
+            _isPublishing = false;
+            return;
+          }
+
+          update = _pendingPublications.Dequeue();
+        }
+
+        if (update.Change is { } change)
+        {
+          _progress?.Report(change);
+        }
+        _updates?.Report(update);
+      }
+    }
+    catch
+    {
+      lock (_gate)
+      {
+        _isPublishing = false;
+      }
+      throw;
+    }
   }
 
   private static bool IsCancellable(TaskState task) =>
