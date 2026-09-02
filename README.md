@@ -14,7 +14,7 @@ Describe the destination once; let the Task DAG take care of the journey.
 [![WPF](https://img.shields.io/badge/UI-WPF-0C54C2)](https://learn.microsoft.com/dotnet/desktop/wpf/)
 [![CI](https://github.com/JasonLiCSHI/WDEM/actions/workflows/ci.yml/badge.svg)](https://github.com/JasonLiCSHI/WDEM/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/JasonLiCSHI/WDEM?display_name=tag&sort=semver)](https://github.com/JasonLiCSHI/WDEM/releases/latest)
-[![License](https://img.shields.io/badge/License-Apache%](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 **Profile says what · DAG decides when · Workflow knows how · Runtime executes safely**
 
@@ -258,7 +258,7 @@ Maintainers publish a release by pushing a semantic version tag such as `v0.1.0`
 | Downstream safety | Failure or cancellation blocks dependents without affecting unrelated Tasks |
 | Recovery | The GUI can retry a failed plan and the CLI accepts `--retries N`; each retry starts at Detect |
 | Cache integrity | Only fully parsed and validated remote content atomically updates the cache |
-| Diagnostics | Logs default to `%LOCALAPPDATA%\Wdem\logs` and fall back to `%TEMP%\Wdem\logs` if needed |
+| Diagnostics | JSONL logs include structured `user_action` entries, default to `%LOCALAPPDATA%\Wdem\logs`, and fall back to `%TEMP%\Wdem\logs` if needed |
 
 ## Source and cache model
 
@@ -322,5 +322,5 @@ Read [AGENTS.md](AGENTS.md) before contributing to understand the product bounda
 
 ## License
 
-WDEM is released under the [Apache License 2.0](LICENSE).
-Copyright 2026 Jason Li.
+WDEM is licensed under the [Apache License 2.0](LICENSE).
+Copyright © 2026 Jason Li.

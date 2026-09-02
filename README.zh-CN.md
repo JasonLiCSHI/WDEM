@@ -14,7 +14,7 @@
 [![WPF](https://img.shields.io/badge/UI-WPF-0C54C2)](https://learn.microsoft.com/dotnet/desktop/wpf/)
 [![CI](https://github.com/JasonLiCSHI/WDEM/actions/workflows/ci.yml/badge.svg)](https://github.com/JasonLiCSHI/WDEM/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/JasonLiCSHI/WDEM?display_name=tag&sort=semver)](https://github.com/JasonLiCSHI/WDEM/releases/latest)
-[![License](https://img.shields.io/badge/License-MIT-2EA44F)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 **Profile 说明要什么 · DAG 决定先后 · Workflow 负责怎么做 · Runtime 保证安全执行**
 
@@ -258,7 +258,7 @@ pwsh .\build\Build-Installer.ps1 -Version 0.1.0
 | 下游安全 | 失败或取消会阻断依赖项，但不影响无关 Task |
 | 恢复 | GUI 可以重试失败计划，CLI 支持 `--retries N`；每次重试都从 Detect 开始 |
 | 缓存完整性 | 只有完整解析并验证成功的远程内容才能原子更新缓存 |
-| 诊断 | 日志默认保存到 `%LOCALAPPDATA%\Wdem\logs`，失败时回退到 `%TEMP%\Wdem\logs` |
+| 诊断 | JSONL 日志包含结构化的 `user_action` 操作记录，默认保存到 `%LOCALAPPDATA%\Wdem\logs`，失败时回退到 `%TEMP%\Wdem\logs` |
 
 ## Source 与缓存模型
 
@@ -320,7 +320,7 @@ WDEM 将贡献规范作为 [Agent Skill](.agents/skills/wdem-development/SKILL.m
 
 贡献前请阅读 [AGENTS.md](AGENTS.md)，了解产品边界和验证要求。
 
-## License
+## 许可证
 
-WDEM 使用 [Apache License 2.0](LICENSE) 发布。
-Copyright 2026 Jason Li。
+WDEM 采用 [Apache License 2.0](LICENSE) 开源许可证。
+版权所有 © 2026 Jason Li。

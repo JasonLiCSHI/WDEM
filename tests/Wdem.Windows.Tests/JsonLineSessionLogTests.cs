@@ -50,4 +50,34 @@ public sealed class JsonLineSessionLogTests
     Assert.NotNull(log.LastError);
     log.Write("ignored", "Logging failure must not escape.");
   }
+
+  [Fact]
+  public void WriteUserAction_PersistsStructuredNonSensitiveOperationData()
+  {
+    var directory = Path.Combine(Path.GetTempPath(), "Wdem.Tests", Guid.NewGuid().ToString("N"));
+    string path;
+
+    using (var log = JsonLineSessionLog.CreateInDirectory("test", directory))
+    {
+      path = Assert.IsType<string>(log.Path);
+      log.WriteUserAction(
+          "start_task",
+          UserActionOutcome.Requested,
+          "csharp-developer",
+          ["visual-studio-professional"]);
+    }
+
+    using var item = JsonDocument.Parse(File.ReadLines(path).ElementAt(1));
+    var root = item.RootElement;
+    Assert.Equal("user_action", root.GetProperty("category").GetString());
+    Assert.Equal("start_task: Requested", root.GetProperty("message").GetString());
+    var data = root.GetProperty("data");
+    Assert.Equal("start_task", data.GetProperty("Operation").GetString());
+    Assert.Equal("Requested", data.GetProperty("Outcome").GetString());
+    Assert.Equal("csharp-developer", data.GetProperty("ProfileId").GetString());
+    Assert.Equal(
+        "visual-studio-professional",
+        data.GetProperty("TaskIds")[0].GetString());
+    Assert.False(data.TryGetProperty("Arguments", out _));
+  }
 }
