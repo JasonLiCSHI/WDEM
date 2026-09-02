@@ -108,7 +108,7 @@ public sealed class ProfileCatalog
         _source.Id);
   }
 
-  private IReadOnlyList<ProfileCatalogEntry> CreateEntries(
+  private ProfileCatalogEntry[] CreateEntries(
       IReadOnlyList<CatalogItem> items,
       ProfileOrigin origin) =>
       items
@@ -183,7 +183,7 @@ public sealed class ProfileCatalog
     return new UTF8Encoding(false, true).GetString(buffer.ToArray()).TrimStart('\uFEFF');
   }
 
-  private async Task TryWriteCacheAsync(
+  private static async Task TryWriteCacheAsync(
       string destination,
       string content,
       CancellationToken cancellationToken)
@@ -257,7 +257,7 @@ public sealed class ProfileCatalog
     }
   }
 
-  private IReadOnlyList<CatalogItem> ParseIndex(string json)
+  private static CatalogItem[] ParseIndex(string json)
   {
     CatalogDto dto;
     try

@@ -111,7 +111,7 @@ public static class ProfileParser
         schemaVersion);
   }
 
-  private static IReadOnlyList<CommandDefinition> Commands(
+  private static CommandDefinition[] Commands(
       IReadOnlyList<CommandDto?>? commands,
       string field)
   {
@@ -193,7 +193,7 @@ public static class ProfileParser
         terminalError: Optional(state.Error));
   }
 
-  private static IReadOnlyList<WorkflowActivity> WorkflowActivities(
+  private static WorkflowActivity[] WorkflowActivities(
       IReadOnlyList<WorkflowActivityDto?>? activities,
       string field) =>
       activities is null
@@ -202,7 +202,9 @@ public static class ProfileParser
               activity,
               $"{field}[{index}]")).ToArray();
 
-  private static WorkflowActivity WorkflowActivity(WorkflowActivityDto? activity, string field)
+  private static CommandWorkflowActivity WorkflowActivity(
+      WorkflowActivityDto? activity,
+      string field)
   {
     if (activity is null)
     {
@@ -280,7 +282,7 @@ public static class ProfileParser
         Optional(command.DisplayName));
   }
 
-  private static IReadOnlyList<string> Strings(IReadOnlyList<string?>? values, string field)
+  private static string[] Strings(IReadOnlyList<string?>? values, string field)
   {
     if (values is null)
     {

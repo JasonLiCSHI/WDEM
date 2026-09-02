@@ -42,8 +42,8 @@ public static class EnvironmentManager
         runtime,
         workflows,
         perTaskCts,
-        allCts.Token,
-        state);
+        state,
+        allCts.Token);
 
     return new EnvironmentRun(
         machine.RunAsync(),
@@ -52,7 +52,7 @@ public static class EnvironmentManager
         state);
   }
 
-  private static IReadOnlyDictionary<string, TaskWorkflowDefinition> CreateWorkflows(
+  private static Dictionary<string, TaskWorkflowDefinition> CreateWorkflows(
       EnvironmentProfile profile,
       ITaskWorkflowProvider? workflowProvider)
   {

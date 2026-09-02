@@ -11,7 +11,7 @@ namespace Wdem.Windows.Logging;
 /// </summary>
 public sealed class JsonLineSessionLog : IProgress<WorkflowProgress>, IDisposable
 {
-  private readonly object _sync = new();
+  private readonly Lock _sync = new();
   private StreamWriter? _writer;
   private long _sequence;
   private bool _disposed;

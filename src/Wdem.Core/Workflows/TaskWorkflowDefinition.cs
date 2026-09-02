@@ -11,10 +11,7 @@ public sealed class TaskWorkflowDefinition
   {
     ArgumentException.ThrowIfNullOrWhiteSpace(initialStateId);
     ArgumentNullException.ThrowIfNull(states);
-    if (maxTransitions <= 0)
-    {
-      throw new ArgumentOutOfRangeException(nameof(maxTransitions));
-    }
+    ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxTransitions);
 
     var byId = new Dictionary<string, TaskWorkflowState>(StringComparer.Ordinal);
     foreach (var state in states)

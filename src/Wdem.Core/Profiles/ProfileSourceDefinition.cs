@@ -31,7 +31,7 @@ public sealed record ProfileSourceDefinition
 
     Id = id;
     DisplayName = displayName;
-    BaseUrl = uri.AbsoluteUri.EndsWith("/", StringComparison.Ordinal)
+    BaseUrl = uri.AbsoluteUri.EndsWith('/')
         ? uri.AbsoluteUri
         : uri.AbsoluteUri + '/';
   }

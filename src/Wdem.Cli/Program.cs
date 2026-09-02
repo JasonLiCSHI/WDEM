@@ -55,13 +55,11 @@ public static class Program
       return 2;
     }
 
+    var catalog = new ProfileCatalog(settings.ProfileSource, settings.CacheDirectory);
     if (command.Equals("profiles", StringComparison.OrdinalIgnoreCase))
     {
-      return await ListProfilesAsync(settings);
+      return await ListProfilesAsync(catalog);
     }
-
-    var source = settings.ProfileSource;
-    var catalog = new ProfileCatalog(source, settings.CacheDirectory);
 
     var profileArg = GetOption(args, "--profile") ?? GetOption(args, "-p");
     if (string.IsNullOrWhiteSpace(profileArg))
@@ -169,7 +167,7 @@ public static class Program
     TaskGraph graph;
     try
     {
-      if (!string.IsNullOrWhiteSpace(singleTask) && selected.Count > 0)
+      if (!string.IsNullOrWhiteSpace(singleTask) && selected.Length > 0)
       {
         throw new ArgumentException("Use either --task or --select, not both.");
       }
@@ -214,9 +212,34 @@ public static class Program
       return 2;
     }
 
-    RunReport report = null!;
+    var report = await RunApplyWithRetriesAsync(
+        profile,
+        graph,
+        runtime,
+        progress,
+        log,
+        retries);
+
+    PrintApply(report);
+    foreach (var task in report.Tasks.Values)
+    {
+      log.Write("result", $"{task.TaskId}: {task.Outcome} {task.Error}", task);
+    }
+    log.Write("run_summary", "Workflow completed.", report);
+
+    return report.Tasks.Values.All(task => task.Outcome is TaskOutcome.Succeeded or TaskOutcome.NotRequired) ? 0 : 1;
+  }
+
+  private static async Task<RunReport> RunApplyWithRetriesAsync(
+      EnvironmentProfile profile,
+      TaskGraph graph,
+      WindowsTaskRuntime runtime,
+      IProgress<WorkflowProgress> progress,
+      JsonLineSessionLog log,
+      int retries)
+  {
     var cancelRequested = false;
-    for (var attempt = 0; attempt <= retries; attempt++)
+    for (var attempt = 0; ; attempt++)
     {
       if (attempt > 0)
       {
@@ -233,6 +256,8 @@ public static class Program
         run.CancelAll();
       };
       Console.CancelKeyPress += cancelHandler;
+
+      RunReport report;
       try
       {
         report = await run.Completion;
@@ -242,22 +267,13 @@ public static class Program
         Console.CancelKeyPress -= cancelHandler;
       }
 
-      if (report.Tasks.Values.All(task =>
-          task.Outcome is TaskOutcome.Succeeded or TaskOutcome.NotRequired) ||
-          cancelRequested)
+      var succeeded = report.Tasks.Values.All(task =>
+          task.Outcome is TaskOutcome.Succeeded or TaskOutcome.NotRequired);
+      if (succeeded || cancelRequested || attempt == retries)
       {
-        break;
+        return report;
       }
     }
-
-    PrintApply(report);
-    foreach (var task in report.Tasks.Values)
-    {
-      log.Write("result", $"{task.TaskId}: {task.Outcome} {task.Error}", task);
-    }
-    log.Write("run_summary", "Workflow completed.", report);
-
-    return report.Tasks.Values.All(task => task.Outcome is TaskOutcome.Succeeded or TaskOutcome.NotRequired) ? 0 : 1;
   }
 
   private static void PrintHelp()
@@ -295,7 +311,7 @@ public static class Program
       {
         return $"Unknown option '{argument}' for command '{command}'.";
       }
-      if (index + 1 >= args.Length || args[index + 1].StartsWith("-", StringComparison.Ordinal))
+      if (index + 1 >= args.Length || args[index + 1].StartsWith('-'))
       {
         return $"Option '{argument}' requires a value.";
       }
@@ -391,9 +407,9 @@ public static class Program
   private static bool HasFlag(string[] args, string name) =>
       args.Any(arg => string.Equals(arg, name, StringComparison.OrdinalIgnoreCase));
 
-  private static IReadOnlyCollection<string> ParseCsv(string? value) =>
+  private static string[] ParseCsv(string? value) =>
       string.IsNullOrWhiteSpace(value)
-          ? Array.Empty<string>()
+          ? []
           : value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
   private static int ParseNonNegativeInt(string? value, string option)
@@ -411,18 +427,16 @@ public static class Program
   }
 
   private static string FormatCommand(string executable, IReadOnlyList<string> arguments) =>
-      string.Join(" ", new[] { executable }.Concat(arguments.Select(QuoteArgument)));
+      string.Join(" ", arguments.Select(QuoteArgument).Prepend(executable));
 
   private static string QuoteArgument(string value) =>
       value.Any(char.IsWhiteSpace) ? $"\"{value.Replace("\"", "\\\"", StringComparison.Ordinal)}\"" : value;
 
-  private static async Task<int> ListProfilesAsync(WdemUserSettingsStore settings)
+  private static async Task<int> ListProfilesAsync(ProfileCatalog catalog)
   {
     try
     {
       var count = 0;
-      var source = settings.ProfileSource;
-      var catalog = new ProfileCatalog(source, settings.CacheDirectory);
       var entries = await catalog.ListAsync();
       foreach (var entry in entries)
       {

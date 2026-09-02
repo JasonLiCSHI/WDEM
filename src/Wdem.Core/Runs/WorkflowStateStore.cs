@@ -11,7 +11,7 @@ namespace Wdem.Core.Runs;
 /// </summary>
 internal sealed class WorkflowStateStore
 {
-  private readonly object _gate = new();
+  private readonly Lock _gate = new();
   private readonly Dictionary<string, TaskState> _tasks;
   private readonly IProgress<WorkflowProgress>? _progress;
   private readonly IProgress<WorkflowUpdate>? _updates;
@@ -308,18 +308,18 @@ internal sealed class WorkflowStateStore
         }
       }
 
-      update = AdvanceLocked(Change: null);
+      update = AdvanceLocked(change: null);
     }
 
     Publish(update);
     return true;
   }
 
-  private WorkflowUpdate AdvanceLocked(WorkflowProgress? Change)
+  private WorkflowUpdate AdvanceLocked(WorkflowProgress? change)
   {
     _revision++;
     _snapshot = CreateSnapshotLocked();
-    return new WorkflowUpdate(_snapshot, Change);
+    return new WorkflowUpdate(_snapshot, change);
   }
 
   private WorkflowSnapshot CreateSnapshotLocked()
