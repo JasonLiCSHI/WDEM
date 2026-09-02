@@ -272,11 +272,11 @@ public sealed class TaskContractTests
       Assert.True(File.Exists(waitMarkerPath), "The script did not wait for the launched installer process.");
       Assert.DoesNotContain("--quiet", installerArguments);
       Assert.DoesNotContain("--passive", installerArguments);
+      Assert.DoesNotContain("--norestart", installerArguments);
+      Assert.DoesNotContain("--allowUnsignedExtensions", installerArguments);
       Assert.Contains("--wait", installerArguments);
-      Assert.Contains("--norestart", installerArguments);
       Assert.Contains("--config", installerArguments);
       Assert.Contains(installerArguments, argument => argument.Contains(configPath, StringComparison.OrdinalIgnoreCase));
-      Assert.DoesNotContain("--allowUnsignedExtensions", installerArguments);
       if (installerExitCode == 0)
       {
         Assert.DoesNotContain("restart is required", result.CombinedOutput, StringComparison.OrdinalIgnoreCase);

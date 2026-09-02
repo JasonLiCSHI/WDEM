@@ -54,11 +54,11 @@ public sealed class DefaultProcessRunnerTests
           result.StandardOutput);
       Assert.DoesNotContain("--quiet", installerArguments);
       Assert.DoesNotContain("--passive", installerArguments);
+      Assert.DoesNotContain("--norestart", installerArguments);
+      Assert.DoesNotContain("--allowUnsignedExtensions", installerArguments);
       Assert.Contains("--wait", installerArguments);
-      Assert.Contains("--norestart", installerArguments);
       Assert.Contains("--config", installerArguments);
       Assert.Contains(configPath, installerArguments);
-      Assert.DoesNotContain("--allowUnsignedExtensions", installerArguments);
     }
     finally
     {

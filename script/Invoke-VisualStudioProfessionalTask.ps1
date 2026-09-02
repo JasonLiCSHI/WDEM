@@ -126,7 +126,6 @@ try {
                 Invoke-WebRequest -Uri $SourceUri -OutFile $bootstrapperPath -MaximumRedirection 10
                 $installerArguments = @(
                     '--wait'
-                    '--norestart'
                     '--config'
                     ('"{0}"' -f $configuration.Path)
                 )
