@@ -123,7 +123,10 @@ try {
             $bootstrapperPath = Join-Path ([IO.Path]::GetTempPath()) "WDEM-vs-professional-$([Guid]::NewGuid().ToString('N')).exe"
             try {
                 Write-Output 'Downloading the Visual Studio Professional bootstrapper from Microsoft.'
-                Invoke-WebRequest -Uri $SourceUri -OutFile $bootstrapperPath -MaximumRedirection 10
+                if (-not (Get-Command Save-WdemRemoteFile -CommandType Function -ErrorAction SilentlyContinue)) {
+                    . (Join-Path $PSScriptRoot 'Wdem.Download.ps1')
+                }
+                Save-WdemRemoteFile -SourceUri $SourceUri -DestinationPath $bootstrapperPath
                 $installerArguments = @(
                     '--wait'
                     '--config'

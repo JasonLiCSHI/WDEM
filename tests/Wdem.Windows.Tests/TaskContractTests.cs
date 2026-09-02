@@ -247,7 +247,8 @@ public sealed class TaskContractTests
     var waitMarkerPath = Path.Combine(Path.GetTempPath(), $"WDEM-contract-vs-wait-{Guid.NewGuid():N}.txt");
     var payload = $$"""
         function Get-Process { param([string] $Name, $ErrorAction); if ($Name -eq 'devenv') { return } }
-        function Invoke-WebRequest { param($Uri, $OutFile, $MaximumRedirection); Set-Content -LiteralPath $OutFile -Value 'fake' }
+        function Save-WdemRemoteFile { param($SourceUri, $DestinationPath); Set-Content -LiteralPath $DestinationPath -Value 'fake' }
+        function Invoke-WebRequest { throw 'Apply must use the shared reliable downloader.' }
         function Start-Process {
             param([string] $FilePath, [string[]] $ArgumentList, [switch] $NoNewWindow, [switch] $Wait, [switch] $PassThru)
             if ($Wait) { throw 'Start-Process must not own descendant-process waiting.' }
@@ -349,6 +350,43 @@ public sealed class TaskContractTests
     }
   }
 
+  [Fact]
+  public async Task ReliableDownloader_RetriesAfterTransientFailureWithoutKeepingPartialContent()
+  {
+    var repositoryRoot = FindRepositoryRoot();
+    var downloaderPath = Path.Combine(repositoryRoot, "script", "Wdem.Download.ps1");
+    var temporaryDirectory = Path.Combine(
+        Path.GetTempPath(),
+        $"WDEM-downloader-{Guid.NewGuid():N}");
+    var fakeCurlPath = Path.Combine(temporaryDirectory, "curl.exe");
+    var attemptPath = Path.Combine(temporaryDirectory, "attempts.txt");
+    var destinationPath = Path.Combine(temporaryDirectory, "installer.exe");
+    Directory.CreateDirectory(temporaryDirectory);
+
+    var payload = $$"""
+        Add-Type -TypeDefinition 'using System; using System.IO; public static class FakeCurl { public static int Main(string[] args) { var outputIndex = Array.IndexOf(args, "--output"); if (outputIndex < 0 || outputIndex + 1 >= args.Length) return 90; var destination = args[outputIndex + 1]; var attemptFile = Environment.GetEnvironmentVariable("WDEM_DOWNLOAD_ATTEMPTS"); var attempt = File.Exists(attemptFile) ? int.Parse(File.ReadAllText(attemptFile)) + 1 : 1; File.WriteAllText(attemptFile, attempt.ToString()); if (attempt == 1) { File.WriteAllText(destination, "partial"); Console.Error.WriteLine("HTTP 404"); return 22; } if (File.Exists(destination)) return 91; File.WriteAllText(destination, "complete"); return 0; } }' -OutputAssembly '{{EscapePowerShellLiteral(fakeCurlPath)}}' -OutputType ConsoleApplication
+        $env:WDEM_DOWNLOAD_ATTEMPTS = '{{EscapePowerShellLiteral(attemptPath)}}'
+        $env:PATH = '{{EscapePowerShellLiteral(temporaryDirectory)}};' + $env:PATH
+        $ErrorActionPreference = 'Stop'
+        . '{{EscapePowerShellLiteral(downloaderPath)}}'
+        Save-WdemRemoteFile -SourceUri 'https://example.test/installer.exe' -DestinationPath '{{EscapePowerShellLiteral(destinationPath)}}' -MaximumAttempts 3 -InitialRetryDelayMilliseconds 0
+        """;
+
+    try
+    {
+      var result = await RunPowerShellAsync(payload);
+
+      Assert.True(result.ExitCode == 0, result.CombinedOutput);
+      Assert.Equal("2", await File.ReadAllTextAsync(attemptPath));
+      Assert.Equal("complete", await File.ReadAllTextAsync(destinationPath));
+      Assert.Contains("retrying", result.CombinedOutput, StringComparison.OrdinalIgnoreCase);
+    }
+    finally
+    {
+      Directory.Delete(temporaryDirectory, recursive: true);
+    }
+  }
+
   [Theory]
   [InlineData(0)]
   [InlineData(1641)]
@@ -365,7 +403,8 @@ public sealed class TaskContractTests
         function Join-Path { param([string] $Path, [string] $ChildPath); if ($ChildPath -eq 'Microsoft Visual Studio\Installer\vswhere.exe') { return '{{EscapePowerShellLiteral(fakeVsWherePath)}}' }; Microsoft.PowerShell.Management\Join-Path @PSBoundParameters }
         function Test-Path { param($LiteralPath, $PathType); if ($LiteralPath -eq '{{EscapePowerShellLiteral(fakeVsWherePath)}}') { return $true }; Microsoft.PowerShell.Management\Test-Path @PSBoundParameters }
         function Get-Process { param([string] $Name, $ErrorAction); if ($Name -eq 'devenv') { return } }
-        function Invoke-WebRequest { param($Uri, $OutFile, $MaximumRedirection); Set-Content -LiteralPath $OutFile -Value 'fake' }
+        function Save-WdemRemoteFile { param($SourceUri, $DestinationPath); Set-Content -LiteralPath $DestinationPath -Value 'fake' }
+        function Invoke-WebRequest { throw 'Apply must use the shared reliable downloader.' }
         function Get-FileHash { param($LiteralPath, $Algorithm); [pscustomobject] @{ Hash = ('A' * 64) } }
         function Start-Process {
             param([string] $FilePath, [string[]] $ArgumentList, [switch] $NoNewWindow, [switch] $Wait, [switch] $PassThru)
