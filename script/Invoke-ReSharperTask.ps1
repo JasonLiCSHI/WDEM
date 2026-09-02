@@ -91,7 +91,10 @@ try {
             $installerPath = Join-Path ([IO.Path]::GetTempPath()) "WDEM-resharper-$([Guid]::NewGuid().ToString('N')).exe"
             try {
                 Write-Output 'Downloading ReSharper from JetBrains.'
-                Invoke-WebRequest -Uri $SourceUri -OutFile $installerPath -MaximumRedirection 10
+                if (-not (Get-Command Save-WdemRemoteFile -CommandType Function -ErrorAction SilentlyContinue)) {
+                    . (Join-Path $PSScriptRoot 'Wdem.Download.ps1')
+                }
+                Save-WdemRemoteFile -SourceUri $SourceUri -DestinationPath $installerPath
                 $actualHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash
                 if (-not $actualHash.Equals($Sha256, [StringComparison]::OrdinalIgnoreCase)) {
                     throw "ReSharper installer integrity check failed. Expected $Sha256 but received $actualHash."

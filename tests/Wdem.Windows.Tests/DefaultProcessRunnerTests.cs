@@ -29,10 +29,11 @@ public sealed class DefaultProcessRunnerTests
             if ($Name -eq 'devenv') { return }
             Microsoft.PowerShell.Management\Get-Process @PSBoundParameters
         }
-        function Invoke-WebRequest {
-            param($Uri, $OutFile, $MaximumRedirection)
-            Add-Type -TypeDefinition 'using System; using System.Diagnostics; using System.IO; public static class FakeInstaller { [STAThread] public static void Main(string[] args) { File.WriteAllLines(Environment.GetEnvironmentVariable("WDEM_FAKE_ARGS_PATH"), args); var child = Process.Start(new ProcessStartInfo(Environment.GetEnvironmentVariable("ComSpec"), "/d /c ping -t 127.0.0.1") { CreateNoWindow = true, UseShellExecute = false }); File.WriteAllText(Environment.GetEnvironmentVariable("WDEM_FAKE_CHILD_PATH"), child.Id.ToString()); Environment.Exit(23); } }' -OutputAssembly $OutFile -OutputType WindowsApplication
+        function Save-WdemRemoteFile {
+            param($SourceUri, $DestinationPath)
+            Add-Type -TypeDefinition 'using System; using System.Diagnostics; using System.IO; public static class FakeInstaller { [STAThread] public static void Main(string[] args) { File.WriteAllLines(Environment.GetEnvironmentVariable("WDEM_FAKE_ARGS_PATH"), args); var child = Process.Start(new ProcessStartInfo(Environment.GetEnvironmentVariable("ComSpec"), "/d /c ping -t 127.0.0.1") { CreateNoWindow = true, UseShellExecute = false }); File.WriteAllText(Environment.GetEnvironmentVariable("WDEM_FAKE_CHILD_PATH"), child.Id.ToString()); Environment.Exit(23); } }' -OutputAssembly $DestinationPath -OutputType WindowsApplication
         }
+        function Invoke-WebRequest { throw 'Apply must use the shared reliable downloader.' }
         $env:WDEM_FAKE_ARGS_PATH = '{{EscapePowerShellLiteral(capturedArgumentsPath)}}'
         $env:WDEM_FAKE_CHILD_PATH = '{{EscapePowerShellLiteral(childProcessIdPath)}}'
         & '{{EscapePowerShellLiteral(scriptPath)}}' -Action Apply -SourceUri 'https://aka.ms/fake-vs-installer' -ConfigPath '{{EscapePowerShellLiteral(configPath)}}'
@@ -102,10 +103,11 @@ public sealed class DefaultProcessRunnerTests
             if ($Name -eq 'devenv') { return }
             Microsoft.PowerShell.Management\Get-Process @PSBoundParameters
         }
-        function Invoke-WebRequest {
-            param($Uri, $OutFile, $MaximumRedirection)
-            Add-Type -TypeDefinition 'using System; public static class FakeInstaller { [STAThread] public static void Main(string[] args) { Environment.Exit(23); } }' -OutputAssembly $OutFile -OutputType WindowsApplication
+        function Save-WdemRemoteFile {
+            param($SourceUri, $DestinationPath)
+            Add-Type -TypeDefinition 'using System; public static class FakeInstaller { [STAThread] public static void Main(string[] args) { Environment.Exit(23); } }' -OutputAssembly $DestinationPath -OutputType WindowsApplication
         }
+        function Invoke-WebRequest { throw 'Apply must use the shared reliable downloader.' }
         function Get-FileHash {
             param($LiteralPath, $Algorithm)
             [pscustomobject] @{ Hash = ('A' * 64) }
