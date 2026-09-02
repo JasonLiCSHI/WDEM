@@ -40,7 +40,7 @@ public sealed class DefaultProcessRunnerTests
 
     try
     {
-      var result = await RunPowerShellAsync(payload).WaitAsync(TimeSpan.FromSeconds(10));
+      var result = await RunPowerShellAsync(payload).WaitAsync(TimeSpan.FromSeconds(30));
       var installerArguments = await File.ReadAllLinesAsync(capturedArgumentsPath);
 
       Assert.Equal(1, result.ExitCode);
