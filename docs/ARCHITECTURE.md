@@ -91,6 +91,8 @@ WPF does not maintain an active-Task collection or interpret execution flow. It 
 
 CLI, WPF, and JSONL logging consume the same Core updates. Cancellation first moves a Task to `Cancelling` and disables duplicate actions. The Task becomes `Cancelled` only after the Runtime has stopped its process tree. Even if a Runtime command wins a cancellation race and returns success, the state machine does not run Exit Activities, take another transition, or start downstream Tasks. Custom Activities must honor the supplied cancellation token; command Activities delegate cancellation to the Windows Runtime, which terminates the process tree.
 
+The shared Windows JSONL logger also records structured `user_action` entries from both clients. These contain only the operation, outcome, Profile ID, and Task IDs; raw command arguments and other potentially sensitive input are intentionally excluded. Workflow progress and results remain separate events so auditing user intent never becomes a second source of runtime state.
+
 Core classifies Detect results as `Missing`, `UpgradeRequired`, `VersionMismatch`, or `Satisfied`. A detected version below a lower-bound requirement such as `>= 2.50` produces `UpgradeRequired`, and both CLI and WPF consume that same result. Presentation state distinguishes `Pending`, `Running`, `Satisfied`, `UpgradeRequired`, `NeedsAttention`, `Succeeded`, `Failed`, `Cancelled`, and `Blocked`. Version failures and blocked or failed Tasks use warning styling. All phase progress comes from `WorkflowProgress`, allowing future Runtime adapters to report finer-grained progress without changing UI button rules.
 
 Task capability matrix:

@@ -94,6 +94,28 @@ public sealed class JsonLineSessionLog : IProgress<WorkflowProgress>, IDisposabl
           value.Message ?? $"{value.TaskId} {value.State} {value.Stage} {value.Percent}%",
           value);
 
+  public void WriteUserAction(
+      string operation,
+      UserActionOutcome outcome,
+      string? profileId = null,
+      IEnumerable<string>? taskIds = null)
+  {
+    ArgumentException.ThrowIfNullOrWhiteSpace(operation);
+
+    var targets = taskIds?
+        .Where(taskId => !string.IsNullOrWhiteSpace(taskId))
+        .Distinct(StringComparer.Ordinal)
+        .ToArray() ?? [];
+    Write(
+        "user_action",
+        $"{operation}: {outcome}",
+        new UserActionLogEntry(
+            operation,
+            outcome.ToString(),
+            string.IsNullOrWhiteSpace(profileId) ? null : profileId,
+            targets));
+  }
+
   public void Write(string category, string message, object? data = null)
   {
     ArgumentException.ThrowIfNullOrWhiteSpace(category);

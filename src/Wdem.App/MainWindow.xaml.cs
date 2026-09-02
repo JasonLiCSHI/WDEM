@@ -68,14 +68,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
   private IEnumerable<TaskRow> AllTasks => RequiredTasks.Concat(OptionalTasks);
 
-  private async void RefreshProfiles_Click(object sender, RoutedEventArgs e) =>
-      await InitializeSourcesAsync(autoLoadProfile: true);
+  private async void RefreshProfiles_Click(object sender, RoutedEventArgs e)
+  {
+    LogUserAction("refresh_profiles", UserActionOutcome.Requested);
+    await InitializeSourcesAsync(autoLoadProfile: true);
+  }
 
   private async void Profile_SelectionChanged(object sender, SelectionChangedEventArgs e)
   {
     UpdateCommandStates();
-    if (!HasExclusiveActivity() && ProfileComboBox.SelectedItem is ProfileCatalogEntry)
+    if (!HasExclusiveActivity() && ProfileComboBox.SelectedItem is ProfileCatalogEntry entry)
     {
+      _log.WriteUserAction(
+          "select_profile",
+          UserActionOutcome.Requested,
+          profileId: entry.Id);
       await LoadSelectedProfileAsync();
     }
   }
@@ -213,6 +220,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         MessageBoxResult.No);
     if (answer != MessageBoxResult.Yes)
     {
+      LogUserAction("trust_profile", UserActionOutcome.Rejected);
       AppendLog("trust", "Profile execution was not trusted.");
       _profileTrusted = false;
       return false;
@@ -221,25 +229,32 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     try
     {
       _settings.Trust(_loadedProfile);
+      LogUserAction("trust_profile", UserActionOutcome.Accepted);
       AppendLog("trust", $"Trusted {_loadedProfile.TrustIdentity}.");
       _profileTrusted = true;
       return true;
     }
     catch (Exception exception)
     {
+      LogUserAction("trust_profile", UserActionOutcome.Failed);
       ShowError(I18n.Get("TrustTitle"), exception);
       _profileTrusted = false;
       return false;
     }
   }
 
-  private async void Inspect_Click(object sender, RoutedEventArgs e) => await InspectAsync();
+  private async void Inspect_Click(object sender, RoutedEventArgs e)
+  {
+    LogUserAction("inspect_profile", UserActionOutcome.Requested);
+    var outcome = await InspectAsync();
+    LogUserAction("inspect_profile", outcome);
+  }
 
-  private async Task InspectAsync()
+  private async Task<UserActionOutcome> InspectAsync()
   {
     if (_loadedProfile is null || HasExclusiveActivity() || !_profileTrusted)
     {
-      return;
+      return UserActionOutcome.Rejected;
     }
 
     _isInspecting = true;
@@ -285,15 +300,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
       var satisfied = report.Tasks.Values.Count(task => task.IsSatisfied);
       RunSummaryText.Text = I18n.Format("InspectCompleted", satisfied, report.Tasks.Count);
       AppendLog("inspect", RunSummaryText.Text, data: report);
+      return UserActionOutcome.Completed;
     }
     catch (OperationCanceledException)
     {
       RunSummaryText.Text = I18n.Get("InspectCancelled");
       AppendLog("cancelled", RunSummaryText.Text);
+      return UserActionOutcome.Cancelled;
     }
     catch (Exception exception)
     {
       ShowError(I18n.Get("InspectErrorTitle"), exception);
+      return UserActionOutcome.Failed;
     }
     finally
     {
@@ -312,6 +330,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
       return;
     }
 
+    var requestedTaskIds = AllTasks
+        .Where(task => task.IsSelected)
+        .Select(task => task.Id)
+        .ToArray();
+    LogUserAction("start_selected_tasks", UserActionOutcome.Requested, requestedTaskIds);
     try
     {
       var selected = OptionalTasks
@@ -319,10 +342,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
           .Select(task => task.Id)
           .ToArray();
       var graph = TaskGraph.BuildForSelection(_loadedProfile.Profile, selected);
-      await StartRunAsync(graph);
+      var report = await StartRunAsync(graph);
+      LogUserAction(
+          "start_selected_tasks",
+          ToUserActionOutcome(report),
+          graph.OrderedTaskIds);
     }
     catch (Exception exception)
     {
+      LogUserAction("start_selected_tasks", UserActionOutcome.Failed, requestedTaskIds);
       ShowError(I18n.Get("StartErrorTitle"), exception);
     }
   }
@@ -338,22 +366,25 @@ public partial class MainWindow : Window, INotifyPropertyChanged
       return;
     }
 
+    LogUserAction("start_task", UserActionOutcome.Requested, [row.Id]);
     try
     {
       var graph = TaskGraph.Build(_loadedProfile.Profile, [row.Id]);
-      await StartRunAsync(graph);
+      var report = await StartRunAsync(graph);
+      LogUserAction("start_task", ToUserActionOutcome(report), graph.OrderedTaskIds);
     }
     catch (Exception exception)
     {
+      LogUserAction("start_task", UserActionOutcome.Failed, [row.Id]);
       ShowError(I18n.Get("StartErrorTitle"), exception);
     }
   }
 
-  private async Task StartRunAsync(TaskGraph graph)
+  private async Task<RunReport> StartRunAsync(TaskGraph graph)
   {
     if (_loadedProfile is null)
     {
-      return;
+      throw new InvalidOperationException("A Profile must be loaded before starting a workflow.");
     }
 
     AppendLog("plan", string.Join(" -> ", graph.OrderedTaskIds));
@@ -368,9 +399,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     ApplyWorkflowSnapshot(_currentRun.Snapshot);
     UpdateCommandStates();
 
+    RunReport report;
     try
     {
-      var report = await _currentRun.Completion;
+      report = await _currentRun.Completion;
       foreach (var task in report.Tasks.Values)
       {
         var row = FindTask(task.TaskId);
@@ -401,6 +433,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
       _currentRun = null;
       UpdateCommandStates();
     }
+
+    return report;
   }
 
   private void CancelAll_Click(object sender, RoutedEventArgs e)
@@ -411,6 +445,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     _currentRun.CancelAll();
+    LogUserAction(
+        "cancel_all_tasks",
+        UserActionOutcome.Requested,
+        _currentRun.Snapshot.Tasks.Values
+            .Where(task => task.IsPlanned && task.Outcome is null)
+            .Select(task => task.TaskId));
     UpdateCommandStates();
     AppendLog("cancel", I18n.Get("CancelRequested"));
   }
@@ -427,8 +467,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     var retryGraph = _retryGraph;
+    LogUserAction("retry_plan", UserActionOutcome.Requested, retryGraph.OrderedTaskIds);
     AppendLog("retry", I18n.Get("RetryStarted"));
-    await StartRunAsync(retryGraph);
+    var report = await StartRunAsync(retryGraph);
+    LogUserAction("retry_plan", ToUserActionOutcome(report), retryGraph.OrderedTaskIds);
   }
 
   private void CancelTask_Click(object sender, RoutedEventArgs e)
@@ -442,6 +484,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     _currentRun.CancelTask(row.Id);
+    LogUserAction("cancel_task", UserActionOutcome.Requested, [row.Id]);
     UpdateCommandStates();
     AppendLog("cancel", $"{I18n.Get("CancelRequested")} Task: {row.Id}");
   }
@@ -569,8 +612,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
   private void TaskRow_PropertyChanged(object? sender, PropertyChangedEventArgs e)
   {
-    if (e.PropertyName == nameof(TaskRow.IsSelected))
+    if (e.PropertyName == nameof(TaskRow.IsSelected) && sender is TaskRow task)
     {
+      LogUserAction(
+          task.IsSelected ? "select_optional_task" : "deselect_optional_task",
+          UserActionOutcome.Completed,
+          [task.Id]);
       UpdateCommandStates();
     }
   }
@@ -629,10 +676,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
       return;
     }
 
+    if (!_closePending)
+    {
+      LogUserAction("close_application", UserActionOutcome.Requested);
+    }
+
     var activeRun = _currentRun?.Snapshot.IsCompleted == false ? _currentRun : null;
     var activeInspection = _inspectionTask;
     if (activeRun is null && activeInspection is null)
     {
+      LogUserAction("close_application", UserActionOutcome.Completed);
       _allowClose = true;
       _log.Dispose();
       return;
@@ -671,14 +724,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     _allowClose = true;
+    LogUserAction("close_application", UserActionOutcome.Completed);
     _log.Dispose();
     Close();
   }
 
   private void OpenLogs_Click(object sender, RoutedEventArgs e)
   {
+    LogUserAction("open_log_directory", UserActionOutcome.Requested);
     if (_log.Path is null)
     {
+      LogUserAction("open_log_directory", UserActionOutcome.Failed);
       MessageBox.Show(
           this,
           _log.LastError ?? I18n.Get("LogsUnavailable"),
@@ -686,11 +742,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
       return;
     }
 
-    Process.Start(new ProcessStartInfo
+    try
     {
-      FileName = Path.GetDirectoryName(_log.Path)!,
-      UseShellExecute = true
-    });
+      Process.Start(new ProcessStartInfo
+      {
+        FileName = Path.GetDirectoryName(_log.Path)!,
+        UseShellExecute = true
+      });
+      LogUserAction("open_log_directory", UserActionOutcome.Completed);
+    }
+    catch (Exception exception)
+    {
+      LogUserAction("open_log_directory", UserActionOutcome.Failed);
+      ShowError(I18n.Get("MessageTitle"), exception);
+    }
   }
 
   private static string FormatOutcome(TaskOutcome outcome) => outcome switch
@@ -712,6 +777,28 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     TaskOutcome.Blocked => TaskVisualState.Blocked,
     _ => TaskVisualState.Pending
   };
+
+  private static UserActionOutcome ToUserActionOutcome(RunReport report)
+  {
+    if (report.Tasks.Values.Any(task => task.Outcome == TaskOutcome.Cancelled))
+    {
+      return UserActionOutcome.Cancelled;
+    }
+
+    return report.Tasks.Values.Any(task => task.Outcome is TaskOutcome.Failed or TaskOutcome.Blocked)
+        ? UserActionOutcome.Failed
+        : UserActionOutcome.Completed;
+  }
+
+  private void LogUserAction(
+      string operation,
+      UserActionOutcome outcome,
+      IEnumerable<string>? taskIds = null) =>
+      _log.WriteUserAction(
+          operation,
+          outcome,
+          _loadedProfile?.Profile.Id,
+          taskIds);
 
   private static bool IsActivityState(TaskExecutionState state) => state is
       TaskExecutionState.Detecting or

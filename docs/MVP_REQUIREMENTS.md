@@ -200,7 +200,7 @@ The minimum single-window interface contains:
 - Task description, source, version, dependencies, and Detect/Pre/Apply/Post/Verify command details;
 - Start and Cancel for individual Tasks plus Start All and Cancel All;
 - automatic local detection after Profile loading;
-- overall progress, current Task phase, command-level progress, live logs, and final statistics.
+- overall progress, current Task phase, command-level progress, live logs, structured user-operation entries, and final statistics.
 
 The Core state machine enters a runtime state before running its Entry, Residence, and Exit Activities. Activity results drive subsequent transitions, and each runtime state projects a stable Task state. Task snapshots directly expose start, cancel, and selection capabilities. The GUI only reacts to projected Task state and capabilities; it never interprets transitions. Global start/cancel actions only aggregate Task capabilities. If the Source is unavailable, only refresh is enabled. After cancellation is requested, duplicate cancellation is disabled immediately, and the Task becomes Cancelled only after its process tree exits.
 

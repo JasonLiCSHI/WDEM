@@ -20,8 +20,11 @@ public static class Program
       return AdministratorRequirement.AccessDeniedExitCode;
     }
 
+    using var log = JsonLineSessionLog.Create("cli");
+
     if (args.Length == 0 || args[0] is "-h" or "--help")
     {
+      log.WriteUserAction("show_help", UserActionOutcome.Completed);
       PrintHelp();
       return args.Length == 0 ? 2 : 0;
     }
@@ -31,6 +34,7 @@ public static class Program
         !command.Equals("inspect", StringComparison.OrdinalIgnoreCase) &&
         !command.Equals("apply", StringComparison.OrdinalIgnoreCase))
     {
+      log.WriteUserAction("invalid_command", UserActionOutcome.Rejected);
       Console.Error.WriteLine($"Unknown command '{command}'.");
       PrintHelp();
       return 2;
@@ -39,10 +43,28 @@ public static class Program
     var argumentError = ValidateArguments(command, args);
     if (argumentError is not null)
     {
+      log.WriteUserAction("invalid_arguments", UserActionOutcome.Rejected);
       Console.Error.WriteLine(argumentError);
       PrintHelp();
       return 2;
     }
+
+    var userOperation = command.ToLowerInvariant() switch
+    {
+      "profiles" => "list_profiles",
+      "inspect" => "inspect_profile",
+      _ => "apply_plan"
+    };
+    var profileArg = GetOption(args, "--profile") ?? GetOption(args, "-p");
+    if (!command.Equals("profiles", StringComparison.OrdinalIgnoreCase) &&
+        string.IsNullOrWhiteSpace(profileArg))
+    {
+      log.WriteUserAction(userOperation, UserActionOutcome.Rejected);
+      Console.Error.WriteLine("Missing --profile <id>.");
+      return 2;
+    }
+
+    log.WriteUserAction(userOperation, UserActionOutcome.Requested, profileArg);
 
     WdemUserSettingsStore settings;
     try
@@ -51,6 +73,7 @@ public static class Program
     }
     catch (Exception exception)
     {
+      log.WriteUserAction(userOperation, UserActionOutcome.Failed, profileArg);
       Console.Error.WriteLine(exception.Message);
       return 2;
     }
@@ -58,23 +81,22 @@ public static class Program
     var catalog = new ProfileCatalog(settings.ProfileSource, settings.CacheDirectory);
     if (command.Equals("profiles", StringComparison.OrdinalIgnoreCase))
     {
-      return await ListProfilesAsync(catalog);
+      var exitCode = await ListProfilesAsync(catalog);
+      log.WriteUserAction(
+          userOperation,
+          exitCode == 2 ? UserActionOutcome.Failed : UserActionOutcome.Completed);
+      return exitCode;
     }
 
-    var profileArg = GetOption(args, "--profile") ?? GetOption(args, "-p");
-    if (string.IsNullOrWhiteSpace(profileArg))
-    {
-      Console.Error.WriteLine("Missing --profile <id>.");
-      return 2;
-    }
-
+    var profileId = profileArg!;
     LoadedProfile loaded;
     try
     {
-      loaded = await catalog.LoadAsync(profileArg);
+      loaded = await catalog.LoadAsync(profileId);
     }
     catch (Exception exception)
     {
+      log.WriteUserAction(userOperation, UserActionOutcome.Failed, profileId);
       Console.Error.WriteLine(exception.Message);
       return 2;
     }
@@ -89,11 +111,23 @@ public static class Program
         if (HasFlag(args, "--trust-profile"))
         {
           settings.Trust(loaded);
+          log.WriteUserAction(
+              "trust_profile",
+              UserActionOutcome.Accepted,
+              profile.Id);
         }
         else
         {
           if (Console.IsInputRedirected)
           {
+            log.WriteUserAction(
+                "trust_profile",
+                UserActionOutcome.Rejected,
+                profile.Id);
+            log.WriteUserAction(
+                userOperation,
+                UserActionOutcome.Rejected,
+                profile.Id);
             Console.Error.WriteLine(
                 "Remote Profile is not trusted. Review it, then run again with --trust-profile.");
             return 3;
@@ -104,21 +138,40 @@ public static class Program
           var trustAnswer = Console.ReadLine();
           if (!string.Equals(trustAnswer, "y", StringComparison.OrdinalIgnoreCase))
           {
+            log.WriteUserAction(
+                "trust_profile",
+                UserActionOutcome.Rejected,
+                profile.Id);
+            log.WriteUserAction(
+                userOperation,
+                UserActionOutcome.Rejected,
+                profile.Id);
             Console.Error.WriteLine("Profile was not trusted; no Detect or Apply command was run.");
             return 3;
           }
           settings.Trust(loaded);
+          log.WriteUserAction(
+              "trust_profile",
+              UserActionOutcome.Accepted,
+              profile.Id);
         }
       }
     }
     catch (Exception exception)
     {
+      log.WriteUserAction(
+          "trust_profile",
+          UserActionOutcome.Failed,
+          profile.Id);
+      log.WriteUserAction(
+          userOperation,
+          UserActionOutcome.Failed,
+          profile.Id);
       Console.Error.WriteLine($"Unable to persist Profile trust: {exception.Message}");
       return 2;
     }
 
     var runtime = new WindowsTaskRuntime(new DefaultProcessRunner());
-    using var log = JsonLineSessionLog.Create("cli");
     log.Write("profile", $"Loaded {profile.Id} {profile.Version} from {loaded.Location}");
     Console.WriteLine($"Log: {log.DisplayPath}");
     if (log.LastError is not null)
@@ -131,6 +184,10 @@ public static class Program
     ConsoleCancelEventHandler inspectCancelHandler = (_, e) =>
     {
       e.Cancel = true;
+      log.WriteUserAction(
+          "cancel_inspection",
+          UserActionOutcome.Requested,
+          profile.Id);
       log.Write("cancel", "Ctrl+C requested safe cancellation during Detect.");
       inspectCancellation.Cancel();
     };
@@ -147,6 +204,10 @@ public static class Program
     catch (OperationCanceledException)
     {
       Console.Error.WriteLine("Inspection cancelled safely.");
+      log.WriteUserAction(
+          userOperation,
+          UserActionOutcome.Cancelled,
+          profile.Id);
       log.Write("cancelled", "Inspection cancelled safely.");
       return 130;
     }
@@ -158,6 +219,10 @@ public static class Program
 
     if (command.Equals("inspect", StringComparison.OrdinalIgnoreCase))
     {
+      log.WriteUserAction(
+          userOperation,
+          UserActionOutcome.Completed,
+          profile.Id);
       log.Write("inspect", $"Satisfied {inspect.Tasks.Values.Count(task => task.IsSatisfied)}/{inspect.Tasks.Count}");
       return inspect.Tasks.Values.All(task => task.IsSatisfied) ? 0 : 1;
     }
@@ -178,6 +243,10 @@ public static class Program
     }
     catch (Exception exception)
     {
+      log.WriteUserAction(
+          userOperation,
+          UserActionOutcome.Failed,
+          profile.Id);
       Console.Error.WriteLine(exception.Message);
       return 2;
     }
@@ -197,9 +266,24 @@ public static class Program
       var answer = Console.ReadLine();
       if (!string.Equals(answer, "y", StringComparison.OrdinalIgnoreCase))
       {
+        log.WriteUserAction(
+            "confirm_apply",
+            UserActionOutcome.Rejected,
+            profile.Id,
+            graph.OrderedTaskIds);
+        log.WriteUserAction(
+            userOperation,
+            UserActionOutcome.Rejected,
+            profile.Id,
+            graph.OrderedTaskIds);
         return 0;
       }
     }
+    log.WriteUserAction(
+        "confirm_apply",
+        UserActionOutcome.Accepted,
+        profile.Id,
+        graph.OrderedTaskIds);
 
     int retries;
     try
@@ -208,6 +292,11 @@ public static class Program
     }
     catch (ArgumentException exception)
     {
+      log.WriteUserAction(
+          userOperation,
+          UserActionOutcome.Failed,
+          profile.Id,
+          graph.OrderedTaskIds);
       Console.Error.WriteLine(exception.Message);
       return 2;
     }
@@ -226,6 +315,11 @@ public static class Program
       log.Write("result", $"{task.TaskId}: {task.Outcome} {task.Error}", task);
     }
     log.Write("run_summary", "Workflow completed.", report);
+    log.WriteUserAction(
+        userOperation,
+        ToUserActionOutcome(report),
+        profile.Id,
+        graph.OrderedTaskIds);
 
     return report.Tasks.Values.All(task => task.Outcome is TaskOutcome.Succeeded or TaskOutcome.NotRequired) ? 0 : 1;
   }
@@ -244,6 +338,11 @@ public static class Program
       if (attempt > 0)
       {
         Console.WriteLine($"Retry {attempt}/{retries}: re-detecting the plan.");
+        log.WriteUserAction(
+            "retry_workflow",
+            UserActionOutcome.Requested,
+            profile.Id,
+            graph.OrderedTaskIds);
         log.Write("retry", $"Attempt {attempt}/{retries}");
       }
 
@@ -252,6 +351,11 @@ public static class Program
       {
         e.Cancel = true;
         cancelRequested = true;
+        log.WriteUserAction(
+            "cancel_workflow",
+            UserActionOutcome.Requested,
+            profile.Id,
+            graph.OrderedTaskIds);
         log.Write("cancel", "Ctrl+C requested safe cancellation of the active workflow.");
         run.CancelAll();
       };
@@ -281,6 +385,18 @@ public static class Program
     Console.WriteLine("wdem profiles");
     Console.WriteLine("wdem inspect  --profile <id> [--trust-profile]");
     Console.WriteLine("wdem apply    --profile <id> [--select task1,task2 | --task task1] [--yes] [--retries N] [--trust-profile]");
+  }
+
+  private static UserActionOutcome ToUserActionOutcome(RunReport report)
+  {
+    if (report.Tasks.Values.Any(task => task.Outcome == TaskOutcome.Cancelled))
+    {
+      return UserActionOutcome.Cancelled;
+    }
+
+    return report.Tasks.Values.Any(task => task.Outcome is TaskOutcome.Failed or TaskOutcome.Blocked)
+        ? UserActionOutcome.Failed
+        : UserActionOutcome.Completed;
   }
 
   private static string? ValidateArguments(string command, string[] args)
