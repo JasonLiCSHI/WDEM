@@ -20,6 +20,9 @@ public sealed class DefaultProcessRunnerTests
     var capturedArgumentsPath = Path.Combine(
         Path.GetTempPath(),
         $"WDEM-fake-vs-arguments-{Guid.NewGuid():N}.txt");
+    var childProcessIdPath = Path.Combine(
+        Path.GetTempPath(),
+        $"WDEM-fake-vs-child-{Guid.NewGuid():N}.txt");
     var payload = $$"""
         function Get-Process {
             param([string] $Name, $ErrorAction)
@@ -28,15 +31,16 @@ public sealed class DefaultProcessRunnerTests
         }
         function Invoke-WebRequest {
             param($Uri, $OutFile, $MaximumRedirection)
-            Add-Type -TypeDefinition 'using System; using System.IO; public static class FakeInstaller { [STAThread] public static void Main(string[] args) { File.WriteAllLines(Environment.GetEnvironmentVariable("WDEM_FAKE_ARGS_PATH"), args); Environment.Exit(23); } }' -OutputAssembly $OutFile -OutputType WindowsApplication
+            Add-Type -TypeDefinition 'using System; using System.Diagnostics; using System.IO; public static class FakeInstaller { [STAThread] public static void Main(string[] args) { File.WriteAllLines(Environment.GetEnvironmentVariable("WDEM_FAKE_ARGS_PATH"), args); var child = Process.Start(new ProcessStartInfo(Environment.GetEnvironmentVariable("ComSpec"), "/d /c ping -t 127.0.0.1") { CreateNoWindow = true, UseShellExecute = false }); File.WriteAllText(Environment.GetEnvironmentVariable("WDEM_FAKE_CHILD_PATH"), child.Id.ToString()); Environment.Exit(23); } }' -OutputAssembly $OutFile -OutputType WindowsApplication
         }
         $env:WDEM_FAKE_ARGS_PATH = '{{EscapePowerShellLiteral(capturedArgumentsPath)}}'
+        $env:WDEM_FAKE_CHILD_PATH = '{{EscapePowerShellLiteral(childProcessIdPath)}}'
         & '{{EscapePowerShellLiteral(scriptPath)}}' -Action Apply -SourceUri 'https://aka.ms/fake-vs-installer' -ConfigPath '{{EscapePowerShellLiteral(configPath)}}'
         """;
 
     try
     {
-      var result = await RunPowerShellAsync(payload);
+      var result = await RunPowerShellAsync(payload).WaitAsync(TimeSpan.FromSeconds(10));
       var installerArguments = await File.ReadAllLinesAsync(capturedArgumentsPath);
 
       Assert.Equal(1, result.ExitCode);
@@ -48,16 +52,33 @@ public sealed class DefaultProcessRunnerTests
       Assert.Contains(
           "Downloading the Visual Studio Professional bootstrapper",
           result.StandardOutput);
-      Assert.Contains("--quiet", installerArguments);
+      Assert.DoesNotContain("--quiet", installerArguments);
+      Assert.DoesNotContain("--passive", installerArguments);
       Assert.Contains("--wait", installerArguments);
       Assert.Contains("--norestart", installerArguments);
       Assert.Contains("--config", installerArguments);
       Assert.Contains(configPath, installerArguments);
-      Assert.Contains("--allowUnsignedExtensions", installerArguments);
+      Assert.DoesNotContain("--allowUnsignedExtensions", installerArguments);
     }
     finally
     {
+      if (File.Exists(childProcessIdPath) &&
+          int.TryParse(await File.ReadAllTextAsync(childProcessIdPath), out var childProcessId))
+      {
+        try
+        {
+          using var childProcess = Process.GetProcessById(childProcessId);
+          childProcess.Kill(entireProcessTree: true);
+          await childProcess.WaitForExitAsync();
+        }
+        catch (ArgumentException)
+        {
+          // The fake installer's child already exited.
+        }
+      }
+
       File.Delete(capturedArgumentsPath);
+      File.Delete(childProcessIdPath);
     }
   }
 

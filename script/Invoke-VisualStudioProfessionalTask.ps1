@@ -125,23 +125,17 @@ try {
                 Write-Output 'Downloading the Visual Studio Professional bootstrapper from Microsoft.'
                 Invoke-WebRequest -Uri $SourceUri -OutFile $bootstrapperPath -MaximumRedirection 10
                 $installerArguments = @(
-                    '--quiet'
                     '--wait'
                     '--norestart'
                     '--config'
                     ('"{0}"' -f $configuration.Path)
                 )
-                if ($configuration.Extensions.Count -gt 0) {
-                    # Required by Visual Studio Installer when a .vsconfig imports
-                    # extensions programmatically in quiet or passive mode.
-                    $installerArguments += '--allowUnsignedExtensions'
-                }
+                Write-Output 'Opening Visual Studio Installer. Complete the installation in the installer window.'
                 $installerProcess = Start-Process `
                     -FilePath $bootstrapperPath `
                     -ArgumentList $installerArguments `
-                    -NoNewWindow `
-                    -Wait `
                     -PassThru
+                $installerProcess | Wait-Process
                 $installerExitCode = $installerProcess.ExitCode
                 if ($installerExitCode -notin @(0, 1641, 3010)) {
                     throw "Visual Studio Installer failed with exit code $installerExitCode."

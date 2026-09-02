@@ -238,19 +238,27 @@ public sealed class TaskContractTests
   [InlineData(0)]
   [InlineData(1641)]
   [InlineData(3010)]
-  public async Task VisualStudioApply_AcceptsDocumentedSuccessCodesAndPassesExtensionFlag(int installerExitCode)
+  public async Task VisualStudioApply_UsesInteractiveInstallerAndAcceptsDocumentedSuccessCodes(int installerExitCode)
   {
     var repositoryRoot = FindRepositoryRoot();
     var scriptPath = Path.Combine(repositoryRoot, "script", "Invoke-VisualStudioProfessionalTask.ps1");
     var configPath = Path.Combine(repositoryRoot, "settings", ".vsconfig");
     var capturedArgumentsPath = Path.Combine(Path.GetTempPath(), $"WDEM-contract-vs-args-{Guid.NewGuid():N}.txt");
+    var waitMarkerPath = Path.Combine(Path.GetTempPath(), $"WDEM-contract-vs-wait-{Guid.NewGuid():N}.txt");
     var payload = $$"""
         function Get-Process { param([string] $Name, $ErrorAction); if ($Name -eq 'devenv') { return } }
         function Invoke-WebRequest { param($Uri, $OutFile, $MaximumRedirection); Set-Content -LiteralPath $OutFile -Value 'fake' }
         function Start-Process {
             param([string] $FilePath, [string[]] $ArgumentList, [switch] $NoNewWindow, [switch] $Wait, [switch] $PassThru)
+            if ($Wait) { throw 'Start-Process must not own descendant-process waiting.' }
+            if ($NoNewWindow) { throw 'The interactive installer must be allowed to create its window.' }
+            if (-not $PassThru) { throw 'The installer process handle is required.' }
             Set-Content -LiteralPath '{{EscapePowerShellLiteral(capturedArgumentsPath)}}' -Value $ArgumentList
             [pscustomobject] @{ ExitCode = {{installerExitCode}} }
+        }
+        function Wait-Process {
+            param([Parameter(ValueFromPipeline = $true)] $InputObject)
+            process { Set-Content -LiteralPath '{{EscapePowerShellLiteral(waitMarkerPath)}}' -Value 'waited' }
         }
         & '{{EscapePowerShellLiteral(scriptPath)}}' -Action Apply -SourceUri 'https://aka.ms/vs/18/stable/vs_professional.exe' -ConfigPath '{{EscapePowerShellLiteral(configPath)}}'
         """;
@@ -261,12 +269,14 @@ public sealed class TaskContractTests
       var installerArguments = await File.ReadAllLinesAsync(capturedArgumentsPath);
 
       Assert.Equal(0, result.ExitCode);
-      Assert.Equal("--quiet", installerArguments[0]);
+      Assert.True(File.Exists(waitMarkerPath), "The script did not wait for the launched installer process.");
+      Assert.DoesNotContain("--quiet", installerArguments);
+      Assert.DoesNotContain("--passive", installerArguments);
       Assert.Contains("--wait", installerArguments);
       Assert.Contains("--norestart", installerArguments);
       Assert.Contains("--config", installerArguments);
       Assert.Contains(installerArguments, argument => argument.Contains(configPath, StringComparison.OrdinalIgnoreCase));
-      Assert.Contains("--allowUnsignedExtensions", installerArguments);
+      Assert.DoesNotContain("--allowUnsignedExtensions", installerArguments);
       if (installerExitCode == 0)
       {
         Assert.DoesNotContain("restart is required", result.CombinedOutput, StringComparison.OrdinalIgnoreCase);
@@ -280,6 +290,7 @@ public sealed class TaskContractTests
     finally
     {
       File.Delete(capturedArgumentsPath);
+      File.Delete(waitMarkerPath);
     }
   }
 
@@ -342,12 +353,13 @@ public sealed class TaskContractTests
   [InlineData(0)]
   [InlineData(1641)]
   [InlineData(3010)]
-  public async Task ReSharperApply_AcceptsDocumentedSuccessCodesAndUsesSilentArgument(int installerExitCode)
+  public async Task ReSharperApply_UsesInteractiveInstallerAndAcceptsDocumentedSuccessCodes(int installerExitCode)
   {
     var repositoryRoot = FindRepositoryRoot();
     var scriptPath = Path.Combine(repositoryRoot, "script", "Invoke-ReSharperTask.ps1");
     var fakeVsWherePath = Path.Combine(Path.GetTempPath(), $"WDEM-contract-rs-vswhere-{Guid.NewGuid():N}.exe");
     var capturedArgumentsPath = Path.Combine(Path.GetTempPath(), $"WDEM-contract-rs-args-{Guid.NewGuid():N}.txt");
+    var waitMarkerPath = Path.Combine(Path.GetTempPath(), $"WDEM-contract-rs-wait-{Guid.NewGuid():N}.txt");
     var payload = $$"""
         Add-Type -TypeDefinition 'using System; public static class FakeVsWhere { public static void Main(string[] args) { Console.WriteLine(@"C:\Fake VS"); } }' -OutputAssembly '{{EscapePowerShellLiteral(fakeVsWherePath)}}' -OutputType ConsoleApplication
         function Join-Path { param([string] $Path, [string] $ChildPath); if ($ChildPath -eq 'Microsoft Visual Studio\Installer\vswhere.exe') { return '{{EscapePowerShellLiteral(fakeVsWherePath)}}' }; Microsoft.PowerShell.Management\Join-Path @PSBoundParameters }
@@ -357,8 +369,15 @@ public sealed class TaskContractTests
         function Get-FileHash { param($LiteralPath, $Algorithm); [pscustomobject] @{ Hash = ('A' * 64) } }
         function Start-Process {
             param([string] $FilePath, [string[]] $ArgumentList, [switch] $NoNewWindow, [switch] $Wait, [switch] $PassThru)
-            Set-Content -LiteralPath '{{EscapePowerShellLiteral(capturedArgumentsPath)}}' -Value $ArgumentList
+            if ($Wait) { throw 'Start-Process must not own descendant-process waiting.' }
+            if ($NoNewWindow) { throw 'The interactive installer must be allowed to create its window.' }
+            if (-not $PassThru) { throw 'The installer process handle is required.' }
+            Set-Content -LiteralPath '{{EscapePowerShellLiteral(capturedArgumentsPath)}}' -Value @($ArgumentList)
             [pscustomobject] @{ ExitCode = {{installerExitCode}} }
+        }
+        function Wait-Process {
+            param([Parameter(ValueFromPipeline = $true)] $InputObject)
+            process { Set-Content -LiteralPath '{{EscapePowerShellLiteral(waitMarkerPath)}}' -Value 'waited' }
         }
         & '{{EscapePowerShellLiteral(scriptPath)}}' -Action Apply -SourceUri 'https://download.jetbrains.com/resharper/fake.exe' -Sha256 ('A' * 64)
         """;
@@ -366,10 +385,13 @@ public sealed class TaskContractTests
     try
     {
       var result = await RunPowerShellAsync(payload);
-      var installerArguments = await File.ReadAllLinesAsync(capturedArgumentsPath);
+      var installerArguments = File.Exists(capturedArgumentsPath)
+          ? await File.ReadAllLinesAsync(capturedArgumentsPath)
+          : [];
 
       Assert.Equal(0, result.ExitCode);
-      Assert.Equal(["/Silent=True"], installerArguments);
+      Assert.True(File.Exists(waitMarkerPath), "The script did not wait for the launched installer process.");
+      Assert.Empty(installerArguments);
       if (installerExitCode == 0)
       {
         Assert.DoesNotContain("restart is required", result.CombinedOutput, StringComparison.OrdinalIgnoreCase);
@@ -384,6 +406,7 @@ public sealed class TaskContractTests
     {
       File.Delete(fakeVsWherePath);
       File.Delete(capturedArgumentsPath);
+      File.Delete(waitMarkerPath);
     }
   }
 
