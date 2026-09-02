@@ -67,7 +67,7 @@ Extension happens at two levels:
 - new workflow factories implement `ITaskWorkflowProvider`, and code-defined transitions may use custom predicates;
 - declaration-format changes use a new `schemaVersion`.
 
-The current engine is a deterministic sequential DAG scheduler. Parallel scheduling, persistent checkpoints, transactional rollback, restart resume, and signature policies are not implemented. These belong in future modules rather than as product-specific logic in Core.
+The current engine is a deterministic dependency-aware DAG scheduler. Every Task waits for all declared dependencies to finish successfully; Tasks with no dependency path between them may run concurrently. Persistent checkpoints, transactional rollback, restart resume, and signature policies are not implemented. These belong in future modules rather than as product-specific logic in Core.
 
 ## Task-driven state and reactive UI
 
@@ -90,6 +90,8 @@ Schema v2 may replace that path with any validated bounded graph. Runtime states
 WPF does not maintain an active-Task collection or interpret execution flow. It maps Task snapshots into presentation state and binds directly to their capabilities. Start All and Cancel All aggregate the corresponding Task capabilities. A small workspace state still handles Profile loading, trust, and inspection because they occur outside the Task Workflow.
 
 CLI, WPF, and JSONL logging consume the same Core updates. Cancellation first moves a Task to `Cancelling` and disables duplicate actions. The Task becomes `Cancelled` only after the Runtime has stopped its process tree. Even if a Runtime command wins a cancellation race and returns success, the state machine does not run Exit Activities, take another transition, or start downstream Tasks. Custom Activities must honor the supplied cancellation token; command Activities delegate cancellation to the Windows Runtime, which terminates the process tree.
+
+The scheduler creates one asynchronous execution for every planned DAG node. A node remains `Pending` until all of its dependencies report `Succeeded` or `NotRequired`; independent ready nodes enter their workflows concurrently. A failed, cancelled, or blocked dependency projects its downstream nodes as `Blocked`, while unrelated branches continue. State mutations remain serialized, and update publications are queued in monotonically increasing `Revision` order so reactive clients never observe a stale snapshot after a newer one.
 
 The shared Windows JSONL logger also records structured `user_action` entries from both clients. These contain only the operation, outcome, Profile ID, and Task IDs; raw command arguments and other potentially sensitive input are intentionally excluded. Workflow progress and results remain separate events so auditing user intent never becomes a second source of runtime state.
 

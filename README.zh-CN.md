@@ -9,6 +9,8 @@
 机器会漂移，清单会过期。WDEM 把 Windows 开发环境变成声明式工作流。<br>
 你只需描述终点，Task DAG 会安排好抵达那里的每一步。
 
+**最终目标：为 Windows 工作站提供 Terraform 级的计划与收敛能力，以及 Dev Box 级的使用体验。**
+
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
 [![.NET](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![WPF](https://img.shields.io/badge/UI-WPF-0C54C2)](https://learn.microsoft.com/dotnet/desktop/wpf/)
@@ -72,7 +74,7 @@ Running → Cancelling → Cancelled       dependency failure → Blocked
 ## 核心能力
 
 - **声明式 Profile** — 定义 Task 元数据、必选/可选、依赖、来源、版本要求和阶段命令。
-- **确定性的 Task DAG** — 展开依赖闭包、去重、生成拓扑顺序，并在执行前报告环。
+- **依赖感知的 Task DAG** — 展开依赖闭包、拒绝环、并发运行独立 Task，并只在全部前置任务成功后启动下游。
 - **可组合生命周期** — Schema v1 编译为 `Detect → Pre → Apply → Post → Verify`；Schema v2 可声明带 Entry、Residence、Exit Activities 的有界状态图。
 - **版本感知** — 支持精确版本、通配符、最低版本和版本范围；低于最低版本时明确标记为必须升级。
 - **响应式操作能力** — 单独或整体启动、取消 Task；所有可用操作都由 Core 根据 Workflow 状态投影。
@@ -240,12 +242,12 @@ WDEM-<version>-win-x64-setup.exe
 安装 .NET 10 SDK 和 Inno Setup 6，然后运行：
 
 ```powershell
-pwsh .\build\Build-Installer.ps1 -Version 0.1.0
+pwsh .\build\Build-Installer.ps1 -Version 0.1.1
 ```
 
 产物及其 SHA-256 校验文件会写入 `artifacts/installer/`。`script/` 和 `settings/` 会作为运行时资源打包；安装程序永远不会捆绑 `profiles/`。
 
-维护者可以通过推送 `v0.1.0` 这样的语义版本标签发布新版本。GitHub Actions 会测试解决方案、构建发布产物，并将安装程序和校验文件附加到对应 GitHub Release。
+维护者可以通过推送 `v0.1.1` 这样的语义版本标签发布新版本。GitHub Actions 会测试解决方案、构建发布产物，并将安装程序和校验文件附加到对应 GitHub Release。
 
 ## 安全与恢复
 
@@ -286,9 +288,25 @@ Base URL 可以指向 Git 分支、Tag 或 Release 路径，末尾是否带 `/` 
 %LOCALAPPDATA%\Wdem\logs              JSONL Session 日志
 ```
 
+## 路线图：Terraform 的严谨，Dev Box 的体验
+
+WDEM 的目标是成为 Windows 环境收敛引擎：像 Terraform 一样可预览、可复现，像 Microsoft Dev Box 一样易于使用和集中分发。这个类比用于指导产品模型；WDEM 仍然以本地 Windows 为中心，Visual Studio、ReSharper 等软件始终只是普通声明式 Task，而不是 Core 中的专用 Provider。
+
+| 里程碑 | 结果 | 计划能力 |
+|---|---|---|
+| **0.1.1 · 执行基础** | 安全且可观测的本地 Workflow | 可信远程 Profile、必选/可选 Task、依赖感知的并行 DAG、可组合 Task 状态机、进程树安全取消、CLI/WPF 一致行为和 JSONL 审计日志 |
+| **0.2 · Apply 前先 Plan** | 每次变更都可审阅 | 不可变 Plan 模型；`NoOp`、`Create`、`Upgrade`、`Reconfigure`、`Blocked` 变更；JSON 导出；GUI 差异确认；Apply 时再次校验 Profile 内容指纹 |
+| **0.3 · State 与恢复** | 中断后可继续，但绝不把缓存当成机器真相 | 原子保存 Desired/Observed State、执行 Journal、State 锁、重启/重启系统后续跑、只读漂移检测，以及每次 Plan/Apply 前重新 Detect |
+| **0.4 · 可复现 Profile** | 无需复制粘贴即可组合环境 | 类型化输入、经过验证的输出与 Task 引用、modules/includes、组织层与用户层、带哈希的来源/版本锁文件，以及明确的 Schema 迁移 |
+| **0.5 · 可扩展 Runtime** | 无需污染 Core 即可增加安装机制 | 通用 Executable、MSI/MSIX、Archive/Download、WinGet Adapter；超时、重试/退避、需要重启结果、并发限制和独占资源锁 |
+| **0.6 · 团队 Catalog** | 将 Dev Box 的自助模式带到共享 Windows 环境 | Git-backed 签名 Catalog、批准发布者、组织策略、无界面镜像/VM 配置、合规导出，以及位于 Core 之外的可选 Azure Dev Box 集成 |
+| **1.0 · 可信契约** | 面向个人和企业的稳定基础 | Profile/Package 信任链、安装包代码签名、SBOM、Credential Manager/Key Vault Secret 引用、审计保证和明确的 Schema 兼容策略 |
+
+近期顺序是有意设计的：**Plan → 执行 Journal 与恢复 → Profile 组合与锁 → Runtime Adapter → 组织 Catalog**。Marketplace、任意远程插件、完整事务回滚、中央设备控制面和跨平台支持，要等这些基础足够可靠后再考虑。
+
 ## MVP 边界
 
-当前版本刻意保持小而可靠。它使用确定性的串行 DAG 调度，暂不包含并行执行、自动 UAC 提权、回滚或卸载、重启后续跑、Profile 市场、带身份认证的私有 Source，以及跨平台支持。这些能力未来可以沿现有 Profile、Graph、Workflow 和 Runtime 扩展点演进，无需把产品专用逻辑放进 Core。
+当前版本刻意保持小而可靠。依赖感知的 DAG 调度器会并发运行彼此独立的 Task，同时严格保持依赖顺序和单个 Task 内的 Activity 顺序。当前暂不包含自动 UAC 提权、回滚或卸载、重启后续跑、Profile 市场、带身份认证的私有 Source，以及跨平台支持。这些能力未来可以沿现有 Profile、Graph、Workflow 和 Runtime 扩展点演进，无需把产品专用逻辑放进 Core。
 
 ## 开发
 

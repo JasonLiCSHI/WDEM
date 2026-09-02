@@ -41,6 +41,7 @@ Visual Studio, ReSharper, Git, and the .NET SDK are ordinary Profile Tasks. Core
 - Select Required Tasks automatically and prevent deselection.
 - Allow users to select Optional Tasks.
 - Add dependencies automatically, remove duplicates, detect cycles, and topologically sort the graph.
+- Run Tasks concurrently when no dependency path exists between them, while starting a dependent only after every declared dependency succeeds or is already satisfied.
 - Support exact, wildcard, minimum, and range version requirements.
 - Inspect using only commands declared as read-only and return a compliance report.
 - Apply by detecting again, creating a plan, executing in DAG order, and running Detect/Verify afterward.
@@ -60,7 +61,6 @@ Visual Studio, ReSharper, Git, and the .NET SDK are ordinary Profile Tasks. Core
 - Hard-coded Providers for Visual Studio, ReSharper, or any other product.
 - A Profile marketplace, search, authentication, or private remote Sources.
 - Profile digital signatures, certificate chains, or organization policies.
-- Parallel Task scheduling.
 - Automatic UAC elevation.
 - Resume after restart.
 - Rollback or uninstall.
@@ -167,15 +167,16 @@ Every remote Profile Source contains an `index.json` and one `<id>.json` file pe
 1. A Profile is the configuration entry point, and a Task is the only scheduling unit.
 2. A Task appears only once in a DAG.
 3. Dependencies must verify successfully before downstream Tasks can run.
-4. A dependency cycle prevents the entire run.
-5. Detection failure and a missing Task are distinct results.
-6. Inspect never invokes an `apply` command.
-7. Apply exit code zero means only that the Apply phase completed; the Task succeeds only when Verify satisfies the version requirement.
-8. Apply and retry must regenerate the plan and create fresh Task workflows at their declared initial states; the Schema v1 initial state is Detect.
-9. Starting one Task automatically includes and first executes any unsatisfied dependencies.
-10. Cancelling one Task terminates its active process tree. Dependents become `Blocked`, while unrelated Tasks may continue.
-11. Cancel All terminates the active process tree and prevents any new Task from starting.
-12. Detect, Pre, Apply, Post, and Verify cannot run until the current Remote/Cache Profile content hash is trusted.
+4. Tasks without a dependency path between them may run concurrently; concurrency never changes the ordered Activities inside one Task workflow.
+5. A dependency cycle prevents the entire run.
+6. Detection failure and a missing Task are distinct results.
+7. Inspect never invokes an `apply` command.
+8. Apply exit code zero means only that the Apply phase completed; the Task succeeds only when Verify satisfies the version requirement.
+9. Apply and retry must regenerate the plan and create fresh Task workflows at their declared initial states; the Schema v1 initial state is Detect.
+10. Starting one Task automatically includes and first executes any unsatisfied dependencies.
+11. Cancelling one Task terminates its active process tree. Dependents become `Blocked`, while unrelated Tasks may continue.
+12. Cancel All terminates every active process tree and prevents any waiting Task from starting.
+13. Detect, Pre, Apply, Post, and Verify cannot run until the current Remote/Cache Profile content hash is trusted.
 
 ## 5. CLI
 
@@ -211,6 +212,7 @@ Apply must present the execution plan before it begins.
 - Remote and Cache Profile content produce the same domain model.
 - Changed remote content requires fresh trust confirmation.
 - Required Tasks, selected Optional Tasks, and automatically included dependencies form a deterministic topological order.
+- Independent Tasks can be active concurrently, and a dependent Task never starts before every dependency succeeds or is already satisfied.
 - A cycle error includes the cycle path.
 - All four version-expression forms match correctly, and an unparseable version is never considered satisfied.
 - Inspect never invokes Apply.
@@ -219,6 +221,7 @@ Apply must present the execution plan before it begins.
 - `pre`, `apply`, and `post` run strictly in order, followed by Verify.
 - Schema v2 runs state Entry, Residence, and Exit Activities in order and follows the first matching transition.
 - Runtime state IDs and Activity locations are projected through progress, snapshots, and reports.
+- Parallel state updates are published to clients in monotonically increasing snapshot revision order.
 - Cancelling a custom workflow prevents Exit Activities, further transitions, and downstream Tasks from executing.
 - Downstream Tasks do not execute after an upstream failure.
 - Cancelling one Task stops its process tree and blocks dependents; Cancel All prevents all subsequent Tasks from starting.
