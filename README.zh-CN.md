@@ -322,4 +322,5 @@ WDEM 将贡献规范作为 [Agent Skill](.agents/skills/wdem-development/SKILL.m
 
 ## License
 
-WDEM 使用 [MIT License](LICENSE) 发布。
+WDEM 使用 [Apache License 2.0](LICENSE) 发布。
+Copyright 2026 Jason Li。

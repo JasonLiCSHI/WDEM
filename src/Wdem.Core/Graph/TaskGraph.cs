@@ -83,7 +83,7 @@ public sealed class TaskGraph
     }
   }
 
-  private static IReadOnlyList<string> TopologicalSort(
+  private static List<string> TopologicalSort(
       EnvironmentProfile profile,
       HashSet<string> included)
   {

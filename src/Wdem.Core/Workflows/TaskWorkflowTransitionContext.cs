@@ -21,7 +21,8 @@ public sealed class TaskWorkflowTransitionContext
 
   public IReadOnlyList<WorkflowActivityResult> ActivityResults { get; }
 
-  public WorkflowActivityResult? LastResult => ActivityResults.LastOrDefault();
+  public WorkflowActivityResult? LastResult =>
+      ActivityResults.Count == 0 ? null : ActivityResults[^1];
 
   public StepReport? LastStep => ActivityResults.LastOrDefault(result => result.Step is not null)?.Step;
 

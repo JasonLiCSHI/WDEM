@@ -21,9 +21,9 @@ public sealed class WdemUserSettingsStore
     WriteIndented = true
   };
 
-  private readonly object _sync = new();
+  private readonly Lock _sync = new();
   private readonly HashSet<string> _trustedProfiles;
-  private SettingsDocument _document;
+  private readonly SettingsDocument _document;
 
   private WdemUserSettingsStore(string settingsPath, string cacheDirectory, SettingsDocument document)
   {

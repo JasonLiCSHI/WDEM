@@ -16,8 +16,8 @@ internal sealed class WorkflowStateMachine(
     ITaskRuntime runtime,
     IReadOnlyDictionary<string, TaskWorkflowDefinition> workflows,
     IReadOnlyDictionary<string, CancellationTokenSource> taskCancellationSources,
-    CancellationToken allCancellationToken,
-    WorkflowStateStore state)
+    WorkflowStateStore state,
+    CancellationToken allCancellationToken)
 {
   public async Task<RunReport> RunAsync()
   {
@@ -219,8 +219,8 @@ internal sealed class WorkflowStateMachine(
       IReadOnlyList<WorkflowActivity> activities,
       WorkflowActivityLocation location,
       ActivityCounter activityCounter,
-      ICollection<WorkflowActivityResult> results,
-      ICollection<StepReport> steps,
+      List<WorkflowActivityResult> results,
+      List<StepReport> steps,
       CancellationToken cancellationToken)
   {
     foreach (var activity in activities)
@@ -274,7 +274,7 @@ internal sealed class WorkflowStateMachine(
 
   private static bool IsBlockedByDependency(
       TaskDefinition task,
-      IReadOnlyDictionary<string, TaskReport> reports) =>
+      Dictionary<string, TaskReport> reports) =>
       task.DependsOn.Any(dependencyId =>
           reports.TryGetValue(dependencyId, out var dependency) &&
           dependency.Outcome is TaskOutcome.Failed or

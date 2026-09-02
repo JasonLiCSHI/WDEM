@@ -322,4 +322,5 @@ Read [AGENTS.md](AGENTS.md) before contributing to understand the product bounda
 
 ## License
 
-WDEM is released under the [MIT License](LICENSE).
+WDEM is released under the [Apache License 2.0](LICENSE).
+Copyright 2026 Jason Li.
