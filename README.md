@@ -14,7 +14,7 @@ Describe the destination once; let the Task DAG take care of the journey.
 [![WPF](https://img.shields.io/badge/UI-WPF-0C54C2)](https://learn.microsoft.com/dotnet/desktop/wpf/)
 [![CI](https://github.com/JasonLiCSHI/WDEM/actions/workflows/ci.yml/badge.svg)](https://github.com/JasonLiCSHI/WDEM/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/JasonLiCSHI/WDEM?display_name=tag&sort=semver)](https://github.com/JasonLiCSHI/WDEM/releases/latest)
-[![License](https://img.shields.io/badge/License-MIT-2EA44F)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache%](LICENSE)
 
 **Profile says what · DAG decides when · Workflow knows how · Runtime executes safely**
 
