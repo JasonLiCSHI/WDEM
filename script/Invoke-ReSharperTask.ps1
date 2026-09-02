@@ -97,12 +97,11 @@ try {
                     throw "ReSharper installer integrity check failed. Expected $Sha256 but received $actualHash."
                 }
 
+                Write-Output 'Opening JetBrains Installer. Complete the installation in the installer window.'
                 $installerProcess = Start-Process `
                     -FilePath $installerPath `
-                    -ArgumentList @('/Silent=True') `
-                    -NoNewWindow `
-                    -Wait `
                     -PassThru
+                $installerProcess | Wait-Process
                 $installerExitCode = $installerProcess.ExitCode
                 if ($installerExitCode -notin @(0, 1641, 3010)) {
                     throw "ReSharper Installer failed with exit code $installerExitCode."

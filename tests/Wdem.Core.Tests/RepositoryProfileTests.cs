@@ -13,7 +13,7 @@ public sealed class RepositoryProfileTests
     var profilePath = Path.Combine(repositoryRoot, "profiles", "csharp-developer.json");
     var profile = ProfileParser.Parse(File.ReadAllText(profilePath));
 
-    Assert.Equal("2.0.0", profile.Version);
+    Assert.Equal("2.0.1", profile.Version);
     Assert.Equal("Csharp developer", profile.DisplayName);
     Assert.Equal(2, profile.Tasks.Count);
 
