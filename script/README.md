@@ -8,5 +8,4 @@ Included scripts:
 
 - `Invoke-VisualStudioProfessionalTask.ps1` detects Visual Studio Professional 2026, validates prerequisites, installs it from Microsoft's official stable channel with `settings/.vsconfig`, and verifies the declared components.
 - `Invoke-ReSharperTask.ps1` detects ReSharper for Visual Studio Professional 2026, validates prerequisites, and installs a SHA-256-pinned package from JetBrains.
-- `Apply-ReSharperSettings.ps1` safely merges `settings/CT.DotSettings` into the current user's ReSharper global settings layer and preserves a backup.
 - `Wdem.Download.ps1` provides the shared HTTPS-only, redirect-safe, retrying `curl.exe` downloader used by installer Tasks.

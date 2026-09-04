@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
-using System.Xml;
 using Wdem.Core.Graph;
 using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
@@ -15,6 +14,14 @@ namespace Wdem.Windows.Tests;
 
 public sealed class TaskContractTests
 {
+  [Fact]
+  public void RepositoryProfile_ReSharperHasNoPostActivities()
+  {
+    var profile = LoadRepositoryProfile(FindRepositoryRoot());
+
+    Assert.Empty(profile.Tasks["resharper"].Post);
+  }
+
   [Fact]
   public async Task RepositoryProfile_AllCommandPathsExpandToPublishedAssets()
   {
@@ -37,7 +44,7 @@ public sealed class TaskContractTests
           CancellationToken.None);
     }
 
-    Assert.Equal(8, commands.Length);
+    Assert.Equal(7, commands.Length);
     Assert.Equal(commands.Length, runner.Requests.Count);
     foreach (var request in runner.Requests)
     {
@@ -49,10 +56,6 @@ public sealed class TaskContractTests
       {
         AssertExistingRepositoryFile(request, "-ConfigPath", repositoryRoot);
       }
-      if (request.Arguments.Contains("-SettingsPath", StringComparer.Ordinal))
-      {
-        AssertExistingRepositoryFile(request, "-SettingsPath", repositoryRoot);
-      }
     }
 
     var visualStudioApply = FindRequest(commands, runner.Requests, "visual-studio-professional", "apply");
@@ -62,9 +65,6 @@ public sealed class TaskContractTests
     var reSharperApply = FindRequest(commands, runner.Requests, "resharper", "apply");
     Assert.Equal(profile.Tasks["resharper"].Source, ValueAfter(reSharperApply, "-SourceUri"));
     Assert.Matches("^[a-f0-9]{64}$", ValueAfter(reSharperApply, "-Sha256"));
-
-    var reSharperPost = FindRequest(commands, runner.Requests, "resharper", "post");
-    Assert.EndsWith(Path.Combine("settings", "CT.DotSettings"), ValueAfter(reSharperPost, "-SettingsPath"));
   }
 
   [Fact]
@@ -93,6 +93,8 @@ public sealed class TaskContractTests
         line.Contains("'settings'", StringComparison.OrdinalIgnoreCase));
     Assert.DoesNotContain(copiedDirectories, line =>
         line.Contains("'profiles'", StringComparison.OrdinalIgnoreCase));
+    Assert.False(File.Exists(Path.Combine(repositoryRoot, "script", "Apply-ReSharperSettings.ps1")));
+    Assert.False(File.Exists(Path.Combine(repositoryRoot, "settings", "CT.DotSettings")));
   }
 
   [Fact]
@@ -117,7 +119,6 @@ public sealed class TaskContractTests
           ("resharper", "detect"),
           ("resharper", "pre"),
           ("resharper", "apply"),
-          ("resharper", "post"),
           ("resharper", "verify")
         ],
         runtime.Invocations);
@@ -126,7 +127,7 @@ public sealed class TaskContractTests
         ["detect", "pre", "apply", "post", "verify"],
         report.Tasks["visual-studio-professional"].Steps.Select(step => step.Phase));
     Assert.Equal(
-        ["detect", "pre", "apply", "post", "verify"],
+        ["detect", "pre", "apply", "verify"],
         report.Tasks["resharper"].Steps.Select(step => step.Phase));
   }
 
@@ -449,38 +450,6 @@ public sealed class TaskContractTests
     }
   }
 
-  [Fact]
-  public async Task ReSharperPost_AppliesBundledSettingsToAnIsolatedTarget()
-  {
-    var repositoryRoot = FindRepositoryRoot();
-    var scriptPath = Path.Combine(repositoryRoot, "script", "Apply-ReSharperSettings.ps1");
-    var settingsPath = Path.Combine(repositoryRoot, "settings", "CT.DotSettings");
-    var temporaryDirectory = Path.Combine(Path.GetTempPath(), $"WDEM-contract-settings-{Guid.NewGuid():N}");
-    var targetPath = Path.Combine(temporaryDirectory, "GlobalSettingsStorage.DotSettings");
-    var payload = $$"""
-        & '{{EscapePowerShellLiteral(scriptPath)}}' -SettingsPath '{{EscapePowerShellLiteral(settingsPath)}}' -TargetPath '{{EscapePowerShellLiteral(targetPath)}}' -AllowRunningVisualStudio
-        """;
-
-    try
-    {
-      var result = await RunPowerShellAsync(payload);
-
-      Assert.Equal(0, result.ExitCode);
-      Assert.True(File.Exists(targetPath));
-      Assert.Contains("Applied", result.StandardOutput);
-      Assert.Contains(targetPath, result.StandardOutput, StringComparison.OrdinalIgnoreCase);
-      Assert.Equal(ReadSettingEntries(settingsPath), ReadSettingEntries(targetPath));
-      Assert.Empty(Directory.GetFiles(temporaryDirectory, "*.backup-*"));
-    }
-    finally
-    {
-      if (Directory.Exists(temporaryDirectory))
-      {
-        Directory.Delete(temporaryDirectory, recursive: true);
-      }
-    }
-  }
-
   private static EnvironmentProfile LoadRepositoryProfile(string repositoryRoot) =>
       ProfileParser.Parse(File.ReadAllText(
           Path.Combine(repositoryRoot, "profiles", "csharp-developer.json")));
@@ -538,23 +507,6 @@ public sealed class TaskContractTests
         string.Equals(argument, option, StringComparison.Ordinal));
     Assert.True(index >= 0 && index + 1 < request.Arguments.Count, $"Missing value for {option}.");
     return request.Arguments[index + 1];
-  }
-
-  private static IReadOnlyList<string> ReadSettingEntries(string path)
-  {
-    var document = new XmlDocument();
-    document.Load(path);
-    var namespaceManager = new XmlNamespaceManager(document.NameTable);
-    namespaceManager.AddNamespace("x", "http://schemas.microsoft.com/winfx/2006/xaml");
-    return document.DocumentElement!
-        .SelectNodes("*[@x:Key]", namespaceManager)!
-        .Cast<XmlElement>()
-        .Select(element => string.Concat(
-            element.GetAttribute("Key", "http://schemas.microsoft.com/winfx/2006/xaml"),
-            "\u001f",
-            element.OuterXml))
-        .OrderBy(entry => entry, StringComparer.Ordinal)
-        .ToArray();
   }
 
   private static string FindRepositoryRoot()

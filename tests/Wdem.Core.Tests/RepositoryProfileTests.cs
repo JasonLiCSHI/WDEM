@@ -13,7 +13,7 @@ public sealed class RepositoryProfileTests
     var profilePath = Path.Combine(repositoryRoot, "profiles", "csharp-developer.json");
     var profile = ProfileParser.Parse(File.ReadAllText(profilePath));
 
-    Assert.Equal("2.0.1", profile.Version);
+    Assert.Equal("2.0.2", profile.Version);
     Assert.Equal("Csharp developer", profile.DisplayName);
     Assert.Equal(2, profile.Tasks.Count);
 
@@ -32,7 +32,7 @@ public sealed class RepositoryProfileTests
     Assert.StartsWith("https://download.jetbrains.com/", reSharper.Source, StringComparison.Ordinal);
     Assert.Single(reSharper.Pre);
     Assert.NotNull(reSharper.Apply);
-    Assert.Single(reSharper.Post);
+    Assert.Empty(reSharper.Post);
 
     using var index = JsonDocument.Parse(
         File.ReadAllText(Path.Combine(repositoryRoot, "profiles", "index.json")));
