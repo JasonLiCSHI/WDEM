@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "id": "csharp-developer",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "displayName": "Csharp developer",
-  "description": "A focused Visual Studio Professional 2026 workstation with ReSharper and managed configuration.",
+  "description": "A focused Visual Studio Professional 2026 workstation with ReSharper.",
   "tasks": {
     "visual-studio-professional": {
       "displayName": "Visual Studio Professional 2026",
@@ -87,7 +87,7 @@
     },
     "resharper": {
       "displayName": "JetBrains ReSharper",
-      "description": "Installs ReSharper from JetBrains for Visual Studio Professional 2026 and applies the bundled global settings.",
+      "description": "Installs ReSharper from JetBrains for Visual Studio Professional 2026.",
       "required": true,
       "dependsOn": ["visual-studio-professional"],
       "version": ">= 2026.1.0.1",
@@ -145,23 +145,7 @@
           "-Sha256",
           "c1f330ff9d9faafcf46c13b646a4b8e09acfe982c7e9de4e9a5fae2ac7f15fc8"
         ]
-      },
-      "post": [
-        {
-          "displayName": "Apply ReSharper global settings",
-          "executable": "powershell.exe",
-          "arguments": [
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            "{appDirectory}\\script\\Apply-ReSharperSettings.ps1",
-            "-SettingsPath",
-            "{appDirectory}\\settings\\CT.DotSettings"
-          ]
-        }
-      ]
+      }
     }
   }
 }

@@ -7,4 +7,3 @@ Do not commit credentials, machine-specific user settings, generated files, or P
 Current configuration files:
 
 - `.vsconfig` declares Visual Studio workloads and components.
-- `CT.DotSettings` contains ReSharper settings that are merged into the current user's global settings layer.
