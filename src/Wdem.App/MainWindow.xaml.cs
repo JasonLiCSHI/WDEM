@@ -8,6 +8,7 @@ using System.Windows.Controls;
 using Wdem.Core.Graph;
 using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
+using Wdem.Domain.Versions;
 using Wdem.Windows.Configuration;
 using Wdem.Windows.Logging;
 using Wdem.Windows.Processes;
@@ -282,14 +283,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         row.Status = inspection.Compliance switch
         {
-          TaskComplianceState.Satisfied => I18n.Get("SatisfiedStatus"),
-          TaskComplianceState.UpgradeRequired => I18n.Get("UpgradeRequiredStatus"),
+          ComplianceStatus.Satisfied => I18n.Get("SatisfiedStatus"),
+          ComplianceStatus.UpgradeRequired => I18n.Get("UpgradeRequiredStatus"),
           _ => I18n.Get("NotCompliantStatus")
         };
         row.VisualState = inspection.Compliance switch
         {
-          TaskComplianceState.Satisfied => TaskVisualState.Satisfied,
-          TaskComplianceState.UpgradeRequired => TaskVisualState.UpgradeRequired,
+          ComplianceStatus.Satisfied => TaskVisualState.Satisfied,
+          ComplianceStatus.UpgradeRequired => TaskVisualState.UpgradeRequired,
           _ => TaskVisualState.NeedsAttention
         };
         row.DetectedVersion = inspection.DetectedVersion;

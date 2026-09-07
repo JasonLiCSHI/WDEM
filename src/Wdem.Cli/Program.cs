@@ -1,6 +1,7 @@
 using Wdem.Core.Graph;
 using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
+using Wdem.Domain.Versions;
 using Wdem.Windows.Configuration;
 using Wdem.Windows.Logging;
 using Wdem.Windows.Processes;
@@ -444,14 +445,14 @@ public static class Program
     {
       var status = task.Compliance switch
       {
-        TaskComplianceState.Satisfied => "OK",
-        TaskComplianceState.Missing => "MISSING",
-        TaskComplianceState.UpgradeRequired => "UPGRADE",
-        TaskComplianceState.VersionMismatch => "MISMATCH",
+        ComplianceStatus.Satisfied => "OK",
+        ComplianceStatus.Missing => "MISSING",
+        ComplianceStatus.UpgradeRequired => "UPGRADE",
+        ComplianceStatus.VersionMismatch => "MISMATCH",
         _ => "UNKNOWN"
       };
       var version = string.IsNullOrWhiteSpace(task.DetectedVersion) ? "" : $" ({task.DetectedVersion})";
-      var requirement = task.Compliance == TaskComplianceState.UpgradeRequired &&
+      var requirement = task.Compliance == ComplianceStatus.UpgradeRequired &&
                         !string.IsNullOrWhiteSpace(task.VersionRequirement)
           ? $" -> requires {task.VersionRequirement}"
           : "";
@@ -477,7 +478,7 @@ public static class Program
     }
     Console.WriteLine($"  depends-on: {(task.DependsOn.Count == 0 ? "none" : string.Join(", ", task.DependsOn))}");
     Console.WriteLine($"  source: {task.Source ?? "none"}");
-    Console.WriteLine($"  version: {task.VersionConstraint ?? "any"}");
+    Console.WriteLine($"  version: {task.VersionRequirement?.Expression ?? "any"}");
     Console.WriteLine($"  preferred-version: {task.PreferredVersion ?? "none"}");
     PrintPhase("detect", [task.Detect]);
     PrintPhase("pre", task.Pre);

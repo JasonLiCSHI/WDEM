@@ -237,7 +237,7 @@ Apply must present the execution plan before it begins.
 | Profile Source | `ProfileSourceDefinition` | HTTPS Source URL, identifier, and display metadata validation |
 | Profile Catalog | `ProfileCatalog.ListAsync/LoadAsync` | Remote-first retrieval, last-known-good cache, size limits, ID validation, and content validation |
 | Profile | `ProfileParser.Parse` | JSON, fields, commands, references, and version validation |
-| Version | `VersionConstraint.Parse/IsSatisfiedBy` | Four expression forms and version comparison |
+| Version | `VersionRequirement.Parse/Evaluate` | Four expression forms, version comparison, and compliance classification |
 | Task DAG | `TaskGraph.Build` | Selection, dependency closure, deduplication, cycle detection, and topological sorting |
 | Task Workflow | `ITaskWorkflowProvider`, `WorkflowActivity` | state validation, lifecycle Activities, transition selection, projection, and limits |
 | Environment Run | `EnvironmentManager.StartApply` | DAG scheduling, blocking, cancellation, and reporting |

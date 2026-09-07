@@ -1,12 +1,23 @@
 using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
 using Wdem.Core.Workflows;
+using Wdem.Core.Tasks;
+using Wdem.Domain.Versions;
 using Xunit;
 
 namespace Wdem.Core.Tests;
 
 public sealed class ProfileParserTests
 {
+  [Fact]
+  public void TaskDefinitionExposesAParsedVersionRequirement()
+  {
+    var property = typeof(TaskDefinition).GetProperty("VersionRequirement");
+
+    Assert.NotNull(property);
+    Assert.Equal(typeof(VersionRequirement), property.PropertyType);
+  }
+
   [Fact]
   public void Parse_DeclarativeTaskPreservesSourceCommandsAndVersion()
   {
@@ -62,7 +73,7 @@ public sealed class ProfileParserTests
     Assert.Equal("visual-studio", task.Id);
     Assert.Equal("Microsoft.VisualStudio.2022.Community", task.Source);
     Assert.Equal("IDE plus organization configuration", task.Description);
-    Assert.Equal(">= 18.3 < 19.0", task.VersionConstraint);
+    Assert.Equal(">= 18.3 < 19.0", task.VersionRequirement?.Expression);
     Assert.Equal("18.3.2", task.PreferredVersion);
     Assert.Equal("vswhere.exe", task.Detect.Executable);
     var pre = Assert.Single(task.Pre);

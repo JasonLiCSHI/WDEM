@@ -64,7 +64,7 @@ public sealed class TaskRow(TaskDefinition definition) : INotifyPropertyChanged
 
   public string Source { get; } = ValueOrPlaceholder(definition.Source);
 
-  public string VersionConstraint { get; } = ValueOrPlaceholder(definition.VersionConstraint);
+  public string VersionConstraint { get; } = ValueOrPlaceholder(definition.VersionRequirement?.Expression);
 
   public string PreferredVersion { get; } = ValueOrPlaceholder(definition.PreferredVersion);
 

@@ -1,9 +1,9 @@
-using Wdem.Core.Versions;
+using Wdem.Domain.Versions;
 using Xunit;
 
 namespace Wdem.Core.Tests;
 
-public sealed class VersionConstraintTests
+public sealed class VersionRequirementCompatibilityTests
 {
   [Theory]
   [InlineData("= 18.3.2", "18.3.2", true)]
@@ -19,7 +19,7 @@ public sealed class VersionConstraintTests
       string version,
       bool expected)
   {
-    var constraint = VersionConstraint.Parse(expression);
+    var constraint = VersionRequirement.Parse(expression);
 
     Assert.Equal(expected, constraint.IsSatisfiedBy(version));
   }
@@ -36,7 +36,7 @@ public sealed class VersionConstraintTests
       string version,
       bool expected)
   {
-    var constraint = VersionConstraint.Parse(expression);
+    var constraint = VersionRequirement.Parse(expression);
 
     Assert.Equal(expected, constraint.IsBelowMinimum(version));
   }

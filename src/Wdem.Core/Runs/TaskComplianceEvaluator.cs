@@ -1,6 +1,6 @@
 using System.Text.RegularExpressions;
 using Wdem.Core.Tasks;
-using Wdem.Core.Versions;
+using Wdem.Domain.Versions;
 
 namespace Wdem.Core.Runs;
 
@@ -21,28 +21,20 @@ internal static class TaskComplianceEvaluator
     var detectedVersion = ExtractVersion(detectionCommand.VersionPattern, detectStep.Stdout);
     if (detectStep.ExitCode != 0)
     {
-      return new TaskComplianceEvaluation(TaskComplianceState.Missing, detectedVersion);
+      return new TaskComplianceEvaluation(ComplianceStatus.Missing, detectedVersion);
     }
 
-    if (string.IsNullOrWhiteSpace(task.VersionConstraint))
+    if (task.VersionRequirement is null)
     {
-      return new TaskComplianceEvaluation(TaskComplianceState.Satisfied, detectedVersion);
+      return new TaskComplianceEvaluation(ComplianceStatus.Satisfied, detectedVersion);
     }
 
-    var constraint = VersionConstraint.Parse(task.VersionConstraint);
     var candidate = string.IsNullOrWhiteSpace(detectionCommand.VersionPattern)
         ? detectStep.Stdout
         : detectedVersion;
 
-    if (!string.IsNullOrWhiteSpace(candidate) && constraint.IsSatisfiedBy(candidate))
-    {
-      return new TaskComplianceEvaluation(TaskComplianceState.Satisfied, detectedVersion);
-    }
-
-    var state = !string.IsNullOrWhiteSpace(candidate) && constraint.IsBelowMinimum(candidate)
-        ? TaskComplianceState.UpgradeRequired
-        : TaskComplianceState.VersionMismatch;
-    return new TaskComplianceEvaluation(state, detectedVersion);
+    var compliance = task.VersionRequirement.Evaluate(candidate ?? string.Empty);
+    return new TaskComplianceEvaluation(compliance.Status, detectedVersion);
   }
 
   private static string? ExtractVersion(string? versionPattern, string stdout)
@@ -58,5 +50,5 @@ internal static class TaskComplianceEvaluator
 }
 
 internal readonly record struct TaskComplianceEvaluation(
-    TaskComplianceState State,
+    ComplianceStatus State,
     string? DetectedVersion);
