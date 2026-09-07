@@ -30,7 +30,7 @@ internal static class I18n
   }
 
   public static string Get(string key) =>
-      System.Windows.Application.Current.TryFindResource(key) as string ?? key;
+      System.Windows.Application.Current?.TryFindResource(key) as string ?? key;
 
   public static string Format(string key, params object?[] arguments) =>
       string.Format(CultureInfo.CurrentUICulture, Get(key), arguments);

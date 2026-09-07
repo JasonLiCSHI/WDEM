@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using Xunit;
 
@@ -5,6 +7,77 @@ namespace Wdem.Architecture.Tests;
 
 public sealed class ArchitectureDependencyTests
 {
+  [Fact]
+  public void Repository_WhenProjectFrameworksAreInspected_ThenEveryProjectTargetsDotNet10()
+  {
+    var repositoryRoot = FindRepositoryRoot();
+    var projectFiles = Directory
+        .EnumerateFiles(repositoryRoot, "*.csproj", SearchOption.AllDirectories)
+        .Where(path => !IsBuildOutput(path))
+        .ToArray();
+
+    var invalidProjects = projectFiles
+        .Select(path => new
+        {
+          Path = path,
+          Frameworks = TargetFrameworks(XDocument.Load(path))
+        })
+        .Where(project =>
+            project.Frameworks.Length == 0 ||
+            project.Frameworks.Any(framework =>
+                !framework.StartsWith("net10.0", StringComparison.Ordinal)))
+        .Select(project => Path.GetRelativePath(repositoryRoot, project.Path))
+        .ToArray();
+
+    Assert.NotEmpty(projectFiles);
+    Assert.Empty(invalidProjects);
+
+    using var globalJson = JsonDocument.Parse(File.ReadAllText(
+        Path.Combine(repositoryRoot, "global.json")));
+    var sdkVersion = globalJson.RootElement.GetProperty("sdk").GetProperty("version").GetString();
+    Assert.StartsWith("10.0.", sdkVersion, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void Repository_WhenPackageReferencesAreInspected_ThenVersionsAreCentralized()
+  {
+    var repositoryRoot = FindRepositoryRoot();
+    var projectFiles = Directory
+        .EnumerateFiles(repositoryRoot, "*.csproj", SearchOption.AllDirectories)
+        .Where(path => !IsBuildOutput(path));
+    var inlineVersions = projectFiles
+        .SelectMany(path => XDocument.Load(path).Descendants("PackageReference")
+            .Where(reference => reference.Attribute("Version") is not null)
+            .Select(_ => Path.GetRelativePath(repositoryRoot, path)))
+        .ToArray();
+
+    Assert.Empty(inlineVersions);
+    var centralPackages = XDocument.Load(Path.Combine(repositoryRoot, "Directory.Packages.props"));
+    Assert.NotEmpty(centralPackages.Descendants("PackageVersion"));
+  }
+
+  [Fact]
+  public void Repository_WhenTestFixturesAreInspected_ThenTheyAreConcreteAndSealed()
+  {
+    var repositoryRoot = FindRepositoryRoot();
+    var testFiles = Directory
+        .EnumerateFiles(Path.Combine(repositoryRoot, "tests"), "*.cs", SearchOption.AllDirectories)
+        .Where(path => !IsBuildOutput(path));
+    var fixturePattern = new Regex(
+        @"public\s+(?<modifiers>(?:(?:abstract|sealed)\s+)*)class\s+(?<name>\w+Tests)\b",
+        RegexOptions.CultureInvariant);
+    var invalidFixtures = testFiles
+        .SelectMany(path => fixturePattern.Matches(File.ReadAllText(path))
+            .Where(match => !match.Groups["modifiers"].Value.Contains(
+                "sealed",
+                StringComparison.Ordinal))
+            .Select(match =>
+                $"{Path.GetRelativePath(repositoryRoot, path)}:{match.Groups["name"].Value}"))
+        .ToArray();
+
+    Assert.Empty(invalidFixtures);
+  }
+
   [Fact]
   public void InnerLayersExistWithTheDeclaredDependencyDirection()
   {
@@ -286,6 +359,13 @@ public sealed class ArchitectureDependencyTests
           .Select(reference => reference.Attribute("Include")?.Value)
           .Where(value => value is not null)
           .Cast<string>()
+          .ToArray();
+
+  private static string[] TargetFrameworks(XDocument project) =>
+      project.Descendants()
+          .Where(element => element.Name.LocalName is "TargetFramework" or "TargetFrameworks")
+          .SelectMany(element => element.Value.Split(';', StringSplitOptions.RemoveEmptyEntries))
+          .Select(framework => framework.Trim())
           .ToArray();
 
   private static bool IsBuildOutput(string path) =>
