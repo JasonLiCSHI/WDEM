@@ -1,6 +1,6 @@
-using Wdem.Core.Tasks;
+using Wdem.Domain.Tasks;
 
-namespace Wdem.Core.Runtime;
+namespace Wdem.Application.Runtime;
 
 public sealed record CommandInvocation(
     string TaskId,

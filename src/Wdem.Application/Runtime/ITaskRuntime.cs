@@ -1,4 +1,4 @@
-namespace Wdem.Core.Runtime;
+namespace Wdem.Application.Runtime;
 
 public interface ITaskRuntime
 {

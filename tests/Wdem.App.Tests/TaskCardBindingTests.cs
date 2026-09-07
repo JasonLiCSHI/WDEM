@@ -3,6 +3,7 @@ using System.Windows.Controls;
 using System.Windows.Data;
 using Wdem.Bootstrapper;
 using Wdem.Core.Tasks;
+using Wdem.Domain.Tasks;
 using Xunit;
 
 namespace Wdem.App.Tests;
@@ -39,7 +40,7 @@ public sealed class TaskCardBindingTests
           LogDirectory = Path.Combine(sessionRoot, "logs"),
           ApplicationDirectory = sessionRoot
         });
-        var application = new Application();
+        var application = new System.Windows.Application();
         application.Resources.MergedDictionaries.Add(new ResourceDictionary
         {
           Source = new Uri(

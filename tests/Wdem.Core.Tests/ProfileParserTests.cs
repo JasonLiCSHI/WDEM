@@ -2,6 +2,7 @@ using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
 using Wdem.Core.Workflows;
 using Wdem.Core.Tasks;
+using Wdem.Domain.Tasks;
 using Wdem.Domain.Versions;
 using Xunit;
 

@@ -1,6 +1,4 @@
-using Wdem.Core.Runs;
-
-namespace Wdem.Core.Runtime;
+namespace Wdem.Application.Runtime;
 
 public sealed record CommandOutput(
     WorkflowOutputStream Stream,

@@ -1,8 +1,8 @@
+using Wdem.Application.Runtime;
 using Wdem.Bootstrapper;
 using Wdem.Core.Planning;
 using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
-using Wdem.Core.Runtime;
 using Wdem.Domain.Planning;
 using Wdem.Domain.Versions;
 using Wdem.Windows.Configuration;
@@ -492,7 +492,7 @@ public static class Program
 
   private static void PrintPhase(
       string phase,
-      IReadOnlyList<Wdem.Core.Tasks.CommandDefinition> commands)
+      IReadOnlyList<Wdem.Domain.Tasks.CommandDefinition> commands)
   {
     if (commands.Count == 0)
     {

@@ -11,6 +11,7 @@
     <Resource Include="Assets\Wdem.ico" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\Wdem.Application\Wdem.Application.csproj" />
     <ProjectReference Include="..\Wdem.Bootstrapper\Wdem.Bootstrapper.csproj" />
     <ProjectReference Include="..\Wdem.Core\Wdem.Core.csproj" />
     <ProjectReference Include="..\Wdem.Windows\Wdem.Windows.csproj" />
