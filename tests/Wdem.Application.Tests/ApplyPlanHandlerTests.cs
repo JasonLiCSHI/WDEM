@@ -1,10 +1,12 @@
 using Wdem.Application.Execution;
+using Wdem.Application.Inspection;
 using Wdem.Application.Planning;
 using Wdem.Application.Profiles;
 using Wdem.Application.Runtime;
 using Wdem.Application.Tests.TestDoubles;
 using Wdem.Application.Workflows;
 using Wdem.Domain.Execution;
+using Wdem.Domain.Versions;
 using Wdem.Infrastructure.Profiles;
 using Xunit;
 
@@ -27,6 +29,32 @@ public sealed class ApplyPlanHandlerTests
     var handler = CreateHandler(runtime, trusted: false);
 
     Assert.Throws<UntrustedProfileException>(() => handler.Start(loaded, plan));
+    Assert.Empty(runtime.Invocations);
+  }
+
+  [Fact]
+  public async Task Apply_DoesNotExecuteATaskWhoseDetectionFailedDuringPlanning()
+  {
+    var profile = ProfileParser.Parse(ProfileJson);
+    var inspection = new InspectReport(profile.Tasks.Keys.ToDictionary(
+        taskId => taskId,
+        taskId => new TaskInspection(
+            taskId,
+            DetectSucceeded: false,
+            DetectedVersion: null,
+            Compliance: ComplianceStatus.DetectionFailed,
+            VersionRequirement: null,
+            new StepReport("detect", 5, "", "access denied")),
+        StringComparer.Ordinal));
+    var plan = new CreatePlanHandler().CreateForTasks(
+        profile,
+        rootTaskIds: ["a"],
+        inspection);
+    var runtime = new FakeRuntime();
+
+    var report = await CreateHandler(runtime).Start(Loaded(profile), plan).Completion;
+
+    Assert.Equal(TaskOutcome.Blocked, report.Tasks["a"].Outcome);
     Assert.Empty(runtime.Invocations);
   }
 
@@ -403,20 +431,20 @@ public sealed class ApplyPlanHandlerTests
         "a": {
           "displayName": "A",
           "required": true,
-          "detect": { "executable": "a", "arguments": [] },
+          "detect": { "executable": "a", "arguments": [], "missingExitCodes": [1] },
           "apply": { "executable": "a", "arguments": ["apply"] }
         },
         "b": {
           "displayName": "B",
           "required": true,
-          "detect": { "executable": "b", "arguments": [] },
+          "detect": { "executable": "b", "arguments": [], "missingExitCodes": [1] },
           "apply": { "executable": "b", "arguments": ["apply"] }
         },
         "c": {
           "displayName": "C",
           "required": true,
           "dependsOn": ["a"],
-          "detect": { "executable": "c", "arguments": [] },
+          "detect": { "executable": "c", "arguments": [], "missingExitCodes": [1] },
           "apply": { "executable": "c", "arguments": ["apply"] }
         }
       }
@@ -432,7 +460,7 @@ public sealed class ApplyPlanHandlerTests
         "pipeline": {
           "displayName": "Pipeline",
           "required": true,
-          "detect": { "executable": "pipeline", "arguments": ["detect"] },
+          "detect": { "executable": "pipeline", "arguments": ["detect"], "missingExitCodes": [1] },
           "pre": [
             { "executable": "pipeline", "arguments": ["pre"] }
           ],

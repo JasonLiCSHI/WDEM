@@ -244,8 +244,8 @@ public static class Program
       }
 
       plan = string.IsNullOrWhiteSpace(singleTask)
-          ? createPlan.CreateForSelection(profile, selectedOptionalTaskIds: selected)
-          : createPlan.CreateForTasks(profile, [singleTask]);
+          ? createPlan.CreateForSelection(profile, selectedOptionalTaskIds: selected, inspect)
+          : createPlan.CreateForTasks(profile, [singleTask], inspect);
     }
     catch (Exception exception)
     {
@@ -259,10 +259,11 @@ public static class Program
 
     Console.WriteLine("Plan:");
     var plannedTaskIds = TaskIds(plan);
-    foreach (var taskId in plannedTaskIds)
+    foreach (var plannedTask in plan.Tasks)
     {
+      var taskId = plannedTask.Id.Value;
       var task = profile.Tasks[taskId];
-      PrintTaskPlan(task);
+      PrintTaskPlan(task, plannedTask.Action);
     }
     log.Write("plan", string.Join(" -> ", plannedTaskIds));
 
@@ -311,6 +312,8 @@ public static class Program
     var report = await RunApplyWithRetriesAsync(
         loaded,
         plan,
+        createPlan,
+        inspectEnvironment,
         applyPlan,
         progress,
         log,
@@ -334,6 +337,8 @@ public static class Program
   private static async Task<RunReport> RunApplyWithRetriesAsync(
       LoadedProfile loadedProfile,
       Plan plan,
+      CreatePlanHandler createPlan,
+      InspectEnvironmentHandler inspectEnvironment,
       ApplyPlanHandler applyPlan,
       IProgress<WorkflowProgress> progress,
       ISessionLog log,
@@ -341,6 +346,7 @@ public static class Program
   {
     var profile = loadedProfile.Profile;
     var cancelRequested = false;
+    RunReport? lastReport = null;
     for (var attempt = 0; ; attempt++)
     {
       if (attempt > 0)
@@ -352,6 +358,43 @@ public static class Program
             profile.Id,
             TaskIds(plan));
         log.Write("retry", $"Attempt {attempt}/{retries}");
+
+        using var inspectionCancellation = new CancellationTokenSource();
+        ConsoleCancelEventHandler inspectionCancelHandler = (_, e) =>
+        {
+          e.Cancel = true;
+          cancelRequested = true;
+          inspectionCancellation.Cancel();
+        };
+        Console.CancelKeyPress += inspectionCancelHandler;
+        try
+        {
+          var inspection = await inspectEnvironment.HandleAsync(
+              loadedProfile,
+              progress,
+              inspectionCancellation.Token);
+          plan = createPlan.CreateForTasks(profile, TaskIds(plan), inspection);
+          Console.WriteLine("Updated plan:");
+          foreach (var plannedTask in plan.Tasks)
+          {
+            PrintTaskPlan(profile.Tasks[plannedTask.Id.Value], plannedTask.Action);
+          }
+        }
+        catch (OperationCanceledException)
+        {
+          Console.Error.WriteLine("Retry inspection cancelled safely.");
+          log.Write("cancelled", "Retry inspection cancelled safely.");
+          if (lastReport is null)
+          {
+            throw;
+          }
+
+          return lastReport;
+        }
+        finally
+        {
+          Console.CancelKeyPress -= inspectionCancelHandler;
+        }
       }
 
       var run = applyPlan.Start(
@@ -376,6 +419,7 @@ public static class Program
       try
       {
         report = await run.Completion;
+        lastReport = report;
       }
       finally
       {
@@ -479,9 +523,12 @@ public static class Program
     }
   }
 
-  private static void PrintTaskPlan(Wdem.Domain.Tasks.TaskDefinition task)
+  private static void PrintTaskPlan(
+      Wdem.Domain.Tasks.TaskDefinition task,
+      PlannedTaskAction action)
   {
-    Console.WriteLine($"- {task.Id}: {task.DisplayName} [{(task.Required ? "required" : "optional")}]");
+    Console.WriteLine(
+        $"- {task.Id}: {task.DisplayName} [{(task.Required ? "required" : "optional")}; {action}]");
     if (!string.IsNullOrWhiteSpace(task.Description))
     {
       Console.WriteLine($"  description: {task.Description}");

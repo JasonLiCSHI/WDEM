@@ -2,6 +2,7 @@ using Wdem.Application.Execution;
 using Wdem.Application.Runtime;
 using Wdem.Application.Workflows;
 using Wdem.Domain.Tasks;
+using Wdem.Domain.Planning;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Profiles;
 using Wdem.Domain.Workflows;
@@ -14,7 +15,7 @@ namespace Wdem.Application.Execution;
 /// </summary>
 internal sealed class WorkflowStateMachine(
     EnvironmentProfile profile,
-    IReadOnlyList<string> plannedTaskIds,
+    IReadOnlyList<PlannedTask> plannedTasks,
     ITaskRuntime runtime,
     IWorkflowActivityExecutor activityExecutor,
     IReadOnlyDictionary<string, TaskWorkflowDefinition> workflows,
@@ -24,16 +25,19 @@ internal sealed class WorkflowStateMachine(
 {
   public async Task<RunReport> RunAsync()
   {
+    var plannedTaskIds = plannedTasks.Select(task => task.Id.Value).ToArray();
     var scheduledTasks = new Dictionary<string, Task<TaskReport>>(StringComparer.Ordinal);
 
-    foreach (var taskId in plannedTaskIds)
+    foreach (var plannedTask in plannedTasks)
     {
+      var taskId = plannedTask.Id.Value;
       var task = profile.Tasks[taskId];
       var dependencies = task.DependsOn
           .Select(dependencyId => scheduledTasks[dependencyId])
           .ToArray();
       scheduledTasks.Add(taskId, RunAfterDependenciesAsync(
           task,
+          plannedTask.Action,
           workflows[taskId],
           dependencies,
           taskCancellationSources[taskId].Token));
@@ -48,6 +52,7 @@ internal sealed class WorkflowStateMachine(
 
   private async Task<TaskReport> RunAfterDependenciesAsync(
       TaskDefinition task,
+      PlannedTaskAction action,
       TaskWorkflowDefinition workflow,
       IReadOnlyList<Task<TaskReport>> dependencyTasks,
       CancellationToken taskCancellationToken)
@@ -55,6 +60,14 @@ internal sealed class WorkflowStateMachine(
     // Allow every ready node in the DAG to be scheduled before any synchronous
     // Activity implementation can occupy the caller's thread.
     await Task.Yield();
+
+    if (action == PlannedTaskAction.Blocked)
+    {
+      return CompleteWithoutSteps(
+          task.Id,
+          TaskOutcome.Blocked,
+          "Planning was blocked because detection failed for this Task or one of its dependencies.");
+    }
 
     var dependencies = await Task.WhenAll(dependencyTasks);
     if (allCancellationToken.IsCancellationRequested || taskCancellationToken.IsCancellationRequested)
@@ -285,14 +298,17 @@ internal sealed class WorkflowStateMachine(
         outcome == TaskOutcome.Failed ? error : null);
   }
 
-  private TaskReport CompleteWithoutSteps(string taskId, TaskOutcome outcome)
+  private TaskReport CompleteWithoutSteps(
+      string taskId,
+      TaskOutcome outcome,
+      string? error = null)
   {
     var effectiveOutcome = state.CompleteTask(taskId, outcome);
     return new TaskReport(
         taskId,
         effectiveOutcome,
         Steps: Array.Empty<StepReport>(),
-        Error: null);
+        Error: error);
   }
 
   private static bool IsBlockedByDependency(IEnumerable<TaskReport> dependencies) =>

@@ -3,7 +3,7 @@ using Wdem.Domain.Tasks;
 
 namespace Wdem.Domain.Planning;
 
-public sealed record PlannedTask(TaskId Id);
+public sealed record PlannedTask(TaskId Id, PlannedTaskAction Action);
 
 public sealed class Plan
 {

@@ -3,6 +3,7 @@ namespace Wdem.Domain.Versions;
 public enum ComplianceStatus
 {
   Missing,
+  DetectionFailed,
   UpgradeRequired,
   VersionMismatch,
   Satisfied

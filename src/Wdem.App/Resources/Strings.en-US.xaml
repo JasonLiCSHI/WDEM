@@ -61,6 +61,7 @@
   <sys:String x:Key="SucceededStatus">Succeeded</sys:String>
   <sys:String x:Key="SatisfiedStatus">Satisfied</sys:String>
   <sys:String x:Key="UpgradeRequiredStatus">Upgrade required</sys:String>
+  <sys:String x:Key="DetectionFailedStatus">Detection failed</sys:String>
   <sys:String x:Key="FailedStatus">Failed</sys:String>
   <sys:String x:Key="CancelledStatus">Cancelled</sys:String>
   <sys:String x:Key="BlockedStatus">Blocked</sys:String>
@@ -76,6 +77,12 @@
   <sys:String x:Key="SelectProfileMessage">Select a Profile first.</sys:String>
   <sys:String x:Key="BusyMessage">An inspection or workflow is already running.</sys:String>
   <sys:String x:Key="NoRetryMessage">There is no failed or blocked plan to retry.</sys:String>
+  <sys:String x:Key="PlanConfirmationTitle">Review execution plan</sys:String>
+  <sys:String x:Key="PlanConfirmationMessage">WDEM re-inspected this machine and created the following plan:&#x0a;&#x0a;{0}&#x0a;&#x0a;Continue?</sys:String>
+  <sys:String x:Key="PlanActionNoOp">No change required</sys:String>
+  <sys:String x:Key="PlanActionInstall">Install</sys:String>
+  <sys:String x:Key="PlanActionUpgrade">Upgrade</sys:String>
+  <sys:String x:Key="PlanActionBlocked">Blocked by detection failure</sys:String>
   <sys:String x:Key="TrustTitle">Trust remote Profile</sys:String>
   <sys:String x:Key="TrustMessage">Profile “{0}” came from:&#x0a;{1}&#x0a;&#x0a;Its Detect, Pre, Apply, Post and Verify commands can start local processes. You will be asked again whenever its content changes. Trust this version and continue?</sys:String>
   <sys:String x:Key="NotTrustedSummary">The Profile is loaded, but its commands have not been trusted.</sys:String>

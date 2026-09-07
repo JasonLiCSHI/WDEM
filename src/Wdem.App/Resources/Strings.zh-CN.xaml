@@ -61,6 +61,7 @@
   <sys:String x:Key="SucceededStatus">成功</sys:String>
   <sys:String x:Key="SatisfiedStatus">已满足</sys:String>
   <sys:String x:Key="UpgradeRequiredStatus">必须升级</sys:String>
+  <sys:String x:Key="DetectionFailedStatus">检测失败</sys:String>
   <sys:String x:Key="FailedStatus">失败</sys:String>
   <sys:String x:Key="CancelledStatus">已取消</sys:String>
   <sys:String x:Key="BlockedStatus">已阻断</sys:String>
@@ -76,6 +77,12 @@
   <sys:String x:Key="SelectProfileMessage">请选择 Profile。</sys:String>
   <sys:String x:Key="BusyMessage">当前已有检查或运行正在进行。</sys:String>
   <sys:String x:Key="NoRetryMessage">当前没有失败或被阻断的计划需要重试。</sys:String>
+  <sys:String x:Key="PlanConfirmationTitle">确认执行计划</sys:String>
+  <sys:String x:Key="PlanConfirmationMessage">WDEM 已重新检查本机并生成以下计划：&#x0a;&#x0a;{0}&#x0a;&#x0a;是否继续？</sys:String>
+  <sys:String x:Key="PlanActionNoOp">无需更改</sys:String>
+  <sys:String x:Key="PlanActionInstall">安装</sys:String>
+  <sys:String x:Key="PlanActionUpgrade">升级</sys:String>
+  <sys:String x:Key="PlanActionBlocked">因检测失败而阻断</sys:String>
   <sys:String x:Key="TrustTitle">信任远程 Profile</sys:String>
   <sys:String x:Key="TrustMessage">Profile “{0}” 来自：&#x0a;{1}&#x0a;&#x0a;其中的 Detect、Pre、Apply、Post 和 Verify 命令可以启动本机进程。内容变更后会再次询问。是否信任此版本并继续？</sys:String>
   <sys:String x:Key="NotTrustedSummary">Profile 已加载，但尚未获得执行命令的信任。</sys:String>

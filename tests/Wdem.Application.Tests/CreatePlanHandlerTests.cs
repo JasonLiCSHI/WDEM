@@ -1,4 +1,8 @@
+using Wdem.Application.Execution;
+using Wdem.Application.Inspection;
 using Wdem.Application.Planning;
+using Wdem.Domain.Planning;
+using Wdem.Domain.Versions;
 using Wdem.Infrastructure.Profiles;
 using Xunit;
 
@@ -13,12 +17,31 @@ public sealed class CreatePlanHandlerTests
 
     var plan = new CreatePlanHandler().CreateForSelection(
         profile,
-        selectedOptionalTaskIds: ["resharper"]);
+        selectedOptionalTaskIds: ["resharper"],
+        inspection: Report(
+            ("dotnet-sdk", ComplianceStatus.Satisfied),
+            ("visual-studio", ComplianceStatus.UpgradeRequired),
+            ("resharper", ComplianceStatus.Missing)));
 
     Assert.Equal(
         ["dotnet-sdk", "visual-studio", "resharper"],
         plan.Tasks.Select(task => task.Id.Value));
+    Assert.Equal(
+        [PlannedTaskAction.NoOp, PlannedTaskAction.Upgrade, PlannedTaskAction.Install],
+        plan.Tasks.Select(task => task.Action));
   }
+
+  private static InspectReport Report(params (string Id, ComplianceStatus Status)[] tasks) =>
+      new(tasks.ToDictionary(
+          task => task.Id,
+          task => new TaskInspection(
+              task.Id,
+              task.Status != ComplianceStatus.DetectionFailed,
+              null,
+              task.Status,
+              null,
+              new StepReport("detect", task.Status == ComplianceStatus.DetectionFailed ? 1 : 0, "", "")),
+          StringComparer.Ordinal));
 
   [Fact]
   public void BuildForSelection_ThrowsOnUnknownTaskId()

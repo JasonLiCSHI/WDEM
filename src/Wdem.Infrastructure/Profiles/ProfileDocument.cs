@@ -51,6 +51,8 @@ internal sealed class CommandDocument
   public List<string?>? Arguments { get; init; }
 
   public string? VersionPattern { get; init; }
+
+  public List<int>? MissingExitCodes { get; init; }
 }
 
 internal sealed class TaskWorkflowDocument
@@ -96,6 +98,8 @@ internal sealed class WorkflowActivityDocument
   public List<string?>? Arguments { get; init; }
 
   public string? VersionPattern { get; init; }
+
+  public List<int>? MissingExitCodes { get; init; }
 }
 
 internal sealed class TaskWorkflowTransitionDocument

@@ -61,7 +61,7 @@ public sealed class InspectEnvironmentHandlerTests
   }
 
   [Fact]
-  public async Task Inspect_MarksNotSatisfiedWhenDetectFails()
+  public async Task Inspect_ReportsDetectionFailureSeparatelyFromMissing()
   {
     var profile = ProfileParser.Parse(ProfileJson);
     var runtime = new FakeRuntime()
@@ -71,6 +71,19 @@ public sealed class InspectEnvironmentHandlerTests
 
     Assert.False(report.Tasks["git"].DetectSucceeded);
     Assert.False(report.Tasks["git"].IsSatisfied);
+    Assert.Equal(ComplianceStatus.DetectionFailed, report.Tasks["git"].Compliance);
+  }
+
+  [Fact]
+  public async Task Inspect_ReportsMissingOnlyForADeclaredExitCode()
+  {
+    var profile = ProfileParser.Parse(ProfileJson.Replace(
+        "\"versionPattern\": \"git version (?<version>\\\\d+(?:\\\\.\\\\d+)+(?:\\\\.[a-zA-Z0-9]+)*)\"",
+        "\"versionPattern\": \"git version (?<version>\\\\d+(?:\\\\.\\\\d+)+(?:\\\\.[a-zA-Z0-9]+)*)\", \"missingExitCodes\": [3]"));
+    var runtime = new FakeRuntime().WithDetect("git", exitCode: 3, stdout: "not installed");
+
+    var report = await CreateHandler(runtime).HandleAsync(Loaded(profile));
+
     Assert.Equal(ComplianceStatus.Missing, report.Tasks["git"].Compliance);
   }
 

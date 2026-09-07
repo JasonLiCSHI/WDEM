@@ -1,4 +1,5 @@
 using Wdem.Domain.Tasks;
+using Wdem.Domain.Versions;
 
 namespace Wdem.Domain.Planning;
 
@@ -36,8 +37,32 @@ public static class TaskPlanner
       IncludeDependencies(tasks, root, included);
     }
 
-    return new Plan(TopologicalSort(tasks, included).Select(id => new PlannedTask(id)));
+    var planned = new List<PlannedTask>(included.Count);
+    var actions = new Dictionary<TaskId, PlannedTaskAction>(included.Count);
+    foreach (var id in TopologicalSort(tasks, included))
+    {
+      var task = tasks[id];
+      var blockedByDependency = task.Dependencies.Any(dependency =>
+          actions.TryGetValue(dependency, out var dependencyAction) &&
+              dependencyAction == PlannedTaskAction.Blocked);
+      var action = blockedByDependency
+          ? PlannedTaskAction.Blocked
+          : ToAction(task.Compliance);
+      planned.Add(new PlannedTask(id, action));
+      actions.Add(id, action);
+    }
+
+    return new Plan(planned);
   }
+
+  private static PlannedTaskAction ToAction(ComplianceStatus compliance) => compliance switch
+  {
+    ComplianceStatus.Satisfied => PlannedTaskAction.NoOp,
+    ComplianceStatus.Missing => PlannedTaskAction.Install,
+    ComplianceStatus.UpgradeRequired or ComplianceStatus.VersionMismatch => PlannedTaskAction.Upgrade,
+    ComplianceStatus.DetectionFailed => PlannedTaskAction.Blocked,
+    _ => throw new ArgumentOutOfRangeException(nameof(compliance), compliance, null)
+  };
 
   private static void ValidateKnownTasks(
       IReadOnlyDictionary<TaskId, PlanningTask> tasks,

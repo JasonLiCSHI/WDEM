@@ -75,8 +75,17 @@ function Assert-Preflight {
 try {
     switch ($Action) {
         'Detect' {
-            $version = Get-InstalledVersion
-            Write-Output "JetBrains ReSharper version $version"
+            try {
+                $version = Get-InstalledVersion
+                Write-Output "JetBrains ReSharper version $version"
+            }
+            catch {
+                if ($_.Exception.Message -eq 'JetBrains ReSharper for Visual Studio Professional 2026 is not installed.') {
+                    Write-Output $_.Exception.Message
+                    exit 3
+                }
+                throw
+            }
         }
         'Pre' {
             Assert-Preflight
