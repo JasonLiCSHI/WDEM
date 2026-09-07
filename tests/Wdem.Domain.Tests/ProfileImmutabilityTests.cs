@@ -52,6 +52,27 @@ public sealed class ProfileImmutabilityTests
         ((IList<string>)task.DependsOn).Clear());
   }
 
+  [Fact]
+  public void Command_WhenCreated_ThenCopiesArgumentAndExitCodeCollectionsAtBoundary()
+  {
+    var arguments = new List<string> { "--version" };
+    var missingExitCodes = new List<int> { 3 };
+    var command = new CommandDefinition(
+        "tool",
+        arguments,
+        MissingExitCodes: missingExitCodes);
+
+    arguments.Clear();
+    missingExitCodes.Clear();
+
+    Assert.Equal(["--version"], command.Arguments);
+    Assert.Equal([3], command.MissingExitCodes);
+    Assert.Throws<NotSupportedException>(() =>
+        ((IList<string>)command.Arguments).Clear());
+    Assert.Throws<NotSupportedException>(() =>
+        ((IList<int>)command.MissingExitCodes!).Clear());
+  }
+
   private static TaskDefinition Task(string id) => new(
       id,
       id,

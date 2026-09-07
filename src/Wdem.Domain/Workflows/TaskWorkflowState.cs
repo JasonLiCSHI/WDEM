@@ -19,10 +19,10 @@ public sealed class TaskWorkflowState
     Id = id;
     DisplayName = string.IsNullOrWhiteSpace(displayName) ? id : displayName;
     TaskState = taskState;
-    EntryActivities = (entryActivities ?? []).ToArray();
-    ResidenceActivities = (residenceActivities ?? []).ToArray();
-    ExitActivities = (exitActivities ?? []).ToArray();
-    Transitions = (transitions ?? []).ToArray();
+    EntryActivities = Array.AsReadOnly((entryActivities ?? []).ToArray());
+    ResidenceActivities = Array.AsReadOnly((residenceActivities ?? []).ToArray());
+    ExitActivities = Array.AsReadOnly((exitActivities ?? []).ToArray());
+    Transitions = Array.AsReadOnly((transitions ?? []).ToArray());
     TerminalOutcome = terminalOutcome;
     TerminalError = terminalError;
   }

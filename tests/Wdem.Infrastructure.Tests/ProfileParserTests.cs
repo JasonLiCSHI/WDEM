@@ -97,6 +97,38 @@ public sealed class ProfileParserTests
   }
 
   [Fact]
+  public void Parse_WhenTaskDependenciesContainCycle_ThenRejectsProfileAggregate()
+  {
+    const string json = """
+      {
+        "id": "cyclic-profile",
+        "version": "1.0.0",
+        "displayName": "Cyclic profile",
+        "tasks": {
+          "ide": {
+            "displayName": "IDE",
+            "required": true,
+            "dependsOn": ["sdk"],
+            "detect": { "executable": "ide", "arguments": ["detect"] },
+            "apply": { "executable": "ide", "arguments": ["apply"] }
+          },
+          "sdk": {
+            "displayName": "SDK",
+            "required": true,
+            "dependsOn": ["ide"],
+            "detect": { "executable": "sdk", "arguments": ["detect"] },
+            "apply": { "executable": "sdk", "arguments": ["apply"] }
+          }
+        }
+      }
+      """;
+
+    var exception = Assert.Throws<FormatException>(() => ProfileParser.Parse(json));
+
+    Assert.Contains("ide -> sdk -> ide", exception.Message, StringComparison.Ordinal);
+  }
+
+  [Fact]
   public void Parse_RejectsInvalidVersionConstraint()
   {
     var json = ValidProfile.Replace("\"version\": \">= 2.50\"", "\"version\": \"latest\"");
@@ -227,7 +259,7 @@ public sealed class ProfileParserTests
   {
     var json = ValidProfile.Replace(
         "\"apply\": {",
-        "\"workflow\": { \"initialState\": \"done\", \"states\": [] }, \"apply\": {");
+        "\"workflow\": { \"initialState\": \"done\", \"states\": [ { \"id\": \"done\", \"taskState\": \"Succeeded\", \"outcome\": \"Succeeded\" } ] }, \"apply\": {");
 
     var exception = Assert.Throws<FormatException>(() => ProfileParser.Parse(json));
 

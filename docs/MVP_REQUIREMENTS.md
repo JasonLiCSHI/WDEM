@@ -31,6 +31,7 @@ Visual Studio, ReSharper, Git, and the .NET SDK are ordinary Profile Tasks. Doma
 - Do not bundle Profiles in the installer.
 - Require explicit, content-hash-based user trust for Remote and Cache Profiles before Detect runs.
 - Support Profile metadata: unique ID, version, display name, and description.
+- Treat `EnvironmentProfile` as the aggregate root that owns and validates the complete immutable Task dependency graph.
 - Support Task metadata: ID, display name, description, Required/Optional, dependencies, version requirement, preferred version, and source.
 - Support Task detection and apply commands, `pre`/`post` commands, and a version extraction rule.
 - Compile Schema v1 Tasks into the standard Detect/Pre/Apply/Post/Verify state graph.

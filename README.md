@@ -77,6 +77,8 @@ Running → Cancelling → Cancelled       dependency failure → Blocked
 
 WDEM is intentionally built as a pure domain-driven design at its core, surrounded by explicit Clean Architecture boundaries. The model speaks the product language—Profile, Task, dependency, Plan, Activity, Workflow, compliance, and outcome—without knowing about WPF, HTTP, JSON, PowerShell, or Autofac.
 
+- The MVP deliberately has one **Environment Convergence** bounded context; adapters are not mislabeled as domain contexts.
+- `EnvironmentProfile` is its aggregate root and guarantees that the complete immutable Task dependency graph is internally consistent and acyclic.
 - `Wdem.Domain` owns value objects, invariants, version policy, DAG planning, workflow definitions, and transitions. It has no package or project dependencies.
 - Immutable Task lifecycle domain events describe completed workflow facts; Application dispatches them in process and Infrastructure records them without making diagnostics part of Task success.
 - `Wdem.Application` expresses Inspect, Plan, and Apply as use cases and defines ports for execution, persistence, trust, and reporting.
