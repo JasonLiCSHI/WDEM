@@ -1,6 +1,6 @@
 using Wdem.Domain.Profiles;
 
-namespace Wdem.Core.Profiles;
+namespace Wdem.Application.Profiles;
 
 public sealed record LoadedProfile(
     EnvironmentProfile Profile,

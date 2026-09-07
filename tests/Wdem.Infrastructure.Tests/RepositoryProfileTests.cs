@@ -1,8 +1,8 @@
 using System.Text.Json;
-using Wdem.Core.Profiles;
+using Wdem.Infrastructure.Profiles;
 using Xunit;
 
-namespace Wdem.Core.Tests;
+namespace Wdem.Infrastructure.Tests;
 
 public sealed class RepositoryProfileTests
 {

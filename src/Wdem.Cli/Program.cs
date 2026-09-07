@@ -1,10 +1,10 @@
 using Wdem.Application.Execution;
 using Wdem.Application.Inspection;
 using Wdem.Application.Planning;
+using Wdem.Application.Profiles;
 using Wdem.Application.Runtime;
 using Wdem.Application.Workflows;
 using Wdem.Bootstrapper;
-using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Planning;
@@ -86,10 +86,10 @@ public static class Program
       return 2;
     }
 
-    var catalog = session.ProfileCatalog;
+    var profileRepository = session.ProfileRepository;
     if (command.Equals("profiles", StringComparison.OrdinalIgnoreCase))
     {
-      var exitCode = await ListProfilesAsync(catalog);
+      var exitCode = await ListProfilesAsync(profileRepository);
       log.WriteUserAction(
           userOperation,
           exitCode == 2 ? UserActionOutcome.Failed : UserActionOutcome.Completed);
@@ -100,7 +100,7 @@ public static class Program
     LoadedProfile loaded;
     try
     {
-      loaded = await catalog.LoadAsync(profileId);
+      loaded = await profileRepository.LoadAsync(profileId);
     }
     catch (Exception exception)
     {
@@ -569,12 +569,12 @@ public static class Program
   private static IReadOnlyList<string> TaskIds(Plan plan) =>
       plan.Tasks.Select(task => task.Id.Value).ToArray();
 
-  private static async Task<int> ListProfilesAsync(ProfileCatalog catalog)
+  private static async Task<int> ListProfilesAsync(IProfileRepository profileRepository)
   {
     try
     {
       var count = 0;
-      var entries = await catalog.ListAsync();
+      var entries = await profileRepository.ListAsync();
       foreach (var entry in entries)
       {
         Console.WriteLine(

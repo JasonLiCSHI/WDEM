@@ -1,4 +1,5 @@
-using Wdem.Core.Profiles;
+using Wdem.Application.Profiles;
+using Wdem.Infrastructure.Profiles;
 using Wdem.Windows.Configuration;
 using Xunit;
 

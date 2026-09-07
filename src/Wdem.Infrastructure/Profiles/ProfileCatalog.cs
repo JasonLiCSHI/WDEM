@@ -2,14 +2,16 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Security.Cryptography;
+using Wdem.Application.Profiles;
+using Wdem.Domain.Profiles;
 
-namespace Wdem.Core.Profiles;
+namespace Wdem.Infrastructure.Profiles;
 
 /// <summary>
 /// Presents one remote Profile Source as a catalog and transparently maintains
 /// a last-known-good local cache for offline use.
 /// </summary>
-public sealed class ProfileCatalog
+public sealed class ProfileCatalog : IProfileRepository
 {
   public const int DefaultMaxDocumentBytes = 1024 * 1024;
 

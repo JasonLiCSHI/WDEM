@@ -1,8 +1,10 @@
 using System.Net;
-using Wdem.Core.Profiles;
+using Wdem.Application.Profiles;
+using Wdem.Domain.Profiles;
+using Wdem.Infrastructure.Profiles;
 using Xunit;
 
-namespace Wdem.Core.Tests;
+namespace Wdem.Infrastructure.Tests;
 
 public sealed class ProfileCatalogTests
 {

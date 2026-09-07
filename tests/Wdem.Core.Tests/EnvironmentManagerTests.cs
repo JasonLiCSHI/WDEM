@@ -1,10 +1,10 @@
 using Wdem.Application.Execution;
 using Wdem.Application.Planning;
 using Wdem.Application.Runtime;
-using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
 using Wdem.Core.Tests.TestDoubles;
 using Wdem.Domain.Execution;
+using Wdem.Infrastructure.Profiles;
 using Xunit;
 
 namespace Wdem.Core.Tests;

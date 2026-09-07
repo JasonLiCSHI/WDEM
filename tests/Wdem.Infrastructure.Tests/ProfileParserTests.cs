@@ -1,13 +1,11 @@
-using Wdem.Core.Profiles;
-using Wdem.Core.Runs;
-using Wdem.Core.Workflows;
+using Wdem.Infrastructure.Profiles;
 using Wdem.Domain.Tasks;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Versions;
 using Wdem.Domain.Workflows;
 using Xunit;
 
-namespace Wdem.Core.Tests;
+namespace Wdem.Infrastructure.Tests;
 
 public sealed class ProfileParserTests
 {

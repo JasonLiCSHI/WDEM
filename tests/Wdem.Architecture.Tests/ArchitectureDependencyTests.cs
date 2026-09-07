@@ -23,6 +23,39 @@ public sealed class ArchitectureDependencyTests
   }
 
   [Fact]
+  public void ProfileIoIsImplementedByInfrastructureBehindAnApplicationPort()
+  {
+    var repositoryRoot = FindRepositoryRoot();
+    var infrastructure = LoadProject(
+        repositoryRoot,
+        "src",
+        "Wdem.Infrastructure",
+        "Wdem.Infrastructure.csproj");
+
+    Assert.Equal(
+        [Path.Combine("..", "Wdem.Application", "Wdem.Application.csproj")],
+        ProjectReferences(infrastructure));
+    Assert.True(File.Exists(Path.Combine(
+        repositoryRoot,
+        "src",
+        "Wdem.Application",
+        "Profiles",
+        "IProfileRepository.cs")));
+    Assert.True(File.Exists(Path.Combine(
+        repositoryRoot,
+        "src",
+        "Wdem.Infrastructure",
+        "Profiles",
+        "ProfileCatalog.cs")));
+    Assert.True(File.Exists(Path.Combine(
+        repositoryRoot,
+        "src",
+        "Wdem.Infrastructure",
+        "Profiles",
+        "ProfileParser.cs")));
+  }
+
+  [Fact]
   public void AutofacIsOwnedByTheBootstrapperCompositionRoot()
   {
     var repositoryRoot = FindRepositoryRoot();
