@@ -1,4 +1,4 @@
-namespace Wdem.Core.Tasks;
+namespace Wdem.Domain.Tasks;
 
 public sealed record CommandDefinition(
     string Executable,

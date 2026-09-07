@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../Wdem.Application/Wdem.Application.csproj" />
     <ProjectReference Include="../Wdem.Core/Wdem.Core.csproj" />
   </ItemGroup>
 </Project>

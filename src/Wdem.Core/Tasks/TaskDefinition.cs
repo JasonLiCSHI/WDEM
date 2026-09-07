@@ -1,6 +1,7 @@
 namespace Wdem.Core.Tasks;
 
 using Wdem.Core.Workflows;
+using Wdem.Domain.Tasks;
 using Wdem.Domain.Versions;
 
 public sealed record TaskDefinition(

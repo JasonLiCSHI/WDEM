@@ -1,6 +1,6 @@
 using Autofac;
+using Wdem.Application.Runtime;
 using Wdem.Core.Profiles;
-using Wdem.Core.Runtime;
 using Wdem.Windows.Configuration;
 using Wdem.Windows.Logging;
 

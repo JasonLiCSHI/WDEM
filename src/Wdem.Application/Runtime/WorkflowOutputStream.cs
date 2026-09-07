@@ -1,4 +1,4 @@
-namespace Wdem.Core.Runs;
+namespace Wdem.Application.Runtime;
 
 public enum WorkflowOutputStream
 {

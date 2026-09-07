@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using Wdem.Core.Tasks;
+using Wdem.Domain.Tasks;
 using Wdem.Domain.Versions;
 
 namespace Wdem.Core.Runs;

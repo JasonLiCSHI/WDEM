@@ -58,6 +58,39 @@ public sealed class ArchitectureDependencyTests
     Assert.Equal(["Wdem.Bootstrapper"], projectsWithAutofac);
   }
 
+  [Fact]
+  public void RuntimePortBelongsToApplicationAndCommandDefinitionBelongsToDomain()
+  {
+    var repositoryRoot = FindRepositoryRoot();
+    var core = LoadProject(repositoryRoot, "src", "Wdem.Core", "Wdem.Core.csproj");
+    var windows = LoadProject(repositoryRoot, "src", "Wdem.Windows", "Wdem.Windows.csproj");
+
+    Assert.Contains(
+        ProjectReferences(core),
+        reference => reference.EndsWith(
+            "Wdem.Application.csproj",
+            StringComparison.OrdinalIgnoreCase));
+    Assert.Contains(
+        ProjectReferences(windows),
+        reference => reference.EndsWith(
+            "Wdem.Application.csproj",
+            StringComparison.OrdinalIgnoreCase));
+    Assert.True(File.Exists(Path.Combine(
+        repositoryRoot,
+        "src",
+        "Wdem.Domain",
+        "Tasks",
+        "CommandDefinition.cs")));
+    var legacyRuntimeDirectory = Path.Combine(
+        repositoryRoot,
+        "src",
+        "Wdem.Core",
+        "Runtime");
+    Assert.False(
+        Directory.Exists(legacyRuntimeDirectory) &&
+        Directory.EnumerateFiles(legacyRuntimeDirectory, "*.cs").Any());
+  }
+
   [Theory]
   [InlineData("src/Wdem.Domain", "System.Diagnostics.Process")]
   [InlineData("src/Wdem.Domain", "System.IO.File")]

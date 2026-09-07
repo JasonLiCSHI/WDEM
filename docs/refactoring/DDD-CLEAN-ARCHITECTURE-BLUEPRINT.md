@@ -55,7 +55,7 @@ Ports are owned by the use case that needs them. Initial ports are `IProfileRepo
 |---|---|---|
 | `Core/Versions/VersionConstraint.cs` | `Domain/Versions/VersionRequirement.cs`, `SoftwareVersion.cs` | Split parsing/comparison from compliance result |
 | `Core/Tasks/TaskDefinition.cs` | `Domain/Tasks/TaskDefinition.cs` | Move immutable definition and parsed requirement |
-| `Core/Tasks/CommandDefinition.cs` | `Domain/Tasks/CommandDefinition.cs` | Keep executable plus argument-array invariant |
+| ~~`Core/Tasks/CommandDefinition.cs`~~ | `Domain/Tasks/CommandDefinition.cs` | Migrated; keeps the executable plus argument-array invariant |
 | `Core/Profiles/EnvironmentProfile.cs` | `Domain/Profiles/Profile.cs` | Rename after callers migrate |
 | `Core/Profiles/ProfileSourceDefinition.cs` | `Domain/Profiles/ProfileSource.cs` | Move validated identity and URI value semantics |
 | `Core/Profiles/ProfileCatalogEntry.cs` | `Application/Profiles` read model | Move catalog projection out of Domain |
@@ -76,7 +76,7 @@ Ports are owned by the use case that needs them. Initial ports are `IProfileRepo
 | `Core/Runs/WorkflowStateMachine.cs` | `Application/Execution` | Coordinate Activities using domain decisions |
 | `Core/Runs/WorkflowStateStore.cs` | `Application/Queries` | Project serialized immutable snapshots |
 | `Core/Runs/Workflow*.cs` snapshot/progress files | `Application/Queries` | Preserve client-facing read models |
-| `Core/Runtime/*.cs` | `Application/Abstractions/Runtime` | Move runtime port and transport results |
+| ~~`Core/Runtime/*.cs`~~ | `Application/Runtime` | Migrated; Application owns the runtime port and transport results |
 | `Core/Workflows/TaskWorkflow*.cs` | `Domain/Workflows` | Move states, transitions, context, and decisions |
 | `Core/Workflows/WorkflowActivity*.cs` | split Domain/Application | Domain keeps declarations; Application executes Activities |
 | `Core/Workflows/DefaultTaskWorkflowProvider.cs` | `Application/Execution` | Compile Schema v1 into the domain workflow |
