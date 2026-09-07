@@ -1,5 +1,6 @@
 using Wdem.Application.Execution;
 using Wdem.Application.Inspection;
+using Wdem.Application.Logging;
 using Wdem.Application.Planning;
 using Wdem.Application.Profiles;
 using Wdem.Application.Runtime;
@@ -8,8 +9,6 @@ using Wdem.Domain.Execution;
 using Wdem.Domain.Planning;
 using Wdem.Domain.Profiles;
 using Wdem.Domain.Versions;
-using Wdem.Windows.Configuration;
-using Wdem.Windows.Logging;
 using Wdem.Windows.Security;
 
 namespace Wdem.Cli;
@@ -72,10 +71,10 @@ public static class Program
 
     log.WriteUserAction(userOperation, UserActionOutcome.Requested, profileArg);
 
-    WdemUserSettingsStore settings;
+    IProfileTrustStore profileTrust;
     try
     {
-      settings = session.Settings;
+      profileTrust = session.ProfileTrust;
     }
     catch (Exception exception)
     {
@@ -112,11 +111,11 @@ public static class Program
 
     try
     {
-      if (loaded.RequiresTrust && !settings.IsTrusted(loaded))
+      if (loaded.RequiresTrust && !profileTrust.IsTrusted(loaded))
       {
         if (HasFlag(args, "--trust-profile"))
         {
-          settings.Trust(loaded);
+          profileTrust.Trust(loaded);
           log.WriteUserAction(
               "trust_profile",
               UserActionOutcome.Accepted,
@@ -155,7 +154,7 @@ public static class Program
             Console.Error.WriteLine("Profile was not trusted; no Detect or Apply command was run.");
             return 3;
           }
-          settings.Trust(loaded);
+          profileTrust.Trust(loaded);
           log.WriteUserAction(
               "trust_profile",
               UserActionOutcome.Accepted,
@@ -337,7 +336,7 @@ public static class Program
       Plan plan,
       ApplyPlanHandler applyPlan,
       IProgress<WorkflowProgress> progress,
-      JsonLineSessionLog log,
+      ISessionLog log,
       int retries)
   {
     var cancelRequested = false;

@@ -2,14 +2,15 @@ using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using Wdem.Application.Execution;
+using Wdem.Application.Logging;
 
-namespace Wdem.Windows.Logging;
+namespace Wdem.Infrastructure.Logging;
 
 /// <summary>
 /// Writes one durable JSON object per line for a single WDEM process session.
 /// Logging is best-effort: an unavailable log directory never prevents WDEM from starting.
 /// </summary>
-public sealed class JsonLineSessionLog : IProgress<WorkflowProgress>, IDisposable
+public sealed class JsonLineSessionLog : ISessionLog, IDisposable
 {
   private readonly Lock _sync = new();
   private StreamWriter? _writer;

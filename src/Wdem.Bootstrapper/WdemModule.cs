@@ -1,13 +1,14 @@
 using Autofac;
 using Wdem.Application.Execution;
 using Wdem.Application.Inspection;
+using Wdem.Application.Logging;
 using Wdem.Application.Planning;
 using Wdem.Application.Profiles;
 using Wdem.Application.Runtime;
 using Wdem.Application.Workflows;
+using Wdem.Infrastructure.Configuration;
+using Wdem.Infrastructure.Logging;
 using Wdem.Infrastructure.Profiles;
-using Wdem.Windows.Configuration;
-using Wdem.Windows.Logging;
 using Wdem.Windows.Processes;
 using Wdem.Windows.Runtime;
 
@@ -17,7 +18,10 @@ internal sealed class WdemModule(WdemBootstrapperOptions options) : Module
 {
   protected override void Load(ContainerBuilder builder)
   {
-    builder.Register(_ => OpenSettings(options)).SingleInstance();
+    builder.Register(_ => OpenSettings(options))
+        .AsSelf()
+        .As<IProfileTrustStore>()
+        .SingleInstance();
     builder.Register(context =>
         new ProfileCatalog(
             context.Resolve<WdemUserSettingsStore>().ProfileSource,
@@ -42,7 +46,9 @@ internal sealed class WdemModule(WdemBootstrapperOptions options) : Module
     builder.RegisterType<ApplyPlanHandler>().SingleInstance();
     builder.RegisterType<CreatePlanHandler>().SingleInstance();
     builder.RegisterType<InspectEnvironmentHandler>().SingleInstance();
-    builder.Register(_ => CreateLog(options)).SingleInstance();
+    builder.Register(_ => CreateLog(options))
+        .As<ISessionLog>()
+        .SingleInstance();
   }
 
   private static WdemUserSettingsStore OpenSettings(WdemBootstrapperOptions options)

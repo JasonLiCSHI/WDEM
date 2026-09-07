@@ -81,8 +81,8 @@ Ports are owned by the use case that needs them. Initial ports are `IProfileRepo
 | ~~`Core/Workflows/TaskWorkflow*.cs`~~ | `Domain/Workflows` | Migrated state graph definitions, validation, transition facts, and decisions |
 | ~~`Core/Workflows/WorkflowActivity*.cs`~~ | split Domain/Application | Migrated: Domain keeps Activity definitions; Application executes them through a port |
 | ~~`Core/Workflows/DefaultTaskWorkflowProvider.cs`~~ | `Application/Workflows` | Migrated Schema v1 compilation into Domain workflow definitions |
-| `Windows/Configuration/*` | `Infrastructure/Configuration` | Implement settings/trust persistence ports |
-| `Windows/Logging/*` | `Infrastructure/Logging` | Implement execution journal port |
+| ~~`Windows/Configuration/*`~~ | `Infrastructure/Configuration`, `Application/Profiles/IProfileTrustStore.cs` | Migrated settings/trust persistence adapter and port |
+| ~~`Windows/Logging/*`~~ | `Infrastructure/Logging`, `Application/Logging/ISessionLog.cs` | Migrated JSONL journal adapter and port |
 | `Windows/Processes/*`, `Windows/Runtime/*`, `Windows/Security/*` | `Windows` | Retain Windows-specific adapters |
 | `App/MainWindow.xaml.cs` | WPF vertical presentation slices | Replace orchestration with application handlers |
 | `App/TaskRow.cs`, `WorkspaceActionState.cs` | WPF projections | Bind only to application snapshots/capabilities |

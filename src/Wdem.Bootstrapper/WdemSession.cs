@@ -1,10 +1,9 @@
 using Autofac;
 using Wdem.Application.Execution;
 using Wdem.Application.Inspection;
+using Wdem.Application.Logging;
 using Wdem.Application.Planning;
 using Wdem.Application.Profiles;
-using Wdem.Windows.Configuration;
-using Wdem.Windows.Logging;
 
 namespace Wdem.Bootstrapper;
 
@@ -19,12 +18,12 @@ public sealed class WdemSession : IDisposable
   internal WdemSession(IContainer container)
   {
     _container = container;
-    SessionLog = container.Resolve<JsonLineSessionLog>();
+    SessionLog = container.Resolve<ISessionLog>();
   }
 
-  public JsonLineSessionLog SessionLog { get; }
+  public ISessionLog SessionLog { get; }
 
-  public WdemUserSettingsStore Settings => Resolve<WdemUserSettingsStore>();
+  public IProfileTrustStore ProfileTrust => Resolve<IProfileTrustStore>();
 
   public IProfileRepository ProfileRepository => Resolve<IProfileRepository>();
 

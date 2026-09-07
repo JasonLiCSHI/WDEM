@@ -1,4 +1,4 @@
-namespace Wdem.Windows.Logging;
+namespace Wdem.Application.Logging;
 
 public enum UserActionOutcome
 {

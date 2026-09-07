@@ -7,6 +7,7 @@ using System.Windows;
 using System.Windows.Controls;
 using Wdem.Application.Execution;
 using Wdem.Application.Inspection;
+using Wdem.Application.Logging;
 using Wdem.Application.Planning;
 using Wdem.Application.Profiles;
 using Wdem.Bootstrapper;
@@ -14,8 +15,6 @@ using Wdem.Domain.Planning;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Workflows;
 using Wdem.Domain.Versions;
-using Wdem.Windows.Configuration;
-using Wdem.Windows.Logging;
 
 namespace Wdem.App;
 
@@ -25,8 +24,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
   private readonly ApplyPlanHandler _applyPlan;
   private readonly CreatePlanHandler _createPlan;
   private readonly InspectEnvironmentHandler _inspectEnvironment;
-  private readonly JsonLineSessionLog _log;
-  private WdemUserSettingsStore? _settings;
+  private readonly ISessionLog _log;
+  private IProfileTrustStore? _profileTrust;
   private IProfileRepository? _profileRepository;
   private LoadedProfile? _loadedProfile;
   private EnvironmentRun? _currentRun;
@@ -117,9 +116,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     var shouldLoadProfile = false;
     try
     {
-      _settings = _session.Settings;
-      var source = _settings.ProfileSource;
+      _profileTrust = _session.ProfileTrust;
       _profileRepository = _session.ProfileRepository;
+      var source = _profileRepository.Source;
       var entries = await _profileRepository.ListAsync();
       foreach (var entry in entries)
       {
@@ -214,10 +213,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
   private bool EnsureTrusted()
   {
-    if (_loadedProfile is null || _settings is null || _settings.IsTrusted(_loadedProfile))
+    if (_loadedProfile is null || _profileTrust is null)
     {
-      _profileTrusted = _loadedProfile is not null;
-      return _profileTrusted;
+      _profileTrusted = false;
+      return false;
+    }
+
+    if (_profileTrust.IsTrusted(_loadedProfile))
+    {
+      _profileTrusted = true;
+      return true;
     }
 
     var answer = MessageBox.Show(
@@ -240,7 +245,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     try
     {
-      _settings.Trust(_loadedProfile);
+      _profileTrust.Trust(_loadedProfile);
       LogUserAction("trust_profile", UserActionOutcome.Accepted);
       AppendLog("trust", $"Trusted {_loadedProfile.TrustIdentity}.");
       _profileTrusted = true;

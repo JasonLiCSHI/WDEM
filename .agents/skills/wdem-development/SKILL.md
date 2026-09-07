@@ -30,8 +30,8 @@ Treat a request to explain or diagnose as read-only. Modify code, external syste
 | --- | --- | --- |
 | Version rules, Profile/Task invariants, plans, workflow decisions | `Wdem.Domain` | Keep I/O, platform, and product details out |
 | Use cases, execution coordination, projections | `Wdem.Application` | Depend only on Domain and ports owned by Application |
-| Profile JSON, remote/cache I/O | `Wdem.Infrastructure` | Implement Application ports; do not depend on clients or platform UI |
-| Windows commands, process trees, logs, settings, trust persistence, administrator check | `Wdem.Windows` | Share behavior between both clients |
+| Profile JSON, remote/cache I/O, logs, settings, trust persistence | `Wdem.Infrastructure` | Implement Application ports; do not depend on clients or platform UI |
+| Windows commands, process trees, administrator check | `Wdem.Windows` | Share behavior between both clients |
 | Task presentation and interaction | `Wdem.App` | Bind to projected Task state/capabilities |
 | Terminal interaction | `Wdem.Cli` | Consume the same Application use cases and Windows adapters |
 | Product installation/configuration | `profiles/`, `script/`, `settings/` | Do not add product-specific Domain or Application providers |

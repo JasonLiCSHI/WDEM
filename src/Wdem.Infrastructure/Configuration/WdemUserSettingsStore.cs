@@ -4,12 +4,12 @@ using System.Text.Json.Serialization;
 using Wdem.Application.Profiles;
 using Wdem.Domain.Profiles;
 
-namespace Wdem.Windows.Configuration;
+namespace Wdem.Infrastructure.Configuration;
 
 /// <summary>
 /// Owns the release Profile Source definition and persisted content-trust decisions.
 /// </summary>
-public sealed class WdemUserSettingsStore
+public sealed class WdemUserSettingsStore : IProfileTrustStore
 {
   public const string OfficialSourceId = "official";
   public const string OfficialSourceUrl =
