@@ -1,4 +1,4 @@
-namespace Wdem.Core.Workflows;
+namespace Wdem.Domain.Workflows;
 
 public enum WorkflowActivityLocation
 {

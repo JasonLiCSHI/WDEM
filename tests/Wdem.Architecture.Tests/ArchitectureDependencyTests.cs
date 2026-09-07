@@ -92,6 +92,24 @@ public sealed class ArchitectureDependencyTests
   }
 
   [Theory]
+  [InlineData("Execution/TaskExecutionState.cs")]
+  [InlineData("Execution/TaskOutcome.cs")]
+  [InlineData("Workflows/TaskWorkflowTransition.cs")]
+  [InlineData("Workflows/TaskWorkflowTransitionContext.cs")]
+  [InlineData("Workflows/WorkflowActivityLocation.cs")]
+  public void WorkflowLifecycleVocabularyBelongsToDomain(string relativePath)
+  {
+    var repositoryRoot = FindRepositoryRoot();
+    var domainPath = Path.Combine(
+        repositoryRoot,
+        "src",
+        "Wdem.Domain",
+        relativePath.Replace('/', Path.DirectorySeparatorChar));
+
+    Assert.True(File.Exists(domainPath), $"Expected Domain source '{domainPath}'.");
+  }
+
+  [Theory]
   [InlineData("src/Wdem.Domain", "System.Diagnostics.Process")]
   [InlineData("src/Wdem.Domain", "System.IO.File")]
   [InlineData("src/Wdem.Domain", "System.Net.Http")]

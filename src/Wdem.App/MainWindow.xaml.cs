@@ -11,6 +11,8 @@ using Wdem.Core.Planning;
 using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
 using Wdem.Domain.Planning;
+using Wdem.Domain.Execution;
+using Wdem.Domain.Workflows;
 using Wdem.Domain.Versions;
 using Wdem.Windows.Configuration;
 using Wdem.Windows.Logging;

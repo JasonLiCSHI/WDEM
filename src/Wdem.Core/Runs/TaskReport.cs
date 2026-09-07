@@ -1,3 +1,5 @@
+using Wdem.Domain.Execution;
+
 namespace Wdem.Core.Runs;
 
 public sealed record TaskReport(

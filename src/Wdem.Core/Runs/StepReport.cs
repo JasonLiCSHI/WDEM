@@ -1,6 +1,6 @@
 namespace Wdem.Core.Runs;
 
-using Wdem.Core.Workflows;
+using Wdem.Domain.Workflows;
 
 public sealed record StepReport(
     string Phase,
