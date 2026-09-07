@@ -55,7 +55,7 @@ The installer does not contain `profiles/`. That repository directory is the con
 
 ## Profile and runtime extensibility
 
-Profile Schema v1 covers the compact default workflow: Profile version, Task description, Required/Optional behavior, dependencies, version requirements, preferred version, source, Detect/Pre/Apply/Post commands, human-readable step names, and Detect reuse for Verify. It is compiled into a state graph rather than handled by a separate runner. Commands always use an executable plus an argument array; shell command strings are never concatenated.
+Profile Schema v1 covers the compact default workflow: Profile version, Task description, Required/Optional behavior, dependencies, version requirements, preferred version, source, Detect/Pre/Apply/Post commands, human-readable step names, and Detect reuse for Verify. Domain `TaskDefinition` contains only this immutable desired state; optional executable workflow graphs are associated by Task ID outside the Task definition. The standard workflow is compiled into a state graph rather than handled by a separate runner. Commands always use an executable plus an argument array; shell command strings are never concatenated.
 
 Profile Schema v2 optionally declares a Task `workflow`. A workflow names an initial state, a transition limit, and states. Every state maps to a stable `TaskExecutionState`, owns ordered Entry, Residence, and Exit Activity collections, and declares ordered transitions or a terminal outcome. Built-in declarative conditions cover Activity success/failure and detected compliance. The parser rejects missing initial states, duplicate state IDs, dangling targets, non-terminal states without transitions, and terminal states with transitions.
 
@@ -109,7 +109,7 @@ Task capability matrix:
 
 ## Project responsibilities
 
-- `Wdem.Domain`: dependency-free business language and rules. Version requirements, compliance, planning, stable execution state/outcomes, and workflow transition decisions live here.
+- `Wdem.Domain`: dependency-free business language and rules. Task and command definitions, version requirements, compliance, planning, stable execution state/outcomes, and workflow transition decisions live here.
 - `Wdem.Application`: use-case orchestration and ports; the Task Runtime command boundary now lives here and the layer depends only on Domain.
 - `Wdem.Core`: temporary compatibility module for Profile Schema mapping, inspection, Workflow state, and reports that have not migrated yet.
 - `Wdem.Windows`: user settings, trust records, logs, the shared administrator requirement, Windows process execution, output forwarding, and process-tree cancellation.

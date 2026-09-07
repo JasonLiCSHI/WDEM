@@ -1,5 +1,4 @@
 using Wdem.Core.Runs;
-using Wdem.Core.Tasks;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Tasks;
 using Wdem.Domain.Workflows;
@@ -14,12 +13,14 @@ public sealed class DefaultTaskWorkflowProvider : ITaskWorkflowProvider
   {
   }
 
-  public TaskWorkflowDefinition Create(TaskDefinition task)
+  public TaskWorkflowDefinition Create(
+      TaskDefinition task,
+      TaskWorkflowDefinition? declaredWorkflow = null)
   {
     ArgumentNullException.ThrowIfNull(task);
-    if (task.Workflow is not null)
+    if (declaredWorkflow is not null)
     {
-      return task.Workflow;
+      return declaredWorkflow;
     }
 
     var states = new List<TaskWorkflowState>();

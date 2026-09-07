@@ -1,7 +1,6 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Wdem.Core.Runs;
-using Wdem.Core.Tasks;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Tasks;
 using Wdem.Domain.Versions;
@@ -46,6 +45,7 @@ public static class ProfileParser
     }
 
     var tasks = new Dictionary<string, TaskDefinition>(StringComparer.Ordinal);
+    var workflows = new Dictionary<string, TaskWorkflowDefinition>(StringComparer.Ordinal);
     foreach (var (taskIdValue, taskDto) in dto.Tasks)
     {
       var taskId = Required(taskIdValue, "Task id");
@@ -86,10 +86,13 @@ public static class ProfileParser
           pre,
           apply,
           post,
-          Optional(taskDto.Description),
-          workflow);
+          Optional(taskDto.Description));
 
       tasks.Add(taskId, task);
+      if (workflow is not null)
+      {
+        workflows.Add(taskId, workflow);
+      }
     }
 
     foreach (var task in tasks.Values)
@@ -110,7 +113,8 @@ public static class ProfileParser
         displayName,
         Optional(dto.Description),
         tasks,
-        schemaVersion);
+        schemaVersion,
+        workflows);
   }
 
   private static CommandDefinition[] Commands(

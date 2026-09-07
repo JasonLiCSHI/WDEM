@@ -473,7 +473,7 @@ public static class Program
     }
   }
 
-  private static void PrintTaskPlan(Wdem.Core.Tasks.TaskDefinition task)
+  private static void PrintTaskPlan(Wdem.Domain.Tasks.TaskDefinition task)
   {
     Console.WriteLine($"- {task.Id}: {task.DisplayName} [{(task.Required ? "required" : "optional")}]");
     if (!string.IsNullOrWhiteSpace(task.Description))

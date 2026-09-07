@@ -109,6 +109,28 @@ public sealed class ArchitectureDependencyTests
     Assert.True(File.Exists(domainPath), $"Expected Domain source '{domainPath}'.");
   }
 
+  [Fact]
+  public void TaskDefinitionBelongsToDomainAndDoesNotOwnExecutableWorkflowState()
+  {
+    var repositoryRoot = FindRepositoryRoot();
+    var domainTask = Path.Combine(
+        repositoryRoot,
+        "src",
+        "Wdem.Domain",
+        "Tasks",
+        "TaskDefinition.cs");
+    var legacyTask = Path.Combine(
+        repositoryRoot,
+        "src",
+        "Wdem.Core",
+        "Tasks",
+        "TaskDefinition.cs");
+
+    Assert.True(File.Exists(domainTask));
+    Assert.False(File.Exists(legacyTask));
+    Assert.DoesNotContain("Wdem.Core", File.ReadAllText(domainTask), StringComparison.Ordinal);
+  }
+
   [Theory]
   [InlineData("src/Wdem.Domain", "System.Diagnostics.Process")]
   [InlineData("src/Wdem.Domain", "System.IO.File")]

@@ -206,7 +206,9 @@ public sealed class TaskWorkflowTests
   private sealed class SingleWorkflowProvider(TaskWorkflowDefinition workflow)
       : ITaskWorkflowProvider
   {
-    public TaskWorkflowDefinition Create(Wdem.Core.Tasks.TaskDefinition task) => workflow;
+    public TaskWorkflowDefinition Create(
+        Wdem.Domain.Tasks.TaskDefinition task,
+        TaskWorkflowDefinition? declaredWorkflow = null) => workflow;
   }
 
   private sealed class RecordingActivity(string id, ICollection<string> executed)
