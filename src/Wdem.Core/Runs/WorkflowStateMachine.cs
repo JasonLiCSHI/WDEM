@@ -1,7 +1,7 @@
 using Wdem.Core.Profiles;
 using Wdem.Application.Runtime;
-using Wdem.Core.Tasks;
 using Wdem.Core.Workflows;
+using Wdem.Domain.Tasks;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Workflows;
 

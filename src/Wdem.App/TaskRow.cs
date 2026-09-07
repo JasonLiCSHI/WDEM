@@ -1,7 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using Wdem.Core.Runs;
-using Wdem.Core.Tasks;
 using Wdem.Core.Workflows;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Tasks;
@@ -22,7 +21,9 @@ public enum TaskVisualState
   Blocked
 }
 
-public sealed class TaskRow(TaskDefinition definition) : INotifyPropertyChanged
+public sealed class TaskRow(
+    TaskDefinition definition,
+    TaskWorkflowDefinition? workflow = null) : INotifyPropertyChanged
 {
   private bool _isSelected = definition.Required;
   private string _status = I18n.Get("PendingStatus");
@@ -70,18 +71,18 @@ public sealed class TaskRow(TaskDefinition definition) : INotifyPropertyChanged
 
   public string PreferredVersion { get; } = ValueOrPlaceholder(definition.PreferredVersion);
 
-  public string PipelineSummary { get; } = definition.Workflow is null
+  public string PipelineSummary { get; } = workflow is null
       ? I18n.Format("PipelineSummary", definition.Pre.Count, definition.Post.Count)
       : I18n.Format(
           "ComposableWorkflowSummary",
-          definition.Workflow.States.Count,
-          definition.Workflow.ActivityCount);
+          workflow.States.Count,
+          workflow.ActivityCount);
 
-  public bool HasCustomWorkflow { get; } = definition.Workflow is not null;
+  public bool HasCustomWorkflow { get; } = workflow is not null;
 
-  public string WorkflowDetails { get; } = definition.Workflow is null
+  public string WorkflowDetails { get; } = workflow is null
       ? "—"
-      : FormatWorkflow(definition.Workflow);
+      : FormatWorkflow(workflow);
 
   public string DetectDetails { get; } = FormatCommand(definition.Detect);
 

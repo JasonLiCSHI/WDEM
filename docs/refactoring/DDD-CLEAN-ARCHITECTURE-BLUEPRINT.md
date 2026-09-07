@@ -54,7 +54,7 @@ Ports are owned by the use case that needs them. Initial ports are `IProfileRepo
 | Current source | Destination | Action |
 |---|---|---|
 | `Core/Versions/VersionConstraint.cs` | `Domain/Versions/VersionRequirement.cs`, `SoftwareVersion.cs` | Split parsing/comparison from compliance result |
-| `Core/Tasks/TaskDefinition.cs` | `Domain/Tasks/TaskDefinition.cs` | Move immutable definition and parsed requirement |
+| ~~`Core/Tasks/TaskDefinition.cs`~~ | `Domain/Tasks/TaskDefinition.cs` | Migrated immutable desired-state definition; executable workflow association stays outside the Task |
 | ~~`Core/Tasks/CommandDefinition.cs`~~ | `Domain/Tasks/CommandDefinition.cs` | Migrated; keeps the executable plus argument-array invariant |
 | `Core/Profiles/EnvironmentProfile.cs` | `Domain/Profiles/Profile.cs` | Rename after callers migrate |
 | `Core/Profiles/ProfileSourceDefinition.cs` | `Domain/Profiles/ProfileSource.cs` | Move validated identity and URI value semantics |

@@ -2,7 +2,6 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
 using Wdem.Bootstrapper;
-using Wdem.Core.Tasks;
 using Wdem.Domain.Tasks;
 using Xunit;
 

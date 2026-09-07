@@ -167,7 +167,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
       foreach (var definition in loaded.Profile.Tasks.Values
                    .OrderBy(value => value.Id, StringComparer.Ordinal))
       {
-        var row = new TaskRow(definition);
+        var row = new TaskRow(
+            definition,
+            loaded.Profile.Workflows.GetValueOrDefault(definition.Id));
         row.PropertyChanged += TaskRow_PropertyChanged;
         (definition.Required ? RequiredTasks : OptionalTasks).Add(row);
       }

@@ -60,7 +60,9 @@ public static class EnvironmentManager
     var provider = workflowProvider ?? DefaultTaskWorkflowProvider.Instance;
     return profile.Tasks.Values.ToDictionary(
         task => task.Id,
-        task => provider.Create(task) ??
+        task => provider.Create(
+            task,
+            profile.Workflows.GetValueOrDefault(task.Id)) ??
             throw new InvalidOperationException($"Workflow provider returned no definition for task '{task.Id}'."),
         StringComparer.Ordinal);
   }
