@@ -32,6 +32,8 @@
 
 > 安装程序是命令式的，环境应该是声明式的。
 
+![WDEM Task 工作台，展示必须任务、工作流步骤、合规状态、操作按钮、进度与结构化日志](docs/assets/wdem-dashboard.png)
+
 ## 不再盯着安装程序发呆
 
 搭建开发环境不该依赖一份注定过期的安装清单，也不该把每个软件都硬编码进管理器。
@@ -71,6 +73,18 @@ Pending → Ready → Detecting → RunningPre → Applying → RunningPost → 
 Running → Cancelling → Cancelled       dependency failure → Blocked
 ```
 
+## 值得学习的纯 DDD 项目
+
+WDEM 的核心刻意采用纯领域驱动设计，并在外围建立清晰的 Clean Architecture 边界。模型直接使用产品语言——Profile、Task、依赖、Plan、Activity、Workflow、合规状态与执行结果——同时完全不了解 WPF、HTTP、JSON、PowerShell 或 Autofac。
+
+- `Wdem.Domain` 负责值对象、不变量、版本策略、DAG 规划、Workflow 定义和状态转换，不依赖任何项目或第三方包。
+- `Wdem.Application` 将 Inspect、Plan、Apply 表达为用例，并定义执行、持久化、信任与报告端口。
+- Infrastructure 与 Windows 是适配器；WPF 和 CLI 是同一套用例的响应式客户端，而不是业务规则的第二份实现。
+- Autofac 只存在于组合根 `Wdem.Bootstrapper`；领域对象从不主动解析服务。
+- 架构测试把依赖方向、框架隔离和 .NET 版本约束变成可执行规则。
+
+因此，这个仓库不仅是一个环境安装工具，也是一个紧凑的 DDD、端口与适配器、状态机、不可变规划和确定性并发学习项目。建议先阅读[架构指南](docs/ARCHITECTURE.md)，再阅读[测试策略](docs/TESTING.md)。
+
 ## 核心能力
 
 - **声明式 Profile** — 定义 Task 元数据、必选/可选、依赖、来源、版本要求和阶段命令。
@@ -108,7 +122,8 @@ Running → Cancelling → Cancelled       dependency failure → Blocked
         "displayName": "Detect Git version",
         "executable": "git",
         "arguments": ["--version"],
-        "versionPattern": "git version (?<version>\\d+(?:\\.\\d+)+)"
+        "versionPattern": "git version (?<version>\\d+(?:\\.\\d+)+)",
+        "missingExitCodes": [3]
       },
       "pre": [
         {
@@ -277,7 +292,7 @@ https://raw.githubusercontent.com/JasonLiCSHI/WDEM/main/profiles/
 WDEM 刻意将 Source 作为发版决策，而不是用户设置。若要发布使用其他 HTTPS 主机或 GitHub 仓库的版本：
 
 1. 发布一个包含 `index.json` 以及该索引引用的所有 `<profile-id>.json` 的目录；每个文件都必须能够通过直接的 HTTPS `GET` 请求访问。
-2. 在 [`WdemUserSettingsStore.cs`](src/Wdem.Windows/Configuration/WdemUserSettingsStore.cs) 中，把 `OfficialSourceUrl` 改为该目录的 URL。切换 Source 的管理方时，应将 `OfficialSourceId` 改为一个新的、稳定的标识符；如有需要，也应更新 `WDEM Official` 显示名称。
+2. 在 [`WdemUserSettingsStore.cs`](src/Wdem.Infrastructure/Configuration/WdemUserSettingsStore.cs) 中，把 `OfficialSourceUrl` 改为该目录的 URL。切换 Source 的管理方时，应将 `OfficialSourceId` 改为一个新的、稳定的标识符；如有需要，也应更新 `WDEM Official` 显示名称。
 3. 确认 `<base-url>/index.json` 可以访问，然后在发布新安装包前运行 `dotnet test Wdem.slnx` 和 `dotnet build Wdem.slnx`。
 
 Base URL 可以指向 Git 分支、Tag 或 Release 路径，末尾是否带 `/` 均可，WDEM 会自动规范化。持续交付 Profile 时建议使用受保护分支；需要让 Profile 与软件版本严格绑定时建议使用不可变 Tag。缓存按 Source ID 隔离；信任同时绑定 Source ID 与 Profile 内容哈希，因此来自新 Source 的 Profile 或命令内容发生变化的 Profile，都必须先由用户明确授权，Detect 或 Apply 才能执行命令。
@@ -313,6 +328,7 @@ WDEM 的目标是成为 Windows 环境收敛引擎：像 Terraform 一样可预�
 ```powershell
 dotnet build Wdem.slnx
 dotnet test Wdem.slnx
+dotnet format Wdem.slnx --verify-no-changes --no-restore
 dotnet run --project src/Wdem.App/Wdem.App.csproj
 dotnet run --project src/Wdem.Cli/Wdem.Cli.csproj -- profiles
 ```
@@ -340,6 +356,7 @@ WDEM 将贡献规范作为 [Agent Skill](.agents/skills/wdem-development/SKILL.m
 该 Skill 覆盖分层职责、Profile 与 Workflow 语义、安全终止进程树、管理员权限、安装器诊断、验证、打包和发布纪律。所有发现入口最终指向 `.agents/skills/` 中的唯一规范正文，保证不同 Agent 获得一致指导。[评估用例](.agents/skills/wdem-development/evals/evals.json)则覆盖安装器故障恢复、声明式 Task 扩展和响应式 UI 状态联动。
 
 贡献前请阅读 [AGENTS.md](AGENTS.md)，了解产品边界和验证要求。
+[测试策略](docs/TESTING.md)定义了测试金字塔、Given-When-Then 命名、Fixture 生命周期，以及确定性边界测试规范。
 
 ## 许可证
 

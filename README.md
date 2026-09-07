@@ -32,6 +32,8 @@ Describe the destination once; let the Task DAG take care of the journey.
 
 > Installers are imperative. Environments should be declarative.
 
+![WDEM task dashboard showing required tasks, workflow steps, compliance state, controls, progress, and structured logs](docs/assets/wdem-dashboard.png)
+
 ## Stop babysitting installers
 
 Setting up a development environment should not depend on an installation checklist that becomes obsolete, nor should every product be hard-coded into the manager.
@@ -71,6 +73,18 @@ Pending → Ready → Detecting → RunningPre → Applying → RunningPost → 
 Running → Cancelling → Cancelled       dependency failure → Blocked
 ```
 
+## A DDD codebase worth studying
+
+WDEM is intentionally built as a pure domain-driven design at its core, surrounded by explicit Clean Architecture boundaries. The model speaks the product language—Profile, Task, dependency, Plan, Activity, Workflow, compliance, and outcome—without knowing about WPF, HTTP, JSON, PowerShell, or Autofac.
+
+- `Wdem.Domain` owns value objects, invariants, version policy, DAG planning, workflow definitions, and transitions. It has no package or project dependencies.
+- `Wdem.Application` expresses Inspect, Plan, and Apply as use cases and defines ports for execution, persistence, trust, and reporting.
+- Infrastructure and Windows are adapters. WPF and CLI are reactive clients of the same use cases, not alternative homes for business rules.
+- Autofac exists only in `Wdem.Bootstrapper`, the composition root. Domain objects never resolve services.
+- Architecture tests make dependency direction and framework isolation executable constraints.
+
+That separation makes the repository useful as a compact study project for DDD, ports and adapters, state machines, immutable planning, and deterministic concurrency—not only as an installer. Start with the [architecture guide](docs/ARCHITECTURE.md), then read the [testing strategy](docs/TESTING.md).
+
 ## Core capabilities
 
 - **Declarative Profiles** — Define Task metadata, Required/Optional behavior, dependencies, sources, version requirements, and phase commands.
@@ -108,7 +122,8 @@ The Task below declares a minimum version, source, detection strategy, installat
         "displayName": "Detect Git version",
         "executable": "git",
         "arguments": ["--version"],
-        "versionPattern": "git version (?<version>\\d+(?:\\.\\d+)+)"
+        "versionPattern": "git version (?<version>\\d+(?:\\.\\d+)+)",
+        "missingExitCodes": [3]
       },
       "pre": [
         {
@@ -277,7 +292,7 @@ The repository [`profiles/`](profiles/) directory is the content published by th
 WDEM intentionally treats the Source as a release decision, not a user setting. To publish a build backed by another HTTPS host or GitHub repository:
 
 1. Publish a directory containing `index.json` and every `<profile-id>.json` referenced by that index. Each document must be reachable with a direct HTTPS `GET` request.
-2. In [`WdemUserSettingsStore.cs`](src/Wdem.Windows/Configuration/WdemUserSettingsStore.cs), change `OfficialSourceUrl` to that directory URL. Change `OfficialSourceId` to a new stable identifier when changing the source authority, and update the `WDEM Official` display name if appropriate.
+2. In [`WdemUserSettingsStore.cs`](src/Wdem.Infrastructure/Configuration/WdemUserSettingsStore.cs), change `OfficialSourceUrl` to that directory URL. Change `OfficialSourceId` to a new stable identifier when changing the source authority, and update the `WDEM Official` display name if appropriate.
 3. Confirm the URL resolves as `<base-url>/index.json`, then run `dotnet test Wdem.slnx` and `dotnet build Wdem.slnx` before publishing a new installer.
 
 The base URL may include a Git branch, tag, or release path and may be written with or without a trailing `/`; WDEM normalizes it. Prefer a protected branch for continuously delivered Profiles or an immutable tag for release-pinned Profiles. Cache directories are isolated by Source ID. Trust is bound to both the Source ID and the Profile content hash, so Profiles from a new Source—or modified command-bearing content—must be explicitly trusted before Detect or Apply can run commands.
@@ -313,6 +328,7 @@ The current release is intentionally small and dependable. Its dependency-aware 
 ```powershell
 dotnet build Wdem.slnx
 dotnet test Wdem.slnx
+dotnet format Wdem.slnx --verify-no-changes --no-restore
 dotnet run --project src/Wdem.App/Wdem.App.csproj
 dotnet run --project src/Wdem.Cli/Wdem.Cli.csproj -- profiles
 ```
@@ -340,6 +356,7 @@ WDEM ships its contributor contract as an [Agent Skill](.agents/skills/wdem-deve
 The Skill covers layer ownership, Profile and Workflow semantics, safe process-tree cancellation, administrator requirements, installer diagnostics, validation, packaging, and release discipline. All discovery entry points resolve to the canonical `.agents/skills/` copy, keeping the guidance consistent across agents. Its [evaluation set](.agents/skills/wdem-development/evals/evals.json) exercises installer failure recovery, declarative Task additions, and reactive UI state handling.
 
 Read [AGENTS.md](AGENTS.md) before contributing to understand the product boundaries and validation requirements.
+The [testing strategy](docs/TESTING.md) defines the test pyramid, Given-When-Then naming, fixture lifecycle, and deterministic boundary-test rules.
 
 ## License
 
