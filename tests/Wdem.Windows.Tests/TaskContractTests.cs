@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
-using Wdem.Core.Graph;
+using Wdem.Core.Planning;
 using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
 using Wdem.Core.Runtime;
@@ -101,14 +101,14 @@ public sealed class TaskContractTests
   public async Task RepositoryProfile_ExecutesBothTaskPipelinesInDependencyOrder()
   {
     var profile = LoadRepositoryProfile(FindRepositoryRoot());
-    var graph = TaskGraph.Build(profile, rootTaskIds: ["resharper"]);
+    var plan = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["resharper"]);
     var runtime = new RepositoryContractRuntime();
 
-    var report = await EnvironmentManager.StartApply(profile, graph, runtime).Completion;
+    var report = await EnvironmentManager.StartApply(profile, plan, runtime).Completion;
 
     Assert.Equal(
         ["visual-studio-professional", "resharper"],
-        graph.OrderedTaskIds);
+        plan.Tasks.Select(task => task.Id.Value));
     Assert.Equal(
         [
           ("visual-studio-professional", "detect"),
@@ -135,10 +135,10 @@ public sealed class TaskContractTests
   public async Task RepositoryProfile_VisualStudioFailureBlocksReSharperBeforeDetection()
   {
     var profile = LoadRepositoryProfile(FindRepositoryRoot());
-    var graph = TaskGraph.Build(profile, rootTaskIds: ["resharper"]);
+    var plan = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["resharper"]);
     var runtime = new RepositoryContractRuntime(failVisualStudioApply: true);
 
-    var report = await EnvironmentManager.StartApply(profile, graph, runtime).Completion;
+    var report = await EnvironmentManager.StartApply(profile, plan, runtime).Completion;
 
     Assert.Equal(TaskOutcome.Failed, report.Tasks["visual-studio-professional"].Outcome);
     Assert.Equal(TaskOutcome.Blocked, report.Tasks["resharper"].Outcome);

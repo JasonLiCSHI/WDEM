@@ -5,9 +5,10 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
-using Wdem.Core.Graph;
+using Wdem.Core.Planning;
 using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
+using Wdem.Domain.Planning;
 using Wdem.Domain.Versions;
 using Wdem.Windows.Configuration;
 using Wdem.Windows.Logging;
@@ -24,7 +25,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
   private ProfileCatalog? _catalog;
   private LoadedProfile? _loadedProfile;
   private EnvironmentRun? _currentRun;
-  private TaskGraph? _retryGraph;
+  private Plan? _retryPlan;
   private CancellationTokenSource? _inspectCancellation;
   private Task<InspectReport>? _inspectionTask;
   private long _operationGeneration;
@@ -342,12 +343,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
           .Where(task => task.IsSelected)
           .Select(task => task.Id)
           .ToArray();
-      var graph = TaskGraph.BuildForSelection(_loadedProfile.Profile, selected);
-      var report = await StartRunAsync(graph);
+      var plan = ProfilePlanner.CreateForSelection(_loadedProfile.Profile, selected);
+      var report = await StartRunAsync(plan);
       LogUserAction(
           "start_selected_tasks",
           ToUserActionOutcome(report),
-          graph.OrderedTaskIds);
+          TaskIds(plan));
     }
     catch (Exception exception)
     {
@@ -370,9 +371,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     LogUserAction("start_task", UserActionOutcome.Requested, [row.Id]);
     try
     {
-      var graph = TaskGraph.Build(_loadedProfile.Profile, [row.Id]);
-      var report = await StartRunAsync(graph);
-      LogUserAction("start_task", ToUserActionOutcome(report), graph.OrderedTaskIds);
+      var plan = ProfilePlanner.CreateForTasks(_loadedProfile.Profile, [row.Id]);
+      var report = await StartRunAsync(plan);
+      LogUserAction("start_task", ToUserActionOutcome(report), TaskIds(plan));
     }
     catch (Exception exception)
     {
@@ -381,20 +382,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
   }
 
-  private async Task<RunReport> StartRunAsync(TaskGraph graph)
+  private async Task<RunReport> StartRunAsync(Plan plan)
   {
     if (_loadedProfile is null)
     {
       throw new InvalidOperationException("A Profile must be loaded before starting a workflow.");
     }
 
-    AppendLog("plan", string.Join(" -> ", graph.OrderedTaskIds));
-    RunSummaryText.Text = I18n.Format("RunStarted", graph.OrderedTaskIds.Count);
+    var taskIds = TaskIds(plan);
+    AppendLog("plan", string.Join(" -> ", taskIds));
+    RunSummaryText.Text = I18n.Format("RunStarted", taskIds.Count);
     var operationGeneration = ++_operationGeneration;
     _lastWorkflowRevision = -1;
     _currentRun = EnvironmentManager.StartApply(
         _loadedProfile.Profile,
-        graph,
+        plan,
         _runtime,
         updates: CreateRunUpdates(operationGeneration));
     ApplyWorkflowSnapshot(_currentRun.Snapshot);
@@ -426,7 +428,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
       RunSummaryText.Text = I18n.Format("RunCompleted", succeeded, report.Tasks.Count);
       var hasRecoverableFailure = report.Tasks.Values.Any(task =>
           task.Outcome is TaskOutcome.Failed or TaskOutcome.Blocked);
-      _retryGraph = hasRecoverableFailure ? graph : null;
+      _retryPlan = hasRecoverableFailure ? plan : null;
       AppendLog("run_summary", RunSummaryText.Text, data: report);
     }
     finally
@@ -458,20 +460,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
   private async void Retry_Click(object sender, RoutedEventArgs e)
   {
-    if (_retryGraph is null || HasExclusiveActivity() || !_profileTrusted)
+    if (_retryPlan is null || HasExclusiveActivity() || !_profileTrusted)
     {
-      if (_retryGraph is null)
+      if (_retryPlan is null)
       {
         MessageBox.Show(this, I18n.Get("NoRetryMessage"), I18n.Get("MessageTitle"));
       }
       return;
     }
 
-    var retryGraph = _retryGraph;
-    LogUserAction("retry_plan", UserActionOutcome.Requested, retryGraph.OrderedTaskIds);
+    var retryPlan = _retryPlan;
+    LogUserAction("retry_plan", UserActionOutcome.Requested, TaskIds(retryPlan));
     AppendLog("retry", I18n.Get("RetryStarted"));
-    var report = await StartRunAsync(retryGraph);
-    LogUserAction("retry_plan", ToUserActionOutcome(report), retryGraph.OrderedTaskIds);
+    var report = await StartRunAsync(retryPlan);
+    LogUserAction("retry_plan", ToUserActionOutcome(report), TaskIds(retryPlan));
   }
 
   private void CancelTask_Click(object sender, RoutedEventArgs e)
@@ -632,7 +634,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     _loadedProfile = null;
     _profileTrusted = false;
-    _retryGraph = null;
+    _retryPlan = null;
     _operationGeneration++;
     RequiredTasks.Clear();
     OptionalTasks.Clear();
@@ -649,7 +651,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         HasCatalog: _catalog is not null,
         HasProfileChoice: ProfileComboBox.SelectedItem is not null,
         HasTrustedProfile: _loadedProfile is not null && _profileTrusted,
-        HasRetryPlan: _retryGraph is not null));
+        HasRetryPlan: _retryPlan is not null));
 
     foreach (var task in AllTasks)
     {
@@ -800,6 +802,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
           outcome,
           _loadedProfile?.Profile.Id,
           taskIds);
+
+  private static IReadOnlyList<string> TaskIds(Plan plan) =>
+      plan.Tasks.Select(task => task.Id.Value).ToArray();
 
   private static bool IsActivityState(TaskExecutionState state) => state is
       TaskExecutionState.Detecting or

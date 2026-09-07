@@ -30,7 +30,7 @@ Release-defined HTTPS Profile Source
 
 - `ProfileCatalog` is the external seam for remote configuration. Its public API is limited to `ListAsync` and `LoadAsync`; HTTPS enforcement, redirect validation, size limits, UTF-8 decoding, atomic caching, offline fallback, and ID validation remain internal.
 - `ProfileParser` converts versioned JSON into one domain model, so callers never handle JSON details.
-- `TaskGraph` encapsulates Required/Optional selection, dependency closure, deduplication, topological sorting, and cycle detection.
+- Domain `TaskPlanner` encapsulates Required/Optional selection, dependency closure, deduplication, topological sorting, and cycle detection, and returns an immutable `Plan`. The transitional `ProfilePlanner` maps parsed Profiles into that domain interface.
 - `EnvironmentManager.StartApply` compiles or selects a per-Task state graph and encapsulates graph execution, failure propagation, cancellation, and reporting.
 - `ITaskRuntime` is the execution seam. The current Windows adapter starts an executable with an argument array directly. Future script downloaders, elevation brokers, or remote executors can be introduced here without teaching the DAG about specific products.
 
@@ -111,7 +111,7 @@ Task capability matrix:
 
 - `Wdem.Domain`: dependency-free business language and rules. Version requirements and compliance are the first migrated slice.
 - `Wdem.Application`: use-case orchestration and ports; this layer is introduced incrementally and depends only on Domain.
-- `Wdem.Core`: temporary compatibility module for Profile Schema, DAG construction, inspection, Workflow state, and reports that have not migrated yet.
+- `Wdem.Core`: temporary compatibility module for Profile Schema mapping, inspection, Workflow state, and reports that have not migrated yet.
 - `Wdem.Windows`: user settings, trust records, logs, the shared administrator requirement, Windows process execution, output forwarding, and process-tree cancellation.
 - `Wdem.Cli`: Profile selection, trust confirmation, complete plan preview, retries, and terminal output.
 - `Wdem.App`: installation-language-aware WPF workbench, unified button-state projection, Required/Optional sections, Task details, progress, cancellation, and logs.

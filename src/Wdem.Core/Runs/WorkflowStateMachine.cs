@@ -1,4 +1,3 @@
-using Wdem.Core.Graph;
 using Wdem.Core.Profiles;
 using Wdem.Core.Runtime;
 using Wdem.Core.Tasks;
@@ -8,11 +7,11 @@ namespace Wdem.Core.Runs;
 
 /// <summary>
 /// Executes arbitrary task state graphs. Runtime state always changes before an
-/// Entry, Residence, or Exit Activity runs, and is projected to Task state by the graph.
+/// Entry, Residence, or Exit Activity runs, and is projected to Task state by the workflow.
 /// </summary>
 internal sealed class WorkflowStateMachine(
     EnvironmentProfile profile,
-    TaskGraph graph,
+    IReadOnlyList<string> plannedTaskIds,
     ITaskRuntime runtime,
     IReadOnlyDictionary<string, TaskWorkflowDefinition> workflows,
     IReadOnlyDictionary<string, CancellationTokenSource> taskCancellationSources,
@@ -23,7 +22,7 @@ internal sealed class WorkflowStateMachine(
   {
     var scheduledTasks = new Dictionary<string, Task<TaskReport>>(StringComparer.Ordinal);
 
-    foreach (var taskId in graph.OrderedTaskIds)
+    foreach (var taskId in plannedTaskIds)
     {
       var task = profile.Tasks[taskId];
       var dependencies = task.DependsOn
@@ -37,8 +36,8 @@ internal sealed class WorkflowStateMachine(
     }
 
     var reports = await Task.WhenAll(
-        graph.OrderedTaskIds.Select(taskId => scheduledTasks[taskId]));
-    return new RunReport(graph.OrderedTaskIds
+        plannedTaskIds.Select(taskId => scheduledTasks[taskId]));
+    return new RunReport(plannedTaskIds
         .Zip(reports)
         .ToDictionary(pair => pair.First, pair => pair.Second, StringComparer.Ordinal));
   }

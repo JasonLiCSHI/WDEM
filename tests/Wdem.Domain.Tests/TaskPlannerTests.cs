@@ -1,0 +1,78 @@
+using Wdem.Domain.Planning;
+using Wdem.Domain.Tasks;
+using Xunit;
+
+namespace Wdem.Domain.Tests;
+
+public sealed class TaskPlannerTests
+{
+  [Fact]
+  public void CreateForSelectionIncludesRequiredSelectedAndTransitiveDependencies()
+  {
+    var tasks = Tasks(
+        Required("dotnet"),
+        Required("visual-studio", "dotnet"),
+        Optional("resharper", "visual-studio"));
+
+    var plan = TaskPlanner.CreateForSelection(tasks, [TaskId.Parse("resharper")]);
+
+    Assert.Equal(["dotnet", "visual-studio", "resharper"], Values(plan));
+  }
+
+  [Fact]
+  public void CreateForTasksRejectsAnUnknownTask()
+  {
+    var tasks = Tasks(Required("dotnet"));
+
+    var exception = Assert.Throws<FormatException>(() =>
+        TaskPlanner.CreateForTasks(tasks, [TaskId.Parse("missing")]));
+
+    Assert.Contains("missing", exception.Message);
+  }
+
+  [Fact]
+  public void CreateForTasksRejectsCyclesWithTheCyclePath()
+  {
+    var tasks = Tasks(
+        Required("a", "b"),
+        Required("b", "c"),
+        Required("c", "a"));
+
+    var exception = Assert.Throws<InvalidOperationException>(() =>
+        TaskPlanner.CreateForTasks(tasks, [TaskId.Parse("a")]));
+
+    Assert.Contains("a", exception.Message);
+    Assert.Contains("b", exception.Message);
+    Assert.Contains("c", exception.Message);
+  }
+
+  [Fact]
+  public void CreateForTasksProducesDeterministicOrderForIndependentTasks()
+  {
+    var tasks = Tasks(Required("z"), Required("a"));
+
+    var plan = TaskPlanner.CreateForTasks(
+        tasks,
+        [TaskId.Parse("z"), TaskId.Parse("a")]);
+
+    Assert.Equal(["a", "z"], Values(plan));
+  }
+
+  private static IReadOnlyDictionary<TaskId, PlanningTask> Tasks(params PlanningTask[] tasks) =>
+      tasks.ToDictionary(task => task.Id);
+
+  private static PlanningTask Required(string id, params string[] dependencies) =>
+      new(
+          TaskId.Parse(id),
+          isRequired: true,
+          dependencies.Select(TaskId.Parse).ToArray());
+
+  private static PlanningTask Optional(string id, params string[] dependencies) =>
+      new(
+          TaskId.Parse(id),
+          isRequired: false,
+          dependencies.Select(TaskId.Parse).ToArray());
+
+  private static string[] Values(Plan plan) =>
+      plan.Tasks.Select(task => task.Id.Value).ToArray();
+}

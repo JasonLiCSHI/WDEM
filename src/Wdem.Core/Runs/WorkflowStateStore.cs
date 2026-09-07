@@ -1,5 +1,4 @@
 using System.Collections.ObjectModel;
-using Wdem.Core.Graph;
 using Wdem.Core.Profiles;
 using Wdem.Core.Workflows;
 
@@ -23,14 +22,14 @@ internal sealed class WorkflowStateStore
 
   public WorkflowStateStore(
       EnvironmentProfile profile,
-      TaskGraph graph,
+      IReadOnlyCollection<string> plannedTaskIds,
       IReadOnlyDictionary<string, TaskWorkflowDefinition> workflows,
       IProgress<WorkflowProgress>? progress,
       IProgress<WorkflowUpdate>? updates)
   {
     _progress = progress;
     _updates = updates;
-    var planned = graph.OrderedTaskIds.ToHashSet(StringComparer.Ordinal);
+    var planned = plannedTaskIds.ToHashSet(StringComparer.Ordinal);
     _tasks = profile.Tasks.Values.ToDictionary(
         task => task.Id,
         task => new TaskState(
