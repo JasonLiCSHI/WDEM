@@ -1,5 +1,6 @@
 using Wdem.Application.Planning;
 using Wdem.Application.Execution;
+using Wdem.Application.Profiles;
 using Wdem.Application.Runtime;
 using Wdem.Application.Tests.TestDoubles;
 using Wdem.Application.Workflows;
@@ -39,7 +40,7 @@ public sealed class TaskWorkflowTests
         new FakeRuntime(),
         new SingleWorkflowProvider(workflow),
         new TestActivityExecutor()).Start(
-        profile,
+        Loaded(profile),
         graph,
         updates: new InlineProgress<WorkflowUpdate>(updates.Add));
     var report = await run.Completion;
@@ -99,7 +100,7 @@ public sealed class TaskWorkflowTests
         new FakeRuntime(),
         new SingleWorkflowProvider(workflow),
         new TestActivityExecutor()).Start(
-        profile,
+        Loaded(profile),
         graph).Completion;
 
     Assert.Equal(TaskOutcome.Succeeded, report.Tasks["custom"].Outcome);
@@ -132,7 +133,7 @@ public sealed class TaskWorkflowTests
         new FakeRuntime(),
         new SingleWorkflowProvider(workflow),
         new TestActivityExecutor()).Start(
-        profile,
+        Loaded(profile),
         graph);
     await blockingActivity.Started;
 
@@ -177,7 +178,7 @@ public sealed class TaskWorkflowTests
     var report = await CreateHandler(
         new FakeRuntime(),
         new SingleWorkflowProvider(workflow)).Start(
-        profile,
+        Loaded(profile),
         graph).Completion;
 
     Assert.Equal(TaskOutcome.Failed, report.Tasks["custom"].Outcome);
@@ -192,7 +193,7 @@ public sealed class TaskWorkflowTests
     var runtime = new FakeRuntime()
         .WithDetect("custom", exitCode: 0, stdout: "custom version 2.5");
 
-    var report = await CreateHandler(runtime).Start(profile, graph).Completion;
+    var report = await CreateHandler(runtime).Start(Loaded(profile), graph).Completion;
 
     Assert.Equal(TaskOutcome.Succeeded, report.Tasks["custom"].Outcome);
     Assert.Equal(
@@ -214,7 +215,11 @@ public sealed class TaskWorkflowTests
       new(
           runtime,
           activityExecutor ?? DefaultWorkflowActivityExecutor.Instance,
-          workflowProvider ?? DefaultTaskWorkflowProvider.Instance);
+          workflowProvider ?? DefaultTaskWorkflowProvider.Instance,
+          new ProfileExecutionAuthorizer(new FakeProfileTrustStore()));
+
+  private static LoadedProfile Loaded(Wdem.Domain.Profiles.EnvironmentProfile profile) =>
+      new(profile, ProfileOrigin.Local, "test-profile.json", "TEST");
 
   private sealed class SingleWorkflowProvider(TaskWorkflowDefinition workflow)
       : ITaskWorkflowProvider

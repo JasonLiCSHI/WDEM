@@ -1,5 +1,6 @@
 using Wdem.Application.Execution;
 using Wdem.Application.Inspection;
+using Wdem.Application.Profiles;
 using Wdem.Application.Tests.TestDoubles;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Versions;
@@ -11,13 +12,34 @@ namespace Wdem.Application.Tests;
 public sealed class InspectEnvironmentHandlerTests
 {
   [Fact]
+  public async Task Inspect_RejectsUntrustedRemoteProfileBeforeRunningDetect()
+  {
+    var profile = ProfileParser.Parse(ProfileJson);
+    var loaded = new LoadedProfile(
+        profile,
+        ProfileOrigin.Remote,
+        "https://profiles.example/test.json",
+        "UNTRUSTED",
+        "test-source");
+    var runtime = new FakeRuntime();
+    var handler = new InspectEnvironmentHandler(
+        runtime,
+        new ProfileExecutionAuthorizer(new FakeProfileTrustStore(trusted: false)));
+
+    await Assert.ThrowsAsync<UntrustedProfileException>(() =>
+        handler.HandleAsync(loaded));
+
+    Assert.Empty(runtime.Invocations);
+  }
+
+  [Fact]
   public async Task Inspect_MarksSatisfiedWhenDetectSucceedsAndConstraintMatches()
   {
     var profile = ProfileParser.Parse(ProfileJson);
     var runtime = new FakeRuntime()
         .WithDetect("git", exitCode: 0, stdout: "git version 2.52.0.windows.1");
 
-    var report = await new InspectEnvironmentHandler(runtime).HandleAsync(profile);
+    var report = await CreateHandler(runtime).HandleAsync(Loaded(profile));
 
     Assert.True(report.Tasks["git"].IsSatisfied);
     Assert.Equal(ComplianceStatus.Satisfied, report.Tasks["git"].Compliance);
@@ -31,7 +53,7 @@ public sealed class InspectEnvironmentHandlerTests
     var runtime = new FakeRuntime()
         .WithDetect("git", exitCode: 0, stdout: "git version 2.40.0");
 
-    var report = await new InspectEnvironmentHandler(runtime).HandleAsync(profile);
+    var report = await CreateHandler(runtime).HandleAsync(Loaded(profile));
 
     Assert.False(report.Tasks["git"].IsSatisfied);
     Assert.Equal(ComplianceStatus.UpgradeRequired, report.Tasks["git"].Compliance);
@@ -45,7 +67,7 @@ public sealed class InspectEnvironmentHandlerTests
     var runtime = new FakeRuntime()
         .WithDetect("git", exitCode: 1, stdout: "not found");
 
-    var report = await new InspectEnvironmentHandler(runtime).HandleAsync(profile);
+    var report = await CreateHandler(runtime).HandleAsync(Loaded(profile));
 
     Assert.False(report.Tasks["git"].DetectSucceeded);
     Assert.False(report.Tasks["git"].IsSatisfied);
@@ -59,7 +81,7 @@ public sealed class InspectEnvironmentHandlerTests
     var runtime = new FakeRuntime()
         .WithDetect("git", exitCode: 0, stdout: "git version 2.51.0");
 
-    var report = await new InspectEnvironmentHandler(runtime).HandleAsync(profile);
+    var report = await CreateHandler(runtime).HandleAsync(Loaded(profile));
 
     Assert.Equal(ComplianceStatus.VersionMismatch, report.Tasks["git"].Compliance);
   }
@@ -73,7 +95,7 @@ public sealed class InspectEnvironmentHandlerTests
     var updates = new List<WorkflowProgress>();
     var progress = new InlineProgress<WorkflowProgress>(updates.Add);
 
-    await new InspectEnvironmentHandler(runtime).HandleAsync(profile, progress);
+    await CreateHandler(runtime).HandleAsync(Loaded(profile), progress);
 
     Assert.Collection(
         updates,
@@ -97,8 +119,8 @@ public sealed class InspectEnvironmentHandlerTests
     var runtime = new FakeRuntime().WithDetectThatWaitsForCancellation("git");
     using var cancellation = new CancellationTokenSource();
 
-    var inspection = new InspectEnvironmentHandler(runtime).HandleAsync(
-        profile,
+    var inspection = CreateHandler(runtime).HandleAsync(
+        Loaded(profile),
         cancellationToken: cancellation.Token);
     await runtime.WaitForCommandStartAsync("git", "detect");
     cancellation.Cancel();
@@ -106,6 +128,12 @@ public sealed class InspectEnvironmentHandlerTests
     await Assert.ThrowsAnyAsync<OperationCanceledException>(() => inspection);
     Assert.Single(runtime.Invocations);
   }
+
+  private static InspectEnvironmentHandler CreateHandler(FakeRuntime runtime) =>
+      new(runtime, new ProfileExecutionAuthorizer(new FakeProfileTrustStore()));
+
+  private static LoadedProfile Loaded(Wdem.Domain.Profiles.EnvironmentProfile profile) =>
+      new(profile, ProfileOrigin.Local, "test-profile.json", "TEST");
 
   private const string ProfileJson = """
     {

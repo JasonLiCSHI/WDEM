@@ -97,28 +97,28 @@ public sealed class TaskCardBindingTests
 
   private static TaskDefinition CreateTask() =>
       new(
-          Id: "test-task",
-          DisplayName: "Test Task",
-          Required: true,
-          DependsOn: ["dependency"],
-          VersionRequirement: Wdem.Domain.Versions.VersionRequirement.Parse(">=1.0.0"),
-          PreferredVersion: "1.0.0",
-          Source: "https://example.test/tool.exe",
-          Detect: new CommandDefinition("tool.exe", ["--version"]),
-          Pre:
+          id: "test-task",
+          displayName: "Test Task",
+          required: true,
+          dependsOn: ["dependency"],
+          versionRequirement: Wdem.Domain.Versions.VersionRequirement.Parse(">=1.0.0"),
+          preferredVersion: "1.0.0",
+          source: "https://example.test/tool.exe",
+          detect: new CommandDefinition("tool.exe", ["--version"]),
+          pre:
           [
             new CommandDefinition(
                 "prepare.exe",
                 ["--quiet"],
                 DisplayName: "Prepare the test environment")
           ],
-          Apply: new CommandDefinition("installer.exe", ["--quiet"]),
-          Post:
+          apply: new CommandDefinition("installer.exe", ["--quiet"]),
+          post:
           [
             new CommandDefinition(
                 "verify.exe",
                 ["--installed"],
                 DisplayName: "Verify the test environment")
           ],
-          Description: "Exercises the task card bindings.");
+          description: "Exercises the task card bindings.");
 }

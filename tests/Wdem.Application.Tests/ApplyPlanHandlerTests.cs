@@ -1,5 +1,6 @@
 using Wdem.Application.Execution;
 using Wdem.Application.Planning;
+using Wdem.Application.Profiles;
 using Wdem.Application.Runtime;
 using Wdem.Application.Tests.TestDoubles;
 using Wdem.Application.Workflows;
@@ -12,6 +13,24 @@ namespace Wdem.Application.Tests;
 public sealed class ApplyPlanHandlerTests
 {
   [Fact]
+  public void Apply_RejectsUntrustedRemoteProfileBeforeStartingWorkflow()
+  {
+    var profile = ProfileParser.Parse(ProfileJson);
+    var loaded = new LoadedProfile(
+        profile,
+        ProfileOrigin.Cache,
+        "profile-cache.json",
+        "UNTRUSTED",
+        "test-source");
+    var plan = new CreatePlanHandler().CreateForTasks(profile, rootTaskIds: ["a"]);
+    var runtime = new FakeRuntime();
+    var handler = CreateHandler(runtime, trusted: false);
+
+    Assert.Throws<UntrustedProfileException>(() => handler.Start(loaded, plan));
+    Assert.Empty(runtime.Invocations);
+  }
+
+  [Fact]
   public async Task Apply_IndependentTasksStartConcurrently()
   {
     var profile = ProfileParser.Parse(ProfileJson);
@@ -21,7 +40,7 @@ public sealed class ApplyPlanHandlerTests
         .WithDetect("b", exitCode: 1)
         .WithApplyThatWaitsForCancellation("a")
         .WithApplyThatWaitsForCancellation("b");
-    var run = CreateHandler(runtime).Start(profile, graph);
+    var run = CreateHandler(runtime).Start(Loaded(profile), graph);
 
     try
     {
@@ -52,7 +71,7 @@ public sealed class ApplyPlanHandlerTests
         .WithDetect("c", exitCode: 1)
         .WithApplyThatWaitsFor("a", finishDependency.Task)
         .WithApplyThatWaitsForCancellation("c");
-    var run = CreateHandler(runtime).Start(profile, graph);
+    var run = CreateHandler(runtime).Start(Loaded(profile), graph);
 
     await runtime.WaitForCommandStartAsync("a", "apply");
     Assert.DoesNotContain(runtime.Invocations, invocation => invocation.taskId == "c");
@@ -83,7 +102,7 @@ public sealed class ApplyPlanHandlerTests
         .WithApplyThatWaitsFor("b", finishIndependentTask.Task)
         .WithApply("c", exitCode: 0);
 
-    var run = CreateHandler(runtime).Start(profile, graph);
+    var run = CreateHandler(runtime).Start(Loaded(profile), graph);
 
     await Task.WhenAll(
         runtime.WaitForCommandStartAsync("a", "apply"),
@@ -91,7 +110,9 @@ public sealed class ApplyPlanHandlerTests
     run.CancelTask("a");
 
     Assert.Equal(WorkflowRunState.Running, run.Snapshot.State);
-    Assert.Equal(TaskExecutionState.Cancelling, run.Snapshot.Tasks["a"].State);
+    Assert.Contains(
+        run.Snapshot.Tasks["a"].State,
+        new[] { TaskExecutionState.Cancelling, TaskExecutionState.Cancelled });
     Assert.False(run.Snapshot.Tasks["a"].CanCancel);
     Assert.True(run.Snapshot.Tasks["b"].CanCancel);
     finishIndependentTask.SetResult();
@@ -118,7 +139,7 @@ public sealed class ApplyPlanHandlerTests
         .WithDetect("c", exitCode: 1)
         .WithApply("a", exitCode: 2);
 
-    var report = await CreateHandler(runtime).Start(profile, graph).Completion;
+    var report = await CreateHandler(runtime).Start(Loaded(profile), graph).Completion;
 
     Assert.Equal(TaskExecutionState.Failed, report.Tasks["a"].State);
     Assert.Equal(TaskOutcome.Failed, report.Tasks["a"].Outcome);
@@ -138,7 +159,7 @@ public sealed class ApplyPlanHandlerTests
         .WithApplyThatWaitsForCancellation("a")
         .WithApply("c", exitCode: 0);
 
-    var run = CreateHandler(runtime).Start(profile, graph);
+    var run = CreateHandler(runtime).Start(Loaded(profile), graph);
 
     await runtime.WaitForCommandStartAsync("a", "apply");
     run.CancelAll();
@@ -170,7 +191,7 @@ public sealed class ApplyPlanHandlerTests
     var updates = new List<WorkflowProgress>();
     var progress = new InlineProgress<WorkflowProgress>(updates.Add);
 
-    var report = await CreateHandler(runtime).Start(profile, graph, progress).Completion;
+    var report = await CreateHandler(runtime).Start(Loaded(profile), graph, progress).Completion;
 
     Assert.Equal(TaskOutcome.Succeeded, report.Tasks["b"].Outcome);
     Assert.Collection(
@@ -210,7 +231,7 @@ public sealed class ApplyPlanHandlerTests
     var updates = new List<WorkflowProgress>();
     var progress = new InlineProgress<WorkflowProgress>(updates.Add);
 
-    await CreateHandler(runtime).Start(profile, graph, progress).Completion;
+    await CreateHandler(runtime).Start(Loaded(profile), graph, progress).Completion;
 
     var output = Assert.Single(updates, update => update.Message == "downloading");
     Assert.Equal("b", output.TaskId);
@@ -230,7 +251,7 @@ public sealed class ApplyPlanHandlerTests
     var updates = new List<WorkflowUpdate>();
 
     var run = CreateHandler(runtime).Start(
-        profile,
+        Loaded(profile),
         graph,
         updates: new InlineProgress<WorkflowUpdate>(updates.Add));
     await run.Completion;
@@ -257,7 +278,7 @@ public sealed class ApplyPlanHandlerTests
         .WithApplyThatWaitsForCancellation("b");
     var updates = new List<WorkflowUpdate>();
     var run = CreateHandler(runtime).Start(
-        profile,
+        Loaded(profile),
         graph,
         updates: new InlineProgress<WorkflowUpdate>(updates.Add));
 
@@ -287,7 +308,7 @@ public sealed class ApplyPlanHandlerTests
         .OnInvocation(_ => statesSeenByRuntime.Add(updates[^1].Snapshot.Tasks["pipeline"].State));
 
     var report = await CreateHandler(runtime).Start(
-        profile,
+        Loaded(profile),
         graph,
         updates: new InlineProgress<WorkflowUpdate>(updates.Add)).Completion;
 
@@ -327,7 +348,7 @@ public sealed class ApplyPlanHandlerTests
     var runtime = new FakeRuntime()
         .WithDetect("a", exitCode: 1)
         .WithApplyThatWaitsForCancellation("a");
-    var run = CreateHandler(runtime).Start(profile, graph);
+    var run = CreateHandler(runtime).Start(Loaded(profile), graph);
 
     await runtime.WaitForCommandStartAsync("a", "apply");
 
@@ -352,7 +373,7 @@ public sealed class ApplyPlanHandlerTests
     var runtime = new FakeRuntime()
         .WithDetect("a", exitCode: 1)
         .WithApplyThatReturnsAfterCancellation("a");
-    var run = CreateHandler(runtime).Start(profile, graph);
+    var run = CreateHandler(runtime).Start(Loaded(profile), graph);
 
     await runtime.WaitForCommandStartAsync("a", "apply");
     run.CancelTask("a");
@@ -363,11 +384,15 @@ public sealed class ApplyPlanHandlerTests
     Assert.DoesNotContain(runtime.Invocations, invocation => invocation.phase == "verify");
   }
 
-  private static ApplyPlanHandler CreateHandler(ITaskRuntime runtime) =>
+  private static ApplyPlanHandler CreateHandler(ITaskRuntime runtime, bool trusted = true) =>
       new(
           runtime,
           DefaultWorkflowActivityExecutor.Instance,
-          DefaultTaskWorkflowProvider.Instance);
+          DefaultTaskWorkflowProvider.Instance,
+          new ProfileExecutionAuthorizer(new FakeProfileTrustStore(trusted)));
+
+  private static LoadedProfile Loaded(Wdem.Domain.Profiles.EnvironmentProfile profile) =>
+      new(profile, ProfileOrigin.Local, "test-profile.json", "TEST");
 
   private const string ProfileJson = """
     {

@@ -283,7 +283,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     try
     {
       _inspectionTask = _inspectEnvironment.HandleAsync(
-          _loadedProfile.Profile,
+          _loadedProfile,
           CreateInspectionProgress(operationGeneration),
           _inspectCancellation.Token);
       var report = await _inspectionTask;
@@ -409,7 +409,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     var operationGeneration = ++_operationGeneration;
     _lastWorkflowRevision = -1;
     _currentRun = _applyPlan.Start(
-        _loadedProfile.Profile,
+        _loadedProfile,
         plan,
         updates: CreateRunUpdates(operationGeneration));
     ApplyWorkflowSnapshot(_currentRun.Snapshot);
