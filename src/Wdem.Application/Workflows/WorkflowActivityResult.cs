@@ -1,6 +1,6 @@
-using Wdem.Core.Runs;
+using Wdem.Application.Execution;
 
-namespace Wdem.Core.Workflows;
+namespace Wdem.Application.Workflows;
 
 public sealed record WorkflowActivityResult(
     bool Succeeded,

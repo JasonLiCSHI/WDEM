@@ -1,7 +1,9 @@
-using Wdem.Core.Profiles;
-using Wdem.Domain.Planning;
 using Wdem.Application.Runtime;
+using Wdem.Application.Workflows;
+using Wdem.Core.Profiles;
 using Wdem.Core.Workflows;
+using Wdem.Domain.Planning;
+using Wdem.Domain.Workflows;
 
 namespace Wdem.Core.Runs;
 
@@ -22,7 +24,8 @@ public static class EnvironmentManager
       ITaskRuntime runtime,
       IProgress<WorkflowProgress>? progress = null,
       IProgress<WorkflowUpdate>? updates = null,
-      ITaskWorkflowProvider? workflowProvider = null)
+      ITaskWorkflowProvider? workflowProvider = null,
+      IWorkflowActivityExecutor? activityExecutor = null)
   {
     ArgumentNullException.ThrowIfNull(profile);
     ArgumentNullException.ThrowIfNull(plan);
@@ -41,6 +44,7 @@ public static class EnvironmentManager
         profile,
         plannedTaskIds,
         runtime,
+        activityExecutor ?? DefaultWorkflowActivityExecutor.Instance,
         workflows,
         perTaskCts,
         state,
@@ -60,9 +64,7 @@ public static class EnvironmentManager
     var provider = workflowProvider ?? DefaultTaskWorkflowProvider.Instance;
     return profile.Tasks.Values.ToDictionary(
         task => task.Id,
-        task => provider.Create(
-            task,
-            profile.Workflows.GetValueOrDefault(task.Id)) ??
+        task => provider.Create(task) ??
             throw new InvalidOperationException($"Workflow provider returned no definition for task '{task.Id}'."),
         StringComparer.Ordinal);
   }

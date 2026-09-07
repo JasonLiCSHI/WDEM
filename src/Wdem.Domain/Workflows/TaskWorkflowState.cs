@@ -1,7 +1,6 @@
 using Wdem.Domain.Execution;
-using Wdem.Domain.Workflows;
 
-namespace Wdem.Core.Workflows;
+namespace Wdem.Domain.Workflows;
 
 public sealed class TaskWorkflowState
 {

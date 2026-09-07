@@ -132,6 +132,21 @@ public sealed class ArchitectureDependencyTests
   }
 
   [Theory]
+  [InlineData("src/Wdem.Domain/Workflows/TaskWorkflowDefinition.cs")]
+  [InlineData("src/Wdem.Domain/Workflows/TaskWorkflowState.cs")]
+  [InlineData("src/Wdem.Domain/Workflows/WorkflowActivity.cs")]
+  [InlineData("src/Wdem.Application/Workflows/IWorkflowActivityExecutor.cs")]
+  [InlineData("src/Wdem.Application/Execution/StepReport.cs")]
+  public void WorkflowDefinitionsAndExecutionAreSeparated(string relativePath)
+  {
+    var path = Path.Combine(
+        FindRepositoryRoot(),
+        relativePath.Replace('/', Path.DirectorySeparatorChar));
+
+    Assert.True(File.Exists(path), $"Expected architecture source '{path}'.");
+  }
+
+  [Theory]
   [InlineData("src/Wdem.Domain", "System.Diagnostics.Process")]
   [InlineData("src/Wdem.Domain", "System.IO.File")]
   [InlineData("src/Wdem.Domain", "System.Net.Http")]

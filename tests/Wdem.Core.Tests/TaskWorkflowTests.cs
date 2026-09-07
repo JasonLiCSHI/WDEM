@@ -1,3 +1,4 @@
+using Wdem.Application.Workflows;
 using Wdem.Core.Planning;
 using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
@@ -39,7 +40,8 @@ public sealed class TaskWorkflowTests
         graph,
         new FakeRuntime(),
         updates: new InlineProgress<WorkflowUpdate>(updates.Add),
-        workflowProvider: new SingleWorkflowProvider(workflow));
+        workflowProvider: new SingleWorkflowProvider(workflow),
+        activityExecutor: new TestActivityExecutor());
     var report = await run.Completion;
 
     Assert.Equal(["enter", "reside", "exit"], executed);
@@ -97,7 +99,8 @@ public sealed class TaskWorkflowTests
         profile,
         graph,
         new FakeRuntime(),
-        workflowProvider: new SingleWorkflowProvider(workflow)).Completion;
+        workflowProvider: new SingleWorkflowProvider(workflow),
+        activityExecutor: new TestActivityExecutor()).Completion;
 
     Assert.Equal(TaskOutcome.Succeeded, report.Tasks["custom"].Outcome);
   }
@@ -129,7 +132,8 @@ public sealed class TaskWorkflowTests
         profile,
         graph,
         new FakeRuntime(),
-        workflowProvider: new SingleWorkflowProvider(workflow));
+        workflowProvider: new SingleWorkflowProvider(workflow),
+        activityExecutor: new TestActivityExecutor());
     await blockingActivity.Started;
 
     run.CancelTask("custom");
@@ -206,30 +210,16 @@ public sealed class TaskWorkflowTests
   private sealed class SingleWorkflowProvider(TaskWorkflowDefinition workflow)
       : ITaskWorkflowProvider
   {
-    public TaskWorkflowDefinition Create(
-        Wdem.Domain.Tasks.TaskDefinition task,
-        TaskWorkflowDefinition? declaredWorkflow = null) => workflow;
+    public TaskWorkflowDefinition Create(Wdem.Domain.Tasks.TaskDefinition task) => workflow;
   }
 
   private sealed class RecordingActivity(string id, ICollection<string> executed)
       : WorkflowActivity(id)
   {
-    public override Task<WorkflowActivityResult> ExecuteAsync(
-        WorkflowActivityContext context,
-        CancellationToken cancellationToken)
-    {
-      executed.Add(Id);
-      return Task.FromResult(WorkflowActivityResult.Success());
-    }
+    public ICollection<string> Executed { get; } = executed;
   }
 
-  private sealed class FailingActivity(string id) : WorkflowActivity(id)
-  {
-    public override Task<WorkflowActivityResult> ExecuteAsync(
-        WorkflowActivityContext context,
-        CancellationToken cancellationToken) =>
-        Task.FromResult(WorkflowActivityResult.Failure("Expected failure."));
-  }
+  private sealed class FailingActivity(string id) : WorkflowActivity(id);
 
   private sealed class BlockingActivity(string id) : WorkflowActivity(id)
   {
@@ -238,13 +228,36 @@ public sealed class TaskWorkflowTests
 
     public Task Started => _started.Task;
 
-    public override async Task<WorkflowActivityResult> ExecuteAsync(
-        WorkflowActivityContext context,
-        CancellationToken cancellationToken)
+    public async Task WaitAsync(CancellationToken cancellationToken)
     {
       _started.TrySetResult();
       await Task.Delay(Timeout.Infinite, cancellationToken);
-      return WorkflowActivityResult.Success();
+    }
+  }
+
+  private sealed class TestActivityExecutor : IWorkflowActivityExecutor
+  {
+    public async Task<WorkflowActivityResult> ExecuteAsync(
+        WorkflowActivity activity,
+        WorkflowActivityContext context,
+        CancellationToken cancellationToken)
+    {
+      switch (activity)
+      {
+        case RecordingActivity recording:
+          recording.Executed.Add(recording.Id);
+          return WorkflowActivityResult.Success();
+        case FailingActivity:
+          return WorkflowActivityResult.Failure("Expected failure.");
+        case BlockingActivity blocking:
+          await blocking.WaitAsync(cancellationToken);
+          return WorkflowActivityResult.Success();
+        default:
+          return await DefaultWorkflowActivityExecutor.Instance.ExecuteAsync(
+              activity,
+              context,
+              cancellationToken);
+      }
     }
   }
 

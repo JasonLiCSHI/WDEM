@@ -1,5 +1,7 @@
-using Wdem.Core.Profiles;
+using Wdem.Application.Execution;
 using Wdem.Application.Runtime;
+using Wdem.Application.Workflows;
+using Wdem.Core.Profiles;
 using Wdem.Core.Workflows;
 using Wdem.Domain.Tasks;
 using Wdem.Domain.Execution;
@@ -15,6 +17,7 @@ internal sealed class WorkflowStateMachine(
     EnvironmentProfile profile,
     IReadOnlyList<string> plannedTaskIds,
     ITaskRuntime runtime,
+    IWorkflowActivityExecutor activityExecutor,
     IReadOnlyDictionary<string, TaskWorkflowDefinition> workflows,
     IReadOnlyDictionary<string, CancellationTokenSource> taskCancellationSources,
     WorkflowStateStore state,
@@ -256,7 +259,7 @@ internal sealed class WorkflowStateMachine(
           location,
           runtime,
           output => state.PublishOutput(task.Id, output.Message, output.Stream));
-      var result = await activity.ExecuteAsync(context, cancellationToken)
+      var result = await activityExecutor.ExecuteAsync(activity, context, cancellationToken)
           ?? throw new InvalidOperationException($"Activity '{activity.Id}' returned no result.");
       if (result.Step is { } step)
       {

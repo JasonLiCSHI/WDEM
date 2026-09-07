@@ -1,4 +1,5 @@
 using Wdem.Application.Runtime;
+using Wdem.Application.Workflows;
 using Wdem.Bootstrapper;
 using Wdem.Core.Planning;
 using Wdem.Core.Profiles;
@@ -176,6 +177,7 @@ public static class Program
     }
 
     var runtime = session.TaskRuntime;
+    var activityExecutor = session.WorkflowActivityExecutor;
     log.Write("profile", $"Loaded {profile.Id} {profile.Version} from {loaded.Location}");
     Console.WriteLine($"Log: {log.DisplayPath}");
     if (log.LastError is not null)
@@ -310,6 +312,7 @@ public static class Program
         profile,
         plan,
         runtime,
+        activityExecutor,
         progress,
         log,
         retries);
@@ -333,6 +336,7 @@ public static class Program
       EnvironmentProfile profile,
       Plan plan,
       ITaskRuntime runtime,
+      IWorkflowActivityExecutor activityExecutor,
       IProgress<WorkflowProgress> progress,
       JsonLineSessionLog log,
       int retries)
@@ -351,7 +355,12 @@ public static class Program
         log.Write("retry", $"Attempt {attempt}/{retries}");
       }
 
-      var run = EnvironmentManager.StartApply(profile, plan, runtime, progress);
+      var run = EnvironmentManager.StartApply(
+          profile,
+          plan,
+          runtime,
+          progress,
+          activityExecutor: activityExecutor);
       ConsoleCancelEventHandler cancelHandler = (_, e) =>
       {
         e.Cancel = true;

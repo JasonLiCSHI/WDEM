@@ -4,6 +4,7 @@ using Wdem.Core.Workflows;
 using Wdem.Domain.Tasks;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Versions;
+using Wdem.Domain.Workflows;
 using Xunit;
 
 namespace Wdem.Core.Tests;
@@ -196,7 +197,7 @@ public sealed class ProfileParserTests
     var profile = ProfileParser.Parse(json);
 
     Assert.Equal(2, profile.SchemaVersion);
-    var workflow = profile.Workflows["tool"];
+    var workflow = Assert.IsType<TaskWorkflowDefinition>(profile.Tasks["tool"].Workflow);
     Assert.Equal("prepare", workflow.InitialStateId);
     Assert.Equal(20, workflow.MaxTransitions);
     var prepare = workflow.States["prepare"];

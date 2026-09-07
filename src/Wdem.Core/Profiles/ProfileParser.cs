@@ -4,7 +4,6 @@ using Wdem.Core.Runs;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Tasks;
 using Wdem.Domain.Versions;
-using Wdem.Core.Workflows;
 using Wdem.Domain.Workflows;
 
 namespace Wdem.Core.Profiles;
@@ -45,7 +44,6 @@ public static class ProfileParser
     }
 
     var tasks = new Dictionary<string, TaskDefinition>(StringComparer.Ordinal);
-    var workflows = new Dictionary<string, TaskWorkflowDefinition>(StringComparer.Ordinal);
     foreach (var (taskIdValue, taskDto) in dto.Tasks)
     {
       var taskId = Required(taskIdValue, "Task id");
@@ -86,13 +84,10 @@ public static class ProfileParser
           pre,
           apply,
           post,
-          Optional(taskDto.Description));
+          Optional(taskDto.Description),
+          workflow);
 
       tasks.Add(taskId, task);
-      if (workflow is not null)
-      {
-        workflows.Add(taskId, workflow);
-      }
     }
 
     foreach (var task in tasks.Values)
@@ -113,8 +108,7 @@ public static class ProfileParser
         displayName,
         Optional(dto.Description),
         tasks,
-        schemaVersion,
-        workflows);
+        schemaVersion);
   }
 
   private static CommandDefinition[] Commands(

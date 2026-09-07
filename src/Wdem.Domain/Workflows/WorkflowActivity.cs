@@ -1,7 +1,8 @@
-namespace Wdem.Core.Workflows;
+namespace Wdem.Domain.Workflows;
 
 /// <summary>
-/// Base class for work executed while a task workflow enters, resides in, or exits a state.
+/// Describes work attached to a workflow state. Execution belongs to an
+/// Application-layer <c>IWorkflowActivityExecutor</c>.
 /// </summary>
 public abstract class WorkflowActivity
 {
@@ -15,8 +16,4 @@ public abstract class WorkflowActivity
   public string Id { get; }
 
   public string DisplayName { get; }
-
-  public abstract Task<WorkflowActivityResult> ExecuteAsync(
-      WorkflowActivityContext context,
-      CancellationToken cancellationToken);
 }

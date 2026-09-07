@@ -43,6 +43,7 @@ If GUI and CLI need the same decision, place it in Core or Windows and make both
 
 - Compile Schema v1 into `Detect → Pre → Apply → Post → Verify`.
 - Allow Schema v2 only through its validated bounded state graph. States can run Entry, Residence, and Exit Activities.
+- Keep `WorkflowActivity` as a Domain definition; execute it only through an Application `IWorkflowActivityExecutor` so custom Activity types do not introduce I/O into Domain.
 - Let workflow states project stable `TaskExecutionState` and capabilities. UI buttons must bind to those capabilities instead of interpreting state IDs.
 - Re-detect before Apply. Skip Tasks already satisfying their version constraint.
 - Execute dependencies before dependents. An upstream failure or cancellation blocks unsafe downstream work.

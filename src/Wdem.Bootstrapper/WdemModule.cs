@@ -1,5 +1,6 @@
 using Autofac;
 using Wdem.Application.Runtime;
+using Wdem.Application.Workflows;
 using Wdem.Core.Profiles;
 using Wdem.Windows.Configuration;
 using Wdem.Windows.Logging;
@@ -26,6 +27,9 @@ internal sealed class WdemModule(WdemBootstrapperOptions options) : Module
             context.Resolve<IProcessRunner>(),
             options.ApplicationDirectory))
         .As<ITaskRuntime>()
+        .SingleInstance();
+    builder.RegisterType<DefaultWorkflowActivityExecutor>()
+        .As<IWorkflowActivityExecutor>()
         .SingleInstance();
     builder.Register(_ => CreateLog(options)).SingleInstance();
   }

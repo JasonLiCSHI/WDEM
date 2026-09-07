@@ -1,4 +1,5 @@
 using Wdem.Domain.Versions;
+using Wdem.Domain.Workflows;
 
 namespace Wdem.Domain.Tasks;
 
@@ -14,4 +15,5 @@ public sealed record TaskDefinition(
     IReadOnlyList<CommandDefinition> Pre,
     CommandDefinition? Apply,
     IReadOnlyList<CommandDefinition> Post,
-    string? Description = null);
+    string? Description = null,
+    TaskWorkflowDefinition? Workflow = null);
