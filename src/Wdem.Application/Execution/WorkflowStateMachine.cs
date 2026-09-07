@@ -1,9 +1,11 @@
 using Wdem.Application.Execution;
+using Wdem.Application.Events;
 using Wdem.Application.Runtime;
 using Wdem.Application.Workflows;
 using Wdem.Domain.Tasks;
 using Wdem.Domain.Planning;
 using Wdem.Domain.Execution;
+using Wdem.Domain.Events;
 using Wdem.Domain.Profiles;
 using Wdem.Domain.Workflows;
 
@@ -21,6 +23,7 @@ internal sealed class WorkflowStateMachine(
     IReadOnlyDictionary<string, TaskWorkflowDefinition> workflows,
     IReadOnlyDictionary<string, CancellationTokenSource> taskCancellationSources,
     WorkflowStateStore state,
+    IDomainEventPublisher domainEvents,
     CancellationToken allCancellationToken)
 {
   public async Task<RunReport> RunAsync()
@@ -104,6 +107,10 @@ internal sealed class WorkflowStateMachine(
         token.ThrowIfCancellationRequested();
         throw new OperationCanceledException(token);
       }
+      domainEvents.Publish(new TaskWorkflowStarted(
+          profile.Id,
+          task.Id,
+          workflow.InitialStateId));
 
       while (true)
       {
@@ -113,15 +120,19 @@ internal sealed class WorkflowStateMachine(
 
         if (runtimeState.IsTerminal && !hasLifecycleActivities)
         {
-          var terminalOutcome = state.CompleteTask(
+          var terminalError = runtimeState.TerminalOutcome == TaskOutcome.Failed
+              ? runtimeState.TerminalError
+              : null;
+          var terminalOutcome = CompleteTask(
               task.Id,
               runtimeState.TerminalOutcome!.Value,
-              runtimeState.Id);
+              runtimeState.Id,
+              terminalError);
           return new TaskReport(
               task.Id,
               terminalOutcome,
               steps,
-              terminalOutcome == TaskOutcome.Failed ? runtimeState.TerminalError : null);
+              terminalOutcome == TaskOutcome.Failed ? terminalError : null);
         }
 
         if (!state.EnterState(
@@ -133,6 +144,11 @@ internal sealed class WorkflowStateMachine(
           token.ThrowIfCancellationRequested();
           throw new OperationCanceledException(token);
         }
+        domainEvents.Publish(new TaskWorkflowStateEntered(
+            profile.Id,
+            task.Id,
+            runtimeState.Id,
+            runtimeState.TaskState));
 
         var activityResults = new List<WorkflowActivityResult>();
         var entered = await RunActivitiesAsync(
@@ -172,14 +188,19 @@ internal sealed class WorkflowStateMachine(
           var requestedOutcome = exited && failedResult is null
               ? runtimeState.TerminalOutcome!.Value
               : TaskOutcome.Failed;
-          var outcome = state.CompleteTask(task.Id, requestedOutcome, runtimeState.Id);
+          var terminalError = requestedOutcome == TaskOutcome.Failed
+              ? failedResult?.Error ?? runtimeState.TerminalError ?? "Terminal state Activity failed."
+              : null;
+          var outcome = CompleteTask(
+              task.Id,
+              requestedOutcome,
+              runtimeState.Id,
+              terminalError);
           return new TaskReport(
               task.Id,
               outcome,
               steps,
-              outcome == TaskOutcome.Failed
-                  ? failedResult?.Error ?? runtimeState.TerminalError ?? "Terminal state Activity failed."
-                  : null);
+              outcome == TaskOutcome.Failed ? terminalError : null);
         }
 
         var transitionContext = new TaskWorkflowTransitionContext(
@@ -225,12 +246,19 @@ internal sealed class WorkflowStateMachine(
                   $"Exit Activity failed in workflow state '{runtimeState.Id}'.");
         }
 
+        var previousStateId = runtimeState.Id;
         runtimeStateId = transition.TargetStateId;
+        domainEvents.Publish(new TaskWorkflowTransitioned(
+            profile.Id,
+            task.Id,
+            previousStateId,
+            runtimeStateId,
+            transition.Name));
       }
     }
     catch (OperationCanceledException)
     {
-      var outcome = state.CompleteTask(task.Id, TaskOutcome.Cancelled);
+      var outcome = CompleteTask(task.Id, TaskOutcome.Cancelled, runtimeStateId);
       return new TaskReport(task.Id, outcome, steps, Error: null);
     }
     catch (Exception exception)
@@ -263,6 +291,13 @@ internal sealed class WorkflowStateMachine(
         cancellationToken.ThrowIfCancellationRequested();
         throw new OperationCanceledException(cancellationToken);
       }
+      domainEvents.Publish(new TaskWorkflowActivityStarted(
+          profile.Id,
+          task.Id,
+          runtimeState.Id,
+          activity.Id,
+          location,
+          activityCounter.Value));
 
       cancellationToken.ThrowIfCancellationRequested();
       var context = new WorkflowActivityContext(
@@ -271,13 +306,41 @@ internal sealed class WorkflowStateMachine(
           location,
           runtime,
           output => state.PublishOutput(task.Id, output.Message, output.Stream));
-      var result = await activityExecutor.ExecuteAsync(activity, context, cancellationToken)
-          ?? throw new InvalidOperationException($"Activity '{activity.Id}' returned no result.");
+      WorkflowActivityResult result;
+      try
+      {
+        result = await activityExecutor.ExecuteAsync(activity, context, cancellationToken)
+            ?? throw new InvalidOperationException($"Activity '{activity.Id}' returned no result.");
+      }
+      catch (Exception exception) when (exception is not OperationCanceledException)
+      {
+        domainEvents.Publish(new TaskWorkflowActivityCompleted(
+            profile.Id,
+            task.Id,
+            runtimeState.Id,
+            activity.Id,
+            location,
+            activityCounter.Value,
+            Succeeded: false,
+            IsTaskSatisfied: null,
+            exception.Message));
+        throw;
+      }
       if (result.Step is { } step)
       {
         steps.Add(step);
       }
       results.Add(result);
+      domainEvents.Publish(new TaskWorkflowActivityCompleted(
+          profile.Id,
+          task.Id,
+          runtimeState.Id,
+          activity.Id,
+          location,
+          activityCounter.Value,
+          result.Succeeded,
+          result.IsTaskSatisfied,
+          result.Error));
       cancellationToken.ThrowIfCancellationRequested();
       if (!result.Succeeded)
       {
@@ -290,7 +353,7 @@ internal sealed class WorkflowStateMachine(
 
   private TaskReport Fail(string taskId, IReadOnlyList<StepReport> steps, string error)
   {
-    var outcome = state.CompleteTask(taskId, TaskOutcome.Failed);
+    var outcome = CompleteTask(taskId, TaskOutcome.Failed, error: error);
     return new TaskReport(
         taskId,
         outcome,
@@ -303,12 +366,28 @@ internal sealed class WorkflowStateMachine(
       TaskOutcome outcome,
       string? error = null)
   {
-    var effectiveOutcome = state.CompleteTask(taskId, outcome);
+    var effectiveOutcome = CompleteTask(taskId, outcome, error: error);
     return new TaskReport(
         taskId,
         effectiveOutcome,
         Steps: Array.Empty<StepReport>(),
         Error: error);
+  }
+
+  private TaskOutcome CompleteTask(
+      string taskId,
+      TaskOutcome outcome,
+      string? runtimeStateId = null,
+      string? error = null)
+  {
+    var effectiveOutcome = state.CompleteTask(taskId, outcome, runtimeStateId);
+    domainEvents.Publish(new TaskWorkflowFinished(
+        profile.Id,
+        taskId,
+        runtimeStateId,
+        effectiveOutcome,
+        effectiveOutcome is TaskOutcome.Failed or TaskOutcome.Blocked ? error : null));
+    return effectiveOutcome;
   }
 
   private static bool IsBlockedByDependency(IEnumerable<TaskReport> dependencies) =>

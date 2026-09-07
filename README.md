@@ -78,6 +78,7 @@ Running → Cancelling → Cancelled       dependency failure → Blocked
 WDEM is intentionally built as a pure domain-driven design at its core, surrounded by explicit Clean Architecture boundaries. The model speaks the product language—Profile, Task, dependency, Plan, Activity, Workflow, compliance, and outcome—without knowing about WPF, HTTP, JSON, PowerShell, or Autofac.
 
 - `Wdem.Domain` owns value objects, invariants, version policy, DAG planning, workflow definitions, and transitions. It has no package or project dependencies.
+- Immutable Task lifecycle domain events describe completed workflow facts; Application dispatches them in process and Infrastructure records them without making diagnostics part of Task success.
 - `Wdem.Application` expresses Inspect, Plan, and Apply as use cases and defines ports for execution, persistence, trust, and reporting.
 - Infrastructure and Windows are adapters. WPF and CLI are reactive clients of the same use cases, not alternative homes for business rules.
 - Autofac exists only in `Wdem.Bootstrapper`, the composition root. Domain objects never resolve services.
@@ -309,7 +310,7 @@ WDEM's destination is a Windows environment convergence engine: previewable and 
 
 | Milestone | Outcome | Planned capabilities |
 |---|---|---|
-| **0.1.2 · Execution foundation** | A safe, observable, compliance-aware local workflow | Trusted remote Profiles, Required/Optional selection, dependency-aware parallel DAG execution, composable Task state machines, immutable `NoOp`/`Install`/`Upgrade`/`Blocked` Plans, confirmed process-tree cancellation, CLI/WPF parity, and JSONL audit logs |
+| **0.1.2 · Execution foundation** | A safe, observable, compliance-aware local workflow | Trusted remote Profiles, Required/Optional selection, dependency-aware parallel DAG execution, composable Task state machines, immutable `NoOp`/`Install`/`Upgrade`/`Blocked` Plans, in-process lifecycle domain events, confirmed process-tree cancellation, CLI/WPF parity, and JSONL audit logs |
 | **0.2 · Complete Plan lifecycle** | Make every change reviewable and portable | Add `Reconfigure` and removal policy, JSON Plan export, richer GUI approval diff, and Profile content fingerprint validation again at Apply |
 | **0.3 · State and recovery** | Survive interruption without pretending cache is truth | Atomic desired/observed State, execution journal, state locking, restart/reboot continuation, read-only drift detection, and fresh Detect before every Plan or Apply |
 | **0.4 · Reproducible Profiles** | Compose environments without copy-and-paste | Typed inputs, validated outputs and Task references, modules/includes, organization and user layers, source/version lock file with hashes, and explicit Schema migration |
@@ -356,7 +357,7 @@ WDEM ships its contributor contract as an [Agent Skill](.agents/skills/wdem-deve
 The Skill covers layer ownership, Profile and Workflow semantics, safe process-tree cancellation, administrator requirements, installer diagnostics, validation, packaging, and release discipline. All discovery entry points resolve to the canonical `.agents/skills/` copy, keeping the guidance consistent across agents. Its [evaluation set](.agents/skills/wdem-development/evals/evals.json) exercises installer failure recovery, declarative Task additions, and reactive UI state handling.
 
 Read [AGENTS.md](AGENTS.md) before contributing to understand the product boundaries and validation requirements.
-The [testing strategy](docs/TESTING.md) defines the test pyramid, Given-When-Then naming, fixture lifecycle, and deterministic boundary-test rules.
+The [testing strategy](docs/TESTING.md) defines the test pyramid, Given-When-Then naming, disciplined abstract fixtures, setup/teardown ownership, and deterministic boundary-test rules.
 
 ## License
 

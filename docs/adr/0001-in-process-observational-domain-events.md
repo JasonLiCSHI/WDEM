@@ -1,0 +1,3 @@
+# Use in-process observational domain events
+
+WDEM defines immutable Task lifecycle events in Domain, publishes them from Application only after the corresponding runtime state change, and handles them through process-local observers. Application handlers may coordinate a distinct follow-up use case, while Infrastructure handlers may perform observational work such as JSONL logging. `WorkflowSnapshot` remains the sole client-facing source of Task state; these events are deliberately not Event Sourcing, a durable message bus, or a second state model, handlers must not recursively drive the same workflow, and observer failures are isolated so diagnostics cannot change an installation outcome.

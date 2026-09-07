@@ -10,7 +10,7 @@ namespace Wdem.Infrastructure.Tests;
 public sealed class ProfileParserTests
 {
   [Fact]
-  public void TaskDefinitionExposesAParsedVersionRequirement()
+  public void TaskDefinition_WhenInspected_ThenExposesParsedVersionRequirement()
   {
     var property = typeof(TaskDefinition).GetProperty("VersionRequirement");
 

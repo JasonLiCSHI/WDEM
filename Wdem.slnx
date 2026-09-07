@@ -6,6 +6,7 @@
   <Project Path="src/Wdem.Windows/Wdem.Windows.csproj" />
   <Project Path="src/Wdem.Cli/Wdem.Cli.csproj" />
   <Project Path="src/Wdem.App/Wdem.App.csproj" />
+  <Project Path="tests/Wdem.Testing/Wdem.Testing.csproj" />
   <Project Path="tests/Wdem.Domain.Tests/Wdem.Domain.Tests.csproj" />
   <Project Path="tests/Wdem.Infrastructure.Tests/Wdem.Infrastructure.Tests.csproj" />
   <Project Path="tests/Wdem.Windows.Tests/Wdem.Windows.Tests.csproj" />

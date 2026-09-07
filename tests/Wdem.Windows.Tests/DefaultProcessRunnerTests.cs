@@ -1,12 +1,11 @@
 using System.Diagnostics;
-using System.Text;
 using Wdem.Application.Runtime;
 using Wdem.Windows.Processes;
 using Xunit;
 
 namespace Wdem.Windows.Tests;
 
-public sealed class DefaultProcessRunnerTests
+public sealed class DefaultProcessRunnerTests : PowerShellScriptTestBase
 {
   [Fact]
   public async Task VisualStudioApply_GuiInstallerReportsItsExitCode()
@@ -17,12 +16,8 @@ public sealed class DefaultProcessRunnerTests
         "script",
         "Invoke-VisualStudioProfessionalTask.ps1");
     var configPath = Path.Combine(repositoryRoot, "settings", ".vsconfig");
-    var capturedArgumentsPath = Path.Combine(
-        Path.GetTempPath(),
-        $"WDEM-fake-vs-arguments-{Guid.NewGuid():N}.txt");
-    var childProcessIdPath = Path.Combine(
-        Path.GetTempPath(),
-        $"WDEM-fake-vs-child-{Guid.NewGuid():N}.txt");
+    var capturedArgumentsPath = TestPath("visual-studio-arguments.txt");
+    var childProcessIdPath = TestPath("visual-studio-child.txt");
     var payload = $$"""
         function Get-Process {
             param([string] $Name, $ErrorAction)
@@ -77,9 +72,6 @@ public sealed class DefaultProcessRunnerTests
           // The fake installer's child already exited.
         }
       }
-
-      File.Delete(capturedArgumentsPath);
-      File.Delete(childProcessIdPath);
     }
   }
 
@@ -88,9 +80,7 @@ public sealed class DefaultProcessRunnerTests
   {
     var repositoryRoot = FindRepositoryRoot();
     var scriptPath = Path.Combine(repositoryRoot, "script", "Invoke-ReSharperTask.ps1");
-    var fakeVsWherePath = Path.Combine(
-        Path.GetTempPath(),
-        $"WDEM-fake-vswhere-{Guid.NewGuid():N}.exe");
+    var fakeVsWherePath = TestPath("fake-vswhere.exe");
     var payload = $$"""
         Add-Type -TypeDefinition 'using System; public static class FakeVsWhere { public static void Main(string[] args) { Console.WriteLine(@"C:\Fake VS"); } }' -OutputAssembly '{{EscapePowerShellLiteral(fakeVsWherePath)}}' -OutputType ConsoleApplication
         function Join-Path {
@@ -115,22 +105,15 @@ public sealed class DefaultProcessRunnerTests
         & '{{EscapePowerShellLiteral(scriptPath)}}' -Action Apply -SourceUri 'https://download.jetbrains.com/fake-resharper.exe' -Sha256 ('A' * 64)
         """;
 
-    try
-    {
-      var result = await RunPowerShellAsync(payload);
+    var result = await RunPowerShellAsync(payload);
 
-      Assert.Equal(1, result.ExitCode);
-      Assert.Contains("ReSharper Installer failed with exit code 23", result.StandardError);
-      Assert.DoesNotContain(
-          "LASTEXITCODE",
-          result.StandardError,
-          StringComparison.OrdinalIgnoreCase);
-      Assert.Contains("Downloading ReSharper from JetBrains", result.StandardOutput);
-    }
-    finally
-    {
-      File.Delete(fakeVsWherePath);
-    }
+    Assert.Equal(1, result.ExitCode);
+    Assert.Contains("ReSharper Installer failed with exit code 23", result.StandardError);
+    Assert.DoesNotContain(
+        "LASTEXITCODE",
+        result.StandardError,
+        StringComparison.OrdinalIgnoreCase);
+    Assert.Contains("Downloading ReSharper from JetBrains", result.StandardOutput);
   }
 
   [Fact]
@@ -224,26 +207,20 @@ public sealed class DefaultProcessRunnerTests
 
   private static async Task<bool> WaitUntilExitedAsync(int processId, TimeSpan timeout)
   {
-    var deadline = DateTimeOffset.UtcNow + timeout;
-    while (DateTimeOffset.UtcNow < deadline)
+    try
     {
-      try
-      {
-        using var process = Process.GetProcessById(processId);
-        if (process.HasExited)
-        {
-          return true;
-        }
-      }
-      catch (ArgumentException)
-      {
-        return true;
-      }
-
-      await Task.Delay(100);
+      using var process = Process.GetProcessById(processId);
+      await process.WaitForExitAsync().WaitAsync(timeout);
+      return true;
     }
-
-    return false;
+    catch (ArgumentException)
+    {
+      return true;
+    }
+    catch (TimeoutException)
+    {
+      return false;
+    }
   }
 
   private static ProcessRequest CreateBlockingProcessRequest()
@@ -266,52 +243,6 @@ public sealed class DefaultProcessRunnerTests
         "powershell.exe",
         ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script]);
   }
-
-  private static string FindRepositoryRoot()
-  {
-    var directory = new DirectoryInfo(AppContext.BaseDirectory);
-    while (directory is not null)
-    {
-      if (File.Exists(Path.Combine(
-              directory.FullName,
-              "script",
-              "Invoke-VisualStudioProfessionalTask.ps1")))
-      {
-        return directory.FullName;
-      }
-
-      directory = directory.Parent;
-    }
-
-    throw new DirectoryNotFoundException("Could not locate the WDEM repository root.");
-  }
-
-  private static string EscapePowerShellLiteral(string value) => value.Replace("'", "''");
-
-  private static async Task<PowerShellResult> RunPowerShellAsync(string payload)
-  {
-    var encodedPayload = Convert.ToBase64String(Encoding.Unicode.GetBytes(payload));
-    var startInfo = new ProcessStartInfo(
-        "powershell.exe",
-        $"-NoLogo -NoProfile -NonInteractive -EncodedCommand {encodedPayload}")
-    {
-      RedirectStandardOutput = true,
-      RedirectStandardError = true,
-      UseShellExecute = false,
-      CreateNoWindow = true,
-    };
-
-    using var process = Process.Start(startInfo)!;
-    var standardOutput = await process.StandardOutput.ReadToEndAsync();
-    var standardError = await process.StandardError.ReadToEndAsync();
-    await process.WaitForExitAsync();
-    return new PowerShellResult(process.ExitCode, standardOutput, standardError);
-  }
-
-  private sealed record PowerShellResult(
-      int ExitCode,
-      string StandardOutput,
-      string StandardError);
 
   private sealed class InlineProgress<T>(Action<T> callback) : IProgress<T>
   {

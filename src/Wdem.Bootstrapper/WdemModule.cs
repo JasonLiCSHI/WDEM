@@ -1,4 +1,5 @@
 using Autofac;
+using Wdem.Application.Events;
 using Wdem.Application.Execution;
 using Wdem.Application.Inspection;
 using Wdem.Application.Logging;
@@ -49,6 +50,12 @@ internal sealed class WdemModule(WdemBootstrapperOptions options) : Module
     builder.RegisterType<InspectEnvironmentHandler>().SingleInstance();
     builder.Register(_ => CreateLog(options))
         .As<ISessionLog>()
+        .SingleInstance();
+    builder.RegisterType<DomainEventSessionLogHandler>()
+        .As<IDomainEventHandler>()
+        .SingleInstance();
+    builder.RegisterType<DomainEventPublisher>()
+        .As<IDomainEventPublisher>()
         .SingleInstance();
   }
 

@@ -15,5 +15,6 @@
     <ProjectReference Include="../../src/Wdem.Application/Wdem.Application.csproj" />
     <ProjectReference Include="../../src/Wdem.Infrastructure/Wdem.Infrastructure.csproj" />
     <ProjectReference Include="../../src/Wdem.Windows/Wdem.Windows.csproj" />
+    <ProjectReference Include="../Wdem.Testing/Wdem.Testing.csproj" />
   </ItemGroup>
 </Project>

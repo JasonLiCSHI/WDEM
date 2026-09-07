@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
+using Wdem.Testing;
 using Xunit;
 
 namespace Wdem.Architecture.Tests;
@@ -10,7 +11,7 @@ public sealed class ArchitectureDependencyTests
   [Fact]
   public void Repository_WhenProjectFrameworksAreInspected_ThenEveryProjectTargetsDotNet10()
   {
-    var repositoryRoot = FindRepositoryRoot();
+    var repositoryRoot = RepositoryLocator.FindRoot();
     var projectFiles = Directory
         .EnumerateFiles(repositoryRoot, "*.csproj", SearchOption.AllDirectories)
         .Where(path => !IsBuildOutput(path))
@@ -41,7 +42,7 @@ public sealed class ArchitectureDependencyTests
   [Fact]
   public void Repository_WhenPackageReferencesAreInspected_ThenVersionsAreCentralized()
   {
-    var repositoryRoot = FindRepositoryRoot();
+    var repositoryRoot = RepositoryLocator.FindRoot();
     var projectFiles = Directory
         .EnumerateFiles(repositoryRoot, "*.csproj", SearchOption.AllDirectories)
         .Where(path => !IsBuildOutput(path));
@@ -57,20 +58,26 @@ public sealed class ArchitectureDependencyTests
   }
 
   [Fact]
-  public void Repository_WhenTestFixturesAreInspected_ThenTheyAreConcreteAndSealed()
+  public void Repository_WhenTestFixturesAreInspected_ThenConcreteFixturesAreSealedAndBasesAreAbstract()
   {
-    var repositoryRoot = FindRepositoryRoot();
+    var repositoryRoot = RepositoryLocator.FindRoot();
     var testFiles = Directory
         .EnumerateFiles(Path.Combine(repositoryRoot, "tests"), "*.cs", SearchOption.AllDirectories)
         .Where(path => !IsBuildOutput(path));
     var fixturePattern = new Regex(
-        @"public\s+(?<modifiers>(?:(?:abstract|sealed)\s+)*)class\s+(?<name>\w+Tests)\b",
+        @"public\s+(?<modifiers>(?:(?:abstract|sealed)\s+)*)class\s+(?<name>\w+(?:Tests|TestBase))\b",
         RegexOptions.CultureInvariant);
     var invalidFixtures = testFiles
         .SelectMany(path => fixturePattern.Matches(File.ReadAllText(path))
-            .Where(match => !match.Groups["modifiers"].Value.Contains(
-                "sealed",
-                StringComparison.Ordinal))
+            .Where(match =>
+            {
+              var name = match.Groups["name"].Value;
+              var modifiers = match.Groups["modifiers"].Value;
+              return name.EndsWith("TestBase", StringComparison.Ordinal)
+                  ? !modifiers.Contains("abstract", StringComparison.Ordinal)
+                  : !modifiers.Contains("sealed", StringComparison.Ordinal) ||
+                    modifiers.Contains("abstract", StringComparison.Ordinal);
+            })
             .Select(match =>
                 $"{Path.GetRelativePath(repositoryRoot, path)}:{match.Groups["name"].Value}"))
         .ToArray();
@@ -79,9 +86,43 @@ public sealed class ArchitectureDependencyTests
   }
 
   [Fact]
-  public void InnerLayersExistWithTheDeclaredDependencyDirection()
+  public void Repository_WhenTestMethodsAreInspected_ThenUsesScenarioBasedNames()
   {
-    var repositoryRoot = FindRepositoryRoot();
+    var repositoryRoot = RepositoryLocator.FindRoot();
+    var testFiles = Directory
+        .EnumerateFiles(Path.Combine(repositoryRoot, "tests"), "*Tests.cs", SearchOption.AllDirectories)
+        .Where(path => !IsBuildOutput(path));
+    var testMethodPattern = new Regex(
+        @"\[(?:Fact|Theory)\][\s\S]*?public\s+(?:async\s+)?(?:Task|void)\s+(?<name>\w+)\s*\(",
+        RegexOptions.CultureInvariant);
+    var invalidMethods = testFiles
+        .SelectMany(path => testMethodPattern.Matches(File.ReadAllText(path))
+            .Where(match => !match.Groups["name"].Value.Contains('_', StringComparison.Ordinal))
+            .Select(match =>
+                $"{Path.GetRelativePath(repositoryRoot, path)}:{match.Groups["name"].Value}"))
+        .ToArray();
+
+    Assert.Empty(invalidMethods);
+  }
+
+  [Fact]
+  public void TestSupportProject_WhenInspected_ThenDoesNotDependOnProductOrTestFrameworks()
+  {
+    var repositoryRoot = RepositoryLocator.FindRoot();
+    var testSupport = LoadProject(
+        repositoryRoot,
+        "tests",
+        "Wdem.Testing",
+        "Wdem.Testing.csproj");
+
+    Assert.Empty(ProjectReferences(testSupport));
+    Assert.Empty(PackageReferences(testSupport));
+  }
+
+  [Fact]
+  public void InnerLayers_WhenDependenciesAreInspected_ThenFollowDeclaredDirection()
+  {
+    var repositoryRoot = RepositoryLocator.FindRoot();
     var domain = LoadProject(repositoryRoot, "src", "Wdem.Domain", "Wdem.Domain.csproj");
     var application = LoadProject(repositoryRoot, "src", "Wdem.Application", "Wdem.Application.csproj");
 
@@ -96,9 +137,9 @@ public sealed class ArchitectureDependencyTests
   }
 
   [Fact]
-  public void ProfileIoIsImplementedByInfrastructureBehindAnApplicationPort()
+  public void ProfileIo_WhenArchitectureIsInspected_ThenUsesInfrastructureBehindApplicationPort()
   {
-    var repositoryRoot = FindRepositoryRoot();
+    var repositoryRoot = RepositoryLocator.FindRoot();
     var infrastructure = LoadProject(
         repositoryRoot,
         "src",
@@ -129,9 +170,9 @@ public sealed class ArchitectureDependencyTests
   }
 
   [Fact]
-  public void AutofacIsOwnedByTheBootstrapperCompositionRoot()
+  public void Autofac_WhenReferencesAreInspected_ThenIsOwnedByBootstrapperCompositionRoot()
   {
-    var repositoryRoot = FindRepositoryRoot();
+    var repositoryRoot = RepositoryLocator.FindRoot();
     var bootstrapper = LoadProject(
         repositoryRoot,
         "src",
@@ -165,9 +206,9 @@ public sealed class ArchitectureDependencyTests
   }
 
   [Fact]
-  public void RuntimePortBelongsToApplicationAndCommandDefinitionBelongsToDomain()
+  public void RuntimeAndCommands_WhenArchitectureIsInspected_ThenBelongToApplicationAndDomain()
   {
-    var repositoryRoot = FindRepositoryRoot();
+    var repositoryRoot = RepositoryLocator.FindRoot();
     var application = LoadProject(
         repositoryRoot,
         "src",
@@ -200,12 +241,14 @@ public sealed class ArchitectureDependencyTests
   [Theory]
   [InlineData("Execution/TaskExecutionState.cs")]
   [InlineData("Execution/TaskOutcome.cs")]
+  [InlineData("Events/IDomainEvent.cs")]
+  [InlineData("Events/TaskWorkflowEvents.cs")]
   [InlineData("Workflows/TaskWorkflowTransition.cs")]
   [InlineData("Workflows/TaskWorkflowTransitionContext.cs")]
   [InlineData("Workflows/WorkflowActivityLocation.cs")]
-  public void WorkflowLifecycleVocabularyBelongsToDomain(string relativePath)
+  public void WorkflowVocabulary_WhenArchitectureIsInspected_ThenBelongsToDomain(string relativePath)
   {
-    var repositoryRoot = FindRepositoryRoot();
+    var repositoryRoot = RepositoryLocator.FindRoot();
     var domainPath = Path.Combine(
         repositoryRoot,
         "src",
@@ -216,9 +259,9 @@ public sealed class ArchitectureDependencyTests
   }
 
   [Fact]
-  public void TaskDefinitionBelongsToDomainAndDoesNotOwnExecutableWorkflowState()
+  public void TaskDefinition_WhenArchitectureIsInspected_ThenBelongsToDomainWithoutRuntimeState()
   {
-    var repositoryRoot = FindRepositoryRoot();
+    var repositoryRoot = RepositoryLocator.FindRoot();
     var domainTask = Path.Combine(
         repositoryRoot,
         "src",
@@ -243,13 +286,38 @@ public sealed class ArchitectureDependencyTests
   [InlineData("src/Wdem.Domain/Workflows/WorkflowActivity.cs")]
   [InlineData("src/Wdem.Application/Workflows/IWorkflowActivityExecutor.cs")]
   [InlineData("src/Wdem.Application/Execution/StepReport.cs")]
-  public void WorkflowDefinitionsAndExecutionAreSeparated(string relativePath)
+  public void WorkflowTypes_WhenArchitectureIsInspected_ThenSeparateDefinitionAndExecution(string relativePath)
   {
     var path = Path.Combine(
-        FindRepositoryRoot(),
+        RepositoryLocator.FindRoot(),
         relativePath.Replace('/', Path.DirectorySeparatorChar));
 
     Assert.True(File.Exists(path), $"Expected architecture source '{path}'.");
+  }
+
+  [Fact]
+  public void DomainEvents_WhenArchitectureIsInspected_ThenFollowLayerBoundaries()
+  {
+    var repositoryRoot = RepositoryLocator.FindRoot();
+
+    Assert.True(File.Exists(Path.Combine(
+        repositoryRoot,
+        "src",
+        "Wdem.Domain",
+        "Events",
+        "TaskWorkflowEvents.cs")));
+    Assert.True(File.Exists(Path.Combine(
+        repositoryRoot,
+        "src",
+        "Wdem.Application",
+        "Events",
+        "DomainEventPublisher.cs")));
+    Assert.True(File.Exists(Path.Combine(
+        repositoryRoot,
+        "src",
+        "Wdem.Infrastructure",
+        "Logging",
+        "DomainEventSessionLogHandler.cs")));
   }
 
   [Theory]
@@ -258,19 +326,19 @@ public sealed class ArchitectureDependencyTests
   [InlineData("src/Wdem.Application/Inspection/InspectEnvironmentHandler.cs")]
   [InlineData("src/Wdem.Application/Inspection/InspectReport.cs")]
   [InlineData("src/Wdem.Application/Execution/WorkflowProgress.cs")]
-  public void ProfileUseCasesFollowTheLayerBoundaries(string relativePath)
+  public void ProfileUseCases_WhenArchitectureIsInspected_ThenFollowLayerBoundaries(string relativePath)
   {
     var path = Path.Combine(
-        FindRepositoryRoot(),
+        RepositoryLocator.FindRoot(),
         relativePath.Replace('/', Path.DirectorySeparatorChar));
 
     Assert.True(File.Exists(path), $"Expected architecture source '{path}'.");
   }
 
   [Fact]
-  public void ExecutionCoordinationBelongsToApplicationAndCoreIsRemoved()
+  public void ExecutionCoordination_WhenArchitectureIsInspected_ThenBelongsToApplication()
   {
-    var repositoryRoot = FindRepositoryRoot();
+    var repositoryRoot = RepositoryLocator.FindRoot();
 
     Assert.True(File.Exists(Path.Combine(
         repositoryRoot,
@@ -296,10 +364,10 @@ public sealed class ArchitectureDependencyTests
   [InlineData("src/Wdem.Application/Logging/ISessionLog.cs")]
   [InlineData("src/Wdem.Infrastructure/Configuration/WdemUserSettingsStore.cs")]
   [InlineData("src/Wdem.Infrastructure/Logging/JsonLineSessionLog.cs")]
-  public void PersistenceAdaptersFollowApplicationPorts(string relativePath)
+  public void PersistenceAdapters_WhenArchitectureIsInspected_ThenFollowApplicationPorts(string relativePath)
   {
     var path = Path.Combine(
-        FindRepositoryRoot(),
+        RepositoryLocator.FindRoot(),
         relativePath.Replace('/', Path.DirectorySeparatorChar));
 
     Assert.True(File.Exists(path), $"Expected architecture source '{path}'.");
@@ -312,10 +380,10 @@ public sealed class ArchitectureDependencyTests
   [InlineData("src/Wdem.Infrastructure/Profiles/ProfileValidator.cs")]
   [InlineData("src/Wdem.Infrastructure/Profiles/HttpProfileDocumentSource.cs")]
   [InlineData("src/Wdem.Infrastructure/Profiles/ProfileDocumentCache.cs")]
-  public void ProfileParsingHasFocusedComponents(string relativePath)
+  public void ProfileParsing_WhenArchitectureIsInspected_ThenUsesFocusedComponents(string relativePath)
   {
     var path = Path.Combine(
-        FindRepositoryRoot(),
+        RepositoryLocator.FindRoot(),
         relativePath.Replace('/', Path.DirectorySeparatorChar));
 
     Assert.True(File.Exists(path), $"Expected architecture source '{path}'.");
@@ -328,10 +396,12 @@ public sealed class ArchitectureDependencyTests
   [InlineData("src/Wdem.Application", "System.Diagnostics.Process")]
   [InlineData("src/Wdem.Application", "System.IO.File")]
   [InlineData("src/Wdem.Application", "System.Net.Http")]
-  public void InnerLayersDoNotUsePeripheralApis(string relativeDirectory, string forbiddenText)
+  public void InnerLayers_WhenArchitectureIsInspected_ThenAvoidPeripheralApis(
+      string relativeDirectory,
+      string forbiddenText)
   {
     var directory = Path.Combine(
-        FindRepositoryRoot(),
+        RepositoryLocator.FindRoot(),
         relativeDirectory.Replace('/', Path.DirectorySeparatorChar));
 
     var offendingFiles = Directory
@@ -373,18 +443,4 @@ public sealed class ArchitectureDependencyTests
           segment.Equals("bin", StringComparison.OrdinalIgnoreCase) ||
           segment.Equals("obj", StringComparison.OrdinalIgnoreCase));
 
-  private static string FindRepositoryRoot()
-  {
-    var directory = new DirectoryInfo(AppContext.BaseDirectory);
-    while (directory is not null)
-    {
-      if (File.Exists(Path.Combine(directory.FullName, "Wdem.slnx")))
-      {
-        return directory.FullName;
-      }
-      directory = directory.Parent;
-    }
-
-    throw new DirectoryNotFoundException("Unable to locate the WDEM repository root.");
-  }
 }

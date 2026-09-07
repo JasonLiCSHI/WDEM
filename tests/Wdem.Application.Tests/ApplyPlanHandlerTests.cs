@@ -1,4 +1,5 @@
 using Wdem.Application.Execution;
+using Wdem.Application.Events;
 using Wdem.Application.Inspection;
 using Wdem.Application.Planning;
 using Wdem.Application.Profiles;
@@ -417,7 +418,8 @@ public sealed class ApplyPlanHandlerTests
           runtime,
           DefaultWorkflowActivityExecutor.Instance,
           DefaultTaskWorkflowProvider.Instance,
-          new ProfileExecutionAuthorizer(new FakeProfileTrustStore(trusted)));
+          new ProfileExecutionAuthorizer(new FakeProfileTrustStore(trusted)),
+          NullDomainEventPublisher.Instance);
 
   private static LoadedProfile Loaded(Wdem.Domain.Profiles.EnvironmentProfile profile) =>
       new(profile, ProfileOrigin.Local, "test-profile.json", "TEST");

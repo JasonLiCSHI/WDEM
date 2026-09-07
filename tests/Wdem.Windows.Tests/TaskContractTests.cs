@@ -1,7 +1,6 @@
-using System.Diagnostics;
-using System.Text;
 using System.Text.Json;
 using Wdem.Application.Execution;
+using Wdem.Application.Events;
 using Wdem.Application.Planning;
 using Wdem.Application.Profiles;
 using Wdem.Application.Runtime;
@@ -16,7 +15,7 @@ using Xunit;
 
 namespace Wdem.Windows.Tests;
 
-public sealed class TaskContractTests
+public sealed class TaskContractTests : PowerShellScriptTestBase
 {
   [Fact]
   public void RepositoryProfile_ReSharperHasNoPostActivities()
@@ -165,8 +164,8 @@ public sealed class TaskContractTests
     var repositoryRoot = FindRepositoryRoot();
     var scriptPath = Path.Combine(repositoryRoot, "script", "Invoke-VisualStudioProfessionalTask.ps1");
     var configPath = Path.Combine(repositoryRoot, "settings", ".vsconfig");
-    var fakeVsWherePath = Path.Combine(Path.GetTempPath(), $"WDEM-contract-vswhere-{Guid.NewGuid():N}.exe");
-    var capturedArgumentsPath = Path.Combine(Path.GetTempPath(), $"WDEM-contract-vswhere-args-{Guid.NewGuid():N}.txt");
+    var fakeVsWherePath = TestPath("visual-studio-vswhere.exe");
+    var capturedArgumentsPath = TestPath("visual-studio-vswhere-arguments.txt");
     var payload = $$"""
         Add-Type -TypeDefinition 'using System; using System.IO; public static class FakeVsWhere { public static void Main(string[] args) { File.WriteAllLines(Environment.GetEnvironmentVariable("WDEM_VSWHERE_ARGS"), args); Console.WriteLine("18.9.2"); } }' -OutputAssembly '{{EscapePowerShellLiteral(fakeVsWherePath)}}' -OutputType ConsoleApplication
         function Join-Path {
@@ -183,39 +182,31 @@ public sealed class TaskContractTests
         & '{{EscapePowerShellLiteral(scriptPath)}}' -Action '{{action}}' -ConfigPath '{{EscapePowerShellLiteral(configPath)}}'
         """;
 
-    try
+    var result = await RunPowerShellAsync(payload);
+    var arguments = await File.ReadAllLinesAsync(capturedArgumentsPath);
+
+    Assert.Equal(0, result.ExitCode);
+    Assert.Contains("-products", arguments);
+    Assert.Contains("Microsoft.VisualStudio.Product.Professional", arguments);
+    Assert.Contains("-version", arguments);
+    Assert.Contains("[18.0,19.0)", arguments);
+    Assert.Contains("Visual Studio Professional version 18.9.2", result.StandardOutput);
+
+    if (action == "Post")
     {
-      var result = await RunPowerShellAsync(payload);
-      var arguments = await File.ReadAllLinesAsync(capturedArgumentsPath);
-
-      Assert.Equal(0, result.ExitCode);
-      Assert.Contains("-products", arguments);
-      Assert.Contains("Microsoft.VisualStudio.Product.Professional", arguments);
-      Assert.Contains("-version", arguments);
-      Assert.Contains("[18.0,19.0)", arguments);
-      Assert.Contains("Visual Studio Professional version 18.9.2", result.StandardOutput);
-
-      if (action == "Post")
-      {
-        using var configuration = JsonDocument.Parse(await File.ReadAllTextAsync(configPath));
-        var requiredComponents = configuration.RootElement
-            .GetProperty("components")
-            .EnumerateArray()
-            .Select(component => component.GetString())
-            .ToArray();
-        Assert.Contains("-requires", arguments);
-        Assert.All(requiredComponents, component => Assert.Contains(component, arguments));
-        Assert.Contains("contains all declared components", result.StandardOutput);
-      }
-      else
-      {
-        Assert.DoesNotContain("-requires", arguments);
-      }
+      using var configuration = JsonDocument.Parse(await File.ReadAllTextAsync(configPath));
+      var requiredComponents = configuration.RootElement
+          .GetProperty("components")
+          .EnumerateArray()
+          .Select(component => component.GetString())
+          .ToArray();
+      Assert.Contains("-requires", arguments);
+      Assert.All(requiredComponents, component => Assert.Contains(component, arguments));
+      Assert.Contains("contains all declared components", result.StandardOutput);
     }
-    finally
+    else
     {
-      File.Delete(fakeVsWherePath);
-      File.Delete(capturedArgumentsPath);
+      Assert.DoesNotContain("-requires", arguments);
     }
   }
 
@@ -248,8 +239,8 @@ public sealed class TaskContractTests
     var repositoryRoot = FindRepositoryRoot();
     var scriptPath = Path.Combine(repositoryRoot, "script", "Invoke-VisualStudioProfessionalTask.ps1");
     var configPath = Path.Combine(repositoryRoot, "settings", ".vsconfig");
-    var capturedArgumentsPath = Path.Combine(Path.GetTempPath(), $"WDEM-contract-vs-args-{Guid.NewGuid():N}.txt");
-    var waitMarkerPath = Path.Combine(Path.GetTempPath(), $"WDEM-contract-vs-wait-{Guid.NewGuid():N}.txt");
+    var capturedArgumentsPath = TestPath("visual-studio-installer-arguments.txt");
+    var waitMarkerPath = TestPath("visual-studio-wait-marker.txt");
     var payload = $$"""
         function Get-Process { param([string] $Name, $ErrorAction); if ($Name -eq 'devenv') { return } }
         function Save-WdemRemoteFile { param($SourceUri, $DestinationPath); Set-Content -LiteralPath $DestinationPath -Value 'fake' }
@@ -269,34 +260,26 @@ public sealed class TaskContractTests
         & '{{EscapePowerShellLiteral(scriptPath)}}' -Action Apply -SourceUri 'https://aka.ms/vs/18/stable/vs_professional.exe' -ConfigPath '{{EscapePowerShellLiteral(configPath)}}'
         """;
 
-    try
-    {
-      var result = await RunPowerShellAsync(payload);
-      var installerArguments = await File.ReadAllLinesAsync(capturedArgumentsPath);
+    var result = await RunPowerShellAsync(payload);
+    var installerArguments = await File.ReadAllLinesAsync(capturedArgumentsPath);
 
-      Assert.Equal(0, result.ExitCode);
-      Assert.True(File.Exists(waitMarkerPath), "The script did not wait for the launched installer process.");
-      Assert.DoesNotContain("--quiet", installerArguments);
-      Assert.DoesNotContain("--passive", installerArguments);
-      Assert.DoesNotContain("--norestart", installerArguments);
-      Assert.DoesNotContain("--allowUnsignedExtensions", installerArguments);
-      Assert.Contains("--wait", installerArguments);
-      Assert.Contains("--config", installerArguments);
-      Assert.Contains(installerArguments, argument => argument.Contains(configPath, StringComparison.OrdinalIgnoreCase));
-      if (installerExitCode == 0)
-      {
-        Assert.DoesNotContain("restart is required", result.CombinedOutput, StringComparison.OrdinalIgnoreCase);
-      }
-      else
-      {
-        Assert.Contains($"exit code {installerExitCode}", result.CombinedOutput, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("restart is required", result.CombinedOutput, StringComparison.OrdinalIgnoreCase);
-      }
-    }
-    finally
+    Assert.Equal(0, result.ExitCode);
+    Assert.True(File.Exists(waitMarkerPath), "The script did not wait for the launched installer process.");
+    Assert.DoesNotContain("--quiet", installerArguments);
+    Assert.DoesNotContain("--passive", installerArguments);
+    Assert.DoesNotContain("--norestart", installerArguments);
+    Assert.DoesNotContain("--allowUnsignedExtensions", installerArguments);
+    Assert.Contains("--wait", installerArguments);
+    Assert.Contains("--config", installerArguments);
+    Assert.Contains(installerArguments, argument => argument.Contains(configPath, StringComparison.OrdinalIgnoreCase));
+    if (installerExitCode == 0)
     {
-      File.Delete(capturedArgumentsPath);
-      File.Delete(waitMarkerPath);
+      Assert.DoesNotContain("restart is required", result.CombinedOutput, StringComparison.OrdinalIgnoreCase);
+    }
+    else
+    {
+      Assert.Contains($"exit code {installerExitCode}", result.CombinedOutput, StringComparison.OrdinalIgnoreCase);
+      Assert.Contains("restart is required", result.CombinedOutput, StringComparison.OrdinalIgnoreCase);
     }
   }
 
@@ -331,7 +314,7 @@ public sealed class TaskContractTests
   {
     var repositoryRoot = FindRepositoryRoot();
     var scriptPath = Path.Combine(repositoryRoot, "script", "Invoke-ReSharperTask.ps1");
-    var fakeVsWherePath = Path.Combine(Path.GetTempPath(), $"WDEM-contract-rs-vswhere-{Guid.NewGuid():N}.exe");
+    var fakeVsWherePath = TestPath("resharper-vswhere.exe");
     var payload = $$"""
         Add-Type -TypeDefinition 'using System; public static class FakeVsWhere { public static void Main(string[] args) { Console.WriteLine(@"C:\Fake VS"); } }' -OutputAssembly '{{EscapePowerShellLiteral(fakeVsWherePath)}}' -OutputType ConsoleApplication
         function Join-Path { param([string] $Path, [string] $ChildPath); if ($ChildPath -eq 'Microsoft Visual Studio\Installer\vswhere.exe') { return '{{EscapePowerShellLiteral(fakeVsWherePath)}}' }; Microsoft.PowerShell.Management\Join-Path @PSBoundParameters }
@@ -341,18 +324,11 @@ public sealed class TaskContractTests
         & '{{EscapePowerShellLiteral(scriptPath)}}' -Action Pre -SourceUri 'https://download.jetbrains.com/resharper/fake.exe' -Sha256 ('A' * 64)
         """;
 
-    try
-    {
-      var result = await RunPowerShellAsync(payload);
+    var result = await RunPowerShellAsync(payload);
 
-      Assert.Equal(0, result.ExitCode);
-      Assert.Contains("ReSharper preflight passed", result.StandardOutput);
-      Assert.DoesNotContain("Downloading", result.StandardOutput, StringComparison.OrdinalIgnoreCase);
-    }
-    finally
-    {
-      File.Delete(fakeVsWherePath);
-    }
+    Assert.Equal(0, result.ExitCode);
+    Assert.Contains("ReSharper preflight passed", result.StandardOutput);
+    Assert.DoesNotContain("Downloading", result.StandardOutput, StringComparison.OrdinalIgnoreCase);
   }
 
   [Fact]
@@ -360,9 +336,7 @@ public sealed class TaskContractTests
   {
     var repositoryRoot = FindRepositoryRoot();
     var downloaderPath = Path.Combine(repositoryRoot, "script", "Wdem.Download.ps1");
-    var temporaryDirectory = Path.Combine(
-        Path.GetTempPath(),
-        $"WDEM-downloader-{Guid.NewGuid():N}");
+    var temporaryDirectory = TestPath("downloader");
     var fakeCurlPath = Path.Combine(temporaryDirectory, "curl.exe");
     var attemptPath = Path.Combine(temporaryDirectory, "attempts.txt");
     var destinationPath = Path.Combine(temporaryDirectory, "installer.exe");
@@ -377,19 +351,12 @@ public sealed class TaskContractTests
         Save-WdemRemoteFile -SourceUri 'https://example.test/installer.exe' -DestinationPath '{{EscapePowerShellLiteral(destinationPath)}}' -MaximumAttempts 3 -InitialRetryDelayMilliseconds 0
         """;
 
-    try
-    {
-      var result = await RunPowerShellAsync(payload);
+    var result = await RunPowerShellAsync(payload);
 
-      Assert.True(result.ExitCode == 0, result.CombinedOutput);
-      Assert.Equal("2", await File.ReadAllTextAsync(attemptPath));
-      Assert.Equal("complete", await File.ReadAllTextAsync(destinationPath));
-      Assert.Contains("retrying", result.CombinedOutput, StringComparison.OrdinalIgnoreCase);
-    }
-    finally
-    {
-      Directory.Delete(temporaryDirectory, recursive: true);
-    }
+    Assert.True(result.ExitCode == 0, result.CombinedOutput);
+    Assert.Equal("2", await File.ReadAllTextAsync(attemptPath));
+    Assert.Equal("complete", await File.ReadAllTextAsync(destinationPath));
+    Assert.Contains("retrying", result.CombinedOutput, StringComparison.OrdinalIgnoreCase);
   }
 
   [Theory]
@@ -400,9 +367,9 @@ public sealed class TaskContractTests
   {
     var repositoryRoot = FindRepositoryRoot();
     var scriptPath = Path.Combine(repositoryRoot, "script", "Invoke-ReSharperTask.ps1");
-    var fakeVsWherePath = Path.Combine(Path.GetTempPath(), $"WDEM-contract-rs-vswhere-{Guid.NewGuid():N}.exe");
-    var capturedArgumentsPath = Path.Combine(Path.GetTempPath(), $"WDEM-contract-rs-args-{Guid.NewGuid():N}.txt");
-    var waitMarkerPath = Path.Combine(Path.GetTempPath(), $"WDEM-contract-rs-wait-{Guid.NewGuid():N}.txt");
+    var fakeVsWherePath = TestPath("resharper-vswhere.exe");
+    var capturedArgumentsPath = TestPath("resharper-installer-arguments.txt");
+    var waitMarkerPath = TestPath("resharper-wait-marker.txt");
     var payload = $$"""
         Add-Type -TypeDefinition 'using System; public static class FakeVsWhere { public static void Main(string[] args) { Console.WriteLine(@"C:\Fake VS"); } }' -OutputAssembly '{{EscapePowerShellLiteral(fakeVsWherePath)}}' -OutputType ConsoleApplication
         function Join-Path { param([string] $Path, [string] $ChildPath); if ($ChildPath -eq 'Microsoft Visual Studio\Installer\vswhere.exe') { return '{{EscapePowerShellLiteral(fakeVsWherePath)}}' }; Microsoft.PowerShell.Management\Join-Path @PSBoundParameters }
@@ -426,31 +393,22 @@ public sealed class TaskContractTests
         & '{{EscapePowerShellLiteral(scriptPath)}}' -Action Apply -SourceUri 'https://download.jetbrains.com/resharper/fake.exe' -Sha256 ('A' * 64)
         """;
 
-    try
-    {
-      var result = await RunPowerShellAsync(payload);
-      var installerArguments = File.Exists(capturedArgumentsPath)
-          ? await File.ReadAllLinesAsync(capturedArgumentsPath)
-          : [];
+    var result = await RunPowerShellAsync(payload);
+    var installerArguments = File.Exists(capturedArgumentsPath)
+        ? await File.ReadAllLinesAsync(capturedArgumentsPath)
+        : [];
 
-      Assert.Equal(0, result.ExitCode);
-      Assert.True(File.Exists(waitMarkerPath), "The script did not wait for the launched installer process.");
-      Assert.Empty(installerArguments);
-      if (installerExitCode == 0)
-      {
-        Assert.DoesNotContain("restart is required", result.CombinedOutput, StringComparison.OrdinalIgnoreCase);
-      }
-      else
-      {
-        Assert.Contains($"exit code {installerExitCode}", result.CombinedOutput, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("restart is required", result.CombinedOutput, StringComparison.OrdinalIgnoreCase);
-      }
-    }
-    finally
+    Assert.Equal(0, result.ExitCode);
+    Assert.True(File.Exists(waitMarkerPath), "The script did not wait for the launched installer process.");
+    Assert.Empty(installerArguments);
+    if (installerExitCode == 0)
     {
-      File.Delete(fakeVsWherePath);
-      File.Delete(capturedArgumentsPath);
-      File.Delete(waitMarkerPath);
+      Assert.DoesNotContain("restart is required", result.CombinedOutput, StringComparison.OrdinalIgnoreCase);
+    }
+    else
+    {
+      Assert.Contains($"exit code {installerExitCode}", result.CombinedOutput, StringComparison.OrdinalIgnoreCase);
+      Assert.Contains("restart is required", result.CombinedOutput, StringComparison.OrdinalIgnoreCase);
     }
   }
 
@@ -459,7 +417,8 @@ public sealed class TaskContractTests
           runtime,
           DefaultWorkflowActivityExecutor.Instance,
           DefaultTaskWorkflowProvider.Instance,
-          new ProfileExecutionAuthorizer(new TrustedProfileStore()));
+          new ProfileExecutionAuthorizer(new TrustedProfileStore()),
+          NullDomainEventPublisher.Instance);
 
   private static LoadedProfile Loaded(EnvironmentProfile profile) =>
       new(profile, ProfileOrigin.Local, "repository-profile.json", "TEST");
@@ -532,55 +491,10 @@ public sealed class TaskContractTests
     return request.Arguments[index + 1];
   }
 
-  private static string FindRepositoryRoot()
-  {
-    var directory = new DirectoryInfo(AppContext.BaseDirectory);
-    while (directory is not null)
-    {
-      if (File.Exists(Path.Combine(directory.FullName, "Wdem.slnx")))
-      {
-        return directory.FullName;
-      }
-      directory = directory.Parent;
-    }
-
-    throw new DirectoryNotFoundException("Unable to locate the WDEM repository root.");
-  }
-
-  private static string EscapePowerShellLiteral(string value) => value.Replace("'", "''");
-
-  private static async Task<PowerShellResult> RunPowerShellAsync(string payload)
-  {
-    var encodedPayload = Convert.ToBase64String(Encoding.Unicode.GetBytes(payload));
-    var startInfo = new ProcessStartInfo(
-        "powershell.exe",
-        $"-NoLogo -NoProfile -NonInteractive -EncodedCommand {encodedPayload}")
-    {
-      RedirectStandardOutput = true,
-      RedirectStandardError = true,
-      UseShellExecute = false,
-      CreateNoWindow = true,
-    };
-
-    using var process = Process.Start(startInfo)!;
-    var standardOutput = await process.StandardOutput.ReadToEndAsync();
-    var standardError = await process.StandardError.ReadToEndAsync();
-    await process.WaitForExitAsync();
-    return new PowerShellResult(process.ExitCode, standardOutput, standardError);
-  }
-
   private sealed record ProfileCommand(
       TaskDefinition Task,
       string Phase,
       CommandDefinition Command);
-
-  private sealed record PowerShellResult(
-      int ExitCode,
-      string StandardOutput,
-      string StandardError)
-  {
-    public string CombinedOutput => StandardOutput + Environment.NewLine + StandardError;
-  }
 
   private sealed class CapturingProcessRunner : IProcessRunner
   {

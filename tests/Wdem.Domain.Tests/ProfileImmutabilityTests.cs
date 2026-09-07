@@ -7,7 +7,7 @@ namespace Wdem.Domain.Tests;
 public sealed class ProfileImmutabilityTests
 {
   [Fact]
-  public void ProfileCopiesTheTaskDictionaryAtItsBoundary()
+  public void Profile_WhenCreated_ThenCopiesTaskDictionaryAtBoundary()
   {
     var tasks = new Dictionary<string, TaskDefinition>(StringComparer.Ordinal)
     {
@@ -23,7 +23,7 @@ public sealed class ProfileImmutabilityTests
   }
 
   [Fact]
-  public void TaskCopiesCommandAndDependencyCollectionsAtItsBoundary()
+  public void Task_WhenCreated_ThenCopiesCommandAndDependencyCollectionsAtBoundary()
   {
     var dependencies = new List<string> { "git" };
     var pre = new List<CommandDefinition> { Command("pre") };

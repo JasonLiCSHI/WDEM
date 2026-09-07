@@ -1,40 +1,32 @@
 using Wdem.Application.Profiles;
 using Wdem.Infrastructure.Configuration;
 using Wdem.Infrastructure.Profiles;
+using Wdem.Testing;
 using Xunit;
 
 namespace Wdem.Infrastructure.Tests;
 
-public sealed class WdemUserSettingsStoreTests
+public sealed class WdemUserSettingsStoreTests : TemporaryDirectoryTestBase
 {
   [Fact]
   public void Open_WhenSettingsAreMissing_UsesReleaseProfileSource()
   {
-    var directory = CreateTempDirectory();
-    try
-    {
-      var path = Path.Combine(directory, "settings.json");
-      var store = WdemUserSettingsStore.Open(path, Path.Combine(directory, "cache"));
+    var directory = RootDirectory;
+    var path = Path.Combine(directory, "settings.json");
+    var store = WdemUserSettingsStore.Open(path, Path.Combine(directory, "cache"));
 
-      var source = store.ProfileSource;
-      Assert.Equal(WdemUserSettingsStore.OfficialSourceId, source.Id);
-      Assert.Equal(WdemUserSettingsStore.OfficialSourceUrl, source.BaseUrl);
-      Assert.True(File.Exists(path));
-    }
-    finally
-    {
-      Directory.Delete(directory, recursive: true);
-    }
+    var source = store.ProfileSource;
+    Assert.Equal(WdemUserSettingsStore.OfficialSourceId, source.Id);
+    Assert.Equal(WdemUserSettingsStore.OfficialSourceUrl, source.BaseUrl);
+    Assert.True(File.Exists(path));
   }
 
   [Fact]
   public void Open_UserSettingsCannotOverrideReleaseProfileSource()
   {
-    var directory = CreateTempDirectory();
-    try
-    {
-      var path = Path.Combine(directory, "settings.json");
-      File.WriteAllText(path, """
+    var directory = RootDirectory;
+    var path = Path.Combine(directory, "settings.json");
+    File.WriteAllText(path, """
         {
           "schemaVersion": 1,
           "profileSources": [
@@ -48,52 +40,33 @@ public sealed class WdemUserSettingsStoreTests
         }
         """);
 
-      var store = WdemUserSettingsStore.Open(path, Path.Combine(directory, "cache"));
+    var store = WdemUserSettingsStore.Open(path, Path.Combine(directory, "cache"));
 
-      Assert.Equal(WdemUserSettingsStore.OfficialSourceId, store.ProfileSource.Id);
-      Assert.Equal(WdemUserSettingsStore.OfficialSourceUrl, store.ProfileSource.BaseUrl);
-    }
-    finally
-    {
-      Directory.Delete(directory, recursive: true);
-    }
+    Assert.Equal(WdemUserSettingsStore.OfficialSourceId, store.ProfileSource.Id);
+    Assert.Equal(WdemUserSettingsStore.OfficialSourceUrl, store.ProfileSource.BaseUrl);
   }
 
   [Fact]
   public void Trust_PersistsExactRemoteContentIdentity()
   {
-    var directory = CreateTempDirectory();
-    try
-    {
-      var path = Path.Combine(directory, "settings.json");
-      var cache = Path.Combine(directory, "cache");
-      var store = WdemUserSettingsStore.Open(path, cache);
-      var profile = ProfileParser.Parse(ProfileJson);
-      var loaded = new LoadedProfile(
-          profile,
-          ProfileOrigin.Remote,
-          "https://example.test/profile.json",
-          "ABC123",
-          "official");
+    var directory = RootDirectory;
+    var path = Path.Combine(directory, "settings.json");
+    var cache = Path.Combine(directory, "cache");
+    var store = WdemUserSettingsStore.Open(path, cache);
+    var profile = ProfileParser.Parse(ProfileJson);
+    var loaded = new LoadedProfile(
+        profile,
+        ProfileOrigin.Remote,
+        "https://example.test/profile.json",
+        "ABC123",
+        "official");
 
-      Assert.False(store.IsTrusted(loaded));
-      store.Trust(loaded);
+    Assert.False(store.IsTrusted(loaded));
+    store.Trust(loaded);
 
-      var reopened = WdemUserSettingsStore.Open(path, cache);
-      Assert.True(reopened.IsTrusted(loaded));
-      Assert.False(reopened.IsTrusted(loaded with { ContentHash = "CHANGED" }));
-    }
-    finally
-    {
-      Directory.Delete(directory, recursive: true);
-    }
-  }
-
-  private static string CreateTempDirectory()
-  {
-    var path = Path.Combine(Path.GetTempPath(), $"wdem-settings-{Guid.NewGuid():N}");
-    Directory.CreateDirectory(path);
-    return path;
+    var reopened = WdemUserSettingsStore.Open(path, cache);
+    Assert.True(reopened.IsTrusted(loaded));
+    Assert.False(reopened.IsTrusted(loaded with { ContentHash = "CHANGED" }));
   }
 
   private const string ProfileJson = """

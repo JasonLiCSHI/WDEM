@@ -19,8 +19,9 @@ Architecture tests enforce dependency direction, Autofac ownership, centrally ma
 - Use small fakes at owned ports such as `ITaskRuntime`; do not mock Domain objects or private implementation details.
 - Prefer data-driven tests for equivalent input partitions. Keep distinct boundary cases separate when their failure meaning differs.
 - Avoid shared mutable state, wall-clock sleeps, real network access, and machine installation changes. Synchronize concurrency tests with `TaskCompletionSource` or another deterministic signal.
-- Avoid abstract test base classes. Use focused builders and local helpers; introduce a shared fixture only when it owns a real shared resource.
+- Use abstract test bases only for a stable shared contract or resource lifecycle, such as isolated temporary-directory ownership or a reusable process harness. Keep inheritance shallow, keep scenario data and assertions in concrete fixtures, and seal those concrete fixtures.
 - Setup must create only state required by most tests in the class. Teardown must be idempotent and release processes, streams, temporary files, and directories even when an assertion fails.
+- Domain-event tests assert lifecycle ordering and observer-failure isolation; they never use events as a substitute for Snapshot assertions.
 
 ## Commands
 
