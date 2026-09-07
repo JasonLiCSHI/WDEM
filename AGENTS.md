@@ -9,8 +9,8 @@
 ## Product boundary
 
 - WDEM is a declarative Windows environment manager built around Profile, Task DAG, and Workflow.
-- Visual Studio, ReSharper, and every other product are ordinary Profile Tasks. Do not add product-specific providers to Core.
-- CLI and WPF must share `Wdem.Core` and `Wdem.Windows`; business rules must not be duplicated in either UI.
+- Visual Studio, ReSharper, and every other product are ordinary Profile Tasks. Do not add product-specific providers to Domain or Application.
+- CLI and WPF must share `Wdem.Application`, `Wdem.Domain`, and the Windows adapters; business rules must not be duplicated in either UI.
 - MVP commands are direct executable plus argument arrays. Do not introduce shell command-string concatenation.
 
 ## Required behavior

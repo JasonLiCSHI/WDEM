@@ -1,5 +1,6 @@
 using Wdem.Core.Runs;
 using Wdem.Core.Tasks;
+using Wdem.Domain.Versions;
 
 namespace Wdem.Core.Workflows;
 
@@ -34,7 +35,7 @@ public sealed class CommandWorkflowActivity : WorkflowActivity
       ActivityLocation = context.Location
     };
     var isTaskSatisfied = TaskComplianceEvaluator.Evaluate(context.Task, Command, step).State ==
-        TaskComplianceState.Satisfied;
+        ComplianceStatus.Satisfied;
     var activityResult = result.ExitCode == 0
         ? WorkflowActivityResult.Success(step)
         : WorkflowActivityResult.Failure(

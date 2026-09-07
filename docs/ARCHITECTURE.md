@@ -109,11 +109,15 @@ Task capability matrix:
 
 ## Project responsibilities
 
-- `Wdem.Core`: Source/Catalog models, Profile Schema, version requirements, DAG construction, inspection, Workflow state, and reports.
+- `Wdem.Domain`: dependency-free business language and rules. Version requirements and compliance are the first migrated slice.
+- `Wdem.Application`: use-case orchestration and ports; this layer is introduced incrementally and depends only on Domain.
+- `Wdem.Core`: temporary compatibility module for Profile Schema, DAG construction, inspection, Workflow state, and reports that have not migrated yet.
 - `Wdem.Windows`: user settings, trust records, logs, the shared administrator requirement, Windows process execution, output forwarding, and process-tree cancellation.
 - `Wdem.Cli`: Profile selection, trust confirmation, complete plan preview, retries, and terminal output.
 - `Wdem.App`: installation-language-aware WPF workbench, unified button-state projection, Required/Optional sections, Task details, progress, cancellation, and logs.
 
 ## Release
+
+The accepted migration decisions and per-file map are recorded in [`refactoring/DDD-CLEAN-ARCHITECTURE-BLUEPRINT.md`](refactoring/DDD-CLEAN-ARCHITECTURE-BLUEPRINT.md).
 
 `build/Build-Installer.ps1` publishes WPF and CLI as self-contained Windows x64 single-file applications and uses Inno Setup to create a bilingual installer. It installs the repository's `script/` and `settings/` directories as shared runtime assets beside both executables, persists the selected language, and does not copy any Profile. Neither executable requests automatic UAC elevation: each checks the shared administrator requirement, explains how to relaunch when necessary, and exits before loading a Profile. On the first elevated launch, WDEM creates user settings and connects to the remote Source.

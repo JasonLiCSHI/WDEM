@@ -87,7 +87,7 @@ public sealed class TaskCardBindingTests
           DisplayName: "Test Task",
           Required: true,
           DependsOn: ["dependency"],
-          VersionConstraint: ">=1.0.0",
+          VersionRequirement: Wdem.Domain.Versions.VersionRequirement.Parse(">=1.0.0"),
           PreferredVersion: "1.0.0",
           Source: "https://example.test/tool.exe",
           Detect: new CommandDefinition("tool.exe", ["--version"]),

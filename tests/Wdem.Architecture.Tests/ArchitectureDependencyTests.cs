@@ -13,9 +13,13 @@ public sealed class ArchitectureDependencyTests
     var application = LoadProject(repositoryRoot, "src", "Wdem.Application", "Wdem.Application.csproj");
 
     Assert.Empty(ProjectReferences(domain));
+    Assert.Empty(PackageReferences(domain));
     Assert.Equal(
         [Path.Combine("..", "Wdem.Domain", "Wdem.Domain.csproj")],
         ProjectReferences(application));
+    Assert.DoesNotContain(
+        PackageReferences(application),
+        package => package.StartsWith("Autofac", StringComparison.OrdinalIgnoreCase));
   }
 
   [Theory]
@@ -46,6 +50,13 @@ public sealed class ArchitectureDependencyTests
 
   private static string[] ProjectReferences(XDocument project) =>
       project.Descendants("ProjectReference")
+          .Select(reference => reference.Attribute("Include")?.Value)
+          .Where(value => value is not null)
+          .Cast<string>()
+          .ToArray();
+
+  private static string[] PackageReferences(XDocument project) =>
+      project.Descendants("PackageReference")
           .Select(reference => reference.Attribute("Include")?.Value)
           .Where(value => value is not null)
           .Cast<string>()

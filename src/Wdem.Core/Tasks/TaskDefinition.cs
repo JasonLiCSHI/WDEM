@@ -1,13 +1,14 @@
 namespace Wdem.Core.Tasks;
 
 using Wdem.Core.Workflows;
+using Wdem.Domain.Versions;
 
 public sealed record TaskDefinition(
     string Id,
     string DisplayName,
     bool Required,
     IReadOnlyList<string> DependsOn,
-    string? VersionConstraint,
+    VersionRequirement? VersionRequirement,
     string? PreferredVersion,
     string? Source,
     CommandDefinition Detect,

@@ -2,7 +2,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Wdem.Core.Runs;
 using Wdem.Core.Tasks;
-using Wdem.Core.Versions;
+using Wdem.Domain.Versions;
 using Wdem.Core.Workflows;
 
 namespace Wdem.Core.Profiles;
@@ -51,11 +51,10 @@ public static class ProfileParser
         throw new FormatException($"Task '{taskId}' must contain an object.");
       }
 
-      var versionConstraint = Optional(taskDto.Version);
-      if (versionConstraint is not null)
-      {
-        VersionConstraint.Parse(versionConstraint);
-      }
+      var versionExpression = Optional(taskDto.Version);
+      var versionRequirement = versionExpression is null
+          ? null
+          : VersionRequirement.Parse(versionExpression);
 
       if (schemaVersion == 1 && taskDto.Workflow is not null)
       {
@@ -77,7 +76,7 @@ public static class ProfileParser
           Required(taskDto.DisplayName, $"Task '{taskId}' displayName"),
           taskDto.Required,
           Strings(taskDto.DependsOn, $"Task '{taskId}' dependsOn"),
-          versionConstraint,
+          versionRequirement,
           Optional(taskDto.PreferredVersion),
           Optional(taskDto.Source),
           detect,

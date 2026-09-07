@@ -1,6 +1,7 @@
 using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
 using Wdem.Core.Tests.TestDoubles;
+using Wdem.Domain.Versions;
 using Xunit;
 
 namespace Wdem.Core.Tests;
@@ -17,7 +18,7 @@ public sealed class EnvironmentInspectorTests
     var report = await EnvironmentInspector.InspectAsync(profile, runtime);
 
     Assert.True(report.Tasks["git"].IsSatisfied);
-    Assert.Equal(TaskComplianceState.Satisfied, report.Tasks["git"].Compliance);
+    Assert.Equal(ComplianceStatus.Satisfied, report.Tasks["git"].Compliance);
     Assert.Equal("2.52.0.windows.1", report.Tasks["git"].DetectedVersion);
   }
 
@@ -31,7 +32,7 @@ public sealed class EnvironmentInspectorTests
     var report = await EnvironmentInspector.InspectAsync(profile, runtime);
 
     Assert.False(report.Tasks["git"].IsSatisfied);
-    Assert.Equal(TaskComplianceState.UpgradeRequired, report.Tasks["git"].Compliance);
+    Assert.Equal(ComplianceStatus.UpgradeRequired, report.Tasks["git"].Compliance);
     Assert.Equal(">= 2.50", report.Tasks["git"].VersionRequirement);
   }
 
@@ -46,7 +47,7 @@ public sealed class EnvironmentInspectorTests
 
     Assert.False(report.Tasks["git"].DetectSucceeded);
     Assert.False(report.Tasks["git"].IsSatisfied);
-    Assert.Equal(TaskComplianceState.Missing, report.Tasks["git"].Compliance);
+    Assert.Equal(ComplianceStatus.Missing, report.Tasks["git"].Compliance);
   }
 
   [Fact]
@@ -58,7 +59,7 @@ public sealed class EnvironmentInspectorTests
 
     var report = await EnvironmentInspector.InspectAsync(profile, runtime);
 
-    Assert.Equal(TaskComplianceState.VersionMismatch, report.Tasks["git"].Compliance);
+    Assert.Equal(ComplianceStatus.VersionMismatch, report.Tasks["git"].Compliance);
   }
 
   [Fact]

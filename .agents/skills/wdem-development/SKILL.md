@@ -28,7 +28,9 @@ Treat a request to explain or diagnose as read-only. Modify code, external syste
 
 | Concern | Owner | Rule |
 | --- | --- | --- |
-| Profile parsing, versions, DAG, planning, state machine, reports | `Wdem.Core` | Keep platform and product details out |
+| Version rules, Profile/Task invariants, plans, workflow decisions | `Wdem.Domain` | Keep I/O, platform, and product details out |
+| Use cases, runtime ports, execution coordination, projections | `Wdem.Application` | Depend only on Domain |
+| Transitional behavior not yet migrated | `Wdem.Core` | Shrink this compatibility module; add no new domain rules |
 | Windows commands, process trees, logs, settings, trust persistence, administrator check | `Wdem.Windows` | Share behavior between both clients |
 | Task presentation and interaction | `Wdem.App` | Bind to projected Task state/capabilities |
 | Terminal interaction | `Wdem.Cli` | Consume the same Core and Windows reports |

@@ -1,5 +1,6 @@
 using Wdem.Core.Profiles;
 using Wdem.Core.Runtime;
+using Wdem.Domain.Versions;
 
 namespace Wdem.Core.Runs;
 
@@ -74,11 +75,11 @@ public static class EnvironmentInspector
               detectSucceeded,
               compliance.DetectedVersion,
               compliance.State,
-              task.VersionConstraint,
+              task.VersionRequirement?.Expression,
               step));
       progress?.Report(new WorkflowProgress(
           task.Id,
-          compliance.State == TaskComplianceState.Satisfied
+          compliance.State == ComplianceStatus.Satisfied
               ? TaskExecutionState.Satisfied
               : TaskExecutionState.Failed,
           null,
