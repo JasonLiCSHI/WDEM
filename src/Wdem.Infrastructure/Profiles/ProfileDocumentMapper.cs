@@ -15,10 +15,6 @@ internal static class ProfileDocumentMapper
 
     var id = Required(document.Id, "Profile id");
     var schemaVersion = document.SchemaVersion ?? 1;
-    if (schemaVersion is not (1 or 2))
-    {
-      throw new FormatException($"Unsupported Profile schemaVersion '{schemaVersion}'.");
-    }
     var version = Required(document.Version, "Profile version");
     var displayName = Required(document.DisplayName, "Profile displayName");
     if (document.Tasks is null || document.Tasks.Count == 0)
@@ -39,12 +35,6 @@ internal static class ProfileDocumentMapper
       var versionRequirement = versionExpression is null
           ? null
           : VersionRequirement.Parse(versionExpression);
-
-      if (schemaVersion == 1 && taskDocument.Workflow is not null)
-      {
-        throw new FormatException(
-            $"Task '{taskId}' workflow requires Profile schemaVersion 2.");
-      }
 
       var detect = Command(taskDocument.Detect, $"Task '{taskId}' detect");
       var pre = Commands(taskDocument.Pre, $"Task '{taskId}' pre");
@@ -73,13 +63,20 @@ internal static class ProfileDocumentMapper
       tasks.Add(taskId, task);
     }
 
-    return new EnvironmentProfile(
-        id,
-        version,
-        displayName,
-        Optional(document.Description),
-        tasks,
-        schemaVersion);
+    try
+    {
+      return new EnvironmentProfile(
+          id,
+          version,
+          displayName,
+          Optional(document.Description),
+          tasks,
+          schemaVersion);
+    }
+    catch (ArgumentException exception)
+    {
+      throw new FormatException($"Profile '{id}' is invalid: {exception.Message}", exception);
+    }
   }
 
   private static CommandDefinition[] Commands(

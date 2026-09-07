@@ -2,6 +2,12 @@
 
 WDEM is built around a stable model: **Declarative Profile → Task DAG → Workflow Pipeline**. CLI and WPF are two clients of the same application layer. Products such as Visual Studio and ReSharper never become special types in Domain or Application.
 
+## Bounded context and aggregate boundary
+
+The MVP has one bounded context: **Environment Convergence**. A single context is deliberate because Profile definition, Task dependency planning, compliance evaluation, and Workflow outcomes use one ubiquitous language and change together. CLI, WPF, Profile transport/cache, JSON serialization, and Windows process execution are ports or adapters—not separate domain contexts. A `CONTEXT-MAP.md` is therefore unnecessary until another independently evolving domain model is introduced.
+
+`EnvironmentProfile` is the aggregate root. It owns immutable `TaskDefinition` entities and their Workflow definitions, and its constructor enforces aggregate-wide invariants: supported Schema, a non-empty Task set, matching dictionary keys and Task identities, unique and declared dependencies, no self-dependency, and an acyclic dependency graph. `Plan` is a derived immutable planning result, while `EnvironmentRun` is Application orchestration rather than a second aggregate. External layers receive the aggregate root and cannot replace or mutate its children.
+
 ```text
 Release-defined HTTPS Profile Source
                  │
@@ -29,7 +35,7 @@ Release-defined HTTPS Profile Source
 ## Deep modules and seams
 
 - Application `IProfileRepository` is the external seam for remote configuration. Infrastructure `ProfileCatalog` implements its `ListAsync` and `LoadAsync` operations; HTTPS enforcement, redirect validation, size limits, UTF-8 decoding, atomic caching, offline fallback, and ID validation remain internal.
-- Infrastructure `ProfileParser` is a stable facade over focused document deserialization, DTO-to-Domain mapping, and cross-Task validation components. Remote retrieval and last-known-good persistence are likewise isolated behind `HttpProfileDocumentSource` and `ProfileDocumentCache`, so clients and inner layers never handle transport or JSON details.
+- Infrastructure `ProfileParser` is a stable facade over focused document deserialization and DTO-to-Domain mapping; construction of the `EnvironmentProfile` aggregate enforces cross-Task invariants. Remote retrieval and last-known-good persistence are likewise isolated behind `HttpProfileDocumentSource` and `ProfileDocumentCache`, so clients and inner layers never handle transport or JSON details.
 - Domain `TaskPlanner` encapsulates Required/Optional selection, dependency closure, deduplication, topological sorting, cycle detection, and compliance-to-action mapping, and returns an immutable `Plan`. Each planned Task is classified as `NoOp`, `Install`, `Upgrade`, or `Blocked`; detection failures propagate `Blocked` through dependencies. Application `CreatePlanHandler` maps an `EnvironmentProfile` and its latest inspection into that planning interface for both clients.
 - Application `ApplyPlanHandler.Start` compiles or selects a per-Task state graph and encapsulates graph execution, failure propagation, cancellation, and reporting.
 - Application's `ITaskRuntime` is the execution port. The current Windows adapter starts a Domain `CommandDefinition` as an executable plus argument array. Future script downloaders, elevation brokers, or remote executors can be introduced without teaching the DAG about specific products.

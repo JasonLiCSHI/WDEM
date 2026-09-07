@@ -281,6 +281,7 @@ public sealed class ArchitectureDependencyTests
   }
 
   [Theory]
+  [InlineData("src/Wdem.Domain/Model/IAggregateRoot.cs")]
   [InlineData("src/Wdem.Domain/Workflows/TaskWorkflowDefinition.cs")]
   [InlineData("src/Wdem.Domain/Workflows/TaskWorkflowState.cs")]
   [InlineData("src/Wdem.Domain/Workflows/WorkflowActivity.cs")]
@@ -377,7 +378,6 @@ public sealed class ArchitectureDependencyTests
   [InlineData("src/Wdem.Infrastructure/Profiles/ProfileDocument.cs")]
   [InlineData("src/Wdem.Infrastructure/Profiles/ProfileDocumentDeserializer.cs")]
   [InlineData("src/Wdem.Infrastructure/Profiles/ProfileDocumentMapper.cs")]
-  [InlineData("src/Wdem.Infrastructure/Profiles/ProfileValidator.cs")]
   [InlineData("src/Wdem.Infrastructure/Profiles/HttpProfileDocumentSource.cs")]
   [InlineData("src/Wdem.Infrastructure/Profiles/ProfileDocumentCache.cs")]
   public void ProfileParsing_WhenArchitectureIsInspected_ThenUsesFocusedComponents(string relativePath)

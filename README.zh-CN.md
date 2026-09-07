@@ -77,6 +77,8 @@ Running → Cancelling → Cancelled       dependency failure → Blocked
 
 WDEM 的核心刻意采用纯领域驱动设计，并在外围建立清晰的 Clean Architecture 边界。模型直接使用产品语言——Profile、Task、依赖、Plan、Activity、Workflow、合规状态与执行结果——同时完全不了解 WPF、HTTP、JSON、PowerShell 或 Autofac。
 
+- MVP 刻意只划分一个 **Environment Convergence（环境收敛）** 限界上下文；各类适配器不会被误称为领域上下文。
+- `EnvironmentProfile` 是该上下文的聚合根，负责保证完整且不可变的 Task 依赖图内部一致并且无环。
 - `Wdem.Domain` 负责值对象、不变量、版本策略、DAG 规划、Workflow 定义和状态转换，不依赖任何项目或第三方包。
 - 不可变的 Task 生命周期领域事件描述已经发生的 Workflow 事实；Application 在进程内分发，Infrastructure 负责记录，同时保证诊断失败不会改变 Task 结果。
 - `Wdem.Application` 将 Inspect、Plan、Apply 表达为用例，并定义执行、持久化、信任与报告端口。

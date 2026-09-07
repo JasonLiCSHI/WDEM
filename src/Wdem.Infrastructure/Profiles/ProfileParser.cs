@@ -7,8 +7,6 @@ public static class ProfileParser
   public static EnvironmentProfile Parse(string json)
   {
     var document = ProfileDocumentDeserializer.Deserialize(json);
-    var profile = ProfileDocumentMapper.Map(document);
-    ProfileValidator.Validate(profile);
-    return profile;
+    return ProfileDocumentMapper.Map(document);
   }
 }

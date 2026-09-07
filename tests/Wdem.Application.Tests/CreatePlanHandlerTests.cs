@@ -56,32 +56,6 @@ public sealed class CreatePlanHandlerTests
     Assert.Contains("missing", exception.Message);
   }
 
-  [Fact]
-  public void Build_ThrowsOnCycleAndIncludesPath()
-  {
-    const string json = """
-      {
-        "id": "cycle",
-        "version": "1.0.0",
-        "displayName": "Cycle",
-        "tasks": {
-          "a": { "displayName": "A", "required": true, "dependsOn": ["b"], "detect": { "executable": "a", "arguments": [] } },
-          "b": { "displayName": "B", "required": true, "dependsOn": ["c"], "detect": { "executable": "b", "arguments": [] } },
-          "c": { "displayName": "C", "required": true, "dependsOn": ["a"], "detect": { "executable": "c", "arguments": [] } }
-        }
-      }
-      """;
-
-    var profile = ProfileParser.Parse(json);
-
-    var exception = Assert.Throws<InvalidOperationException>(() =>
-        new CreatePlanHandler().CreateForTasks(profile, rootTaskIds: ["a"]));
-
-    Assert.Contains("a", exception.Message);
-    Assert.Contains("b", exception.Message);
-    Assert.Contains("c", exception.Message);
-  }
-
   private const string ProfileJson = """
     {
       "id": "csharp-developer",

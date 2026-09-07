@@ -87,6 +87,31 @@ public sealed class TaskWorkflowDefinitionTests
     Assert.Equal(3, workflow.ActivityCount);
   }
 
+  [Fact]
+  public void State_WhenCreated_ThenCopiesLifecycleCollectionsAtBoundary()
+  {
+    var activities = new List<WorkflowActivity> { new TestActivity("configure") };
+    var transitions = new List<TaskWorkflowTransition>
+    {
+      TaskWorkflowTransition.Always("done")
+    };
+    var state = new TaskWorkflowState(
+        "configure",
+        TaskExecutionState.Running,
+        residenceActivities: activities,
+        transitions: transitions);
+
+    activities.Clear();
+    transitions.Clear();
+
+    Assert.Single(state.ResidenceActivities);
+    Assert.Single(state.Transitions);
+    Assert.Throws<NotSupportedException>(() =>
+        ((IList<WorkflowActivity>)state.ResidenceActivities).Clear());
+    Assert.Throws<NotSupportedException>(() =>
+        ((IList<TaskWorkflowTransition>)state.Transitions).Clear());
+  }
+
   private static TaskWorkflowState Terminal(string id) =>
       new(id, TaskExecutionState.Succeeded, terminalOutcome: TaskOutcome.Succeeded);
 
