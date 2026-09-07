@@ -1,7 +1,7 @@
 using Wdem.Domain.Versions;
 using Xunit;
 
-namespace Wdem.Core.Tests;
+namespace Wdem.Domain.Tests;
 
 public sealed class VersionRequirementCompatibilityTests
 {

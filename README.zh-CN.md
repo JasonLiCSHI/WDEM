@@ -36,7 +36,7 @@
 
 搭建开发环境不该依赖一份注定过期的安装清单，也不该把每个软件都硬编码进管理器。
 
-在 WDEM 眼里，Visual Studio、ReSharper、Git、.NET SDK，以及未来加入的任何工具，都只是普通 Task，而不是特殊分支。Profile 声明工作站需要什么，Core 计算依赖和执行顺序，Windows Runtime 安全执行命令。增加软件、调整版本、添加安装后配置，通常只需要修改 Profile。
+在 WDEM 眼里，Visual Studio、ReSharper、Git、.NET SDK，以及未来加入的任何工具，都只是普通 Task，而不是特殊分支。Profile 声明工作站需要什么，Domain 规则计算依赖，Application 协调执行，Windows Runtime 安全执行命令。增加软件、调整版本、添加安装后配置，通常只需要修改 Profile。
 
 | 传统安装脚本 | WDEM |
 |---|---|
@@ -44,7 +44,7 @@
 | 本地环境是否合规并不清楚 | 启动时自动 Detect 并验证版本 |
 | 人工维护安装顺序 | 依赖组成经过验证的 DAG |
 | 取消可能遗留进程并继续执行 | 停止整个进程树并阻断不安全的下游 Task |
-| GUI 和 CLI 各写一套业务规则 | 两端共享相同 Core、状态与报告 |
+| GUI 和 CLI 各写一套业务规则 | 两端共享相同 Application 用例、状态与报告 |
 
 ## 它如何工作
 
@@ -77,11 +77,11 @@ Running → Cancelling → Cancelled       dependency failure → Blocked
 - **依赖感知的 Task DAG** — 展开依赖闭包、拒绝环、并发运行独立 Task，并只在全部前置任务成功后启动下游。
 - **可组合生命周期** — Schema v1 编译为 `Detect → Pre → Apply → Post → Verify`；Schema v2 可声明带 Entry、Residence、Exit Activities 的有界状态图。
 - **版本感知** — 支持精确版本、通配符、最低版本和版本范围；低于最低版本时明确标记为必须升级。
-- **响应式操作能力** — 单独或整体启动、取消 Task；所有可用操作都由 Core 根据 Workflow 状态投影。
+- **响应式操作能力** — 单独或整体启动、取消 Task；所有可用操作都由 Application 根据 Workflow 状态投影。
 - **安全取消** — 终止完整活动进程树、阻止新 Activity 启动，并阻断依赖已取消 Task 的下游任务。
 - **远程优先 Profile** — 每次发版在代码中固定一个 HTTPS Source；网络失败时回退到经过验证的 last-known-good 缓存。
 - **显式信任** — 远程和缓存 Profile 必须按当前内容哈希获得用户批准，才能通过 Detect 或 Apply 执行命令。
-- **统一执行模型** — WPF 与 CLI 共享 `Wdem.Core`、`Wdem.Windows`、进度事件和最终报告。
+- **统一执行模型** — WPF 与 CLI 共享 `Wdem.Application`、`Wdem.Domain`、Windows 适配器、进度事件和最终报告。
 - **完整可追踪日志** — 每个 Session 都有独立 JSONL 日志，记录计划、阶段、stdout、stderr 和结果。
 
 ## Profile 就是产品定义
@@ -290,7 +290,7 @@ Base URL 可以指向 Git 分支、Tag 或 Release 路径，末尾是否带 `/` 
 
 ## 路线图：Terraform 的严谨，Dev Box 的体验
 
-WDEM 的目标是成为 Windows 环境收敛引擎：像 Terraform 一样可预览、可复现，像 Microsoft Dev Box 一样易于使用和集中分发。这个类比用于指导产品模型；WDEM 仍然以本地 Windows 为中心，Visual Studio、ReSharper 等软件始终只是普通声明式 Task，而不是 Core 中的专用 Provider。
+WDEM 的目标是成为 Windows 环境收敛引擎：像 Terraform 一样可预览、可复现，像 Microsoft Dev Box 一样易于使用和集中分发。这个类比用于指导产品模型；WDEM 仍然以本地 Windows 为中心，Visual Studio、ReSharper 等软件始终只是普通声明式 Task，而不是专用 Provider。
 
 | 里程碑 | 结果 | 计划能力 |
 |---|---|---|
@@ -298,15 +298,15 @@ WDEM 的目标是成为 Windows 环境收敛引擎：像 Terraform 一样可预�
 | **0.2 · Apply 前先 Plan** | 每次变更都可审阅 | 不可变 Plan 模型；`NoOp`、`Create`、`Upgrade`、`Reconfigure`、`Blocked` 变更；JSON 导出；GUI 差异确认；Apply 时再次校验 Profile 内容指纹 |
 | **0.3 · State 与恢复** | 中断后可继续，但绝不把缓存当成机器真相 | 原子保存 Desired/Observed State、执行 Journal、State 锁、重启/重启系统后续跑、只读漂移检测，以及每次 Plan/Apply 前重新 Detect |
 | **0.4 · 可复现 Profile** | 无需复制粘贴即可组合环境 | 类型化输入、经过验证的输出与 Task 引用、modules/includes、组织层与用户层、带哈希的来源/版本锁文件，以及明确的 Schema 迁移 |
-| **0.5 · 可扩展 Runtime** | 无需污染 Core 即可增加安装机制 | 通用 Executable、MSI/MSIX、Archive/Download、WinGet Adapter；超时、重试/退避、需要重启结果、并发限制和独占资源锁 |
-| **0.6 · 团队 Catalog** | 将 Dev Box 的自助模式带到共享 Windows 环境 | Git-backed 签名 Catalog、批准发布者、组织策略、无界面镜像/VM 配置、合规导出，以及位于 Core 之外的可选 Azure Dev Box 集成 |
+| **0.5 · 可扩展 Runtime** | 无需向 Domain/Application 添加产品特例即可增加安装机制 | 通用 Executable、MSI/MSIX、Archive/Download、WinGet Adapter；超时、重试/退避、需要重启结果、并发限制和独占资源锁 |
+| **0.6 · 团队 Catalog** | 将 Dev Box 的自助模式带到共享 Windows 环境 | Git-backed 签名 Catalog、批准发布者、组织策略、无界面镜像/VM 配置、合规导出，以及通过适配器实现的可选 Azure Dev Box 集成 |
 | **1.0 · 可信契约** | 面向个人和企业的稳定基础 | Profile/Package 信任链、安装包代码签名、SBOM、Credential Manager/Key Vault Secret 引用、审计保证和明确的 Schema 兼容策略 |
 
 近期顺序是有意设计的：**Plan → 执行 Journal 与恢复 → Profile 组合与锁 → Runtime Adapter → 组织 Catalog**。Marketplace、任意远程插件、完整事务回滚、中央设备控制面和跨平台支持，要等这些基础足够可靠后再考虑。
 
 ## MVP 边界
 
-当前版本刻意保持小而可靠。依赖感知的 DAG 调度器会并发运行彼此独立的 Task，同时严格保持依赖顺序和单个 Task 内的 Activity 顺序。当前暂不包含自动 UAC 提权、回滚或卸载、重启后续跑、Profile 市场、带身份认证的私有 Source，以及跨平台支持。这些能力未来可以沿现有 Profile、Graph、Workflow 和 Runtime 扩展点演进，无需把产品专用逻辑放进 Core。
+当前版本刻意保持小而可靠。依赖感知的 DAG 调度器会并发运行彼此独立的 Task，同时严格保持依赖顺序和单个 Task 内的 Activity 顺序。当前暂不包含自动 UAC 提权、回滚或卸载、重启后续跑、Profile 市场、带身份认证的私有 Source，以及跨平台支持。这些能力未来可以沿现有 Profile、Graph、Workflow 和 Runtime 扩展点演进，无需把产品专用逻辑放进 Domain 或 Application。
 
 ## 开发
 
@@ -319,8 +319,11 @@ dotnet run --project src/Wdem.Cli/Wdem.Cli.csproj -- profiles
 
 | 项目 | 职责 |
 |---|---|
-| `Wdem.Core` | Profile、版本要求、DAG 构建、Workflow 状态、快照和报告 |
-| `Wdem.Windows` | Windows 进程执行、输出转发、进程树取消、缓存、信任和日志 |
+| `Wdem.Domain` | Profile/Task 不变量、版本规则、不可变 Plan 与 Workflow 决策 |
+| `Wdem.Application` | 检查、规划和执行用例，Runtime 端口、快照、能力与报告 |
+| `Wdem.Infrastructure` | Profile JSON、远程优先读取与 last-known-good 缓存适配器 |
+| `Wdem.Bootstrapper` | Autofac 组合根，通过强类型 Session 边界提供依赖 |
+| `Wdem.Windows` | Windows 进程执行、输出转发、进程树取消、信任设置和日志 |
 | `Wdem.Cli` | 命令行交互、计划确认、重试和终端展示 |
 | `Wdem.App` | 本地化 WPF 工作台、Task 详情和响应式状态投影 |
 

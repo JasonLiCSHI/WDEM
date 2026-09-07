@@ -1,4 +1,5 @@
 using Autofac;
+using Wdem.Application.Execution;
 using Wdem.Application.Inspection;
 using Wdem.Application.Planning;
 using Wdem.Application.Profiles;
@@ -35,6 +36,10 @@ internal sealed class WdemModule(WdemBootstrapperOptions options) : Module
     builder.RegisterType<DefaultWorkflowActivityExecutor>()
         .As<IWorkflowActivityExecutor>()
         .SingleInstance();
+    builder.RegisterInstance(DefaultTaskWorkflowProvider.Instance)
+        .As<ITaskWorkflowProvider>()
+        .SingleInstance();
+    builder.RegisterType<ApplyPlanHandler>().SingleInstance();
     builder.RegisterType<CreatePlanHandler>().SingleInstance();
     builder.RegisterType<InspectEnvironmentHandler>().SingleInstance();
     builder.Register(_ => CreateLog(options)).SingleInstance();

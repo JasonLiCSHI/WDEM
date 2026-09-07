@@ -1,9 +1,10 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using Wdem.Application.Execution;
 using Wdem.Application.Planning;
-using Wdem.Core.Runs;
 using Wdem.Application.Runtime;
+using Wdem.Application.Workflows;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Profiles;
 using Wdem.Domain.Tasks;
@@ -106,7 +107,7 @@ public sealed class TaskContractTests
     var plan = new CreatePlanHandler().CreateForTasks(profile, rootTaskIds: ["resharper"]);
     var runtime = new RepositoryContractRuntime();
 
-    var report = await EnvironmentManager.StartApply(profile, plan, runtime).Completion;
+    var report = await CreateHandler(runtime).Start(profile, plan).Completion;
 
     Assert.Equal(
         ["visual-studio-professional", "resharper"],
@@ -140,7 +141,7 @@ public sealed class TaskContractTests
     var plan = new CreatePlanHandler().CreateForTasks(profile, rootTaskIds: ["resharper"]);
     var runtime = new RepositoryContractRuntime(failVisualStudioApply: true);
 
-    var report = await EnvironmentManager.StartApply(profile, plan, runtime).Completion;
+    var report = await CreateHandler(runtime).Start(profile, plan).Completion;
 
     Assert.Equal(TaskOutcome.Failed, report.Tasks["visual-studio-professional"].Outcome);
     Assert.Equal(TaskOutcome.Blocked, report.Tasks["resharper"].Outcome);
@@ -451,6 +452,12 @@ public sealed class TaskContractTests
       File.Delete(waitMarkerPath);
     }
   }
+
+  private static ApplyPlanHandler CreateHandler(ITaskRuntime runtime) =>
+      new(
+          runtime,
+          DefaultWorkflowActivityExecutor.Instance,
+          DefaultTaskWorkflowProvider.Instance);
 
   private static EnvironmentProfile LoadRepositoryProfile(string repositoryRoot) =>
       ProfileParser.Parse(File.ReadAllText(

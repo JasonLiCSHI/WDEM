@@ -1,9 +1,8 @@
-using Wdem.Core.Runs;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Tasks;
 using Wdem.Domain.Workflows;
 
-namespace Wdem.Core.Workflows;
+namespace Wdem.Application.Workflows;
 
 public sealed class DefaultTaskWorkflowProvider : ITaskWorkflowProvider
 {

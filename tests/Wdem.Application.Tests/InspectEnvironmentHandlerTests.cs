@@ -1,12 +1,12 @@
 using Wdem.Application.Execution;
 using Wdem.Application.Inspection;
-using Wdem.Core.Tests.TestDoubles;
+using Wdem.Application.Tests.TestDoubles;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Versions;
 using Wdem.Infrastructure.Profiles;
 using Xunit;
 
-namespace Wdem.Core.Tests;
+namespace Wdem.Application.Tests;
 
 public sealed class InspectEnvironmentHandlerTests
 {

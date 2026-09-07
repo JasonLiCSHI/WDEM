@@ -1,13 +1,12 @@
 using Wdem.Application.Execution;
 using Wdem.Application.Runtime;
 using Wdem.Application.Workflows;
-using Wdem.Core.Workflows;
 using Wdem.Domain.Tasks;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Profiles;
 using Wdem.Domain.Workflows;
 
-namespace Wdem.Core.Runs;
+namespace Wdem.Application.Execution;
 
 /// <summary>
 /// Executes arbitrary task state graphs. Runtime state always changes before an

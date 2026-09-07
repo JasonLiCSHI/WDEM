@@ -1,6 +1,4 @@
-using Wdem.Application.Execution;
-
-namespace Wdem.Core.Runs;
+namespace Wdem.Application.Execution;
 
 public sealed record WorkflowUpdate(
     WorkflowSnapshot Snapshot,

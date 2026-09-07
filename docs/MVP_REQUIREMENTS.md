@@ -17,7 +17,7 @@ Remote Profile Source / offline cache
           Entry · Residence · Exit
 ```
 
-Visual Studio, ReSharper, Git, and the .NET SDK are ordinary Profile Tasks. Core contains no product-specific installation logic.
+Visual Studio, ReSharper, Git, and the .NET SDK are ordinary Profile Tasks. Domain and Application contain no product-specific installation logic.
 
 ## 2. Minimum MVP scope
 
@@ -53,7 +53,7 @@ Visual Studio, ReSharper, Git, and the .NET SDK are ordinary Profile Tasks. Core
 - Report progress, logs, cancellation, and final outcomes.
 - Provide CLI `inspect` and `apply` commands.
 - Provide a WPF GUI for loading a Profile, selecting Tasks, inspecting, applying, cancelling, and reviewing results.
-- Make CLI and GUI share the same Core and Windows Task Runtime.
+- Make CLI and GUI share the same Application use cases and Windows Task Runtime.
 - Require an elevated administrator process at GUI and CLI startup; show a clear instruction and exit before loading or executing Tasks when elevation is absent.
 
 ### 2.2 Not included
@@ -162,7 +162,7 @@ Every remote Profile Source contains an `index.json` and one `<id>.json` file pe
 - The state graph must reject duplicate or missing states, dangling targets, invalid Task-state projections, and unbounded execution past `maxTransitions`.
 - Code extensions may derive from `WorkflowActivity`, supply custom transition predicates, or implement `ITaskWorkflowProvider`; these extensions must preserve cancellation and immutable Task snapshots.
 
-## 4. Core business rules
+## 4. Business rules
 
 1. A Profile is the configuration entry point, and a Task is the only scheduling unit.
 2. A Task appears only once in a DAG.
@@ -203,7 +203,7 @@ The minimum single-window interface contains:
 - automatic local detection after Profile loading;
 - overall progress, current Task phase, command-level progress, live logs, structured user-operation entries, and final statistics.
 
-The Core state machine enters a runtime state before running its Entry, Residence, and Exit Activities. Activity results drive subsequent transitions, and each runtime state projects a stable Task state. Task snapshots directly expose start, cancel, and selection capabilities. The GUI only reacts to projected Task state and capabilities; it never interprets transitions. Global start/cancel actions only aggregate Task capabilities. If the Source is unavailable, only refresh is enabled. After cancellation is requested, duplicate cancellation is disabled immediately, and the Task becomes Cancelled only after its process tree exits.
+The Application state machine enters a runtime state before running its Entry, Residence, and Exit Activities. Activity results drive subsequent Domain transitions, and each runtime state projects a stable Task state. Task snapshots directly expose start, cancel, and selection capabilities. The GUI only reacts to projected Task state and capabilities; it never interprets transitions. Global start/cancel actions only aggregate Task capabilities. If the Source is unavailable, only refresh is enabled. After cancellation is requested, duplicate cancellation is disabled immediately, and the Task becomes Cancelled only after its process tree exits.
 
 Apply must present the execution plan before it begins.
 
@@ -228,7 +228,7 @@ Apply must present the execution plan before it begins.
 - Starting one Task automatically handles its dependencies.
 - Every Task can report phase, output, and progress.
 - CLI and GUI use the same execution module for the same Profile.
-- Tests verify Core with a Fake Task Runtime and never install real software.
+- Tests verify Domain/Application behavior with a Fake Task Runtime and never install real software.
 
 ## 8. Deep modules and test seams
 
@@ -240,7 +240,7 @@ Apply must present the execution plan before it begins.
 | Version | `VersionRequirement.Parse/Evaluate` | Four expression forms, version comparison, and compliance classification |
 | Task planning | `TaskPlanner.CreateForSelection/CreateForTasks` | Immutable Plan, selection, dependency closure, deduplication, cycle detection, and topological sorting |
 | Task Workflow | `ITaskWorkflowProvider`, `WorkflowActivity` | state validation, lifecycle Activities, transition selection, projection, and limits |
-| Environment Run | `EnvironmentManager.StartApply` | DAG scheduling, blocking, cancellation, and reporting |
+| Environment Run | `ApplyPlanHandler.Start` | DAG scheduling, blocking, cancellation, and reporting |
 | Windows Runtime | `ITaskRuntime` | Safe argument passing, process output, process-tree cancellation, and version extraction |
 
 Tests validate behavior exclusively through these seams.

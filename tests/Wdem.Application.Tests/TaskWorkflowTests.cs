@@ -1,14 +1,14 @@
 using Wdem.Application.Planning;
+using Wdem.Application.Execution;
+using Wdem.Application.Runtime;
+using Wdem.Application.Tests.TestDoubles;
 using Wdem.Application.Workflows;
-using Wdem.Core.Runs;
-using Wdem.Core.Tests.TestDoubles;
-using Wdem.Core.Workflows;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Workflows;
 using Wdem.Infrastructure.Profiles;
 using Xunit;
 
-namespace Wdem.Core.Tests;
+namespace Wdem.Application.Tests;
 
 public sealed class TaskWorkflowTests
 {
@@ -35,13 +35,13 @@ public sealed class TaskWorkflowTests
               terminalOutcome: TaskOutcome.Succeeded)
         ]);
 
-    var run = EnvironmentManager.StartApply(
+    var run = CreateHandler(
+        new FakeRuntime(),
+        new SingleWorkflowProvider(workflow),
+        new TestActivityExecutor()).Start(
         profile,
         graph,
-        new FakeRuntime(),
-        updates: new InlineProgress<WorkflowUpdate>(updates.Add),
-        workflowProvider: new SingleWorkflowProvider(workflow),
-        activityExecutor: new TestActivityExecutor());
+        updates: new InlineProgress<WorkflowUpdate>(updates.Add));
     var report = await run.Completion;
 
     Assert.Equal(["enter", "reside", "exit"], executed);
@@ -95,12 +95,12 @@ public sealed class TaskWorkflowTests
               terminalOutcome: TaskOutcome.Succeeded)
         ]);
 
-    var report = await EnvironmentManager.StartApply(
-        profile,
-        graph,
+    var report = await CreateHandler(
         new FakeRuntime(),
-        workflowProvider: new SingleWorkflowProvider(workflow),
-        activityExecutor: new TestActivityExecutor()).Completion;
+        new SingleWorkflowProvider(workflow),
+        new TestActivityExecutor()).Start(
+        profile,
+        graph).Completion;
 
     Assert.Equal(TaskOutcome.Succeeded, report.Tasks["custom"].Outcome);
   }
@@ -128,12 +128,12 @@ public sealed class TaskWorkflowTests
               terminalOutcome: TaskOutcome.Succeeded)
         ]);
 
-    var run = EnvironmentManager.StartApply(
-        profile,
-        graph,
+    var run = CreateHandler(
         new FakeRuntime(),
-        workflowProvider: new SingleWorkflowProvider(workflow),
-        activityExecutor: new TestActivityExecutor());
+        new SingleWorkflowProvider(workflow),
+        new TestActivityExecutor()).Start(
+        profile,
+        graph);
     await blockingActivity.Started;
 
     run.CancelTask("custom");
@@ -174,11 +174,11 @@ public sealed class TaskWorkflowTests
         ],
         maxTransitions: 2);
 
-    var report = await EnvironmentManager.StartApply(
-        profile,
-        graph,
+    var report = await CreateHandler(
         new FakeRuntime(),
-        workflowProvider: new SingleWorkflowProvider(workflow)).Completion;
+        new SingleWorkflowProvider(workflow)).Start(
+        profile,
+        graph).Completion;
 
     Assert.Equal(TaskOutcome.Failed, report.Tasks["custom"].Outcome);
     Assert.Contains("transition limit", report.Tasks["custom"].Error);
@@ -192,7 +192,7 @@ public sealed class TaskWorkflowTests
     var runtime = new FakeRuntime()
         .WithDetect("custom", exitCode: 0, stdout: "custom version 2.5");
 
-    var report = await EnvironmentManager.StartApply(profile, graph, runtime).Completion;
+    var report = await CreateHandler(runtime).Start(profile, graph).Completion;
 
     Assert.Equal(TaskOutcome.Succeeded, report.Tasks["custom"].Outcome);
     Assert.Equal(
@@ -206,6 +206,15 @@ public sealed class TaskWorkflowTests
         ],
         report.Tasks["custom"].Steps.Select(step => step.ActivityLocation));
   }
+
+  private static ApplyPlanHandler CreateHandler(
+      ITaskRuntime runtime,
+      ITaskWorkflowProvider? workflowProvider = null,
+      IWorkflowActivityExecutor? activityExecutor = null) =>
+      new(
+          runtime,
+          activityExecutor ?? DefaultWorkflowActivityExecutor.Instance,
+          workflowProvider ?? DefaultTaskWorkflowProvider.Instance);
 
   private sealed class SingleWorkflowProvider(TaskWorkflowDefinition workflow)
       : ITaskWorkflowProvider

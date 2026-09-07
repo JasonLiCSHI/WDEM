@@ -6,6 +6,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Wdem.Application/Wdem.Application.csproj" />
-    <ProjectReference Include="../Wdem.Core/Wdem.Core.csproj" />
+    <ProjectReference Include="../Wdem.Domain/Wdem.Domain.csproj" />
   </ItemGroup>
 </Project>

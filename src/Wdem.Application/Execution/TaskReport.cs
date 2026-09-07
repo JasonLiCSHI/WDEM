@@ -1,7 +1,7 @@
 using Wdem.Application.Execution;
 using Wdem.Domain.Execution;
 
-namespace Wdem.Core.Runs;
+namespace Wdem.Application.Execution;
 
 public sealed record TaskReport(
     string TaskId,

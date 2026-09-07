@@ -1,4 +1,4 @@
-namespace Wdem.Core.Runs;
+namespace Wdem.Application.Execution;
 
 public sealed class EnvironmentRun
 {

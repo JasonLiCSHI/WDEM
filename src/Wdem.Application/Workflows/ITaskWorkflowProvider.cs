@@ -1,7 +1,7 @@
 using Wdem.Domain.Tasks;
 using Wdem.Domain.Workflows;
 
-namespace Wdem.Core.Workflows;
+namespace Wdem.Application.Workflows;
 
 public interface ITaskWorkflowProvider
 {

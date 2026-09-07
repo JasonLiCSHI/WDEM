@@ -2,7 +2,7 @@ using Wdem.Application.Planning;
 using Wdem.Infrastructure.Profiles;
 using Xunit;
 
-namespace Wdem.Core.Tests;
+namespace Wdem.Application.Tests;
 
 public sealed class CreatePlanHandlerTests
 {

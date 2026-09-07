@@ -1,7 +1,7 @@
 using System.Collections.Concurrent;
 using Wdem.Application.Runtime;
 
-namespace Wdem.Core.Tests.TestDoubles;
+namespace Wdem.Application.Tests.TestDoubles;
 
 public sealed class FakeRuntime : ITaskRuntime
 {
