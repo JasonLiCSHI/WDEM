@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Wdem.Infrastructure.Profiles;
+using Wdem.Testing;
 using Xunit;
 
 namespace Wdem.Infrastructure.Tests;
@@ -9,7 +10,7 @@ public sealed class RepositoryProfileTests
   [Fact]
   public void CSharpDeveloperProfile_DeclaresTheTwoSupportedTaskPipelines()
   {
-    var repositoryRoot = FindRepositoryRoot();
+    var repositoryRoot = RepositoryLocator.FindRoot();
     var profilePath = Path.Combine(repositoryRoot, "profiles", "csharp-developer.json");
     var profile = ProfileParser.Parse(File.ReadAllText(profilePath));
 
@@ -40,20 +41,5 @@ public sealed class RepositoryProfileTests
     Assert.Equal(profile.Id, entry.GetProperty("id").GetString());
     Assert.Equal(profile.Version, entry.GetProperty("version").GetString());
     Assert.Equal(profile.DisplayName, entry.GetProperty("displayName").GetString());
-  }
-
-  private static string FindRepositoryRoot()
-  {
-    var directory = new DirectoryInfo(AppContext.BaseDirectory);
-    while (directory is not null)
-    {
-      if (File.Exists(Path.Combine(directory.FullName, "Wdem.slnx")))
-      {
-        return directory.FullName;
-      }
-      directory = directory.Parent;
-    }
-
-    throw new DirectoryNotFoundException("Unable to locate the WDEM repository root.");
   }
 }

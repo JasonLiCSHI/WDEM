@@ -36,6 +36,7 @@ Visual Studio, ReSharper, Git, and the .NET SDK are ordinary Profile Tasks. Doma
 - Compile Schema v1 Tasks into the standard Detect/Pre/Apply/Post/Verify state graph.
 - Allow Schema v2 Tasks to declare a bounded state graph with Entry, Residence, and Exit command Activities.
 - Project runtime state into stable Task state and capabilities consumed by both CLI and GUI.
+- Publish immutable Task lifecycle domain events after committed workflow changes and record them through the shared JSONL logger without making logging part of Task success.
 - Represent command arguments as arrays and launch executables directly without implicit shell concatenation.
 - Support `{source}`, `{preferredVersion}`, and `{appDirectory}` command placeholders.
 - Select Required Tasks automatically and prevent deselection.
@@ -224,6 +225,7 @@ Apply must present the execution plan before it begins.
 - Schema v2 runs state Entry, Residence, and Exit Activities in order and follows the first matching transition.
 - Runtime state IDs and Activity locations are projected through progress, snapshots, and reports.
 - Parallel state updates are published to clients in monotonically increasing snapshot revision order.
+- Task lifecycle domain events preserve per-Task execution order, and a failing observer never changes the Task outcome.
 - Cancelling a custom workflow prevents Exit Activities, further transitions, and downstream Tasks from executing.
 - Downstream Tasks do not execute after an upstream failure.
 - Cancelling one Task stops its process tree and blocks dependents; Cancel All prevents all subsequent Tasks from starting.

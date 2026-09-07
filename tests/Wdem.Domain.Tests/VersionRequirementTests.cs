@@ -15,7 +15,7 @@ public sealed class VersionRequirementTests
   [InlineData(">= 2.50", "2.49.9", ComplianceStatus.UpgradeRequired)]
   [InlineData("> 2.50", "2.50.0", ComplianceStatus.UpgradeRequired)]
   [InlineData("<= 3.0", "3.1", ComplianceStatus.VersionMismatch)]
-  public void EvaluateClassifiesInstalledVersions(
+  public void Evaluate_WhenVersionIsInstalled_ThenClassifiesCompliance(
       string expression,
       string installedVersion,
       ComplianceStatus expected)
@@ -29,7 +29,7 @@ public sealed class VersionRequirementTests
   }
 
   [Fact]
-  public void EvaluateMarksUnparseableInstalledVersionAsMismatch()
+  public void Evaluate_WhenInstalledVersionIsUnparseable_ThenMarksMismatch()
   {
     var requirement = VersionRequirement.Parse(">= 2.50");
 
@@ -40,7 +40,7 @@ public sealed class VersionRequirementTests
   }
 
   [Fact]
-  public void MissingCreatesAnExplicitComplianceResult()
+  public void Missing_WhenCreated_ThenReturnsExplicitComplianceResult()
   {
     var requirement = VersionRequirement.Parse(">= 2.50");
 
@@ -52,7 +52,7 @@ public sealed class VersionRequirementTests
   }
 
   [Fact]
-  public void ParseRejectsInvalidExpressions()
+  public void Parse_WhenExpressionIsInvalid_ThenRejectsIt()
   {
     Assert.Throws<FormatException>(() => VersionRequirement.Parse("latest"));
   }

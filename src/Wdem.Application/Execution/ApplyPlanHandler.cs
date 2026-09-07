@@ -1,3 +1,4 @@
+using Wdem.Application.Events;
 using Wdem.Application.Runtime;
 using Wdem.Application.Profiles;
 using Wdem.Application.Workflows;
@@ -11,7 +12,8 @@ public sealed class ApplyPlanHandler(
     ITaskRuntime runtime,
     IWorkflowActivityExecutor activityExecutor,
     ITaskWorkflowProvider workflowProvider,
-    ProfileExecutionAuthorizer authorizer)
+    ProfileExecutionAuthorizer authorizer,
+    IDomainEventPublisher domainEvents)
 {
   public WorkflowSnapshot CreateReadySnapshot(EnvironmentProfile profile)
   {
@@ -50,6 +52,7 @@ public sealed class ApplyPlanHandler(
         workflows,
         perTaskCts,
         state,
+        domainEvents,
         allCts.Token);
 
     return new EnvironmentRun(

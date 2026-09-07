@@ -11,4 +11,7 @@
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Wdem.Testing/Wdem.Testing.csproj" />
+  </ItemGroup>
 </Project>

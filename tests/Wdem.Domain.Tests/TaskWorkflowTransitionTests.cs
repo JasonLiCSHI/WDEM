@@ -20,7 +20,7 @@ public sealed class TaskWorkflowTransitionTests
 
   [Theory]
   [MemberData(nameof(BuiltInConditions))]
-  public void BuiltInTransitionEvaluatesWorkflowFacts(
+  public void BuiltInTransition_WhenEvaluated_ThenMatchesWorkflowFacts(
       TaskWorkflowTransition transition,
       bool activitiesSucceeded,
       bool taskSatisfied,
@@ -35,7 +35,7 @@ public sealed class TaskWorkflowTransitionTests
   }
 
   [Fact]
-  public void CustomTransitionCanComposeWorkflowFacts()
+  public void CustomTransition_WhenCreated_ThenCanComposeWorkflowFacts()
   {
     var transition = new TaskWorkflowTransition(
         "recover",

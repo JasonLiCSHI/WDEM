@@ -10,7 +10,7 @@ namespace Wdem.Application.Tests;
 public sealed class DefaultWorkflowActivityExecutorTests
 {
   [Fact]
-  public async Task CommandActivityRunsThroughRuntimeAndEvaluatesCompliance()
+  public async Task CommandActivity_WhenExecuted_ThenRunsThroughRuntimeAndEvaluatesCompliance()
   {
     var command = new CommandDefinition(
         "tool.exe",
@@ -40,7 +40,7 @@ public sealed class DefaultWorkflowActivityExecutorTests
   }
 
   [Fact]
-  public async Task UnknownActivityFailsWithoutExecutingExternalWork()
+  public async Task UnknownActivity_WhenExecuted_ThenFailsWithoutExternalWork()
   {
     var runtime = new StubRuntime(new CommandResult(0, string.Empty, string.Empty));
     var context = new WorkflowActivityContext(

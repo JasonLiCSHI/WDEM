@@ -1,17 +1,13 @@
 using Wdem.Bootstrapper;
+using Wdem.Testing;
 using Xunit;
 
 namespace Wdem.Bootstrapper.Tests;
 
-public sealed class WdemBootstrapperTests : IDisposable
+public sealed class WdemBootstrapperTests : TemporaryDirectoryTestBase
 {
-  private readonly string _root = Path.Combine(
-      Path.GetTempPath(),
-      "wdem-bootstrapper-tests",
-      Guid.NewGuid().ToString("N"));
-
   [Fact]
-  public void SessionProvidesOneSharedInstanceOfEachProcessLevelDependency()
+  public void Session_WhenDependencyIsResolvedRepeatedly_ThenReturnsOneSharedInstance()
   {
     using var session = CreateSession("shared");
 
@@ -24,7 +20,7 @@ public sealed class WdemBootstrapperTests : IDisposable
   }
 
   [Fact]
-  public void SeparateSessionsDoNotShareDisposableState()
+  public void Sessions_WhenCreatedSeparately_ThenDoNotShareDisposableState()
   {
     using var first = CreateSession("first");
     using var second = CreateSession("second");
@@ -38,7 +34,7 @@ public sealed class WdemBootstrapperTests : IDisposable
   }
 
   [Fact]
-  public void DisposedSessionRejectsFurtherResolution()
+  public void Session_WhenDisposed_ThenRejectsFurtherResolution()
   {
     var session = CreateSession("disposed");
     session.Dispose();
@@ -48,7 +44,7 @@ public sealed class WdemBootstrapperTests : IDisposable
 
   private WdemSession CreateSession(string name)
   {
-    var sessionRoot = Path.Combine(_root, name);
+    var sessionRoot = TestPath(name);
     return WdemBootstrapper.StartSession(new WdemBootstrapperOptions(name)
     {
       SettingsPath = Path.Combine(sessionRoot, "settings.json"),
@@ -56,13 +52,5 @@ public sealed class WdemBootstrapperTests : IDisposable
       LogDirectory = Path.Combine(sessionRoot, "logs"),
       ApplicationDirectory = sessionRoot
     });
-  }
-
-  public void Dispose()
-  {
-    if (Directory.Exists(_root))
-    {
-      Directory.Delete(_root, recursive: true);
-    }
   }
 }

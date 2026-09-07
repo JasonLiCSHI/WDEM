@@ -13,5 +13,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Wdem.Bootstrapper\Wdem.Bootstrapper.csproj" />
+    <ProjectReference Include="..\Wdem.Testing\Wdem.Testing.csproj" />
   </ItemGroup>
 </Project>

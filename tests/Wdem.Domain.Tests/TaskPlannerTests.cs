@@ -8,7 +8,7 @@ namespace Wdem.Domain.Tests;
 public sealed class TaskPlannerTests
 {
   [Fact]
-  public void CreateForSelectionIncludesRequiredSelectedAndTransitiveDependencies()
+  public void CreateForSelection_WhenTasksAreSelected_ThenIncludesRequiredAndTransitiveDependencies()
   {
     var tasks = Tasks(
         Required("dotnet"),
@@ -21,7 +21,7 @@ public sealed class TaskPlannerTests
   }
 
   [Fact]
-  public void CreateForTasksRejectsAnUnknownTask()
+  public void CreateForTasks_WhenTaskIsUnknown_ThenRejectsIt()
   {
     var tasks = Tasks(Required("dotnet"));
 
@@ -32,7 +32,7 @@ public sealed class TaskPlannerTests
   }
 
   [Fact]
-  public void CreateForTasksRejectsCyclesWithTheCyclePath()
+  public void CreateForTasks_WhenGraphContainsCycle_ThenReportsCyclePath()
   {
     var tasks = Tasks(
         Required("a", "b"),
@@ -48,7 +48,7 @@ public sealed class TaskPlannerTests
   }
 
   [Fact]
-  public void CreateForTasksProducesDeterministicOrderForIndependentTasks()
+  public void CreateForTasks_WhenTasksAreIndependent_ThenProducesDeterministicOrder()
   {
     var tasks = Tasks(Required("z"), Required("a"));
 
@@ -60,7 +60,7 @@ public sealed class TaskPlannerTests
   }
 
   [Fact]
-  public void CreateForTasksProjectsComplianceIntoExecutionActions()
+  public void CreateForTasks_WhenComplianceIsKnown_ThenProjectsExecutionActions()
   {
     var tasks = Tasks(
         RequiredWithCompliance("installed", ComplianceStatus.Satisfied),
@@ -75,7 +75,7 @@ public sealed class TaskPlannerTests
   }
 
   [Fact]
-  public void CreateForTasksBlocksDetectionFailuresAndTheirDependents()
+  public void CreateForTasks_WhenDetectionFails_ThenBlocksTaskAndDependents()
   {
     var tasks = Tasks(
         RequiredWithCompliance("broken", ComplianceStatus.DetectionFailed),

@@ -7,7 +7,7 @@ namespace Wdem.Domain.Tests;
 public sealed class TaskWorkflowDefinitionTests
 {
   [Fact]
-  public void DefinitionRejectsAnUnknownInitialState()
+  public void Definition_WhenInitialStateIsUnknown_ThenRejectsIt()
   {
     var exception = Assert.Throws<ArgumentException>(() =>
         new TaskWorkflowDefinition("missing", [Terminal("done")]));
@@ -16,7 +16,7 @@ public sealed class TaskWorkflowDefinitionTests
   }
 
   [Fact]
-  public void DefinitionRejectsDuplicateStateIds()
+  public void Definition_WhenStateIdsAreDuplicated_ThenRejectsThem()
   {
     var exception = Assert.Throws<ArgumentException>(() =>
         new TaskWorkflowDefinition("done", [Terminal("done"), Terminal("done")]));
@@ -25,7 +25,7 @@ public sealed class TaskWorkflowDefinitionTests
   }
 
   [Fact]
-  public void DefinitionRejectsDanglingTransitions()
+  public void Definition_WhenTransitionTargetIsUndeclared_ThenRejectsIt()
   {
     var exception = Assert.Throws<ArgumentException>(() =>
         new TaskWorkflowDefinition(
@@ -41,7 +41,7 @@ public sealed class TaskWorkflowDefinitionTests
   }
 
   [Fact]
-  public void DefinitionRejectsNonTerminalStateWithoutATransition()
+  public void Definition_WhenNonTerminalStateHasNoTransition_ThenRejectsIt()
   {
     var exception = Assert.Throws<ArgumentException>(() =>
         new TaskWorkflowDefinition(
@@ -52,7 +52,7 @@ public sealed class TaskWorkflowDefinitionTests
   }
 
   [Fact]
-  public void DefinitionRejectsTerminalStateWithTransitions()
+  public void Definition_WhenTerminalStateHasTransitions_ThenRejectsIt()
   {
     var exception = Assert.Throws<ArgumentException>(() =>
         new TaskWorkflowDefinition(
@@ -69,7 +69,7 @@ public sealed class TaskWorkflowDefinitionTests
   }
 
   [Fact]
-  public void DefinitionCountsEntryResidenceAndExitActivities()
+  public void Definition_WhenActivitiesAreDeclared_ThenCountsEveryLifecycleActivity()
   {
     var workflow = new TaskWorkflowDefinition(
         "start",

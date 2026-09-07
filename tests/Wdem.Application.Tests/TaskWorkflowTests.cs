@@ -1,10 +1,12 @@
 using Wdem.Application.Planning;
 using Wdem.Application.Execution;
+using Wdem.Application.Events;
 using Wdem.Application.Profiles;
 using Wdem.Application.Runtime;
 using Wdem.Application.Tests.TestDoubles;
 using Wdem.Application.Workflows;
 using Wdem.Domain.Execution;
+using Wdem.Domain.Events;
 using Wdem.Domain.Workflows;
 using Wdem.Infrastructure.Profiles;
 using Xunit;
@@ -66,6 +68,56 @@ public sealed class TaskWorkflowTests
       Assert.Equal("prepare", task.RuntimeStateId);
       Assert.Equal(TaskExecutionState.Running, task.State);
     });
+  }
+
+  [Fact]
+  public async Task CustomWorkflow_WhenExecuted_ThenPublishesDomainEventsInLifecycleOrder()
+  {
+    var profile = ProfileParser.Parse(ProfileJson);
+    var graph = new CreatePlanHandler().CreateForTasks(profile, rootTaskIds: ["custom"]);
+    var executed = new List<string>();
+    var domainEvents = new RecordingDomainEventPublisher();
+    var workflow = new TaskWorkflowDefinition(
+        "prepare",
+        [
+          new TaskWorkflowState(
+              "prepare",
+              TaskExecutionState.Running,
+              residenceActivities: [new RecordingActivity("configure", executed)],
+              transitions: [TaskWorkflowTransition.Always("finished")]),
+          new TaskWorkflowState(
+              "finished",
+              TaskExecutionState.Succeeded,
+              terminalOutcome: TaskOutcome.Succeeded)
+        ]);
+
+    var report = await CreateHandler(
+        new FakeRuntime(),
+        new SingleWorkflowProvider(workflow),
+        new TestActivityExecutor(),
+        domainEvents).Start(
+        Loaded(profile),
+        graph).Completion;
+
+    Assert.Equal(TaskOutcome.Succeeded, report.Tasks["custom"].Outcome);
+    Assert.Collection(
+        domainEvents.Events,
+        item => Assert.IsType<TaskWorkflowStarted>(item),
+        item => Assert.IsType<TaskWorkflowStateEntered>(item),
+        item => Assert.IsType<TaskWorkflowActivityStarted>(item),
+        item => Assert.IsType<TaskWorkflowActivityCompleted>(item),
+        item => Assert.IsType<TaskWorkflowTransitioned>(item),
+        item => Assert.IsType<TaskWorkflowFinished>(item));
+
+    var transition = Assert.IsType<TaskWorkflowTransitioned>(domainEvents.Events[4]);
+    Assert.Equal("prepare", transition.FromStateId);
+    Assert.Equal("finished", transition.ToStateId);
+    Assert.Equal("always", transition.TransitionName);
+
+    var finished = Assert.IsType<TaskWorkflowFinished>(domainEvents.Events[5]);
+    Assert.Equal("workflow-test", finished.ProfileId);
+    Assert.Equal("custom", finished.TaskId);
+    Assert.Equal(TaskOutcome.Succeeded, finished.Outcome);
   }
 
   [Fact]
@@ -228,12 +280,14 @@ public sealed class TaskWorkflowTests
   private static ApplyPlanHandler CreateHandler(
       ITaskRuntime runtime,
       ITaskWorkflowProvider? workflowProvider = null,
-      IWorkflowActivityExecutor? activityExecutor = null) =>
+      IWorkflowActivityExecutor? activityExecutor = null,
+      IDomainEventPublisher? domainEvents = null) =>
       new(
           runtime,
           activityExecutor ?? DefaultWorkflowActivityExecutor.Instance,
           workflowProvider ?? DefaultTaskWorkflowProvider.Instance,
-          new ProfileExecutionAuthorizer(new FakeProfileTrustStore()));
+          new ProfileExecutionAuthorizer(new FakeProfileTrustStore()),
+          domainEvents ?? NullDomainEventPublisher.Instance);
 
   private static LoadedProfile Loaded(Wdem.Domain.Profiles.EnvironmentProfile profile) =>
       new(profile, ProfileOrigin.Local, "test-profile.json", "TEST");
@@ -264,6 +318,13 @@ public sealed class TaskWorkflowTests
       _started.TrySetResult();
       await Task.Delay(Timeout.Infinite, cancellationToken);
     }
+  }
+
+  private sealed class RecordingDomainEventPublisher : IDomainEventPublisher
+  {
+    public List<IDomainEvent> Events { get; } = [];
+
+    public void Publish(IDomainEvent domainEvent) => Events.Add(domainEvent);
   }
 
   private sealed class TestActivityExecutor : IWorkflowActivityExecutor

@@ -1,24 +1,22 @@
 using System.Text.Json;
 using Wdem.Application.Logging;
+using Wdem.Domain.Events;
+using Wdem.Domain.Execution;
 using Wdem.Infrastructure.Logging;
+using Wdem.Testing;
 using Xunit;
 
 namespace Wdem.Infrastructure.Tests;
 
-public sealed class JsonLineSessionLogTests : IDisposable
+public sealed class JsonLineSessionLogTests : TemporaryDirectoryTestBase
 {
-  private readonly string _directory = Path.Combine(
-      Path.GetTempPath(),
-      "Wdem.Tests",
-      Guid.NewGuid().ToString("N"));
-
   [Fact]
   public void Write_WhenEventIsRecorded_ThenPersistsSessionMetadataAndOrderedJsonLines()
   {
     string path;
     string sessionId;
 
-    using (var log = JsonLineSessionLog.CreateInDirectory("test", _directory))
+    using (var log = JsonLineSessionLog.CreateInDirectory("test", RootDirectory))
     {
       Assert.True(log.IsEnabled, log.LastError);
       path = Assert.IsType<string>(log.Path);
@@ -43,8 +41,7 @@ public sealed class JsonLineSessionLogTests : IDisposable
   [Fact]
   public void CreateInDirectory_WhenDirectoryIsUnavailable_ThenDisablesLoggingWithoutThrowing()
   {
-    Directory.CreateDirectory(_directory);
-    var filePath = Path.Combine(_directory, "not-a-directory");
+    var filePath = TestPath("not-a-directory");
     File.WriteAllText(filePath, "occupied");
 
     using var log = JsonLineSessionLog.CreateInDirectory("test", filePath);
@@ -60,7 +57,7 @@ public sealed class JsonLineSessionLogTests : IDisposable
   {
     string path;
 
-    using (var log = JsonLineSessionLog.CreateInDirectory("test", _directory))
+    using (var log = JsonLineSessionLog.CreateInDirectory("test", RootDirectory))
     {
       path = Assert.IsType<string>(log.Path);
       log.WriteUserAction(
@@ -84,11 +81,30 @@ public sealed class JsonLineSessionLogTests : IDisposable
     Assert.False(data.TryGetProperty("Arguments", out _));
   }
 
-  public void Dispose()
+  [Fact]
+  public void DomainEventHandler_WhenTaskFinishes_ThenPersistsStructuredBusinessFact()
   {
-    if (Directory.Exists(_directory))
+    string path;
+
+    using (var log = JsonLineSessionLog.CreateInDirectory("test", RootDirectory))
     {
-      Directory.Delete(_directory, recursive: true);
+      path = Assert.IsType<string>(log.Path);
+      var handler = new DomainEventSessionLogHandler(log);
+      handler.Handle(new TaskWorkflowFinished(
+          "csharp-developer",
+          "visual-studio-professional",
+          "succeeded",
+          TaskOutcome.Succeeded,
+          Error: null));
     }
+
+    using var item = JsonDocument.Parse(File.ReadLines(path).ElementAt(1));
+    var root = item.RootElement;
+    Assert.Equal("domain_event", root.GetProperty("category").GetString());
+    Assert.Contains("visual-studio-professional", root.GetProperty("message").GetString());
+    var data = root.GetProperty("data");
+    Assert.Equal("csharp-developer", data.GetProperty("ProfileId").GetString());
+    Assert.Equal("visual-studio-professional", data.GetProperty("TaskId").GetString());
+    Assert.Equal("Succeeded", data.GetProperty("Outcome").GetString());
   }
 }

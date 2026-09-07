@@ -2,11 +2,12 @@ using System.Net;
 using Wdem.Application.Profiles;
 using Wdem.Domain.Profiles;
 using Wdem.Infrastructure.Profiles;
+using Wdem.Testing;
 using Xunit;
 
 namespace Wdem.Infrastructure.Tests;
 
-public sealed class ProfileCatalogTests
+public sealed class ProfileCatalogTests : TemporaryDirectoryTestBase
 {
   private static readonly ProfileSourceDefinition Source = new(
       "official",
@@ -16,130 +17,95 @@ public sealed class ProfileCatalogTests
   [Fact]
   public async Task RemoteCatalog_DownloadsProfilesAndWritesLastKnownGoodCache()
   {
-    var cache = CreateTempDirectory();
-    try
-    {
-      using var client = CreateClient(request => request.RequestUri!.AbsolutePath.EndsWith("index.json")
-          ? CatalogJson()
-          : ProfileJson("Remote C#", "2.0.0"));
-      var catalog = new ProfileCatalog(Source, cache, client);
+    var cache = RootDirectory;
+    using var client = CreateClient(request => request.RequestUri!.AbsolutePath.EndsWith("index.json")
+        ? CatalogJson()
+        : ProfileJson("Remote C#", "2.0.0"));
+    var catalog = new ProfileCatalog(Source, cache, client);
 
-      var entries = await catalog.ListAsync();
-      var loaded = await catalog.LoadAsync("csharp-developer");
+    var entries = await catalog.ListAsync();
+    var loaded = await catalog.LoadAsync("csharp-developer");
 
-      var entry = Assert.Single(entries);
-      Assert.Equal(ProfileOrigin.Remote, entry.Origin);
-      Assert.Equal("official", entry.SourceId);
-      Assert.Equal("Remote C#", loaded.Profile.DisplayName);
-      Assert.Equal(ProfileOrigin.Remote, loaded.Origin);
-      Assert.True(loaded.RequiresTrust);
-      Assert.True(File.Exists(Path.Combine(cache, "official", "index.json")));
-      Assert.True(File.Exists(Path.Combine(cache, "official", "csharp-developer.json")));
-    }
-    finally
-    {
-      Directory.Delete(cache, recursive: true);
-    }
+    var entry = Assert.Single(entries);
+    Assert.Equal(ProfileOrigin.Remote, entry.Origin);
+    Assert.Equal("official", entry.SourceId);
+    Assert.Equal("Remote C#", loaded.Profile.DisplayName);
+    Assert.Equal(ProfileOrigin.Remote, loaded.Origin);
+    Assert.True(loaded.RequiresTrust);
+    Assert.True(File.Exists(Path.Combine(cache, "official", "index.json")));
+    Assert.True(File.Exists(Path.Combine(cache, "official", "csharp-developer.json")));
   }
 
   [Fact]
   public async Task Catalog_WhenRemoteIsOffline_UsesCachedIndexAndProfile()
   {
-    var cache = CreateTempDirectory();
-    try
+    var cache = RootDirectory;
+    using (var onlineClient = CreateClient(request => request.RequestUri!.AbsolutePath.EndsWith("index.json")
+               ? CatalogJson()
+               : ProfileJson("Cached C#", "1.0.0")))
     {
-      using (var onlineClient = CreateClient(request => request.RequestUri!.AbsolutePath.EndsWith("index.json")
-                 ? CatalogJson()
-                 : ProfileJson("Cached C#", "1.0.0")))
-      {
-        var online = new ProfileCatalog(Source, cache, onlineClient);
-        await online.ListAsync();
-        await online.LoadAsync("csharp-developer");
-      }
-
-      using var offlineClient = new HttpClient(new StubHttpMessageHandler(_ =>
-          throw new HttpRequestException("offline")));
-      var offline = new ProfileCatalog(Source, cache, offlineClient);
-
-      var entries = await offline.ListAsync();
-      var loaded = await offline.LoadAsync("csharp-developer");
-
-      Assert.Equal(ProfileOrigin.Cache, Assert.Single(entries).Origin);
-      Assert.Equal(ProfileOrigin.Cache, loaded.Origin);
-      Assert.Equal("Cached C#", loaded.Profile.DisplayName);
-      Assert.True(loaded.RequiresTrust);
+      var online = new ProfileCatalog(Source, cache, onlineClient);
+      await online.ListAsync();
+      await online.LoadAsync("csharp-developer");
     }
-    finally
-    {
-      Directory.Delete(cache, recursive: true);
-    }
+
+    using var offlineClient = new HttpClient(new StubHttpMessageHandler(_ =>
+        throw new HttpRequestException("offline")));
+    var offline = new ProfileCatalog(Source, cache, offlineClient);
+
+    var entries = await offline.ListAsync();
+    var loaded = await offline.LoadAsync("csharp-developer");
+
+    Assert.Equal(ProfileOrigin.Cache, Assert.Single(entries).Origin);
+    Assert.Equal(ProfileOrigin.Cache, loaded.Origin);
+    Assert.Equal("Cached C#", loaded.Profile.DisplayName);
+    Assert.True(loaded.RequiresTrust);
   }
 
   [Fact]
   public async Task Catalog_WhenRemoteAndCacheAreUnavailable_ReportsClearError()
   {
-    var cache = CreateTempDirectory();
-    try
-    {
-      using var client = new HttpClient(new StubHttpMessageHandler(_ =>
-          throw new HttpRequestException("offline")));
-      var catalog = new ProfileCatalog(Source, cache, client);
+    var cache = RootDirectory;
+    using var client = new HttpClient(new StubHttpMessageHandler(_ =>
+        throw new HttpRequestException("offline")));
+    var catalog = new ProfileCatalog(Source, cache, client);
 
-      var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => catalog.ListAsync());
+    var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => catalog.ListAsync());
 
-      Assert.Contains("no local cache", exception.Message, StringComparison.OrdinalIgnoreCase);
-    }
-    finally
-    {
-      Directory.Delete(cache, recursive: true);
-    }
+    Assert.Contains("no local cache", exception.Message, StringComparison.OrdinalIgnoreCase);
   }
 
   [Fact]
   public async Task Catalog_FreshRemoteProfileReplacesStaleCache()
   {
-    var cache = CreateTempDirectory();
-    try
-    {
-      Directory.CreateDirectory(Path.Combine(cache, "official"));
-      await File.WriteAllTextAsync(
-          Path.Combine(cache, "official", "csharp-developer.json"),
-          ProfileJson("Stale", "1.0.0"));
-      using var client = CreateClient(_ => ProfileJson("Fresh", "2.0.0"));
-      var catalog = new ProfileCatalog(Source, cache, client);
+    var cache = RootDirectory;
+    Directory.CreateDirectory(Path.Combine(cache, "official"));
+    await File.WriteAllTextAsync(
+        Path.Combine(cache, "official", "csharp-developer.json"),
+        ProfileJson("Stale", "1.0.0"));
+    using var client = CreateClient(_ => ProfileJson("Fresh", "2.0.0"));
+    var catalog = new ProfileCatalog(Source, cache, client);
 
-      var loaded = await catalog.LoadAsync("csharp-developer");
+    var loaded = await catalog.LoadAsync("csharp-developer");
 
-      Assert.Equal(ProfileOrigin.Remote, loaded.Origin);
-      Assert.Equal("Fresh", loaded.Profile.DisplayName);
-      Assert.Contains(
-          "Fresh",
-          await File.ReadAllTextAsync(Path.Combine(cache, "official", "csharp-developer.json")));
-    }
-    finally
-    {
-      Directory.Delete(cache, recursive: true);
-    }
+    Assert.Equal(ProfileOrigin.Remote, loaded.Origin);
+    Assert.Equal("Fresh", loaded.Profile.DisplayName);
+    Assert.Contains(
+        "Fresh",
+        await File.ReadAllTextAsync(Path.Combine(cache, "official", "csharp-developer.json")));
   }
 
   [Fact]
   public async Task Catalog_RemoteNotFoundDoesNotHideBehindStaleCache()
   {
-    var cache = CreateTempDirectory();
-    try
-    {
-      Directory.CreateDirectory(Path.Combine(cache, "official"));
-      await File.WriteAllTextAsync(Path.Combine(cache, "official", "index.json"), CatalogJson());
-      using var client = new HttpClient(new StubHttpMessageHandler(_ =>
-          new HttpResponseMessage(HttpStatusCode.NotFound)));
-      var catalog = new ProfileCatalog(Source, cache, client);
+    var cache = RootDirectory;
+    Directory.CreateDirectory(Path.Combine(cache, "official"));
+    await File.WriteAllTextAsync(Path.Combine(cache, "official", "index.json"), CatalogJson());
+    using var client = new HttpClient(new StubHttpMessageHandler(_ =>
+        new HttpResponseMessage(HttpStatusCode.NotFound)));
+    var catalog = new ProfileCatalog(Source, cache, client);
 
-      await Assert.ThrowsAsync<HttpRequestException>(() => catalog.ListAsync());
-    }
-    finally
-    {
-      Directory.Delete(cache, recursive: true);
-    }
+    await Assert.ThrowsAsync<HttpRequestException>(() => catalog.ListAsync());
   }
 
   [Fact]
@@ -156,13 +122,6 @@ public sealed class ProfileCatalogTests
       {
         Content = new StringContent(response(request))
       }));
-
-  private static string CreateTempDirectory()
-  {
-    var path = Path.Combine(Path.GetTempPath(), $"wdem-{Guid.NewGuid():N}");
-    Directory.CreateDirectory(path);
-    return path;
-  }
 
   private static string ProfileJson(string displayName, string version) => $$"""
     {

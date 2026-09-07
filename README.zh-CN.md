@@ -78,6 +78,7 @@ Running → Cancelling → Cancelled       dependency failure → Blocked
 WDEM 的核心刻意采用纯领域驱动设计，并在外围建立清晰的 Clean Architecture 边界。模型直接使用产品语言——Profile、Task、依赖、Plan、Activity、Workflow、合规状态与执行结果——同时完全不了解 WPF、HTTP、JSON、PowerShell 或 Autofac。
 
 - `Wdem.Domain` 负责值对象、不变量、版本策略、DAG 规划、Workflow 定义和状态转换，不依赖任何项目或第三方包。
+- 不可变的 Task 生命周期领域事件描述已经发生的 Workflow 事实；Application 在进程内分发，Infrastructure 负责记录，同时保证诊断失败不会改变 Task 结果。
 - `Wdem.Application` 将 Inspect、Plan、Apply 表达为用例，并定义执行、持久化、信任与报告端口。
 - Infrastructure 与 Windows 是适配器；WPF 和 CLI 是同一套用例的响应式客户端，而不是业务规则的第二份实现。
 - Autofac 只存在于组合根 `Wdem.Bootstrapper`；领域对象从不主动解析服务。
@@ -309,7 +310,7 @@ WDEM 的目标是成为 Windows 环境收敛引擎：像 Terraform 一样可预�
 
 | 里程碑 | 结果 | 计划能力 |
 |---|---|---|
-| **0.1.2 · 执行基础** | 安全、可观测且具备合规判断的本地 Workflow | 可信远程 Profile、必选/可选 Task、依赖感知的并行 DAG、可组合 Task 状态机、不可变的 `NoOp`/`Install`/`Upgrade`/`Blocked` Plan、经确认的进程树安全取消、CLI/WPF 一致行为和 JSONL 审计日志 |
+| **0.1.2 · 执行基础** | 安全、可观测且具备合规判断的本地 Workflow | 可信远程 Profile、必选/可选 Task、依赖感知的并行 DAG、可组合 Task 状态机、不可变的 `NoOp`/`Install`/`Upgrade`/`Blocked` Plan、进程内生命周期领域事件、经确认的进程树安全取消、CLI/WPF 一致行为和 JSONL 审计日志 |
 | **0.2 · 完整 Plan 生命周期** | 让每次变更都可审阅、可传递 | 增加 `Reconfigure` 与移除策略、JSON Plan 导出、更丰富的 GUI 差异确认，以及 Apply 时再次校验 Profile 内容指纹 |
 | **0.3 · State 与恢复** | 中断后可继续，但绝不把缓存当成机器真相 | 原子保存 Desired/Observed State、执行 Journal、State 锁、重启/重启系统后续跑、只读漂移检测，以及每次 Plan/Apply 前重新 Detect |
 | **0.4 · 可复现 Profile** | 无需复制粘贴即可组合环境 | 类型化输入、经过验证的输出与 Task 引用、modules/includes、组织层与用户层、带哈希的来源/版本锁文件，以及明确的 Schema 迁移 |
@@ -356,7 +357,7 @@ WDEM 将贡献规范作为 [Agent Skill](.agents/skills/wdem-development/SKILL.m
 该 Skill 覆盖分层职责、Profile 与 Workflow 语义、安全终止进程树、管理员权限、安装器诊断、验证、打包和发布纪律。所有发现入口最终指向 `.agents/skills/` 中的唯一规范正文，保证不同 Agent 获得一致指导。[评估用例](.agents/skills/wdem-development/evals/evals.json)则覆盖安装器故障恢复、声明式 Task 扩展和响应式 UI 状态联动。
 
 贡献前请阅读 [AGENTS.md](AGENTS.md)，了解产品边界和验证要求。
-[测试策略](docs/TESTING.md)定义了测试金字塔、Given-When-Then 命名、Fixture 生命周期，以及确定性边界测试规范。
+[测试策略](docs/TESTING.md)定义了测试金字塔、Given-When-Then 命名、受约束的抽象 Fixture、Setup/Teardown 责任，以及确定性边界测试规范。
 
 ## 许可证
 
