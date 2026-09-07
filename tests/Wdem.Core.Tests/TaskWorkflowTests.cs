@@ -3,6 +3,8 @@ using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
 using Wdem.Core.Tests.TestDoubles;
 using Wdem.Core.Workflows;
+using Wdem.Domain.Execution;
+using Wdem.Domain.Workflows;
 using Xunit;
 
 namespace Wdem.Core.Tests;

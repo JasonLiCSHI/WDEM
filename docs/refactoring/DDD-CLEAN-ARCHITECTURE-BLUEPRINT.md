@@ -70,14 +70,14 @@ Ports are owned by the use case that needs them. Initial ports are `IProfileRepo
 | `Core/Runs/InspectReport.cs` | `Application/Inspection` | Keep as use-case result/read model |
 | `Core/Runs/RunReport.cs`, `StepReport.cs`, `TaskReport.cs` | `Domain/Execution` | Model immutable execution history |
 | `Core/Runs/TaskComplianceEvaluator.cs`, `TaskComplianceState.cs` | `Domain/Versions` | Move evaluation beside requirements |
-| `Core/Runs/TaskExecutionState.cs`, `TaskOutcome.cs` | `Domain/Execution` | Move stable lifecycle vocabulary |
+| ~~`Core/Runs/TaskExecutionState.cs`, `TaskOutcome.cs`~~ | `Domain/Execution` | Migrated stable lifecycle vocabulary |
 | `Core/Runs/TaskCapabilities.cs` | `Application/Queries` | Project capabilities from domain state |
 | `Core/Runs/TaskInspection.cs` | `Domain/Planning` observation | Feed immutable planning decisions |
 | `Core/Runs/WorkflowStateMachine.cs` | `Application/Execution` | Coordinate Activities using domain decisions |
 | `Core/Runs/WorkflowStateStore.cs` | `Application/Queries` | Project serialized immutable snapshots |
 | `Core/Runs/Workflow*.cs` snapshot/progress files | `Application/Queries` | Preserve client-facing read models |
 | ~~`Core/Runtime/*.cs`~~ | `Application/Runtime` | Migrated; Application owns the runtime port and transport results |
-| `Core/Workflows/TaskWorkflow*.cs` | `Domain/Workflows` | Move states, transitions, context, and decisions |
+| `Core/Workflows/TaskWorkflow*.cs` | `Domain/Workflows` | Transition facts and decisions migrated; executable state definitions remain transitional |
 | `Core/Workflows/WorkflowActivity*.cs` | split Domain/Application | Domain keeps declarations; Application executes Activities |
 | `Core/Workflows/DefaultTaskWorkflowProvider.cs` | `Application/Execution` | Compile Schema v1 into the domain workflow |
 | `Windows/Configuration/*` | `Infrastructure/Configuration` | Implement settings/trust persistence ports |

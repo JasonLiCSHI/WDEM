@@ -2,6 +2,8 @@ using Wdem.Core.Profiles;
 using Wdem.Application.Runtime;
 using Wdem.Core.Tasks;
 using Wdem.Core.Workflows;
+using Wdem.Domain.Execution;
+using Wdem.Domain.Workflows;
 
 namespace Wdem.Core.Runs;
 
@@ -166,9 +168,10 @@ internal sealed class WorkflowStateMachine(
         }
 
         var transitionContext = new TaskWorkflowTransitionContext(
-            task,
-            runtimeState,
-            activityResults);
+            ActivitiesSucceeded: activityResults.All(result => result.Succeeded),
+            IsTaskSatisfied: activityResults
+                .LastOrDefault(result => result.IsTaskSatisfied is not null)
+                ?.IsTaskSatisfied == true);
         var transition = runtimeState.Transitions.FirstOrDefault(candidate =>
             candidate.IsMatch(transitionContext));
         if (transition is null)

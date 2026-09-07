@@ -71,7 +71,7 @@ The current engine is a deterministic dependency-aware DAG scheduler. Every Task
 
 ## Task-driven state and reactive UI
 
-Core's `WorkflowStateMachine` is the single source of truth for execution. For each DAG Task, it owns the current runtime state ID, enters that state, and only then executes its ordered Entry, Residence, and Exit Activities. Residence results are evaluated by ordered transition predicates, and the selected target becomes the next runtime state. The transition limit prevents accidental infinite cycles.
+The Domain owns stable Task execution states, outcomes, Activity locations, and transition predicates. The transitional Core `WorkflowStateMachine` coordinates execution: for each DAG Task, it owns the current runtime state ID, enters that state, and only then executes its ordered Entry, Residence, and Exit Activities. Residence results are reduced to Domain workflow facts, evaluated by ordered Domain transitions, and the selected target becomes the next runtime state. The transition limit prevents accidental infinite cycles.
 
 `DefaultTaskWorkflowProvider` compiles Schema v1 into the familiar path:
 
@@ -109,7 +109,7 @@ Task capability matrix:
 
 ## Project responsibilities
 
-- `Wdem.Domain`: dependency-free business language and rules. Version requirements and compliance are the first migrated slice.
+- `Wdem.Domain`: dependency-free business language and rules. Version requirements, compliance, planning, stable execution state/outcomes, and workflow transition decisions live here.
 - `Wdem.Application`: use-case orchestration and ports; the Task Runtime command boundary now lives here and the layer depends only on Domain.
 - `Wdem.Core`: temporary compatibility module for Profile Schema mapping, inspection, Workflow state, and reports that have not migrated yet.
 - `Wdem.Windows`: user settings, trust records, logs, the shared administrator requirement, Windows process execution, output forwarding, and process-tree cancellation.

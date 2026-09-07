@@ -1,4 +1,4 @@
-namespace Wdem.Core.Runs;
+namespace Wdem.Domain.Execution;
 
 public enum TaskOutcome
 {
