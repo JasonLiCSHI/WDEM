@@ -38,3 +38,6 @@ jobs:
 
       - name: Test
         run: dotnet test Wdem.slnx --configuration Release --no-build
+
+      - name: Verify formatting
+        run: dotnet format Wdem.slnx --verify-no-changes --no-restore

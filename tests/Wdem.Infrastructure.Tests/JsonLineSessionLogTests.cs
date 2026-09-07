@@ -5,16 +5,20 @@ using Xunit;
 
 namespace Wdem.Infrastructure.Tests;
 
-public sealed class JsonLineSessionLogTests
+public sealed class JsonLineSessionLogTests : IDisposable
 {
+  private readonly string _directory = Path.Combine(
+      Path.GetTempPath(),
+      "Wdem.Tests",
+      Guid.NewGuid().ToString("N"));
+
   [Fact]
-  public void Write_PersistsSessionMetadataAndOrderedJsonLines()
+  public void Write_WhenEventIsRecorded_ThenPersistsSessionMetadataAndOrderedJsonLines()
   {
-    var directory = Path.Combine(Path.GetTempPath(), "Wdem.Tests", Guid.NewGuid().ToString("N"));
     string path;
     string sessionId;
 
-    using (var log = JsonLineSessionLog.CreateInDirectory("test", directory))
+    using (var log = JsonLineSessionLog.CreateInDirectory("test", _directory))
     {
       Assert.True(log.IsEnabled, log.LastError);
       path = Assert.IsType<string>(log.Path);
@@ -37,11 +41,10 @@ public sealed class JsonLineSessionLogTests
   }
 
   [Fact]
-  public void CreateInDirectory_WhenDirectoryIsUnavailable_DisablesLoggingWithoutThrowing()
+  public void CreateInDirectory_WhenDirectoryIsUnavailable_ThenDisablesLoggingWithoutThrowing()
   {
-    var parent = Path.Combine(Path.GetTempPath(), "Wdem.Tests", Guid.NewGuid().ToString("N"));
-    Directory.CreateDirectory(parent);
-    var filePath = Path.Combine(parent, "not-a-directory");
+    Directory.CreateDirectory(_directory);
+    var filePath = Path.Combine(_directory, "not-a-directory");
     File.WriteAllText(filePath, "occupied");
 
     using var log = JsonLineSessionLog.CreateInDirectory("test", filePath);
@@ -53,12 +56,11 @@ public sealed class JsonLineSessionLogTests
   }
 
   [Fact]
-  public void WriteUserAction_PersistsStructuredNonSensitiveOperationData()
+  public void WriteUserAction_WhenRecorded_ThenPersistsNonSensitiveStructuredData()
   {
-    var directory = Path.Combine(Path.GetTempPath(), "Wdem.Tests", Guid.NewGuid().ToString("N"));
     string path;
 
-    using (var log = JsonLineSessionLog.CreateInDirectory("test", directory))
+    using (var log = JsonLineSessionLog.CreateInDirectory("test", _directory))
     {
       path = Assert.IsType<string>(log.Path);
       log.WriteUserAction(
@@ -80,5 +82,13 @@ public sealed class JsonLineSessionLogTests
         "visual-studio-professional",
         data.GetProperty("TaskIds")[0].GetString());
     Assert.False(data.TryGetProperty("Arguments", out _));
+  }
+
+  public void Dispose()
+  {
+    if (Directory.Exists(_directory))
+    {
+      Directory.Delete(_directory, recursive: true);
+    }
   }
 }

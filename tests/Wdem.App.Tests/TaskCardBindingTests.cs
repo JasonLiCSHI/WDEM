@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
+using System.Runtime.ExceptionServices;
 using Wdem.Bootstrapper;
 using Wdem.Domain.Tasks;
 using Xunit;
@@ -10,7 +11,7 @@ namespace Wdem.App.Tests;
 public sealed class TaskCardBindingTests
 {
   [Fact]
-  public void TaskRow_ListsPreAndPostActivitiesByDisplayName()
+  public void TaskRow_WhenCreated_ThenListsPreAndPostActivitiesByDisplayName()
   {
     var row = new TaskRow(CreateTask());
 
@@ -21,17 +22,19 @@ public sealed class TaskCardBindingTests
   }
 
   [Fact]
-  public void MainWindow_RendersBrandedTaskCardWithoutBindingErrors()
+  public void MainWindow_WhenRendered_ThenBindsTheBrandedTaskCardWithoutErrors()
   {
-    Exception? renderingError = null;
+    ExceptionDispatchInfo? renderingError = null;
     var thread = new Thread(() =>
     {
+      var sessionRoot = Path.Combine(
+          Path.GetTempPath(),
+          "wdem-app-tests",
+          Guid.NewGuid().ToString("N"));
+      System.Windows.Application? application = null;
+      MainWindow? window = null;
       try
       {
-        var sessionRoot = Path.Combine(
-            Path.GetTempPath(),
-            "wdem-app-tests",
-            Guid.NewGuid().ToString("N"));
         using var session = WdemBootstrapper.StartSession(new WdemBootstrapperOptions("app-test")
         {
           SettingsPath = Path.Combine(sessionRoot, "settings.json"),
@@ -39,7 +42,7 @@ public sealed class TaskCardBindingTests
           LogDirectory = Path.Combine(sessionRoot, "logs"),
           ApplicationDirectory = sessionRoot
         });
-        var application = new System.Windows.Application();
+        application = new System.Windows.Application();
         application.Resources.MergedDictionaries.Add(new ResourceDictionary
         {
           Source = new Uri(
@@ -47,7 +50,7 @@ public sealed class TaskCardBindingTests
               UriKind.Absolute)
         });
 
-        var window = new MainWindow(session);
+        window = new MainWindow(session);
         Assert.NotNull(window.Icon);
         window.Measure(new Size(1200, 800));
         window.Arrange(new Rect(0, 0, 1200, 800));
@@ -58,22 +61,29 @@ public sealed class TaskCardBindingTests
         taskCard.Arrange(new Rect(0, 0, 1200, 800));
         taskCard.UpdateLayout();
 
-        window.Close();
-        application.Shutdown();
-        session.Dispose();
-        Directory.Delete(sessionRoot, recursive: true);
       }
       catch (Exception exception)
       {
-        renderingError = exception;
+        renderingError = ExceptionDispatchInfo.Capture(exception);
+      }
+      finally
+      {
+        window?.Close();
+        application?.Shutdown();
+        if (Directory.Exists(sessionRoot))
+        {
+          Directory.Delete(sessionRoot, recursive: true);
+        }
       }
     });
 
     thread.SetApartmentState(ApartmentState.STA);
+    thread.IsBackground = true;
     thread.Start();
-    thread.Join();
+    var completed = thread.Join(TimeSpan.FromSeconds(15));
 
-    Assert.Null(renderingError);
+    Assert.True(completed, "The WPF rendering test did not finish within 15 seconds.");
+    renderingError?.Throw();
   }
 
   private static ItemsControl FindRequiredTaskList(MainWindow window) =>
