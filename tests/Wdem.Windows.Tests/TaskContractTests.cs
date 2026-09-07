@@ -1,11 +1,12 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
-using Wdem.Core.Planning;
+using Wdem.Application.Planning;
 using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
 using Wdem.Application.Runtime;
 using Wdem.Domain.Execution;
+using Wdem.Domain.Profiles;
 using Wdem.Domain.Tasks;
 using Wdem.Windows.Processes;
 using Wdem.Windows.Runtime;
@@ -102,7 +103,7 @@ public sealed class TaskContractTests
   public async Task RepositoryProfile_ExecutesBothTaskPipelinesInDependencyOrder()
   {
     var profile = LoadRepositoryProfile(FindRepositoryRoot());
-    var plan = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["resharper"]);
+    var plan = new CreatePlanHandler().CreateForTasks(profile, rootTaskIds: ["resharper"]);
     var runtime = new RepositoryContractRuntime();
 
     var report = await EnvironmentManager.StartApply(profile, plan, runtime).Completion;
@@ -136,7 +137,7 @@ public sealed class TaskContractTests
   public async Task RepositoryProfile_VisualStudioFailureBlocksReSharperBeforeDetection()
   {
     var profile = LoadRepositoryProfile(FindRepositoryRoot());
-    var plan = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["resharper"]);
+    var plan = new CreatePlanHandler().CreateForTasks(profile, rootTaskIds: ["resharper"]);
     var runtime = new RepositoryContractRuntime(failVisualStudioApply: true);
 
     var report = await EnvironmentManager.StartApply(profile, plan, runtime).Completion;

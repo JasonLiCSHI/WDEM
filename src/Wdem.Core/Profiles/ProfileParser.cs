@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Wdem.Core.Runs;
 using Wdem.Domain.Execution;
+using Wdem.Domain.Profiles;
 using Wdem.Domain.Tasks;
 using Wdem.Domain.Versions;
 using Wdem.Domain.Workflows;

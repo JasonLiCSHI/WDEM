@@ -1,8 +1,7 @@
 using Wdem.Application.Execution;
-
-namespace Wdem.Core.Runs;
-
 using Wdem.Domain.Versions;
+
+namespace Wdem.Application.Inspection;
 
 public sealed record TaskInspection(
     string TaskId,

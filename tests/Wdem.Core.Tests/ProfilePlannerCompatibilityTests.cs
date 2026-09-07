@@ -1,4 +1,4 @@
-using Wdem.Core.Planning;
+using Wdem.Application.Planning;
 using Wdem.Core.Profiles;
 using Xunit;
 
@@ -11,7 +11,9 @@ public sealed class ProfilePlannerCompatibilityTests
   {
     var profile = ProfileParser.Parse(ProfileJson);
 
-    var plan = ProfilePlanner.CreateForSelection(profile, selectedOptionalTaskIds: ["resharper"]);
+    var plan = new CreatePlanHandler().CreateForSelection(
+        profile,
+        selectedOptionalTaskIds: ["resharper"]);
 
     Assert.Equal(
         ["dotnet-sdk", "visual-studio", "resharper"],
@@ -24,7 +26,9 @@ public sealed class ProfilePlannerCompatibilityTests
     var profile = ProfileParser.Parse(ProfileJson);
 
     var exception = Assert.Throws<FormatException>(() =>
-        ProfilePlanner.CreateForSelection(profile, selectedOptionalTaskIds: ["missing"]));
+        new CreatePlanHandler().CreateForSelection(
+            profile,
+            selectedOptionalTaskIds: ["missing"]));
 
     Assert.Contains("missing", exception.Message);
   }
@@ -48,7 +52,7 @@ public sealed class ProfilePlannerCompatibilityTests
     var profile = ProfileParser.Parse(json);
 
     var exception = Assert.Throws<InvalidOperationException>(() =>
-        ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["a"]));
+        new CreatePlanHandler().CreateForTasks(profile, rootTaskIds: ["a"]));
 
     Assert.Contains("a", exception.Message);
     Assert.Contains("b", exception.Message);

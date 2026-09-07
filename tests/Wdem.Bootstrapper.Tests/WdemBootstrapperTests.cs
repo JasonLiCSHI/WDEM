@@ -19,6 +19,8 @@ public sealed class WdemBootstrapperTests : IDisposable
     Assert.Same(session.ProfileCatalog, session.ProfileCatalog);
     Assert.Same(session.TaskRuntime, session.TaskRuntime);
     Assert.Same(session.WorkflowActivityExecutor, session.WorkflowActivityExecutor);
+    Assert.Same(session.CreatePlan, session.CreatePlan);
+    Assert.Same(session.InspectEnvironment, session.InspectEnvironment);
     Assert.Same(session.SessionLog, session.SessionLog);
   }
 
@@ -31,6 +33,8 @@ public sealed class WdemBootstrapperTests : IDisposable
     Assert.NotSame(first.Settings, second.Settings);
     Assert.NotSame(first.ProfileCatalog, second.ProfileCatalog);
     Assert.NotSame(first.TaskRuntime, second.TaskRuntime);
+    Assert.NotSame(first.CreatePlan, second.CreatePlan);
+    Assert.NotSame(first.InspectEnvironment, second.InspectEnvironment);
     Assert.NotSame(first.SessionLog, second.SessionLog);
   }
 

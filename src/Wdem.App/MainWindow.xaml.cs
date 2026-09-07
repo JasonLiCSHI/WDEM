@@ -5,10 +5,12 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
+using Wdem.Application.Execution;
+using Wdem.Application.Inspection;
+using Wdem.Application.Planning;
 using Wdem.Application.Runtime;
 using Wdem.Application.Workflows;
 using Wdem.Bootstrapper;
-using Wdem.Core.Planning;
 using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
 using Wdem.Domain.Planning;
@@ -25,6 +27,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
   private readonly WdemSession _session;
   private readonly ITaskRuntime _runtime;
   private readonly IWorkflowActivityExecutor _activityExecutor;
+  private readonly CreatePlanHandler _createPlan;
+  private readonly InspectEnvironmentHandler _inspectEnvironment;
   private readonly JsonLineSessionLog _log;
   private WdemUserSettingsStore? _settings;
   private ProfileCatalog? _catalog;
@@ -47,6 +51,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     _session = session ?? throw new ArgumentNullException(nameof(session));
     _runtime = session.TaskRuntime;
     _activityExecutor = session.WorkflowActivityExecutor;
+    _createPlan = session.CreatePlan;
+    _inspectEnvironment = session.InspectEnvironment;
     _log = session.SessionLog;
 
     InitializeComponent();
@@ -276,9 +282,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     AppendLog("inspect", I18n.Get("InspectStart"));
     try
     {
-      _inspectionTask = EnvironmentInspector.InspectAsync(
+      _inspectionTask = _inspectEnvironment.HandleAsync(
           _loadedProfile.Profile,
-          _runtime,
           CreateInspectionProgress(operationGeneration),
           _inspectCancellation.Token);
       var report = await _inspectionTask;
@@ -352,7 +357,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
           .Where(task => task.IsSelected)
           .Select(task => task.Id)
           .ToArray();
-      var plan = ProfilePlanner.CreateForSelection(_loadedProfile.Profile, selected);
+      var plan = _createPlan.CreateForSelection(_loadedProfile.Profile, selected);
       var report = await StartRunAsync(plan);
       LogUserAction(
           "start_selected_tasks",
@@ -380,7 +385,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     LogUserAction("start_task", UserActionOutcome.Requested, [row.Id]);
     try
     {
-      var plan = ProfilePlanner.CreateForTasks(_loadedProfile.Profile, [row.Id]);
+      var plan = _createPlan.CreateForTasks(_loadedProfile.Profile, [row.Id]);
       var report = await StartRunAsync(plan);
       LogUserAction("start_task", ToUserActionOutcome(report), TaskIds(plan));
     }

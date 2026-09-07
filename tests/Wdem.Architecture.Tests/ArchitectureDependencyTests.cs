@@ -147,6 +147,21 @@ public sealed class ArchitectureDependencyTests
   }
 
   [Theory]
+  [InlineData("src/Wdem.Domain/Profiles/EnvironmentProfile.cs")]
+  [InlineData("src/Wdem.Application/Planning/CreatePlanHandler.cs")]
+  [InlineData("src/Wdem.Application/Inspection/InspectEnvironmentHandler.cs")]
+  [InlineData("src/Wdem.Application/Inspection/InspectReport.cs")]
+  [InlineData("src/Wdem.Application/Execution/WorkflowProgress.cs")]
+  public void ProfileUseCasesFollowTheLayerBoundaries(string relativePath)
+  {
+    var path = Path.Combine(
+        FindRepositoryRoot(),
+        relativePath.Replace('/', Path.DirectorySeparatorChar));
+
+    Assert.True(File.Exists(path), $"Expected architecture source '{path}'.");
+  }
+
+  [Theory]
   [InlineData("src/Wdem.Domain", "System.Diagnostics.Process")]
   [InlineData("src/Wdem.Domain", "System.IO.File")]
   [InlineData("src/Wdem.Domain", "System.Net.Http")]

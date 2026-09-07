@@ -1,5 +1,6 @@
+using Wdem.Application.Execution;
+using Wdem.Application.Inspection;
 using Wdem.Core.Profiles;
-using Wdem.Core.Runs;
 using Wdem.Core.Tests.TestDoubles;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Versions;
@@ -16,7 +17,7 @@ public sealed class EnvironmentInspectorTests
     var runtime = new FakeRuntime()
         .WithDetect("git", exitCode: 0, stdout: "git version 2.52.0.windows.1");
 
-    var report = await EnvironmentInspector.InspectAsync(profile, runtime);
+    var report = await new InspectEnvironmentHandler(runtime).HandleAsync(profile);
 
     Assert.True(report.Tasks["git"].IsSatisfied);
     Assert.Equal(ComplianceStatus.Satisfied, report.Tasks["git"].Compliance);
@@ -30,7 +31,7 @@ public sealed class EnvironmentInspectorTests
     var runtime = new FakeRuntime()
         .WithDetect("git", exitCode: 0, stdout: "git version 2.40.0");
 
-    var report = await EnvironmentInspector.InspectAsync(profile, runtime);
+    var report = await new InspectEnvironmentHandler(runtime).HandleAsync(profile);
 
     Assert.False(report.Tasks["git"].IsSatisfied);
     Assert.Equal(ComplianceStatus.UpgradeRequired, report.Tasks["git"].Compliance);
@@ -44,7 +45,7 @@ public sealed class EnvironmentInspectorTests
     var runtime = new FakeRuntime()
         .WithDetect("git", exitCode: 1, stdout: "not found");
 
-    var report = await EnvironmentInspector.InspectAsync(profile, runtime);
+    var report = await new InspectEnvironmentHandler(runtime).HandleAsync(profile);
 
     Assert.False(report.Tasks["git"].DetectSucceeded);
     Assert.False(report.Tasks["git"].IsSatisfied);
@@ -58,7 +59,7 @@ public sealed class EnvironmentInspectorTests
     var runtime = new FakeRuntime()
         .WithDetect("git", exitCode: 0, stdout: "git version 2.51.0");
 
-    var report = await EnvironmentInspector.InspectAsync(profile, runtime);
+    var report = await new InspectEnvironmentHandler(runtime).HandleAsync(profile);
 
     Assert.Equal(ComplianceStatus.VersionMismatch, report.Tasks["git"].Compliance);
   }
@@ -72,7 +73,7 @@ public sealed class EnvironmentInspectorTests
     var updates = new List<WorkflowProgress>();
     var progress = new InlineProgress<WorkflowProgress>(updates.Add);
 
-    await EnvironmentInspector.InspectAsync(profile, runtime, progress);
+    await new InspectEnvironmentHandler(runtime).HandleAsync(profile, progress);
 
     Assert.Collection(
         updates,
@@ -96,7 +97,9 @@ public sealed class EnvironmentInspectorTests
     var runtime = new FakeRuntime().WithDetectThatWaitsForCancellation("git");
     using var cancellation = new CancellationTokenSource();
 
-    var inspection = EnvironmentInspector.InspectAsync(profile, runtime, cancellation.Token);
+    var inspection = new InspectEnvironmentHandler(runtime).HandleAsync(
+        profile,
+        cancellationToken: cancellation.Token);
     await runtime.WaitForCommandStartAsync("git", "detect");
     cancellation.Cancel();
 

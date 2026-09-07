@@ -1,3 +1,5 @@
+using Wdem.Domain.Profiles;
+
 namespace Wdem.Core.Profiles;
 
 public sealed record LoadedProfile(
