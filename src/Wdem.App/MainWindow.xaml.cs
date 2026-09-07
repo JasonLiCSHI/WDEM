@@ -5,21 +5,22 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
+using Wdem.Bootstrapper;
 using Wdem.Core.Planning;
 using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
+using Wdem.Core.Runtime;
 using Wdem.Domain.Planning;
 using Wdem.Domain.Versions;
 using Wdem.Windows.Configuration;
 using Wdem.Windows.Logging;
-using Wdem.Windows.Processes;
-using Wdem.Windows.Runtime;
 
 namespace Wdem.App;
 
 public partial class MainWindow : Window, INotifyPropertyChanged
 {
-  private readonly WindowsTaskRuntime _runtime = new(new DefaultProcessRunner());
+  private readonly WdemSession _session;
+  private readonly ITaskRuntime _runtime;
   private readonly JsonLineSessionLog _log;
   private WdemUserSettingsStore? _settings;
   private ProfileCatalog? _catalog;
@@ -37,12 +38,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
   private bool _closePending;
   private bool _allowClose;
 
-  public MainWindow()
+  public MainWindow(WdemSession session)
   {
+    _session = session ?? throw new ArgumentNullException(nameof(session));
+    _runtime = session.TaskRuntime;
+    _log = session.SessionLog;
+
     InitializeComponent();
     DataContext = this;
 
-    _log = JsonLineSessionLog.Create("gui");
     LogPath = _log.DisplayPath;
     AppendLog("startup", I18n.Get("StartupLog"));
     if (_log.LastError is not null)
@@ -107,9 +111,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     var shouldLoadProfile = false;
     try
     {
-      _settings = WdemUserSettingsStore.OpenDefault();
+      _settings = _session.Settings;
       var source = _settings.ProfileSource;
-      _catalog = new ProfileCatalog(source, _settings.CacheDirectory);
+      _catalog = _session.ProfileCatalog;
       var entries = await _catalog.ListAsync();
       foreach (var entry in entries)
       {

@@ -1,6 +1,7 @@
 <Solution>
   <Project Path="src/Wdem.Domain/Wdem.Domain.csproj" />
   <Project Path="src/Wdem.Application/Wdem.Application.csproj" />
+  <Project Path="src/Wdem.Bootstrapper/Wdem.Bootstrapper.csproj" />
   <Project Path="src/Wdem.Core/Wdem.Core.csproj" />
   <Project Path="src/Wdem.Windows/Wdem.Windows.csproj" />
   <Project Path="src/Wdem.Cli/Wdem.Cli.csproj" />
@@ -10,4 +11,5 @@
   <Project Path="tests/Wdem.Windows.Tests/Wdem.Windows.Tests.csproj" />
   <Project Path="tests/Wdem.App.Tests/Wdem.App.Tests.csproj" />
   <Project Path="tests/Wdem.Architecture.Tests/Wdem.Architecture.Tests.csproj" />
+  <Project Path="tests/Wdem.Bootstrapper.Tests/Wdem.Bootstrapper.Tests.csproj" />
 </Solution>

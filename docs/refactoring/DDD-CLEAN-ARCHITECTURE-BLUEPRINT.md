@@ -22,7 +22,7 @@ WPF / CLI → Bootstrapper → Application → Domain
 - `Wdem.Application` depends only on `Wdem.Domain` and owns use-case orchestration and ports.
 - `Wdem.Infrastructure` implements remote Profile, JSON, cache, trust, and journal ports.
 - `Wdem.Windows` implements process, elevation, and process-tree cancellation ports.
-- `Wdem.Bootstrapper` is the only composition root and may use Autofac after the interfaces and lifetimes stabilize.
+- `Wdem.Bootstrapper` is the only composition root and uses Autofac behind a narrow session boundary; clients and inner layers never receive the container.
 - `Wdem.App` and `Wdem.Cli` consume application use cases and read models; neither recreates domain rules.
 
 During migration, `Wdem.Core` remains a compatibility module. It must shrink in every migration PR and is removed only after all callers have moved.

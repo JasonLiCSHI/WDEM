@@ -22,6 +22,42 @@ public sealed class ArchitectureDependencyTests
         package => package.StartsWith("Autofac", StringComparison.OrdinalIgnoreCase));
   }
 
+  [Fact]
+  public void AutofacIsOwnedByTheBootstrapperCompositionRoot()
+  {
+    var repositoryRoot = FindRepositoryRoot();
+    var bootstrapper = LoadProject(
+        repositoryRoot,
+        "src",
+        "Wdem.Bootstrapper",
+        "Wdem.Bootstrapper.csproj");
+    var app = LoadProject(repositoryRoot, "src", "Wdem.App", "Wdem.App.csproj");
+    var cli = LoadProject(repositoryRoot, "src", "Wdem.Cli", "Wdem.Cli.csproj");
+
+    Assert.Contains(
+        PackageReferences(bootstrapper),
+        package => package.Equals("Autofac", StringComparison.OrdinalIgnoreCase));
+    Assert.Contains(
+        ProjectReferences(app),
+        reference => reference.EndsWith(
+            "Wdem.Bootstrapper.csproj",
+            StringComparison.OrdinalIgnoreCase));
+    Assert.Contains(
+        ProjectReferences(cli),
+        reference => reference.EndsWith(
+            "Wdem.Bootstrapper.csproj",
+            StringComparison.OrdinalIgnoreCase));
+
+    var projectsWithAutofac = Directory
+        .EnumerateFiles(Path.Combine(repositoryRoot, "src"), "*.csproj", SearchOption.AllDirectories)
+        .Where(project => PackageReferences(XDocument.Load(project)).Any(package =>
+            package.StartsWith("Autofac", StringComparison.OrdinalIgnoreCase)))
+        .Select(project => Path.GetFileNameWithoutExtension(project))
+        .ToArray();
+
+    Assert.Equal(["Wdem.Bootstrapper"], projectsWithAutofac);
+  }
+
   [Theory]
   [InlineData("src/Wdem.Domain", "System.Diagnostics.Process")]
   [InlineData("src/Wdem.Domain", "System.IO.File")]
