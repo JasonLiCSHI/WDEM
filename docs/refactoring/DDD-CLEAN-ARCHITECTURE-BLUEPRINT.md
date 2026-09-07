@@ -61,8 +61,8 @@ Ports are owned by the use case that needs them. Initial ports are `IProfileRepo
 | ~~`Core/Profiles/ProfileCatalogEntry.cs`~~ | `Application/Profiles/ProfileCatalogEntry.cs` | Migrated catalog projection out of Domain |
 | ~~`Core/Profiles/LoadedProfile.cs`~~ | `Application/Profiles/LoadedProfile.cs` | Migrated origin/hash load result |
 | ~~`Core/Profiles/ProfileOrigin.cs`~~ | `Application/Profiles/ProfileOrigin.cs` | Migrated transport origin outside Domain |
-| ~~`Core/Profiles/ProfileParser.cs`~~ | `Infrastructure/Profiles/ProfileParser.cs` | Migrated JSON adapter; deserializer/validator/mapper decomposition remains internal follow-up work |
-| ~~`Core/Profiles/ProfileCatalog.cs`~~ | `Infrastructure/Profiles/ProfileCatalog.cs` | Migrated implementation behind Application `IProfileRepository` |
+| ~~`Core/Profiles/ProfileParser.cs`~~ | `Infrastructure/Profiles` parsing components | Migrated and split into deserializer, document mapper, cross-Task validator, and stable facade |
+| ~~`Core/Profiles/ProfileCatalog.cs`~~ | `Infrastructure/Profiles/ProfileCatalog.cs` | Migrated behind Application `IProfileRepository`; HTTP retrieval and last-known-good cache are focused collaborators |
 | ~~`Core/Graph/TaskGraph.cs`~~ | `Domain/Planning/TaskPlanner.cs` | Migrated: public graph replaced by immutable Plan |
 | ~~`Core/Runs/EnvironmentInspector.cs`~~ | `Application/Inspection/InspectEnvironmentHandler.cs` | Migrated use-case handler over the runtime port |
 | ~~`Core/Runs/EnvironmentManager.cs`~~ | `Application/Execution/ApplyPlanHandler.cs` | Migrated to an Autofac-composed use-case handler |

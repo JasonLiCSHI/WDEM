@@ -29,7 +29,7 @@ Release-defined HTTPS Profile Source
 ## Deep modules and seams
 
 - Application `IProfileRepository` is the external seam for remote configuration. Infrastructure `ProfileCatalog` implements its `ListAsync` and `LoadAsync` operations; HTTPS enforcement, redirect validation, size limits, UTF-8 decoding, atomic caching, offline fallback, and ID validation remain internal.
-- Infrastructure `ProfileParser` converts versioned JSON into the Domain Profile model, so clients and inner layers never handle JSON details.
+- Infrastructure `ProfileParser` is a stable facade over focused document deserialization, DTO-to-Domain mapping, and cross-Task validation components. Remote retrieval and last-known-good persistence are likewise isolated behind `HttpProfileDocumentSource` and `ProfileDocumentCache`, so clients and inner layers never handle transport or JSON details.
 - Domain `TaskPlanner` encapsulates Required/Optional selection, dependency closure, deduplication, topological sorting, and cycle detection, and returns an immutable `Plan`. Application `CreatePlanHandler` maps a Domain `EnvironmentProfile` into that planning interface for both clients.
 - Application `ApplyPlanHandler.Start` compiles or selects a per-Task state graph and encapsulates graph execution, failure propagation, cancellation, and reporting.
 - Application's `ITaskRuntime` is the execution port. The current Windows adapter starts a Domain `CommandDefinition` as an executable plus argument array. Future script downloaders, elevation brokers, or remote executors can be introduced without teaching the DAG about specific products.
