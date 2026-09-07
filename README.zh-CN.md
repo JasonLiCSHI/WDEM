@@ -321,9 +321,9 @@ dotnet run --project src/Wdem.Cli/Wdem.Cli.csproj -- profiles
 |---|---|
 | `Wdem.Domain` | Profile/Task 不变量、版本规则、不可变 Plan 与 Workflow 决策 |
 | `Wdem.Application` | 检查、规划和执行用例，Runtime 端口、快照、能力与报告 |
-| `Wdem.Infrastructure` | Profile JSON、远程优先读取与 last-known-good 缓存适配器 |
+| `Wdem.Infrastructure` | Profile JSON、远程/缓存、信任持久化与 JSONL 日志适配器 |
 | `Wdem.Bootstrapper` | Autofac 组合根，通过强类型 Session 边界提供依赖 |
-| `Wdem.Windows` | Windows 进程执行、输出转发、进程树取消、信任设置和日志 |
+| `Wdem.Windows` | Windows 进程执行、输出转发、进程树取消与管理员权限检查 |
 | `Wdem.Cli` | 命令行交互、计划确认、重试和终端展示 |
 | `Wdem.App` | 本地化 WPF 工作台、Task 详情和响应式状态投影 |
 

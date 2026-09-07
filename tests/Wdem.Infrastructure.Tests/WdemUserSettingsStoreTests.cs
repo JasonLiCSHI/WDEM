@@ -1,9 +1,9 @@
 using Wdem.Application.Profiles;
+using Wdem.Infrastructure.Configuration;
 using Wdem.Infrastructure.Profiles;
-using Wdem.Windows.Configuration;
 using Xunit;
 
-namespace Wdem.Windows.Tests;
+namespace Wdem.Infrastructure.Tests;
 
 public sealed class WdemUserSettingsStoreTests
 {

@@ -1,8 +1,9 @@
 using System.Text.Json;
-using Wdem.Windows.Logging;
+using Wdem.Application.Logging;
+using Wdem.Infrastructure.Logging;
 using Xunit;
 
-namespace Wdem.Windows.Tests;
+namespace Wdem.Infrastructure.Tests;
 
 public sealed class JsonLineSessionLogTests
 {

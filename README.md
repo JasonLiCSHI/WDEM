@@ -321,9 +321,9 @@ dotnet run --project src/Wdem.Cli/Wdem.Cli.csproj -- profiles
 |---|---|
 | `Wdem.Domain` | Profile/Task invariants, version rules, immutable Plans, and Workflow decisions |
 | `Wdem.Application` | Inspection, planning and execution use cases, runtime ports, snapshots, capabilities, and reports |
-| `Wdem.Infrastructure` | Profile JSON plus remote-first and last-known-good cache adapters |
+| `Wdem.Infrastructure` | Profile JSON, remote/cache, trust persistence, and JSONL logging adapters |
 | `Wdem.Bootstrapper` | Autofac composition root exposed through a typed session boundary |
-| `Wdem.Windows` | Windows process execution, output forwarding, process-tree cancellation, trust settings, and logs |
+| `Wdem.Windows` | Windows process execution, output forwarding, process-tree cancellation, and administrator checks |
 | `Wdem.Cli` | Command-line interaction, plan confirmation, retries, and terminal presentation |
 | `Wdem.App` | Localized WPF workbench, Task details, and reactive state projection |
 

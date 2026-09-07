@@ -111,8 +111,8 @@ Task capability matrix:
 
 - `Wdem.Domain`: dependency-free business language and rules. Task and command definitions, version requirements, compliance, planning, stable execution state/outcomes, and workflow transition decisions live here.
 - `Wdem.Application`: use-case orchestration and ports; the Task Runtime boundary, Activity execution, and execution step results live here and the layer depends only on Domain.
-- `Wdem.Infrastructure`: Profile JSON and remote/cache I/O adapters implementing Application-owned ports; it depends inward on Application and Domain and never on the transitional Core.
-- `Wdem.Windows`: user settings, trust records, logs, the shared administrator requirement, Windows process execution, output forwarding, and process-tree cancellation.
+- `Wdem.Infrastructure`: Profile JSON, remote/cache I/O, trust persistence, and JSONL logging adapters implementing Application-owned ports; it depends inward on Application and Domain.
+- `Wdem.Windows`: the shared administrator requirement, Windows process execution, output forwarding, and process-tree cancellation.
 - `Wdem.Cli`: Profile selection, trust confirmation, complete plan preview, retries, and terminal output.
 - `Wdem.App`: installation-language-aware WPF workbench, unified button-state projection, Required/Optional sections, Task details, progress, cancellation, and logs.
 
