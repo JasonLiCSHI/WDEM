@@ -176,7 +176,7 @@ Every remote Profile Source contains an `index.json` and one `<id>.json` file pe
 8. Apply exit code zero means only that the Apply phase completed; the Task succeeds only when Verify satisfies the version requirement.
 9. Apply and retry must re-inspect, regenerate an immutable Plan with `NoOp`, `Install`, `Upgrade`, or `Blocked` actions, and create fresh Task workflows at their declared initial states; the Schema v1 initial state is Detect.
 10. Starting one Task automatically includes and first executes any unsatisfied dependencies.
-11. Cancelling one Task terminates its active process tree. Dependents become `Blocked`, while unrelated Tasks may continue.
+11. Cancelling one Task terminates its active process tree and waits for confirmed process exit before reporting `Cancelled`. A termination failure is reported as a Task failure. Dependents become `Blocked`, while unrelated Tasks may continue.
 12. Cancel All terminates every active process tree and prevents any waiting Task from starting.
 13. Detect, Pre, Apply, Post, and Verify cannot run until the current Remote/Cache Profile content hash is trusted.
 
