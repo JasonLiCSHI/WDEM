@@ -257,12 +257,12 @@ WDEM-<version>-win-x64-setup.exe
 安装 .NET 10 SDK 和 Inno Setup 6，然后运行：
 
 ```powershell
-pwsh .\build\Build-Installer.ps1 -Version 0.1.1
+pwsh .\build\Build-Installer.ps1 -Version 0.1.2
 ```
 
 产物及其 SHA-256 校验文件会写入 `artifacts/installer/`。`script/` 和 `settings/` 会作为运行时资源打包；安装程序永远不会捆绑 `profiles/`。
 
-维护者可以通过推送 `v0.1.1` 这样的语义版本标签发布新版本。GitHub Actions 会测试解决方案、构建发布产物，并将安装程序和校验文件附加到对应 GitHub Release。
+维护者可以通过推送 `v0.1.2` 这样的语义版本标签发布新版本。GitHub Actions 会测试解决方案、构建发布产物，并将安装程序和校验文件附加到对应 GitHub Release。
 
 ## 安全与恢复
 
@@ -309,8 +309,8 @@ WDEM 的目标是成为 Windows 环境收敛引擎：像 Terraform 一样可预�
 
 | 里程碑 | 结果 | 计划能力 |
 |---|---|---|
-| **0.1.1 · 执行基础** | 安全且可观测的本地 Workflow | 可信远程 Profile、必选/可选 Task、依赖感知的并行 DAG、可组合 Task 状态机、进程树安全取消、CLI/WPF 一致行为和 JSONL 审计日志 |
-| **0.2 · Apply 前先 Plan** | 每次变更都可审阅 | 不可变 Plan 模型；`NoOp`、`Create`、`Upgrade`、`Reconfigure`、`Blocked` 变更；JSON 导出；GUI 差异确认；Apply 时再次校验 Profile 内容指纹 |
+| **0.1.2 · 执行基础** | 安全、可观测且具备合规判断的本地 Workflow | 可信远程 Profile、必选/可选 Task、依赖感知的并行 DAG、可组合 Task 状态机、不可变的 `NoOp`/`Install`/`Upgrade`/`Blocked` Plan、经确认的进程树安全取消、CLI/WPF 一致行为和 JSONL 审计日志 |
+| **0.2 · 完整 Plan 生命周期** | 让每次变更都可审阅、可传递 | 增加 `Reconfigure` 与移除策略、JSON Plan 导出、更丰富的 GUI 差异确认，以及 Apply 时再次校验 Profile 内容指纹 |
 | **0.3 · State 与恢复** | 中断后可继续，但绝不把缓存当成机器真相 | 原子保存 Desired/Observed State、执行 Journal、State 锁、重启/重启系统后续跑、只读漂移检测，以及每次 Plan/Apply 前重新 Detect |
 | **0.4 · 可复现 Profile** | 无需复制粘贴即可组合环境 | 类型化输入、经过验证的输出与 Task 引用、modules/includes、组织层与用户层、带哈希的来源/版本锁文件，以及明确的 Schema 迁移 |
 | **0.5 · 可扩展 Runtime** | 无需向 Domain/Application 添加产品特例即可增加安装机制 | 通用 Executable、MSI/MSIX、Archive/Download、WinGet Adapter；超时、重试/退避、需要重启结果、并发限制和独占资源锁 |

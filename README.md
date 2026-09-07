@@ -257,12 +257,12 @@ WDEM must run with administrator privileges because environment Tasks install an
 Install the .NET 10 SDK and Inno Setup 6, then run:
 
 ```powershell
-pwsh .\build\Build-Installer.ps1 -Version 0.1.1
+pwsh .\build\Build-Installer.ps1 -Version 0.1.2
 ```
 
 Output is written to `artifacts/installer/` together with a SHA-256 checksum. `script/` and `settings/` are included as runtime assets; the installer never bundles `profiles/`.
 
-Maintainers publish a release by pushing a semantic version tag such as `v0.1.1`. GitHub Actions tests the solution, builds the release payload, and attaches the installer and checksum to the matching GitHub Release.
+Maintainers publish a release by pushing a semantic version tag such as `v0.1.2`. GitHub Actions tests the solution, builds the release payload, and attaches the installer and checksum to the matching GitHub Release.
 
 ## Security and recovery
 
@@ -309,8 +309,8 @@ WDEM's destination is a Windows environment convergence engine: previewable and 
 
 | Milestone | Outcome | Planned capabilities |
 |---|---|---|
-| **0.1.1 · Execution foundation** | A safe, observable local workflow | Trusted remote Profiles, Required/Optional selection, dependency-aware parallel DAG execution, composable Task state machines, process-tree cancellation, CLI/WPF parity, and JSONL audit logs |
-| **0.2 · Plan before Apply** | Make every change reviewable | Immutable Plan model; `NoOp`, `Create`, `Upgrade`, `Reconfigure`, and `Blocked` changes; JSON export; GUI approval diff; Profile content fingerprint checked again at Apply |
+| **0.1.2 · Execution foundation** | A safe, observable, compliance-aware local workflow | Trusted remote Profiles, Required/Optional selection, dependency-aware parallel DAG execution, composable Task state machines, immutable `NoOp`/`Install`/`Upgrade`/`Blocked` Plans, confirmed process-tree cancellation, CLI/WPF parity, and JSONL audit logs |
+| **0.2 · Complete Plan lifecycle** | Make every change reviewable and portable | Add `Reconfigure` and removal policy, JSON Plan export, richer GUI approval diff, and Profile content fingerprint validation again at Apply |
 | **0.3 · State and recovery** | Survive interruption without pretending cache is truth | Atomic desired/observed State, execution journal, state locking, restart/reboot continuation, read-only drift detection, and fresh Detect before every Plan or Apply |
 | **0.4 · Reproducible Profiles** | Compose environments without copy-and-paste | Typed inputs, validated outputs and Task references, modules/includes, organization and user layers, source/version lock file with hashes, and explicit Schema migration |
 | **0.5 · Extensible runtime** | Add installation mechanisms without product-specific Domain/Application logic | Generic executable, MSI/MSIX, archive/download, and WinGet adapters; timeouts, retry/backoff, reboot-required outcomes, concurrency limits, and exclusive resource locks |
