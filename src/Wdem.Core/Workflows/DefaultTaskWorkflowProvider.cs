@@ -13,14 +13,12 @@ public sealed class DefaultTaskWorkflowProvider : ITaskWorkflowProvider
   {
   }
 
-  public TaskWorkflowDefinition Create(
-      TaskDefinition task,
-      TaskWorkflowDefinition? declaredWorkflow = null)
+  public TaskWorkflowDefinition Create(TaskDefinition task)
   {
     ArgumentNullException.ThrowIfNull(task);
-    if (declaredWorkflow is not null)
+    if (task.Workflow is not null)
     {
-      return declaredWorkflow;
+      return task.Workflow;
     }
 
     var states = new List<TaskWorkflowState>();
@@ -55,7 +53,7 @@ public sealed class DefaultTaskWorkflowProvider : ITaskWorkflowProvider
     }
 
     WorkflowActivity applyActivity = task.Apply is null
-        ? new MissingApplyActivity()
+        ? new FailureWorkflowActivity("apply", "Task has no apply command.", "apply")
         : new CommandWorkflowActivity("apply", "apply", task.Apply);
     var afterApply = task.Post.Count > 0 ? "post" : "verify";
     states.Add(new TaskWorkflowState(
@@ -116,12 +114,4 @@ public sealed class DefaultTaskWorkflowProvider : ITaskWorkflowProvider
     return new TaskWorkflowDefinition("detect", states);
   }
 
-  private sealed class MissingApplyActivity()
-      : WorkflowActivity("apply", "apply")
-  {
-    public override Task<WorkflowActivityResult> ExecuteAsync(
-        WorkflowActivityContext context,
-        CancellationToken cancellationToken) =>
-        Task.FromResult(WorkflowActivityResult.Failure("Task has no apply command."));
-  }
 }

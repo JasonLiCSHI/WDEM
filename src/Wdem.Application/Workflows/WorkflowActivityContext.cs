@@ -1,16 +1,15 @@
 using Wdem.Application.Runtime;
-using Wdem.Core.Runs;
 using Wdem.Domain.Tasks;
 using Wdem.Domain.Workflows;
 
-namespace Wdem.Core.Workflows;
+namespace Wdem.Application.Workflows;
 
 public sealed class WorkflowActivityContext
 {
   private readonly ITaskRuntime _runtime;
   private readonly Action<CommandOutput> _publishOutput;
 
-  internal WorkflowActivityContext(
+  public WorkflowActivityContext(
       TaskDefinition task,
       string stateId,
       WorkflowActivityLocation location,
@@ -30,7 +29,9 @@ public sealed class WorkflowActivityContext
 
   public WorkflowActivityLocation Location { get; }
 
-  public void ReportOutput(string message, WorkflowOutputStream stream = WorkflowOutputStream.StandardOutput) =>
+  public void ReportOutput(
+      string message,
+      WorkflowOutputStream stream = WorkflowOutputStream.StandardOutput) =>
       _publishOutput(new CommandOutput(stream, message));
 
   public Task<CommandResult> RunCommandAsync(

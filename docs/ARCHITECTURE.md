@@ -55,7 +55,7 @@ The installer does not contain `profiles/`. That repository directory is the con
 
 ## Profile and runtime extensibility
 
-Profile Schema v1 covers the compact default workflow: Profile version, Task description, Required/Optional behavior, dependencies, version requirements, preferred version, source, Detect/Pre/Apply/Post commands, human-readable step names, and Detect reuse for Verify. Domain `TaskDefinition` contains only this immutable desired state; optional executable workflow graphs are associated by Task ID outside the Task definition. The standard workflow is compiled into a state graph rather than handled by a separate runner. Commands always use an executable plus an argument array; shell command strings are never concatenated.
+Profile Schema v1 covers the compact default workflow: Profile version, Task description, Required/Optional behavior, dependencies, version requirements, preferred version, source, Detect/Pre/Apply/Post commands, human-readable step names, and Detect reuse for Verify. Domain `TaskDefinition` contains immutable desired state and may reference a pure Domain workflow definition. The standard workflow is compiled into the same state-graph model rather than handled by a separate runner. Commands always use an executable plus an argument array; shell command strings are never concatenated.
 
 Profile Schema v2 optionally declares a Task `workflow`. A workflow names an initial state, a transition limit, and states. Every state maps to a stable `TaskExecutionState`, owns ordered Entry, Residence, and Exit Activity collections, and declares ordered transitions or a terminal outcome. Built-in declarative conditions cover Activity success/failure and detected compliance. The parser rejects missing initial states, duplicate state IDs, dangling targets, non-terminal states without transitions, and terminal states with transitions.
 
@@ -63,7 +63,7 @@ Extension happens at two levels:
 
 - new software, parameters, versions, and post-install configuration require only Profile changes;
 - new execution mechanisms use an `ITaskRuntime` adapter;
-- new in-process work derives from `WorkflowActivity`;
+- new Activity definitions derive from Domain `WorkflowActivity`, while execution is supplied through Application `IWorkflowActivityExecutor`;
 - new workflow factories implement `ITaskWorkflowProvider`, and code-defined transitions may use custom predicates;
 - declaration-format changes use a new `schemaVersion`.
 
@@ -71,7 +71,7 @@ The current engine is a deterministic dependency-aware DAG scheduler. Every Task
 
 ## Task-driven state and reactive UI
 
-The Domain owns stable Task execution states, outcomes, Activity locations, and transition predicates. The transitional Core `WorkflowStateMachine` coordinates execution: for each DAG Task, it owns the current runtime state ID, enters that state, and only then executes its ordered Entry, Residence, and Exit Activities. Residence results are reduced to Domain workflow facts, evaluated by ordered Domain transitions, and the selected target becomes the next runtime state. The transition limit prevents accidental infinite cycles.
+The Domain owns workflow definitions, stable Task execution states, outcomes, Activity locations, graph validation, and transition predicates. Application owns Activity execution and converts Runtime results into Activity results. The transitional Core `WorkflowStateMachine` coordinates execution: for each DAG Task, it owns the current runtime state ID, enters that state, and only then invokes the Application executor for its ordered Entry, Residence, and Exit Activities. Activity results are reduced to Domain workflow facts, evaluated by ordered Domain transitions, and the selected target becomes the next runtime state. The transition limit prevents accidental infinite cycles.
 
 `DefaultTaskWorkflowProvider` compiles Schema v1 into the familiar path:
 
@@ -110,7 +110,7 @@ Task capability matrix:
 ## Project responsibilities
 
 - `Wdem.Domain`: dependency-free business language and rules. Task and command definitions, version requirements, compliance, planning, stable execution state/outcomes, and workflow transition decisions live here.
-- `Wdem.Application`: use-case orchestration and ports; the Task Runtime command boundary now lives here and the layer depends only on Domain.
+- `Wdem.Application`: use-case orchestration and ports; the Task Runtime boundary, Activity execution, and execution step results live here and the layer depends only on Domain.
 - `Wdem.Core`: temporary compatibility module for Profile Schema mapping, inspection, Workflow state, and reports that have not migrated yet.
 - `Wdem.Windows`: user settings, trust records, logs, the shared administrator requirement, Windows process execution, output forwarding, and process-tree cancellation.
 - `Wdem.Cli`: Profile selection, trust confirmation, complete plan preview, retries, and terminal output.

@@ -1,6 +1,6 @@
 using System.Collections.ObjectModel;
 
-namespace Wdem.Core.Workflows;
+namespace Wdem.Domain.Workflows;
 
 public sealed class TaskWorkflowDefinition
 {

@@ -10,6 +10,7 @@
   <Project Path="tests/Wdem.Domain.Tests/Wdem.Domain.Tests.csproj" />
   <Project Path="tests/Wdem.Windows.Tests/Wdem.Windows.Tests.csproj" />
   <Project Path="tests/Wdem.App.Tests/Wdem.App.Tests.csproj" />
+  <Project Path="tests/Wdem.Application.Tests/Wdem.Application.Tests.csproj" />
   <Project Path="tests/Wdem.Architecture.Tests/Wdem.Architecture.Tests.csproj" />
   <Project Path="tests/Wdem.Bootstrapper.Tests/Wdem.Bootstrapper.Tests.csproj" />
 </Solution>

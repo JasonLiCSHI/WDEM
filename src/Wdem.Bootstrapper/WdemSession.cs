@@ -1,5 +1,6 @@
 using Autofac;
 using Wdem.Application.Runtime;
+using Wdem.Application.Workflows;
 using Wdem.Core.Profiles;
 using Wdem.Windows.Configuration;
 using Wdem.Windows.Logging;
@@ -27,6 +28,9 @@ public sealed class WdemSession : IDisposable
   public ProfileCatalog ProfileCatalog => Resolve<ProfileCatalog>();
 
   public ITaskRuntime TaskRuntime => Resolve<ITaskRuntime>();
+
+  public IWorkflowActivityExecutor WorkflowActivityExecutor =>
+      Resolve<IWorkflowActivityExecutor>();
 
   public void Dispose()
   {

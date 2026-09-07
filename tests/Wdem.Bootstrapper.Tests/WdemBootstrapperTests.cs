@@ -18,6 +18,7 @@ public sealed class WdemBootstrapperTests : IDisposable
     Assert.Same(session.Settings, session.Settings);
     Assert.Same(session.ProfileCatalog, session.ProfileCatalog);
     Assert.Same(session.TaskRuntime, session.TaskRuntime);
+    Assert.Same(session.WorkflowActivityExecutor, session.WorkflowActivityExecutor);
     Assert.Same(session.SessionLog, session.SessionLog);
   }
 

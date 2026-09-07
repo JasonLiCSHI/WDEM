@@ -1,10 +1,11 @@
 using System.Text.RegularExpressions;
+using Wdem.Application.Execution;
 using Wdem.Domain.Tasks;
 using Wdem.Domain.Versions;
 
-namespace Wdem.Core.Runs;
+namespace Wdem.Application.Inspection;
 
-internal static class TaskComplianceEvaluator
+public static class TaskComplianceEvaluator
 {
   public static TaskComplianceEvaluation Evaluate(TaskDefinition task, StepReport detectStep)
       => Evaluate(task, task.Detect, detectStep);
@@ -49,6 +50,6 @@ internal static class TaskComplianceEvaluator
   }
 }
 
-internal readonly record struct TaskComplianceEvaluation(
+public readonly record struct TaskComplianceEvaluation(
     ComplianceStatus State,
     string? DetectedVersion);

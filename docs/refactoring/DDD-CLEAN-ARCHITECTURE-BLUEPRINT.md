@@ -54,7 +54,7 @@ Ports are owned by the use case that needs them. Initial ports are `IProfileRepo
 | Current source | Destination | Action |
 |---|---|---|
 | `Core/Versions/VersionConstraint.cs` | `Domain/Versions/VersionRequirement.cs`, `SoftwareVersion.cs` | Split parsing/comparison from compliance result |
-| ~~`Core/Tasks/TaskDefinition.cs`~~ | `Domain/Tasks/TaskDefinition.cs` | Migrated immutable desired-state definition; executable workflow association stays outside the Task |
+| ~~`Core/Tasks/TaskDefinition.cs`~~ | `Domain/Tasks/TaskDefinition.cs` | Migrated immutable desired-state definition; it references only pure Domain workflow definitions |
 | ~~`Core/Tasks/CommandDefinition.cs`~~ | `Domain/Tasks/CommandDefinition.cs` | Migrated; keeps the executable plus argument-array invariant |
 | `Core/Profiles/EnvironmentProfile.cs` | `Domain/Profiles/Profile.cs` | Rename after callers migrate |
 | `Core/Profiles/ProfileSourceDefinition.cs` | `Domain/Profiles/ProfileSource.cs` | Move validated identity and URI value semantics |
@@ -69,7 +69,7 @@ Ports are owned by the use case that needs them. Initial ports are `IProfileRepo
 | `Core/Runs/EnvironmentRun.cs` | `Application/Execution` | Rename to execution handle |
 | `Core/Runs/InspectReport.cs` | `Application/Inspection` | Keep as use-case result/read model |
 | `Core/Runs/RunReport.cs`, `StepReport.cs`, `TaskReport.cs` | `Domain/Execution` | Model immutable execution history |
-| `Core/Runs/TaskComplianceEvaluator.cs`, `TaskComplianceState.cs` | `Domain/Versions` | Move evaluation beside requirements |
+| ~~`Core/Runs/TaskComplianceEvaluator.cs`, `TaskComplianceState.cs`~~ | `Application/Inspection`, `Domain/Versions` | Migrated command-output interpretation and compliance rules |
 | ~~`Core/Runs/TaskExecutionState.cs`, `TaskOutcome.cs`~~ | `Domain/Execution` | Migrated stable lifecycle vocabulary |
 | `Core/Runs/TaskCapabilities.cs` | `Application/Queries` | Project capabilities from domain state |
 | `Core/Runs/TaskInspection.cs` | `Domain/Planning` observation | Feed immutable planning decisions |
@@ -77,8 +77,8 @@ Ports are owned by the use case that needs them. Initial ports are `IProfileRepo
 | `Core/Runs/WorkflowStateStore.cs` | `Application/Queries` | Project serialized immutable snapshots |
 | `Core/Runs/Workflow*.cs` snapshot/progress files | `Application/Queries` | Preserve client-facing read models |
 | ~~`Core/Runtime/*.cs`~~ | `Application/Runtime` | Migrated; Application owns the runtime port and transport results |
-| `Core/Workflows/TaskWorkflow*.cs` | `Domain/Workflows` | Transition facts and decisions migrated; executable state definitions remain transitional |
-| `Core/Workflows/WorkflowActivity*.cs` | split Domain/Application | Domain keeps declarations; Application executes Activities |
+| ~~`Core/Workflows/TaskWorkflow*.cs`~~ | `Domain/Workflows` | Migrated state graph definitions, validation, transition facts, and decisions |
+| ~~`Core/Workflows/WorkflowActivity*.cs`~~ | split Domain/Application | Migrated: Domain keeps Activity definitions; Application executes them through a port |
 | `Core/Workflows/DefaultTaskWorkflowProvider.cs` | `Application/Execution` | Compile Schema v1 into the domain workflow |
 | `Windows/Configuration/*` | `Infrastructure/Configuration` | Implement settings/trust persistence ports |
 | `Windows/Logging/*` | `Infrastructure/Logging` | Implement execution journal port |

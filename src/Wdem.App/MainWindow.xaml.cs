@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
 using Wdem.Application.Runtime;
+using Wdem.Application.Workflows;
 using Wdem.Bootstrapper;
 using Wdem.Core.Planning;
 using Wdem.Core.Profiles;
@@ -23,6 +24,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 {
   private readonly WdemSession _session;
   private readonly ITaskRuntime _runtime;
+  private readonly IWorkflowActivityExecutor _activityExecutor;
   private readonly JsonLineSessionLog _log;
   private WdemUserSettingsStore? _settings;
   private ProfileCatalog? _catalog;
@@ -44,6 +46,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
   {
     _session = session ?? throw new ArgumentNullException(nameof(session));
     _runtime = session.TaskRuntime;
+    _activityExecutor = session.WorkflowActivityExecutor;
     _log = session.SessionLog;
 
     InitializeComponent();
@@ -167,9 +170,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
       foreach (var definition in loaded.Profile.Tasks.Values
                    .OrderBy(value => value.Id, StringComparer.Ordinal))
       {
-        var row = new TaskRow(
-            definition,
-            loaded.Profile.Workflows.GetValueOrDefault(definition.Id));
+        var row = new TaskRow(definition);
         row.PropertyChanged += TaskRow_PropertyChanged;
         (definition.Required ? RequiredTasks : OptionalTasks).Add(row);
       }
@@ -406,7 +407,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _loadedProfile.Profile,
         plan,
         _runtime,
-        updates: CreateRunUpdates(operationGeneration));
+        updates: CreateRunUpdates(operationGeneration),
+        activityExecutor: _activityExecutor);
     ApplyWorkflowSnapshot(_currentRun.Snapshot);
     UpdateCommandStates();
 
