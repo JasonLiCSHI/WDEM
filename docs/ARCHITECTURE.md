@@ -1,6 +1,6 @@
 # WDEM MVP Architecture
 
-WDEM is built around a stable core: **Declarative Profile → Task DAG → Workflow Pipeline**. CLI and WPF are two clients of the same application model. Products such as Visual Studio and ReSharper never become special types in Core.
+WDEM is built around a stable model: **Declarative Profile → Task DAG → Workflow Pipeline**. CLI and WPF are two clients of the same application layer. Products such as Visual Studio and ReSharper never become special types in Domain or Application.
 
 ```text
 Release-defined HTTPS Profile Source
@@ -31,7 +31,7 @@ Release-defined HTTPS Profile Source
 - Application `IProfileRepository` is the external seam for remote configuration. Infrastructure `ProfileCatalog` implements its `ListAsync` and `LoadAsync` operations; HTTPS enforcement, redirect validation, size limits, UTF-8 decoding, atomic caching, offline fallback, and ID validation remain internal.
 - Infrastructure `ProfileParser` converts versioned JSON into the Domain Profile model, so clients and inner layers never handle JSON details.
 - Domain `TaskPlanner` encapsulates Required/Optional selection, dependency closure, deduplication, topological sorting, and cycle detection, and returns an immutable `Plan`. Application `CreatePlanHandler` maps a Domain `EnvironmentProfile` into that planning interface for both clients.
-- `EnvironmentManager.StartApply` compiles or selects a per-Task state graph and encapsulates graph execution, failure propagation, cancellation, and reporting.
+- Application `ApplyPlanHandler.Start` compiles or selects a per-Task state graph and encapsulates graph execution, failure propagation, cancellation, and reporting.
 - Application's `ITaskRuntime` is the execution port. The current Windows adapter starts a Domain `CommandDefinition` as an executable plus argument array. Future script downloaders, elevation brokers, or remote executors can be introduced without teaching the DAG about specific products.
 
 ## Profile Source and cache
@@ -67,11 +67,11 @@ Extension happens at two levels:
 - new workflow factories implement `ITaskWorkflowProvider`, and code-defined transitions may use custom predicates;
 - declaration-format changes use a new `schemaVersion`.
 
-The current engine is a deterministic dependency-aware DAG scheduler. Every Task waits for all declared dependencies to finish successfully; Tasks with no dependency path between them may run concurrently. Persistent checkpoints, transactional rollback, restart resume, and signature policies are not implemented. These belong in future modules rather than as product-specific logic in Core.
+The current engine is a deterministic dependency-aware DAG scheduler. Every Task waits for all declared dependencies to finish successfully; Tasks with no dependency path between them may run concurrently. Persistent checkpoints, transactional rollback, restart resume, and signature policies are not implemented. These belong in future modules rather than as product-specific logic in Domain or Application.
 
 ## Task-driven state and reactive UI
 
-The Domain owns workflow definitions, stable Task execution states, outcomes, Activity locations, graph validation, and transition predicates. Application owns Activity execution and converts Runtime results into Activity results. The transitional Core `WorkflowStateMachine` coordinates execution: for each DAG Task, it owns the current runtime state ID, enters that state, and only then invokes the Application executor for its ordered Entry, Residence, and Exit Activities. Activity results are reduced to Domain workflow facts, evaluated by ordered Domain transitions, and the selected target becomes the next runtime state. The transition limit prevents accidental infinite cycles.
+The Domain owns workflow definitions, stable Task execution states, outcomes, Activity locations, graph validation, and transition predicates. Application owns Activity execution and converts Runtime results into Activity results. Application `WorkflowStateMachine` coordinates execution: for each DAG Task, it owns the current runtime state ID, enters that state, and only then invokes the Activity executor for its ordered Entry, Residence, and Exit Activities. Activity results are reduced to Domain workflow facts, evaluated by ordered Domain transitions, and the selected target becomes the next runtime state. The transition limit prevents accidental infinite cycles.
 
 `DefaultTaskWorkflowProvider` compiles Schema v1 into the familiar path:
 
@@ -89,13 +89,13 @@ Schema v2 may replace that path with any validated bounded graph. Runtime states
 
 WPF does not maintain an active-Task collection or interpret execution flow. It maps Task snapshots into presentation state and binds directly to their capabilities. Start All and Cancel All aggregate the corresponding Task capabilities. A small workspace state still handles Profile loading, trust, and inspection because they occur outside the Task Workflow.
 
-CLI, WPF, and JSONL logging consume the same Core updates. Cancellation first moves a Task to `Cancelling` and disables duplicate actions. The Task becomes `Cancelled` only after the Runtime has stopped its process tree. Even if a Runtime command wins a cancellation race and returns success, the state machine does not run Exit Activities, take another transition, or start downstream Tasks. Custom Activities must honor the supplied cancellation token; command Activities delegate cancellation to the Windows Runtime, which terminates the process tree.
+CLI, WPF, and JSONL logging consume the same Application updates. Cancellation first moves a Task to `Cancelling` and disables duplicate actions. The Task becomes `Cancelled` only after the Runtime has stopped its process tree. Even if a Runtime command wins a cancellation race and returns success, the state machine does not run Exit Activities, take another transition, or start downstream Tasks. Custom Activities must honor the supplied cancellation token; command Activities delegate cancellation to the Windows Runtime, which terminates the process tree.
 
 The scheduler creates one asynchronous execution for every planned DAG node. A node remains `Pending` until all of its dependencies report `Succeeded` or `NotRequired`; independent ready nodes enter their workflows concurrently. A failed, cancelled, or blocked dependency projects its downstream nodes as `Blocked`, while unrelated branches continue. State mutations remain serialized, and update publications are queued in monotonically increasing `Revision` order so reactive clients never observe a stale snapshot after a newer one.
 
 The shared Windows JSONL logger also records structured `user_action` entries from both clients. These contain only the operation, outcome, Profile ID, and Task IDs; raw command arguments and other potentially sensitive input are intentionally excluded. Workflow progress and results remain separate events so auditing user intent never becomes a second source of runtime state.
 
-Core classifies Detect results as `Missing`, `UpgradeRequired`, `VersionMismatch`, or `Satisfied`. A detected version below a lower-bound requirement such as `>= 2.50` produces `UpgradeRequired`, and both CLI and WPF consume that same result. Presentation state distinguishes `Pending`, `Running`, `Satisfied`, `UpgradeRequired`, `NeedsAttention`, `Succeeded`, `Failed`, `Cancelled`, and `Blocked`. Version failures and blocked or failed Tasks use warning styling. All phase progress comes from `WorkflowProgress`, allowing future Runtime adapters to report finer-grained progress without changing UI button rules.
+Domain version rules and Application inspection classify Detect results as `Missing`, `UpgradeRequired`, `VersionMismatch`, or `Satisfied`. A detected version below a lower-bound requirement such as `>= 2.50` produces `UpgradeRequired`, and both CLI and WPF consume that same result. Presentation state distinguishes `Pending`, `Running`, `Satisfied`, `UpgradeRequired`, `NeedsAttention`, `Succeeded`, `Failed`, `Cancelled`, and `Blocked`. Version failures and blocked or failed Tasks use warning styling. All phase progress comes from `WorkflowProgress`, allowing future Runtime adapters to report finer-grained progress without changing UI button rules.
 
 Task capability matrix:
 
@@ -112,12 +112,11 @@ Task capability matrix:
 - `Wdem.Domain`: dependency-free business language and rules. Task and command definitions, version requirements, compliance, planning, stable execution state/outcomes, and workflow transition decisions live here.
 - `Wdem.Application`: use-case orchestration and ports; the Task Runtime boundary, Activity execution, and execution step results live here and the layer depends only on Domain.
 - `Wdem.Infrastructure`: Profile JSON and remote/cache I/O adapters implementing Application-owned ports; it depends inward on Application and Domain and never on the transitional Core.
-- `Wdem.Core`: temporary compatibility module for Profile Schema mapping and Workflow execution state that have not migrated yet.
 - `Wdem.Windows`: user settings, trust records, logs, the shared administrator requirement, Windows process execution, output forwarding, and process-tree cancellation.
 - `Wdem.Cli`: Profile selection, trust confirmation, complete plan preview, retries, and terminal output.
 - `Wdem.App`: installation-language-aware WPF workbench, unified button-state projection, Required/Optional sections, Task details, progress, cancellation, and logs.
 
-`Wdem.Bootstrapper` is the only composition root. It registers the Application planning and inspection handlers, Activity executor, Windows runtime, Profile catalog, settings, and session log with Autofac, then exposes only typed dependencies through `WdemSession`; neither client nor an inner layer receives the Autofac container.
+`Wdem.Bootstrapper` is the only composition root. It registers the Application planning, inspection, and execution handlers, workflow provider, Activity executor, Windows runtime, Profile repository, settings, and session log with Autofac, then exposes only typed use cases and adapters through `WdemSession`; neither client nor an inner layer receives the Autofac container.
 
 ## Release
 

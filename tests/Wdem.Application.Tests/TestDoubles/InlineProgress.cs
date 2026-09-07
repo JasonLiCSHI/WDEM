@@ -1,4 +1,4 @@
-namespace Wdem.Core.Tests.TestDoubles;
+namespace Wdem.Application.Tests.TestDoubles;
 
 public sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
 {

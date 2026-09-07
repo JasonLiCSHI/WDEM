@@ -9,10 +9,7 @@ using Wdem.Application.Execution;
 using Wdem.Application.Inspection;
 using Wdem.Application.Planning;
 using Wdem.Application.Profiles;
-using Wdem.Application.Runtime;
-using Wdem.Application.Workflows;
 using Wdem.Bootstrapper;
-using Wdem.Core.Runs;
 using Wdem.Domain.Planning;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Workflows;
@@ -25,8 +22,7 @@ namespace Wdem.App;
 public partial class MainWindow : Window, INotifyPropertyChanged
 {
   private readonly WdemSession _session;
-  private readonly ITaskRuntime _runtime;
-  private readonly IWorkflowActivityExecutor _activityExecutor;
+  private readonly ApplyPlanHandler _applyPlan;
   private readonly CreatePlanHandler _createPlan;
   private readonly InspectEnvironmentHandler _inspectEnvironment;
   private readonly JsonLineSessionLog _log;
@@ -49,8 +45,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
   public MainWindow(WdemSession session)
   {
     _session = session ?? throw new ArgumentNullException(nameof(session));
-    _runtime = session.TaskRuntime;
-    _activityExecutor = session.WorkflowActivityExecutor;
+    _applyPlan = session.ApplyPlan;
     _createPlan = session.CreatePlan;
     _inspectEnvironment = session.InspectEnvironment;
     _log = session.SessionLog;
@@ -197,7 +192,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         return;
       }
 
-      ApplyWorkflowSnapshot(EnvironmentManager.CreateReadySnapshot(loaded.Profile));
+      ApplyWorkflowSnapshot(_applyPlan.CreateReadySnapshot(loaded.Profile));
       shouldInspect = true;
     }
     catch (Exception exception)
@@ -408,12 +403,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     RunSummaryText.Text = I18n.Format("RunStarted", taskIds.Count);
     var operationGeneration = ++_operationGeneration;
     _lastWorkflowRevision = -1;
-    _currentRun = EnvironmentManager.StartApply(
+    _currentRun = _applyPlan.Start(
         _loadedProfile.Profile,
         plan,
-        _runtime,
-        updates: CreateRunUpdates(operationGeneration),
-        activityExecutor: _activityExecutor);
+        updates: CreateRunUpdates(operationGeneration));
     ApplyWorkflowSnapshot(_currentRun.Snapshot);
     UpdateCommandStates();
 

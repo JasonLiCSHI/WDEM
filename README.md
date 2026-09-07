@@ -36,7 +36,7 @@ Describe the destination once; let the Task DAG take care of the journey.
 
 Setting up a development environment should not depend on an installation checklist that becomes obsolete, nor should every product be hard-coded into the manager.
 
-WDEM treats Visual Studio, ReSharper, Git, the .NET SDK, and every future tool as ordinary Tasks—not special cases. A Profile declares what the workstation needs, Core computes dependencies and execution order, and the Windows Runtime executes each command safely. Adding software, changing a version, or introducing post-install configuration usually requires only a Profile change.
+WDEM treats Visual Studio, ReSharper, Git, the .NET SDK, and every future tool as ordinary Tasks—not special cases. A Profile declares what the workstation needs, Domain rules compute dependencies, Application coordinates execution, and the Windows Runtime executes each command safely. Adding software, changing a version, or introducing post-install configuration usually requires only a Profile change.
 
 | Traditional installation scripts | WDEM |
 |---|---|
@@ -44,7 +44,7 @@ WDEM treats Visual Studio, ReSharper, Git, the .NET SDK, and every future tool a
 | Local compliance is unclear | Detect runs automatically and validates installed versions |
 | Execution order is maintained manually | Dependencies form a validated DAG |
 | Cancellation may leave downstream commands running | The active process tree is stopped and unsafe downstream work is blocked |
-| GUI and CLI duplicate business rules | Both clients share the same Core, state, and reports |
+| GUI and CLI duplicate business rules | Both clients share the same Application use cases, state, and reports |
 
 ## How it works
 
@@ -77,11 +77,11 @@ Running → Cancelling → Cancelled       dependency failure → Blocked
 - **Dependency-aware Task DAG** — Expand dependency closure, reject cycles, run independent Tasks concurrently, and start dependents only after their prerequisites succeed.
 - **Composable lifecycle** — Schema v1 compiles to `Detect → Pre → Apply → Post → Verify`; Schema v2 can declare an arbitrary bounded state graph with Entry, Residence, and Exit Activities.
 - **Version awareness** — Support exact, wildcard, minimum, and range requirements, with an explicit upgrade state below the minimum version.
-- **Reactive controls** — Start or cancel one Task or the entire plan; Core projects every available action from workflow state.
+- **Reactive controls** — Start or cancel one Task or the entire plan; Application projects every available action from workflow state.
 - **Safe cancellation** — Terminate the complete active process tree, prevent new Activities, and block Tasks that depend on the cancelled Task.
 - **Remote-first Profiles** — Each release fixes one HTTPS Source in code and falls back to a validated last-known-good cache on network failure.
 - **Explicit trust** — Remote and cached Profiles require approval for their current content hash before Detect or Apply can run commands.
-- **One execution model** — WPF and CLI share `Wdem.Core`, `Wdem.Windows`, progress events, and final reports.
+- **One execution model** — WPF and CLI share `Wdem.Application`, `Wdem.Domain`, Windows adapters, progress events, and final reports.
 - **Traceable logs** — Each Session writes a dedicated JSONL log containing the plan, phases, stdout, stderr, and results.
 
 ## A Profile is the product definition
@@ -290,7 +290,7 @@ The base URL may include a Git branch, tag, or release path and may be written w
 
 ## Roadmap: Terraform discipline, Dev Box experience
 
-WDEM's destination is a Windows environment convergence engine: previewable and reproducible like Terraform, approachable and centrally distributable like Microsoft Dev Box. The comparison guides the product model; WDEM remains a local-first Windows tool, and software such as Visual Studio or ReSharper remains an ordinary declarative Task rather than a Core provider.
+WDEM's destination is a Windows environment convergence engine: previewable and reproducible like Terraform, approachable and centrally distributable like Microsoft Dev Box. The comparison guides the product model; WDEM remains a local-first Windows tool, and software such as Visual Studio or ReSharper remains an ordinary declarative Task rather than a product-specific provider.
 
 | Milestone | Outcome | Planned capabilities |
 |---|---|---|
@@ -298,15 +298,15 @@ WDEM's destination is a Windows environment convergence engine: previewable and 
 | **0.2 · Plan before Apply** | Make every change reviewable | Immutable Plan model; `NoOp`, `Create`, `Upgrade`, `Reconfigure`, and `Blocked` changes; JSON export; GUI approval diff; Profile content fingerprint checked again at Apply |
 | **0.3 · State and recovery** | Survive interruption without pretending cache is truth | Atomic desired/observed State, execution journal, state locking, restart/reboot continuation, read-only drift detection, and fresh Detect before every Plan or Apply |
 | **0.4 · Reproducible Profiles** | Compose environments without copy-and-paste | Typed inputs, validated outputs and Task references, modules/includes, organization and user layers, source/version lock file with hashes, and explicit Schema migration |
-| **0.5 · Extensible runtime** | Add installation mechanisms without product-specific Core logic | Generic executable, MSI/MSIX, archive/download, and WinGet adapters; timeouts, retry/backoff, reboot-required outcomes, concurrency limits, and exclusive resource locks |
-| **0.6 · Team catalogs** | Bring the Dev Box self-service model to shared Windows setups | Git-backed signed Catalogs, approved publishers, organization policy, headless image/VM provisioning, compliance export, and optional Azure Dev Box integration outside Core |
+| **0.5 · Extensible runtime** | Add installation mechanisms without product-specific Domain/Application logic | Generic executable, MSI/MSIX, archive/download, and WinGet adapters; timeouts, retry/backoff, reboot-required outcomes, concurrency limits, and exclusive resource locks |
+| **0.6 · Team catalogs** | Bring the Dev Box self-service model to shared Windows setups | Git-backed signed Catalogs, approved publishers, organization policy, headless image/VM provisioning, compliance export, and optional Azure Dev Box integration through adapters |
 | **1.0 · Trusted contract** | A stable base for personal and enterprise use | Profile/package trust chain, code-signed installer, SBOM, Credential Manager/Key Vault secret references, audit guarantees, and documented Schema compatibility policy |
 
 The near-term order is deliberate: **Plan → execution journal and recovery → Profile composition and lock → runtime adapters → organization Catalog**. A marketplace, arbitrary remote plugins, full transactional rollback, a central fleet control plane, and cross-platform support stay out until these foundations are dependable.
 
 ## MVP scope
 
-The current release is intentionally small and dependable. Its dependency-aware DAG scheduler runs independent Tasks concurrently while preserving dependency and per-Task Activity order. It does not yet include automatic UAC elevation, rollback or uninstall, resume after restart, a Profile marketplace, authenticated private sources, or cross-platform support. Those capabilities can evolve on the existing Profile, Graph, Workflow, and Runtime seams without adding product-specific logic to Core.
+The current release is intentionally small and dependable. Its dependency-aware DAG scheduler runs independent Tasks concurrently while preserving dependency and per-Task Activity order. It does not yet include automatic UAC elevation, rollback or uninstall, resume after restart, a Profile marketplace, authenticated private sources, or cross-platform support. Those capabilities can evolve on the existing Profile, Graph, Workflow, and Runtime seams without adding product-specific logic to Domain or Application.
 
 ## Develop
 
@@ -319,8 +319,11 @@ dotnet run --project src/Wdem.Cli/Wdem.Cli.csproj -- profiles
 
 | Project | Responsibility |
 |---|---|
-| `Wdem.Core` | Profiles, version requirements, DAG construction, Workflow state, snapshots, and reports |
-| `Wdem.Windows` | Windows process execution, output forwarding, process-tree cancellation, cache, trust, and logs |
+| `Wdem.Domain` | Profile/Task invariants, version rules, immutable Plans, and Workflow decisions |
+| `Wdem.Application` | Inspection, planning and execution use cases, runtime ports, snapshots, capabilities, and reports |
+| `Wdem.Infrastructure` | Profile JSON plus remote-first and last-known-good cache adapters |
+| `Wdem.Bootstrapper` | Autofac composition root exposed through a typed session boundary |
+| `Wdem.Windows` | Windows process execution, output forwarding, process-tree cancellation, trust settings, and logs |
 | `Wdem.Cli` | Command-line interaction, plan confirmation, retries, and terminal presentation |
 | `Wdem.App` | Localized WPF workbench, Task details, and reactive state projection |
 

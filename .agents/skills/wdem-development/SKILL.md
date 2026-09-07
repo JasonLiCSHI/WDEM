@@ -29,15 +29,15 @@ Treat a request to explain or diagnose as read-only. Modify code, external syste
 | Concern | Owner | Rule |
 | --- | --- | --- |
 | Version rules, Profile/Task invariants, plans, workflow decisions | `Wdem.Domain` | Keep I/O, platform, and product details out |
-| Use cases, runtime ports, execution coordination, projections | `Wdem.Application` | Depend only on Domain |
-| Transitional behavior not yet migrated | `Wdem.Core` | Shrink this compatibility module; add no new domain rules |
+| Use cases, execution coordination, projections | `Wdem.Application` | Depend only on Domain and ports owned by Application |
+| Profile JSON, remote/cache I/O | `Wdem.Infrastructure` | Implement Application ports; do not depend on clients or platform UI |
 | Windows commands, process trees, logs, settings, trust persistence, administrator check | `Wdem.Windows` | Share behavior between both clients |
 | Task presentation and interaction | `Wdem.App` | Bind to projected Task state/capabilities |
-| Terminal interaction | `Wdem.Cli` | Consume the same Core and Windows reports |
-| Product installation/configuration | `profiles/`, `script/`, `settings/` | Do not add product-specific Core providers |
+| Terminal interaction | `Wdem.Cli` | Consume the same Application use cases and Windows adapters |
+| Product installation/configuration | `profiles/`, `script/`, `settings/` | Do not add product-specific Domain or Application providers |
 | Packaging | `build/`, `installer/`, GitHub Actions | Package scripts/settings, never Profiles |
 
-If GUI and CLI need the same decision, place it in Core or Windows and make both clients consume it. Do not reproduce state graphs, DAG rules, compliance decisions, or capability logic in a client.
+If GUI and CLI need the same decision, place it in Domain or Application and make both clients consume it. Keep Windows-specific I/O in Windows adapters. Do not reproduce state graphs, DAG rules, compliance decisions, or capability logic in a client.
 
 ## Preserve workflow semantics
 
@@ -53,7 +53,7 @@ If GUI and CLI need the same decision, place it in Core or Windows and make both
 ## Keep commands and cancellation safe
 
 - Model every command as an executable plus an argument array. Never concatenate a shell command string.
-- Pass cancellation through Core into the Windows process runner.
+- Pass cancellation through Application into the Windows process runner.
 - Keep installers in the launched process tree. Do not detach them or fire-and-forget.
 - On cancellation, terminate the current process tree, wait for termination, and prevent subsequent Activities and dependent Tasks from starting.
 - Preserve stdout, stderr, exit code, Activity identity, runtime state, and timestamps in progress events and JSONL logs.

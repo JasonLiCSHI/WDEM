@@ -3,9 +3,7 @@ using Wdem.Application.Inspection;
 using Wdem.Application.Planning;
 using Wdem.Application.Profiles;
 using Wdem.Application.Runtime;
-using Wdem.Application.Workflows;
 using Wdem.Bootstrapper;
-using Wdem.Core.Runs;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Planning;
 using Wdem.Domain.Profiles;
@@ -179,10 +177,9 @@ public static class Program
       return 2;
     }
 
-    var runtime = session.TaskRuntime;
-    var activityExecutor = session.WorkflowActivityExecutor;
     var createPlan = session.CreatePlan;
     var inspectEnvironment = session.InspectEnvironment;
+    var applyPlan = session.ApplyPlan;
     log.Write("profile", $"Loaded {profile.Id} {profile.Version} from {loaded.Location}");
     Console.WriteLine($"Log: {log.DisplayPath}");
     if (log.LastError is not null)
@@ -315,8 +312,7 @@ public static class Program
     var report = await RunApplyWithRetriesAsync(
         profile,
         plan,
-        runtime,
-        activityExecutor,
+        applyPlan,
         progress,
         log,
         retries);
@@ -339,8 +335,7 @@ public static class Program
   private static async Task<RunReport> RunApplyWithRetriesAsync(
       EnvironmentProfile profile,
       Plan plan,
-      ITaskRuntime runtime,
-      IWorkflowActivityExecutor activityExecutor,
+      ApplyPlanHandler applyPlan,
       IProgress<WorkflowProgress> progress,
       JsonLineSessionLog log,
       int retries)
@@ -359,12 +354,10 @@ public static class Program
         log.Write("retry", $"Attempt {attempt}/{retries}");
       }
 
-      var run = EnvironmentManager.StartApply(
+      var run = applyPlan.Start(
           profile,
           plan,
-          runtime,
-          progress,
-          activityExecutor: activityExecutor);
+          progress);
       ConsoleCancelEventHandler cancelHandler = (_, e) =>
       {
         e.Cancel = true;

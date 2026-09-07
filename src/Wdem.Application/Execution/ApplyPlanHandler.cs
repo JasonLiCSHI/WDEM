@@ -1,38 +1,34 @@
-using Wdem.Application.Execution;
 using Wdem.Application.Runtime;
 using Wdem.Application.Workflows;
-using Wdem.Core.Workflows;
 using Wdem.Domain.Planning;
 using Wdem.Domain.Profiles;
 using Wdem.Domain.Workflows;
 
-namespace Wdem.Core.Runs;
+namespace Wdem.Application.Execution;
 
-public static class EnvironmentManager
+public sealed class ApplyPlanHandler(
+    ITaskRuntime runtime,
+    IWorkflowActivityExecutor activityExecutor,
+    ITaskWorkflowProvider workflowProvider)
 {
-  public static WorkflowSnapshot CreateReadySnapshot(
-      EnvironmentProfile profile,
-      ITaskWorkflowProvider? workflowProvider = null)
+  public WorkflowSnapshot CreateReadySnapshot(EnvironmentProfile profile)
   {
     ArgumentNullException.ThrowIfNull(profile);
-    var workflows = CreateWorkflows(profile, workflowProvider);
+    var workflows = CreateWorkflows(profile);
     return WorkflowStateStore.CreateReadySnapshot(profile, workflows);
   }
 
-  public static EnvironmentRun StartApply(
+  public EnvironmentRun Start(
       EnvironmentProfile profile,
       Plan plan,
-      ITaskRuntime runtime,
       IProgress<WorkflowProgress>? progress = null,
-      IProgress<WorkflowUpdate>? updates = null,
-      ITaskWorkflowProvider? workflowProvider = null,
-      IWorkflowActivityExecutor? activityExecutor = null)
+      IProgress<WorkflowUpdate>? updates = null)
   {
     ArgumentNullException.ThrowIfNull(profile);
     ArgumentNullException.ThrowIfNull(plan);
     ArgumentNullException.ThrowIfNull(runtime);
 
-    var workflows = CreateWorkflows(profile, workflowProvider);
+    var workflows = CreateWorkflows(profile);
 
     var plannedTaskIds = plan.Tasks.Select(task => task.Id.Value).ToArray();
     var perTaskCts = plannedTaskIds.ToDictionary(
@@ -45,7 +41,7 @@ public static class EnvironmentManager
         profile,
         plannedTaskIds,
         runtime,
-        activityExecutor ?? DefaultWorkflowActivityExecutor.Instance,
+        activityExecutor,
         workflows,
         perTaskCts,
         state,
@@ -58,14 +54,12 @@ public static class EnvironmentManager
         state);
   }
 
-  private static Dictionary<string, TaskWorkflowDefinition> CreateWorkflows(
-      EnvironmentProfile profile,
-      ITaskWorkflowProvider? workflowProvider)
+  private Dictionary<string, TaskWorkflowDefinition> CreateWorkflows(
+      EnvironmentProfile profile)
   {
-    var provider = workflowProvider ?? DefaultTaskWorkflowProvider.Instance;
     return profile.Tasks.Values.ToDictionary(
         task => task.Id,
-        task => provider.Create(task) ??
+        task => workflowProvider.Create(task) ??
             throw new InvalidOperationException($"Workflow provider returned no definition for task '{task.Id}'."),
         StringComparer.Ordinal);
   }

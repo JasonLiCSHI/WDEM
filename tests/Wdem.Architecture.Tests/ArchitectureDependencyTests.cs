@@ -95,14 +95,14 @@ public sealed class ArchitectureDependencyTests
   public void RuntimePortBelongsToApplicationAndCommandDefinitionBelongsToDomain()
   {
     var repositoryRoot = FindRepositoryRoot();
-    var core = LoadProject(repositoryRoot, "src", "Wdem.Core", "Wdem.Core.csproj");
+    var application = LoadProject(
+        repositoryRoot,
+        "src",
+        "Wdem.Application",
+        "Wdem.Application.csproj");
     var windows = LoadProject(repositoryRoot, "src", "Wdem.Windows", "Wdem.Windows.csproj");
 
-    Assert.Contains(
-        ProjectReferences(core),
-        reference => reference.EndsWith(
-            "Wdem.Application.csproj",
-            StringComparison.OrdinalIgnoreCase));
+    Assert.Empty(PackageReferences(application));
     Assert.Contains(
         ProjectReferences(windows),
         reference => reference.EndsWith(
@@ -192,6 +192,30 @@ public sealed class ArchitectureDependencyTests
         relativePath.Replace('/', Path.DirectorySeparatorChar));
 
     Assert.True(File.Exists(path), $"Expected architecture source '{path}'.");
+  }
+
+  [Fact]
+  public void ExecutionCoordinationBelongsToApplicationAndCoreIsRemoved()
+  {
+    var repositoryRoot = FindRepositoryRoot();
+
+    Assert.True(File.Exists(Path.Combine(
+        repositoryRoot,
+        "src",
+        "Wdem.Application",
+        "Execution",
+        "ApplyPlanHandler.cs")));
+    Assert.True(File.Exists(Path.Combine(
+        repositoryRoot,
+        "src",
+        "Wdem.Application",
+        "Execution",
+        "WorkflowStateMachine.cs")));
+    Assert.False(File.Exists(Path.Combine(
+        repositoryRoot,
+        "src",
+        "Wdem.Core",
+        "Wdem.Core.csproj")));
   }
 
   [Theory]

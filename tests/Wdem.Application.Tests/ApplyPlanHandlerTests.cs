@@ -1,15 +1,15 @@
 using Wdem.Application.Execution;
 using Wdem.Application.Planning;
 using Wdem.Application.Runtime;
-using Wdem.Core.Runs;
-using Wdem.Core.Tests.TestDoubles;
+using Wdem.Application.Tests.TestDoubles;
+using Wdem.Application.Workflows;
 using Wdem.Domain.Execution;
 using Wdem.Infrastructure.Profiles;
 using Xunit;
 
-namespace Wdem.Core.Tests;
+namespace Wdem.Application.Tests;
 
-public sealed class EnvironmentManagerTests
+public sealed class ApplyPlanHandlerTests
 {
   [Fact]
   public async Task Apply_IndependentTasksStartConcurrently()
@@ -21,7 +21,7 @@ public sealed class EnvironmentManagerTests
         .WithDetect("b", exitCode: 1)
         .WithApplyThatWaitsForCancellation("a")
         .WithApplyThatWaitsForCancellation("b");
-    var run = EnvironmentManager.StartApply(profile, graph, runtime);
+    var run = CreateHandler(runtime).Start(profile, graph);
 
     try
     {
@@ -52,7 +52,7 @@ public sealed class EnvironmentManagerTests
         .WithDetect("c", exitCode: 1)
         .WithApplyThatWaitsFor("a", finishDependency.Task)
         .WithApplyThatWaitsForCancellation("c");
-    var run = EnvironmentManager.StartApply(profile, graph, runtime);
+    var run = CreateHandler(runtime).Start(profile, graph);
 
     await runtime.WaitForCommandStartAsync("a", "apply");
     Assert.DoesNotContain(runtime.Invocations, invocation => invocation.taskId == "c");
@@ -83,7 +83,7 @@ public sealed class EnvironmentManagerTests
         .WithApplyThatWaitsFor("b", finishIndependentTask.Task)
         .WithApply("c", exitCode: 0);
 
-    var run = EnvironmentManager.StartApply(profile, graph, runtime);
+    var run = CreateHandler(runtime).Start(profile, graph);
 
     await Task.WhenAll(
         runtime.WaitForCommandStartAsync("a", "apply"),
@@ -118,7 +118,7 @@ public sealed class EnvironmentManagerTests
         .WithDetect("c", exitCode: 1)
         .WithApply("a", exitCode: 2);
 
-    var report = await EnvironmentManager.StartApply(profile, graph, runtime).Completion;
+    var report = await CreateHandler(runtime).Start(profile, graph).Completion;
 
     Assert.Equal(TaskExecutionState.Failed, report.Tasks["a"].State);
     Assert.Equal(TaskOutcome.Failed, report.Tasks["a"].Outcome);
@@ -138,7 +138,7 @@ public sealed class EnvironmentManagerTests
         .WithApplyThatWaitsForCancellation("a")
         .WithApply("c", exitCode: 0);
 
-    var run = EnvironmentManager.StartApply(profile, graph, runtime);
+    var run = CreateHandler(runtime).Start(profile, graph);
 
     await runtime.WaitForCommandStartAsync("a", "apply");
     run.CancelAll();
@@ -170,7 +170,7 @@ public sealed class EnvironmentManagerTests
     var updates = new List<WorkflowProgress>();
     var progress = new InlineProgress<WorkflowProgress>(updates.Add);
 
-    var report = await EnvironmentManager.StartApply(profile, graph, runtime, progress).Completion;
+    var report = await CreateHandler(runtime).Start(profile, graph, progress).Completion;
 
     Assert.Equal(TaskOutcome.Succeeded, report.Tasks["b"].Outcome);
     Assert.Collection(
@@ -210,7 +210,7 @@ public sealed class EnvironmentManagerTests
     var updates = new List<WorkflowProgress>();
     var progress = new InlineProgress<WorkflowProgress>(updates.Add);
 
-    await EnvironmentManager.StartApply(profile, graph, runtime, progress).Completion;
+    await CreateHandler(runtime).Start(profile, graph, progress).Completion;
 
     var output = Assert.Single(updates, update => update.Message == "downloading");
     Assert.Equal("b", output.TaskId);
@@ -229,10 +229,9 @@ public sealed class EnvironmentManagerTests
         .WithApply("b", exitCode: 0);
     var updates = new List<WorkflowUpdate>();
 
-    var run = EnvironmentManager.StartApply(
+    var run = CreateHandler(runtime).Start(
         profile,
         graph,
-        runtime,
         updates: new InlineProgress<WorkflowUpdate>(updates.Add));
     await run.Completion;
 
@@ -257,10 +256,9 @@ public sealed class EnvironmentManagerTests
         .WithApplyThatWaitsForCancellation("a")
         .WithApplyThatWaitsForCancellation("b");
     var updates = new List<WorkflowUpdate>();
-    var run = EnvironmentManager.StartApply(
+    var run = CreateHandler(runtime).Start(
         profile,
         graph,
-        runtime,
         updates: new InlineProgress<WorkflowUpdate>(updates.Add));
 
     await Task.WhenAll(
@@ -288,10 +286,9 @@ public sealed class EnvironmentManagerTests
         .WithPost("pipeline", exitCode: 0)
         .OnInvocation(_ => statesSeenByRuntime.Add(updates[^1].Snapshot.Tasks["pipeline"].State));
 
-    var report = await EnvironmentManager.StartApply(
+    var report = await CreateHandler(runtime).Start(
         profile,
         graph,
-        runtime,
         updates: new InlineProgress<WorkflowUpdate>(updates.Add)).Completion;
 
     Assert.Equal(TaskOutcome.Succeeded, report.Tasks["pipeline"].Outcome);
@@ -311,7 +308,7 @@ public sealed class EnvironmentManagerTests
   {
     var profile = ProfileParser.Parse(ProfileJson);
 
-    var snapshot = EnvironmentManager.CreateReadySnapshot(profile);
+    var snapshot = CreateHandler(new FakeRuntime()).CreateReadySnapshot(profile);
 
     Assert.Equal(WorkflowRunState.Ready, snapshot.State);
     Assert.All(snapshot.Tasks.Values, task =>
@@ -330,7 +327,7 @@ public sealed class EnvironmentManagerTests
     var runtime = new FakeRuntime()
         .WithDetect("a", exitCode: 1)
         .WithApplyThatWaitsForCancellation("a");
-    var run = EnvironmentManager.StartApply(profile, graph, runtime);
+    var run = CreateHandler(runtime).Start(profile, graph);
 
     await runtime.WaitForCommandStartAsync("a", "apply");
 
@@ -355,7 +352,7 @@ public sealed class EnvironmentManagerTests
     var runtime = new FakeRuntime()
         .WithDetect("a", exitCode: 1)
         .WithApplyThatReturnsAfterCancellation("a");
-    var run = EnvironmentManager.StartApply(profile, graph, runtime);
+    var run = CreateHandler(runtime).Start(profile, graph);
 
     await runtime.WaitForCommandStartAsync("a", "apply");
     run.CancelTask("a");
@@ -365,6 +362,12 @@ public sealed class EnvironmentManagerTests
     Assert.Equal(TaskExecutionState.Cancelled, run.Snapshot.Tasks["a"].State);
     Assert.DoesNotContain(runtime.Invocations, invocation => invocation.phase == "verify");
   }
+
+  private static ApplyPlanHandler CreateHandler(ITaskRuntime runtime) =>
+      new(
+          runtime,
+          DefaultWorkflowActivityExecutor.Instance,
+          DefaultTaskWorkflowProvider.Instance);
 
   private const string ProfileJson = """
     {

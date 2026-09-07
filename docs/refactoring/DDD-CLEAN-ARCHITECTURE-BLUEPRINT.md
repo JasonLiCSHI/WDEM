@@ -25,7 +25,7 @@ WPF / CLI → Bootstrapper → Application → Domain
 - `Wdem.Bootstrapper` is the only composition root and uses Autofac behind a narrow session boundary; clients and inner layers never receive the container.
 - `Wdem.App` and `Wdem.Cli` consume application use cases and read models; neither recreates domain rules.
 
-During migration, `Wdem.Core` remains a compatibility module. It must shrink in every migration PR and is removed only after all callers have moved.
+The temporary `Wdem.Core` compatibility module was removed after all callers migrated to Domain and Application.
 
 ## Domain model
 
@@ -53,7 +53,7 @@ Ports are owned by the use case that needs them. Initial ports are `IProfileRepo
 
 | Current source | Destination | Action |
 |---|---|---|
-| `Core/Versions/VersionConstraint.cs` | `Domain/Versions/VersionRequirement.cs`, `SoftwareVersion.cs` | Split parsing/comparison from compliance result |
+| ~~`Core/Versions/VersionConstraint.cs`~~ | `Domain/Versions/VersionRequirement.cs`, `SoftwareVersion.cs` | Migrated parsing/comparison and compliance result |
 | ~~`Core/Tasks/TaskDefinition.cs`~~ | `Domain/Tasks/TaskDefinition.cs` | Migrated immutable desired-state definition; it references only pure Domain workflow definitions |
 | ~~`Core/Tasks/CommandDefinition.cs`~~ | `Domain/Tasks/CommandDefinition.cs` | Migrated; keeps the executable plus argument-array invariant |
 | ~~`Core/Profiles/EnvironmentProfile.cs`~~ | `Domain/Profiles/EnvironmentProfile.cs` | Migrated immutable Profile aggregate; a later vocabulary-only rename is optional |
@@ -65,22 +65,22 @@ Ports are owned by the use case that needs them. Initial ports are `IProfileRepo
 | ~~`Core/Profiles/ProfileCatalog.cs`~~ | `Infrastructure/Profiles/ProfileCatalog.cs` | Migrated implementation behind Application `IProfileRepository` |
 | ~~`Core/Graph/TaskGraph.cs`~~ | `Domain/Planning/TaskPlanner.cs` | Migrated: public graph replaced by immutable Plan |
 | ~~`Core/Runs/EnvironmentInspector.cs`~~ | `Application/Inspection/InspectEnvironmentHandler.cs` | Migrated use-case handler over the runtime port |
-| `Core/Runs/EnvironmentManager.cs` | `Application/Execution` | Replace facade with explicit apply/start handlers |
-| `Core/Runs/EnvironmentRun.cs` | `Application/Execution` | Rename to execution handle |
+| ~~`Core/Runs/EnvironmentManager.cs`~~ | `Application/Execution/ApplyPlanHandler.cs` | Migrated to an Autofac-composed use-case handler |
+| ~~`Core/Runs/EnvironmentRun.cs`~~ | `Application/Execution/EnvironmentRun.cs` | Migrated cancellable execution handle |
 | ~~`Core/Runs/InspectReport.cs`~~ | `Application/Inspection/InspectReport.cs` | Migrated use-case result/read model |
-| `Core/Runs/RunReport.cs`, `StepReport.cs`, `TaskReport.cs` | `Domain/Execution` | Model immutable execution history |
+| ~~`Core/Runs/RunReport.cs`, `TaskReport.cs`~~ | `Application/Execution` | Migrated immutable execution report read models |
 | ~~`Core/Runs/TaskComplianceEvaluator.cs`, `TaskComplianceState.cs`~~ | `Application/Inspection`, `Domain/Versions` | Migrated command-output interpretation and compliance rules |
 | ~~`Core/Runs/TaskExecutionState.cs`, `TaskOutcome.cs`~~ | `Domain/Execution` | Migrated stable lifecycle vocabulary |
-| `Core/Runs/TaskCapabilities.cs` | `Application/Queries` | Project capabilities from domain state |
+| ~~`Core/Runs/TaskCapabilities.cs`~~ | `Application/Execution` | Migrated projected capabilities |
 | ~~`Core/Runs/TaskInspection.cs`~~ | `Application/Inspection/TaskInspection.cs` | Migrated inspection read model |
-| `Core/Runs/WorkflowStateMachine.cs` | `Application/Execution` | Coordinate Activities using domain decisions |
-| `Core/Runs/WorkflowStateStore.cs` | `Application/Queries` | Project serialized immutable snapshots |
-| `Core/Runs/Workflow*.cs` snapshot files | `Application/Queries` | Preserve client-facing read models |
+| ~~`Core/Runs/WorkflowStateMachine.cs`~~ | `Application/Execution` | Migrated Activity coordination using Domain decisions |
+| ~~`Core/Runs/WorkflowStateStore.cs`~~ | `Application/Execution` | Migrated serialized immutable snapshot projection |
+| ~~`Core/Runs/Workflow*.cs` snapshot files~~ | `Application/Execution` | Migrated client-facing read models |
 | ~~`Core/Runs/WorkflowProgress.cs`~~ | `Application/Execution/WorkflowProgress.cs` | Migrated shared runtime progress contract |
 | ~~`Core/Runtime/*.cs`~~ | `Application/Runtime` | Migrated; Application owns the runtime port and transport results |
 | ~~`Core/Workflows/TaskWorkflow*.cs`~~ | `Domain/Workflows` | Migrated state graph definitions, validation, transition facts, and decisions |
 | ~~`Core/Workflows/WorkflowActivity*.cs`~~ | split Domain/Application | Migrated: Domain keeps Activity definitions; Application executes them through a port |
-| `Core/Workflows/DefaultTaskWorkflowProvider.cs` | `Application/Execution` | Compile Schema v1 into the domain workflow |
+| ~~`Core/Workflows/DefaultTaskWorkflowProvider.cs`~~ | `Application/Workflows` | Migrated Schema v1 compilation into Domain workflow definitions |
 | `Windows/Configuration/*` | `Infrastructure/Configuration` | Implement settings/trust persistence ports |
 | `Windows/Logging/*` | `Infrastructure/Logging` | Implement execution journal port |
 | `Windows/Processes/*`, `Windows/Runtime/*`, `Windows/Security/*` | `Windows` | Retain Windows-specific adapters |

@@ -5,8 +5,8 @@
 
 ## Decision
 
-WDEM will migrate by tested vertical slices. Existing Profile, DAG, workflow, trust, cancellation, CLI, WPF, and packaging behavior remains operational after every PR. Compatibility adapters may exist temporarily, but new domain rules are not added to `Wdem.Core`.
+WDEM migrates by tested vertical slices. Existing Profile, DAG, workflow, trust, cancellation, CLI, WPF, and packaging behavior remains operational after every PR. The temporary compatibility project was removed after its final callers migrated.
 
 ## Consequences
 
-Every production change starts with a failing behavioral or architecture test. Every PR runs the full test and build suite. `Wdem.Core` is removed only when no production project references it.
+Every production change starts with a failing behavioral or architecture test. Every PR runs the full test and build suite. New behavior belongs directly in Domain, Application, Infrastructure, or Windows according to the dependency rules.

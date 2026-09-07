@@ -67,7 +67,7 @@ public sealed class WorkspaceActionStateTests
           IsCatalogLoading: false,
           IsProfileLoading: false,
           IsInspecting: false,
-          WorkflowState: isRunning ? Wdem.Core.Runs.WorkflowRunState.Running : null,
+          WorkflowState: isRunning ? Wdem.Application.Execution.WorkflowRunState.Running : null,
           HasCatalog: hasCatalog,
           HasProfileChoice: hasProfileChoice,
           HasTrustedProfile: hasTrustedProfile,
