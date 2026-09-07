@@ -146,17 +146,10 @@ public sealed class DefaultProcessRunnerTests
         childProcessId.TrySetResult(processId);
       }
     });
-    var script =
-        "$child = Start-Process -FilePath $env:ComSpec " +
-        "-ArgumentList '/d','/c','ping -t 127.0.0.1' -WindowStyle Hidden -PassThru; " +
-        "[Console]::Out.WriteLine($child.Id); Wait-Process -Id $child.Id";
-    var request = new ProcessRequest(
-        "powershell.exe",
-        ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script]);
     using var cancellation = new CancellationTokenSource();
     var runner = new DefaultProcessRunner();
 
-    var running = runner.RunAsync(request, output, cancellation.Token);
+    var running = runner.RunAsync(CreateProcessTreeRequest(), output, cancellation.Token);
     var childId = await childProcessId.Task.WaitAsync(TimeSpan.FromSeconds(15));
     cancellation.Cancel();
 
@@ -164,6 +157,55 @@ public sealed class DefaultProcessRunnerTests
     Assert.True(
         await WaitUntilExitedAsync(childId, TimeSpan.FromSeconds(10)),
         $"Child process {childId} was still running after cancellation.");
+  }
+
+  [Fact]
+  public async Task RunAsync_WhenCancellationIsRequested_WaitsForTerminationConfirmation()
+  {
+    var processStarted = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var output = new InlineProgress<ProcessOutput>(_ => processStarted.TrySetResult());
+    var terminator = new ControlledProcessTreeTerminator();
+    using var cancellation = new CancellationTokenSource();
+    var runner = new DefaultProcessRunner(terminator);
+
+    var running = runner.RunAsync(CreateBlockingProcessRequest(), output, cancellation.Token);
+    await processStarted.Task.WaitAsync(TimeSpan.FromSeconds(15));
+    cancellation.Cancel();
+    await terminator.Started.WaitAsync(TimeSpan.FromSeconds(5));
+
+    Assert.False(running.IsCompleted);
+
+    terminator.AllowTermination();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => running);
+    Assert.True(terminator.ProcessHasExited);
+  }
+
+  [Fact]
+  public async Task RunAsync_WhenProcessTreeTerminationFails_ReportsTerminationFailure()
+  {
+    var processStarted = new TaskCompletionSource(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var output = new InlineProgress<ProcessOutput>(_ => processStarted.TrySetResult());
+    var terminator = new FailingProcessTreeTerminator();
+    using var cancellation = new CancellationTokenSource();
+    var runner = new DefaultProcessRunner(terminator);
+
+    try
+    {
+      var running = runner.RunAsync(CreateBlockingProcessRequest(), output, cancellation.Token);
+      await processStarted.Task.WaitAsync(TimeSpan.FromSeconds(15));
+      cancellation.Cancel();
+
+      var exception = await Assert.ThrowsAsync<ProcessTerminationException>(() => running);
+
+      Assert.Equal(terminator.ProcessId, exception.ProcessId);
+      Assert.Contains("could not be confirmed", exception.Message);
+    }
+    finally
+    {
+      await terminator.CleanupAsync();
+    }
   }
 
   [Fact]
@@ -202,6 +244,27 @@ public sealed class DefaultProcessRunnerTests
     }
 
     return false;
+  }
+
+  private static ProcessRequest CreateBlockingProcessRequest()
+  {
+    const string script =
+        "[Console]::Out.WriteLine('started'); " +
+        "Start-Sleep -Seconds 300";
+    return new ProcessRequest(
+        "powershell.exe",
+        ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script]);
+  }
+
+  private static ProcessRequest CreateProcessTreeRequest()
+  {
+    const string script =
+        "$child = Start-Process -FilePath $env:ComSpec " +
+        "-ArgumentList '/d','/c','ping -t 127.0.0.1' -WindowStyle Hidden -PassThru; " +
+        "[Console]::Out.WriteLine($child.Id); Wait-Process -Id $child.Id";
+    return new ProcessRequest(
+        "powershell.exe",
+        ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script]);
   }
 
   private static string FindRepositoryRoot()
@@ -253,5 +316,59 @@ public sealed class DefaultProcessRunnerTests
   private sealed class InlineProgress<T>(Action<T> callback) : IProgress<T>
   {
     public void Report(T value) => callback(value);
+  }
+
+  private sealed class ControlledProcessTreeTerminator : IProcessTreeTerminator
+  {
+    private readonly TaskCompletionSource _started = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _continue = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    public Task Started => _started.Task;
+
+    public bool ProcessHasExited { get; private set; }
+
+    public void AllowTermination() => _continue.TrySetResult();
+
+    public async Task TerminateAsync(Process process, TimeSpan timeout)
+    {
+      _started.TrySetResult();
+      await _continue.Task.WaitAsync(timeout);
+      process.Kill(entireProcessTree: true);
+      await process.WaitForExitAsync().WaitAsync(timeout);
+      ProcessHasExited = process.HasExited;
+    }
+  }
+
+  private sealed class FailingProcessTreeTerminator : IProcessTreeTerminator
+  {
+    public int ProcessId { get; private set; } = -1;
+
+    public Task TerminateAsync(Process process, TimeSpan timeout)
+    {
+      ProcessId = process.Id;
+      throw new ProcessTerminationException(
+          process.Id,
+          "Process tree termination could not be confirmed.");
+    }
+
+    public async Task CleanupAsync()
+    {
+      if (ProcessId < 0)
+      {
+        return;
+      }
+
+      try
+      {
+        using var process = Process.GetProcessById(ProcessId);
+        process.Kill(entireProcessTree: true);
+        await process.WaitForExitAsync();
+      }
+      catch (ArgumentException)
+      {
+        // The process exited between the failed cancellation and cleanup.
+      }
+    }
   }
 }

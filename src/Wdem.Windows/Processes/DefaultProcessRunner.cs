@@ -6,6 +6,20 @@ namespace Wdem.Windows.Processes;
 
 public sealed class DefaultProcessRunner : IProcessRunner
 {
+  private static readonly TimeSpan TerminationTimeout = TimeSpan.FromSeconds(10);
+  private readonly IProcessTreeTerminator _processTreeTerminator;
+
+  public DefaultProcessRunner()
+      : this(DefaultProcessTreeTerminator.Instance)
+  {
+  }
+
+  internal DefaultProcessRunner(IProcessTreeTerminator processTreeTerminator)
+  {
+    _processTreeTerminator = processTreeTerminator ??
+        throw new ArgumentNullException(nameof(processTreeTerminator));
+  }
+
   public async Task<ProcessResult> RunAsync(
       ProcessRequest request,
       IProgress<ProcessOutput>? output,
@@ -86,16 +100,7 @@ public sealed class DefaultProcessRunner : IProcessRunner
     }
     catch (OperationCanceledException)
     {
-      TryKillProcessTree(process);
-      try
-      {
-        using var terminationTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        await process.WaitForExitAsync(terminationTimeout.Token);
-      }
-      catch
-      {
-        // Cancellation has already been requested. The process-tree kill is best effort.
-      }
+      await _processTreeTerminator.TerminateAsync(process, TerminationTimeout);
       throw;
     }
     finally
@@ -115,20 +120,5 @@ public sealed class DefaultProcessRunner : IProcessRunner
         ExitCode: process.ExitCode,
         StandardOutput: standardOutput.ToString(),
         StandardError: standardError.ToString());
-  }
-
-  private static void TryKillProcessTree(Process process)
-  {
-    try
-    {
-      if (!process.HasExited)
-      {
-        process.Kill(entireProcessTree: true);
-      }
-    }
-    catch
-    {
-      // Best effort.
-    }
   }
 }
