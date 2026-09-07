@@ -63,7 +63,7 @@ Ports are owned by the use case that needs them. Initial ports are `IProfileRepo
 | `Core/Profiles/ProfileOrigin.cs` | `Application/Profiles` result | Keep transport origin outside Domain |
 | `Core/Profiles/ProfileParser.cs` | `Infrastructure/Profiles` | Split deserializer, validator, and mapper |
 | `Core/Profiles/ProfileCatalog.cs` | `Infrastructure/Profiles` | Implement application repository port |
-| `Core/Graph/TaskGraph.cs` | `Domain/Planning/TaskPlanner.cs` | Replace public graph with immutable Plan |
+| ~~`Core/Graph/TaskGraph.cs`~~ | `Domain/Planning/TaskPlanner.cs` | Migrated: public graph replaced by immutable Plan |
 | `Core/Runs/EnvironmentInspector.cs` | `Application/Inspection` | Convert to use-case handler over runtime port |
 | `Core/Runs/EnvironmentManager.cs` | `Application/Execution` | Replace facade with explicit apply/start handlers |
 | `Core/Runs/EnvironmentRun.cs` | `Application/Execution` | Rename to execution handle |

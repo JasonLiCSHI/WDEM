@@ -1,21 +1,21 @@
-using Wdem.Core.Graph;
+using Wdem.Core.Planning;
 using Wdem.Core.Profiles;
 using Xunit;
 
 namespace Wdem.Core.Tests;
 
-public sealed class TaskGraphTests
+public sealed class ProfilePlannerCompatibilityTests
 {
   [Fact]
   public void BuildForSelection_IncludesRequiredAndSelectedOptionalsAndDependencies()
   {
     var profile = ProfileParser.Parse(ProfileJson);
 
-    var graph = TaskGraph.BuildForSelection(profile, selectedOptionalTaskIds: ["resharper"]);
+    var plan = ProfilePlanner.CreateForSelection(profile, selectedOptionalTaskIds: ["resharper"]);
 
     Assert.Equal(
         ["dotnet-sdk", "visual-studio", "resharper"],
-        graph.OrderedTaskIds);
+        plan.Tasks.Select(task => task.Id.Value));
   }
 
   [Fact]
@@ -24,7 +24,7 @@ public sealed class TaskGraphTests
     var profile = ProfileParser.Parse(ProfileJson);
 
     var exception = Assert.Throws<FormatException>(() =>
-        TaskGraph.BuildForSelection(profile, selectedOptionalTaskIds: ["missing"]));
+        ProfilePlanner.CreateForSelection(profile, selectedOptionalTaskIds: ["missing"]));
 
     Assert.Contains("missing", exception.Message);
   }
@@ -48,7 +48,7 @@ public sealed class TaskGraphTests
     var profile = ProfileParser.Parse(json);
 
     var exception = Assert.Throws<InvalidOperationException>(() =>
-        TaskGraph.Build(profile, rootTaskIds: ["a"]));
+        ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["a"]));
 
     Assert.Contains("a", exception.Message);
     Assert.Contains("b", exception.Message);

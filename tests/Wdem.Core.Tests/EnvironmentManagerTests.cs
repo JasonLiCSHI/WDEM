@@ -1,4 +1,4 @@
-using Wdem.Core.Graph;
+using Wdem.Core.Planning;
 using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
 using Wdem.Core.Tests.TestDoubles;
@@ -12,7 +12,7 @@ public sealed class EnvironmentManagerTests
   public async Task Apply_IndependentTasksStartConcurrently()
   {
     var profile = ProfileParser.Parse(ProfileJson);
-    var graph = TaskGraph.Build(profile, rootTaskIds: ["a", "b"]);
+    var graph = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["a", "b"]);
     var runtime = new FakeRuntime()
         .WithDetect("a", exitCode: 1)
         .WithDetect("b", exitCode: 1)
@@ -41,7 +41,7 @@ public sealed class EnvironmentManagerTests
   public async Task Apply_DependentTaskWaitsForSuccessfulDependency()
   {
     var profile = ProfileParser.Parse(ProfileJson);
-    var graph = TaskGraph.Build(profile, rootTaskIds: ["c"]);
+    var graph = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["c"]);
     var finishDependency = new TaskCompletionSource(
         TaskCreationOptions.RunContinuationsAsynchronously);
     var runtime = new FakeRuntime()
@@ -68,7 +68,7 @@ public sealed class EnvironmentManagerTests
   public async Task Apply_CancelTask_BlocksDependentsButContinuesIndependentTasks()
   {
     var profile = ProfileParser.Parse(ProfileJson);
-    var graph = TaskGraph.Build(profile, rootTaskIds: ["a", "b", "c"]);
+    var graph = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["a", "b", "c"]);
     var finishIndependentTask = new TaskCompletionSource(
         TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -108,7 +108,7 @@ public sealed class EnvironmentManagerTests
   public async Task Apply_FailedDependency_BlocksDownstreamTasks()
   {
     var profile = ProfileParser.Parse(ProfileJson);
-    var graph = TaskGraph.Build(profile, rootTaskIds: ["a", "c"]);
+    var graph = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["a", "c"]);
 
     var runtime = new FakeRuntime()
         .WithDetect("a", exitCode: 1)
@@ -127,7 +127,7 @@ public sealed class EnvironmentManagerTests
   public async Task Apply_CancelAll_DoesNotStartNewTasks()
   {
     var profile = ProfileParser.Parse(ProfileJson);
-    var graph = TaskGraph.Build(profile, rootTaskIds: ["c"]);
+    var graph = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["c"]);
 
     var runtime = new FakeRuntime()
         .WithDetect("a", exitCode: 1)
@@ -160,7 +160,7 @@ public sealed class EnvironmentManagerTests
   public async Task Apply_ReportsDetailedTaskStateAndStageProgress()
   {
     var profile = ProfileParser.Parse(ProfileJson);
-    var graph = TaskGraph.Build(profile, rootTaskIds: ["b"]);
+    var graph = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["b"]);
     var runtime = new FakeRuntime()
         .WithDetect("b", exitCode: 1)
         .WithApply("b", exitCode: 0);
@@ -200,7 +200,7 @@ public sealed class EnvironmentManagerTests
   public async Task Apply_StreamsCommandOutputWithTaskAndStageContext()
   {
     var profile = ProfileParser.Parse(ProfileJson);
-    var graph = TaskGraph.Build(profile, rootTaskIds: ["b"]);
+    var graph = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["b"]);
     var runtime = new FakeRuntime()
         .WithDetect("b", exitCode: 1)
         .WithApplyOutput("b", "downloading", WorkflowOutputStream.StandardOutput);
@@ -220,7 +220,7 @@ public sealed class EnvironmentManagerTests
   public async Task Apply_TaskEventsReduceToImmutableWorkflowSnapshots()
   {
     var profile = ProfileParser.Parse(ProfileJson);
-    var graph = TaskGraph.Build(profile, rootTaskIds: ["b"]);
+    var graph = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["b"]);
     var runtime = new FakeRuntime()
         .WithDetect("b", exitCode: 1)
         .WithApply("b", exitCode: 0);
@@ -247,7 +247,7 @@ public sealed class EnvironmentManagerTests
   public async Task Apply_ParallelTaskUpdatesArePublishedInRevisionOrder()
   {
     var profile = ProfileParser.Parse(ProfileJson);
-    var graph = TaskGraph.Build(profile, rootTaskIds: ["a", "b"]);
+    var graph = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["a", "b"]);
     var runtime = new FakeRuntime()
         .WithDetect("a", exitCode: 1)
         .WithDetect("b", exitCode: 1)
@@ -275,7 +275,7 @@ public sealed class EnvironmentManagerTests
   public async Task Apply_EnteringEachActivityStatePrecedesItsRuntimeInvocation()
   {
     var profile = ProfileParser.Parse(PipelineProfileJson);
-    var graph = TaskGraph.Build(profile, rootTaskIds: ["pipeline"]);
+    var graph = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["pipeline"]);
     var updates = new List<WorkflowUpdate>();
     var statesSeenByRuntime = new List<TaskExecutionState>();
     var runtime = new FakeRuntime()
@@ -323,7 +323,7 @@ public sealed class EnvironmentManagerTests
   public async Task Apply_CapabilitiesFollowTaskAndWorkflowState()
   {
     var profile = ProfileParser.Parse(ProfileJson);
-    var graph = TaskGraph.Build(profile, rootTaskIds: ["a"]);
+    var graph = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["a"]);
     var runtime = new FakeRuntime()
         .WithDetect("a", exitCode: 1)
         .WithApplyThatWaitsForCancellation("a");
@@ -348,7 +348,7 @@ public sealed class EnvironmentManagerTests
   public async Task Apply_CancellationWinsWhenRuntimeReturnsSuccessAfterCancellation()
   {
     var profile = ProfileParser.Parse(ProfileJson);
-    var graph = TaskGraph.Build(profile, rootTaskIds: ["a"]);
+    var graph = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["a"]);
     var runtime = new FakeRuntime()
         .WithDetect("a", exitCode: 1)
         .WithApplyThatReturnsAfterCancellation("a");

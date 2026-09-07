@@ -1,5 +1,5 @@
-using Wdem.Core.Graph;
 using Wdem.Core.Profiles;
+using Wdem.Domain.Planning;
 using Wdem.Core.Runtime;
 using Wdem.Core.Workflows;
 
@@ -18,27 +18,28 @@ public static class EnvironmentManager
 
   public static EnvironmentRun StartApply(
       EnvironmentProfile profile,
-      TaskGraph graph,
+      Plan plan,
       ITaskRuntime runtime,
       IProgress<WorkflowProgress>? progress = null,
       IProgress<WorkflowUpdate>? updates = null,
       ITaskWorkflowProvider? workflowProvider = null)
   {
     ArgumentNullException.ThrowIfNull(profile);
-    ArgumentNullException.ThrowIfNull(graph);
+    ArgumentNullException.ThrowIfNull(plan);
     ArgumentNullException.ThrowIfNull(runtime);
 
     var workflows = CreateWorkflows(profile, workflowProvider);
 
-    var perTaskCts = graph.OrderedTaskIds.ToDictionary(
+    var plannedTaskIds = plan.Tasks.Select(task => task.Id.Value).ToArray();
+    var perTaskCts = plannedTaskIds.ToDictionary(
         taskId => taskId,
         _ => new CancellationTokenSource(),
         StringComparer.Ordinal);
     var allCts = new CancellationTokenSource();
-    var state = new WorkflowStateStore(profile, graph, workflows, progress, updates);
+    var state = new WorkflowStateStore(profile, plannedTaskIds, workflows, progress, updates);
     var machine = new WorkflowStateMachine(
         profile,
-        graph,
+        plannedTaskIds,
         runtime,
         workflows,
         perTaskCts,

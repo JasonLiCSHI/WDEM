@@ -1,6 +1,7 @@
-using Wdem.Core.Graph;
+using Wdem.Core.Planning;
 using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
+using Wdem.Domain.Planning;
 using Wdem.Domain.Versions;
 using Wdem.Windows.Configuration;
 using Wdem.Windows.Logging;
@@ -230,7 +231,7 @@ public static class Program
 
     var selected = ParseCsv(GetOption(args, "--select"));
     var singleTask = GetOption(args, "--task");
-    TaskGraph graph;
+    Plan plan;
     try
     {
       if (!string.IsNullOrWhiteSpace(singleTask) && selected.Length > 0)
@@ -238,9 +239,9 @@ public static class Program
         throw new ArgumentException("Use either --task or --select, not both.");
       }
 
-      graph = string.IsNullOrWhiteSpace(singleTask)
-          ? TaskGraph.BuildForSelection(profile, selectedOptionalTaskIds: selected)
-          : TaskGraph.Build(profile, [singleTask]);
+      plan = string.IsNullOrWhiteSpace(singleTask)
+          ? ProfilePlanner.CreateForSelection(profile, selectedOptionalTaskIds: selected)
+          : ProfilePlanner.CreateForTasks(profile, [singleTask]);
     }
     catch (Exception exception)
     {
@@ -253,12 +254,13 @@ public static class Program
     }
 
     Console.WriteLine("Plan:");
-    foreach (var taskId in graph.OrderedTaskIds)
+    var plannedTaskIds = TaskIds(plan);
+    foreach (var taskId in plannedTaskIds)
     {
       var task = profile.Tasks[taskId];
       PrintTaskPlan(task);
     }
-    log.Write("plan", string.Join(" -> ", graph.OrderedTaskIds));
+    log.Write("plan", string.Join(" -> ", plannedTaskIds));
 
     var yes = HasFlag(args, "--yes") || HasFlag(args, "-y");
     if (!yes)
@@ -271,12 +273,12 @@ public static class Program
             "confirm_apply",
             UserActionOutcome.Rejected,
             profile.Id,
-            graph.OrderedTaskIds);
+            plannedTaskIds);
         log.WriteUserAction(
             userOperation,
             UserActionOutcome.Rejected,
             profile.Id,
-            graph.OrderedTaskIds);
+            plannedTaskIds);
         return 0;
       }
     }
@@ -284,7 +286,7 @@ public static class Program
         "confirm_apply",
         UserActionOutcome.Accepted,
         profile.Id,
-        graph.OrderedTaskIds);
+        plannedTaskIds);
 
     int retries;
     try
@@ -297,14 +299,14 @@ public static class Program
           userOperation,
           UserActionOutcome.Failed,
           profile.Id,
-          graph.OrderedTaskIds);
+          plannedTaskIds);
       Console.Error.WriteLine(exception.Message);
       return 2;
     }
 
     var report = await RunApplyWithRetriesAsync(
         profile,
-        graph,
+        plan,
         runtime,
         progress,
         log,
@@ -320,14 +322,14 @@ public static class Program
         userOperation,
         ToUserActionOutcome(report),
         profile.Id,
-        graph.OrderedTaskIds);
+        plannedTaskIds);
 
     return report.Tasks.Values.All(task => task.Outcome is TaskOutcome.Succeeded or TaskOutcome.NotRequired) ? 0 : 1;
   }
 
   private static async Task<RunReport> RunApplyWithRetriesAsync(
       EnvironmentProfile profile,
-      TaskGraph graph,
+      Plan plan,
       WindowsTaskRuntime runtime,
       IProgress<WorkflowProgress> progress,
       JsonLineSessionLog log,
@@ -343,11 +345,11 @@ public static class Program
             "retry_workflow",
             UserActionOutcome.Requested,
             profile.Id,
-            graph.OrderedTaskIds);
+            TaskIds(plan));
         log.Write("retry", $"Attempt {attempt}/{retries}");
       }
 
-      var run = EnvironmentManager.StartApply(profile, graph, runtime, progress);
+      var run = EnvironmentManager.StartApply(profile, plan, runtime, progress);
       ConsoleCancelEventHandler cancelHandler = (_, e) =>
       {
         e.Cancel = true;
@@ -356,7 +358,7 @@ public static class Program
             "cancel_workflow",
             UserActionOutcome.Requested,
             profile.Id,
-            graph.OrderedTaskIds);
+            TaskIds(plan));
         log.Write("cancel", "Ctrl+C requested safe cancellation of the active workflow.");
         run.CancelAll();
       };
@@ -548,6 +550,9 @@ public static class Program
 
   private static string QuoteArgument(string value) =>
       value.Any(char.IsWhiteSpace) ? $"\"{value.Replace("\"", "\\\"", StringComparison.Ordinal)}\"" : value;
+
+  private static IReadOnlyList<string> TaskIds(Plan plan) =>
+      plan.Tasks.Select(task => task.Id.Value).ToArray();
 
   private static async Task<int> ListProfilesAsync(ProfileCatalog catalog)
   {
