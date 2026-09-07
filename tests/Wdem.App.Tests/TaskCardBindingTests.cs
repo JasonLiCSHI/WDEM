@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
+using Wdem.Bootstrapper;
 using Wdem.Core.Tasks;
 using Xunit;
 
@@ -27,6 +28,17 @@ public sealed class TaskCardBindingTests
     {
       try
       {
+        var sessionRoot = Path.Combine(
+            Path.GetTempPath(),
+            "wdem-app-tests",
+            Guid.NewGuid().ToString("N"));
+        using var session = WdemBootstrapper.StartSession(new WdemBootstrapperOptions("app-test")
+        {
+          SettingsPath = Path.Combine(sessionRoot, "settings.json"),
+          CacheDirectory = Path.Combine(sessionRoot, "cache"),
+          LogDirectory = Path.Combine(sessionRoot, "logs"),
+          ApplicationDirectory = sessionRoot
+        });
         var application = new Application();
         application.Resources.MergedDictionaries.Add(new ResourceDictionary
         {
@@ -35,7 +47,7 @@ public sealed class TaskCardBindingTests
               UriKind.Absolute)
         });
 
-        var window = new MainWindow();
+        var window = new MainWindow(session);
         Assert.NotNull(window.Icon);
         window.Measure(new Size(1200, 800));
         window.Arrange(new Rect(0, 0, 1200, 800));
@@ -48,6 +60,8 @@ public sealed class TaskCardBindingTests
 
         window.Close();
         application.Shutdown();
+        session.Dispose();
+        Directory.Delete(sessionRoot, recursive: true);
       }
       catch (Exception exception)
       {

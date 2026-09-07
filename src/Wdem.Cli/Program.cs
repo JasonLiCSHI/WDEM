@@ -1,12 +1,12 @@
+using Wdem.Bootstrapper;
 using Wdem.Core.Planning;
 using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
+using Wdem.Core.Runtime;
 using Wdem.Domain.Planning;
 using Wdem.Domain.Versions;
 using Wdem.Windows.Configuration;
 using Wdem.Windows.Logging;
-using Wdem.Windows.Processes;
-using Wdem.Windows.Runtime;
 using Wdem.Windows.Security;
 
 namespace Wdem.Cli;
@@ -22,7 +22,8 @@ public static class Program
       return AdministratorRequirement.AccessDeniedExitCode;
     }
 
-    using var log = JsonLineSessionLog.Create("cli");
+    using var session = WdemBootstrapper.StartSession("cli");
+    var log = session.SessionLog;
 
     if (args.Length == 0 || args[0] is "-h" or "--help")
     {
@@ -71,7 +72,7 @@ public static class Program
     WdemUserSettingsStore settings;
     try
     {
-      settings = WdemUserSettingsStore.OpenDefault();
+      settings = session.Settings;
     }
     catch (Exception exception)
     {
@@ -80,7 +81,7 @@ public static class Program
       return 2;
     }
 
-    var catalog = new ProfileCatalog(settings.ProfileSource, settings.CacheDirectory);
+    var catalog = session.ProfileCatalog;
     if (command.Equals("profiles", StringComparison.OrdinalIgnoreCase))
     {
       var exitCode = await ListProfilesAsync(catalog);
@@ -173,7 +174,7 @@ public static class Program
       return 2;
     }
 
-    var runtime = new WindowsTaskRuntime(new DefaultProcessRunner());
+    var runtime = session.TaskRuntime;
     log.Write("profile", $"Loaded {profile.Id} {profile.Version} from {loaded.Location}");
     Console.WriteLine($"Log: {log.DisplayPath}");
     if (log.LastError is not null)
@@ -330,7 +331,7 @@ public static class Program
   private static async Task<RunReport> RunApplyWithRetriesAsync(
       EnvironmentProfile profile,
       Plan plan,
-      WindowsTaskRuntime runtime,
+      ITaskRuntime runtime,
       IProgress<WorkflowProgress> progress,
       JsonLineSessionLog log,
       int retries)
