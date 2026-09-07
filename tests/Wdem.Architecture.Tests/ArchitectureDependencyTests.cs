@@ -233,6 +233,22 @@ public sealed class ArchitectureDependencyTests
   }
 
   [Theory]
+  [InlineData("src/Wdem.Infrastructure/Profiles/ProfileDocument.cs")]
+  [InlineData("src/Wdem.Infrastructure/Profiles/ProfileDocumentDeserializer.cs")]
+  [InlineData("src/Wdem.Infrastructure/Profiles/ProfileDocumentMapper.cs")]
+  [InlineData("src/Wdem.Infrastructure/Profiles/ProfileValidator.cs")]
+  [InlineData("src/Wdem.Infrastructure/Profiles/HttpProfileDocumentSource.cs")]
+  [InlineData("src/Wdem.Infrastructure/Profiles/ProfileDocumentCache.cs")]
+  public void ProfileParsingHasFocusedComponents(string relativePath)
+  {
+    var path = Path.Combine(
+        FindRepositoryRoot(),
+        relativePath.Replace('/', Path.DirectorySeparatorChar));
+
+    Assert.True(File.Exists(path), $"Expected architecture source '{path}'.");
+  }
+
+  [Theory]
   [InlineData("src/Wdem.Domain", "System.Diagnostics.Process")]
   [InlineData("src/Wdem.Domain", "System.IO.File")]
   [InlineData("src/Wdem.Domain", "System.Net.Http")]

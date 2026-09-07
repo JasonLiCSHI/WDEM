@@ -25,9 +25,8 @@ public sealed class ProfileCatalog : IProfileRepository
       RegexOptions.CultureInvariant);
 
   private readonly ProfileSourceDefinition _source;
-  private readonly string _cacheDirectory;
-  private readonly HttpClient _httpClient;
-  private readonly int _maxDocumentBytes;
+  private readonly HttpProfileDocumentSource _remote;
+  private readonly ProfileDocumentCache _cache;
 
   public ProfileCatalog(
       ProfileSourceDefinition source,
@@ -40,9 +39,11 @@ public sealed class ProfileCatalog : IProfileRepository
     ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxDocumentBytes);
 
     _source = source;
-    _cacheDirectory = Path.Combine(Path.GetFullPath(cacheDirectory), source.Id);
-    _httpClient = httpClient ?? SharedHttpClient;
-    _maxDocumentBytes = maxDocumentBytes;
+    _remote = new HttpProfileDocumentSource(
+        source,
+        httpClient ?? SharedHttpClient,
+        maxDocumentBytes);
+    _cache = new ProfileDocumentCache(cacheDirectory, source.Id, maxDocumentBytes);
   }
 
   public ProfileSourceDefinition Source => _source;
@@ -54,14 +55,14 @@ public sealed class ProfileCatalog : IProfileRepository
     ProfileOrigin origin;
     try
     {
-      json = await DownloadAsync("index.json", cancellationToken);
+      json = await _remote.ReadAsync("index.json", cancellationToken);
       var parsed = ParseIndex(json);
-      await TryWriteCacheAsync(CachePath("index.json"), json, cancellationToken);
+      await _cache.TryWriteAsync("index.json", json, cancellationToken);
       return CreateEntries(parsed, ProfileOrigin.Remote);
     }
     catch (Exception exception) when (IsOfflineFailure(exception, cancellationToken))
     {
-      json = await ReadCacheAsync(CachePath("index.json"), cancellationToken);
+      json = await _cache.ReadAsync("index.json", _source.DisplayName, cancellationToken);
       origin = ProfileOrigin.Cache;
     }
 
@@ -81,10 +82,10 @@ public sealed class ProfileCatalog : IProfileRepository
     string location;
     try
     {
-      json = await DownloadAsync(fileName, cancellationToken);
+      json = await _remote.ReadAsync(fileName, cancellationToken);
       var parsed = ProfileParser.Parse(json);
       ValidateLoadedId(profileId, parsed.Id);
-      await TryWriteCacheAsync(CachePath(fileName), json, cancellationToken);
+      await _cache.TryWriteAsync(fileName, json, cancellationToken);
       return new LoadedProfile(
           parsed,
           ProfileOrigin.Remote,
@@ -94,8 +95,8 @@ public sealed class ProfileCatalog : IProfileRepository
     }
     catch (Exception exception) when (IsOfflineFailure(exception, cancellationToken))
     {
-      var cachePath = CachePath(fileName);
-      json = await ReadCacheAsync(cachePath, cancellationToken);
+      var cachePath = _cache.PathFor(fileName);
+      json = await _cache.ReadAsync(fileName, _source.DisplayName, cancellationToken);
       origin = ProfileOrigin.Cache;
       location = cachePath;
     }
@@ -126,118 +127,12 @@ public sealed class ProfileCatalog : IProfileRepository
           .OrderBy(entry => entry.Id, StringComparer.Ordinal)
           .ToArray();
 
-  private async Task<string> DownloadAsync(
-      string relativePath,
-      CancellationToken cancellationToken)
-  {
-    var uri = new Uri(_source.BaseUri, relativePath);
-    using var response = await _httpClient.GetAsync(
-        uri,
-        HttpCompletionOption.ResponseHeadersRead,
-        cancellationToken);
-    EnsureHttps(response.RequestMessage?.RequestUri ?? uri);
-    response.EnsureSuccessStatusCode();
-    if (response.Content.Headers.ContentLength > _maxDocumentBytes)
-    {
-      throw TooLarge(relativePath);
-    }
-
-    await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-    return await ReadLimitedUtf8Async(stream, relativePath, cancellationToken);
-  }
-
-  private async Task<string> ReadCacheAsync(
-      string path,
-      CancellationToken cancellationToken)
-  {
-    if (!File.Exists(path))
-    {
-      throw new InvalidOperationException(
-          $"Profile Source '{_source.DisplayName}' is unavailable and no local cache exists.");
-    }
-
-    await using var stream = File.OpenRead(path);
-    return await ReadLimitedUtf8Async(stream, Path.GetFileName(path), cancellationToken);
-  }
-
-  private async Task<string> ReadLimitedUtf8Async(
-      Stream stream,
-      string documentName,
-      CancellationToken cancellationToken)
-  {
-    using var buffer = new MemoryStream();
-    var chunk = new byte[8192];
-    while (true)
-    {
-      var read = await stream.ReadAsync(chunk, cancellationToken);
-      if (read == 0)
-      {
-        break;
-      }
-
-      await buffer.WriteAsync(chunk.AsMemory(0, read), cancellationToken);
-      if (buffer.Length > _maxDocumentBytes)
-      {
-        throw TooLarge(documentName);
-      }
-    }
-
-    return new UTF8Encoding(false, true).GetString(buffer.ToArray()).TrimStart('\uFEFF');
-  }
-
-  private static async Task TryWriteCacheAsync(
-      string destination,
-      string content,
-      CancellationToken cancellationToken)
-  {
-    var directory = Path.GetDirectoryName(destination)!;
-    var temporary = destination + ".tmp-" + Guid.NewGuid().ToString("N");
-    try
-    {
-      Directory.CreateDirectory(directory);
-      await File.WriteAllTextAsync(
-          temporary,
-          content,
-          new UTF8Encoding(false),
-          cancellationToken);
-      File.Move(temporary, destination, overwrite: true);
-    }
-    catch (Exception exception) when (
-        exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
-    {
-      // A cache failure must not hide a valid remote response.
-    }
-    finally
-    {
-      try
-      {
-        File.Delete(temporary);
-      }
-      catch
-      {
-        // Best-effort cleanup of WDEM's own temporary cache file.
-      }
-    }
-  }
-
-  private string CachePath(string fileName) => Path.Combine(_cacheDirectory, fileName);
-
   private static bool IsOfflineFailure(Exception exception, CancellationToken cancellationToken) =>
       exception is HttpRequestException { StatusCode: null } ||
       exception is TaskCanceledException && !cancellationToken.IsCancellationRequested;
 
   private static string ComputeHash(string json) =>
       Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json)));
-
-  private static void EnsureHttps(Uri? uri)
-  {
-    if (uri is null ||
-        !uri.IsAbsoluteUri ||
-        !uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
-    {
-      throw new NotSupportedException("Profile Source requests and redirects must use HTTPS.");
-    }
-  }
 
   private static void ValidateProfileId(string profileId)
   {
@@ -299,9 +194,6 @@ public sealed class ProfileCatalog : IProfileRepository
           string.IsNullOrWhiteSpace(item.Description) ? null : item.Description);
     }).ToArray();
   }
-
-  private InvalidDataException TooLarge(string documentName) =>
-      new($"Profile Source document '{documentName}' exceeds the {_maxDocumentBytes} byte size limit.");
 
   private static string Required(string? value, string field) =>
       string.IsNullOrWhiteSpace(value)
