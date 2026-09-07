@@ -1,12 +1,12 @@
-using Wdem.Core.Profiles;
 using Wdem.Domain.Planning;
+using Wdem.Domain.Profiles;
 using Wdem.Domain.Tasks;
 
-namespace Wdem.Core.Planning;
+namespace Wdem.Application.Planning;
 
-public static class ProfilePlanner
+public sealed class CreatePlanHandler
 {
-  public static Plan CreateForSelection(
+  public Plan CreateForSelection(
       EnvironmentProfile profile,
       IReadOnlyCollection<string> selectedOptionalTaskIds)
   {
@@ -17,7 +17,7 @@ public static class ProfilePlanner
         selectedOptionalTaskIds.Select(TaskId.Parse).ToArray());
   }
 
-  public static Plan CreateForTasks(
+  public Plan CreateForTasks(
       EnvironmentProfile profile,
       IReadOnlyCollection<string> rootTaskIds)
   {

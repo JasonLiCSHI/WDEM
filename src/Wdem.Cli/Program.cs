@@ -1,11 +1,14 @@
+using Wdem.Application.Execution;
+using Wdem.Application.Inspection;
+using Wdem.Application.Planning;
 using Wdem.Application.Runtime;
 using Wdem.Application.Workflows;
 using Wdem.Bootstrapper;
-using Wdem.Core.Planning;
 using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
-using Wdem.Domain.Planning;
 using Wdem.Domain.Execution;
+using Wdem.Domain.Planning;
+using Wdem.Domain.Profiles;
 using Wdem.Domain.Versions;
 using Wdem.Windows.Configuration;
 using Wdem.Windows.Logging;
@@ -178,6 +181,8 @@ public static class Program
 
     var runtime = session.TaskRuntime;
     var activityExecutor = session.WorkflowActivityExecutor;
+    var createPlan = session.CreatePlan;
+    var inspectEnvironment = session.InspectEnvironment;
     log.Write("profile", $"Loaded {profile.Id} {profile.Version} from {loaded.Location}");
     Console.WriteLine($"Log: {log.DisplayPath}");
     if (log.LastError is not null)
@@ -201,9 +206,8 @@ public static class Program
     InspectReport inspect;
     try
     {
-      inspect = await EnvironmentInspector.InspectAsync(
+      inspect = await inspectEnvironment.HandleAsync(
           profile,
-          runtime,
           progress,
           inspectCancellation.Token);
     }
@@ -244,8 +248,8 @@ public static class Program
       }
 
       plan = string.IsNullOrWhiteSpace(singleTask)
-          ? ProfilePlanner.CreateForSelection(profile, selectedOptionalTaskIds: selected)
-          : ProfilePlanner.CreateForTasks(profile, [singleTask]);
+          ? createPlan.CreateForSelection(profile, selectedOptionalTaskIds: selected)
+          : createPlan.CreateForTasks(profile, [singleTask]);
     }
     catch (Exception exception)
     {

@@ -1,30 +1,19 @@
 using Wdem.Application.Execution;
-using Wdem.Application.Inspection;
 using Wdem.Application.Runtime;
-using Wdem.Core.Profiles;
 using Wdem.Domain.Execution;
+using Wdem.Domain.Profiles;
 using Wdem.Domain.Versions;
 
-namespace Wdem.Core.Runs;
+namespace Wdem.Application.Inspection;
 
-public static class EnvironmentInspector
+public sealed class InspectEnvironmentHandler(ITaskRuntime runtime)
 {
-  public static async Task<InspectReport> InspectAsync(
+  public async Task<InspectReport> HandleAsync(
       EnvironmentProfile profile,
-      ITaskRuntime runtime,
-      CancellationToken cancellationToken = default)
-  {
-    return await InspectAsync(profile, runtime, progress: null, cancellationToken);
-  }
-
-  public static async Task<InspectReport> InspectAsync(
-      EnvironmentProfile profile,
-      ITaskRuntime runtime,
-      IProgress<WorkflowProgress>? progress,
+      IProgress<WorkflowProgress>? progress = null,
       CancellationToken cancellationToken = default)
   {
     ArgumentNullException.ThrowIfNull(profile);
-    ArgumentNullException.ThrowIfNull(runtime);
 
     var inspections = new Dictionary<string, TaskInspection>(StringComparer.Ordinal);
     foreach (var task in profile.Tasks.Values.OrderBy(value => value.Id, StringComparer.Ordinal))
@@ -91,6 +80,7 @@ public static class EnvironmentInspector
 
     return new InspectReport(inspections);
   }
+
   private sealed class CallbackProgress<T>(Action<T> callback) : IProgress<T>
   {
     public void Report(T value) => callback(value);

@@ -56,7 +56,7 @@ Ports are owned by the use case that needs them. Initial ports are `IProfileRepo
 | `Core/Versions/VersionConstraint.cs` | `Domain/Versions/VersionRequirement.cs`, `SoftwareVersion.cs` | Split parsing/comparison from compliance result |
 | ~~`Core/Tasks/TaskDefinition.cs`~~ | `Domain/Tasks/TaskDefinition.cs` | Migrated immutable desired-state definition; it references only pure Domain workflow definitions |
 | ~~`Core/Tasks/CommandDefinition.cs`~~ | `Domain/Tasks/CommandDefinition.cs` | Migrated; keeps the executable plus argument-array invariant |
-| `Core/Profiles/EnvironmentProfile.cs` | `Domain/Profiles/Profile.cs` | Rename after callers migrate |
+| ~~`Core/Profiles/EnvironmentProfile.cs`~~ | `Domain/Profiles/EnvironmentProfile.cs` | Migrated immutable Profile aggregate; a later vocabulary-only rename is optional |
 | `Core/Profiles/ProfileSourceDefinition.cs` | `Domain/Profiles/ProfileSource.cs` | Move validated identity and URI value semantics |
 | `Core/Profiles/ProfileCatalogEntry.cs` | `Application/Profiles` read model | Move catalog projection out of Domain |
 | `Core/Profiles/LoadedProfile.cs` | `Application/Profiles` result | Keep origin/hash with load use case |
@@ -64,18 +64,19 @@ Ports are owned by the use case that needs them. Initial ports are `IProfileRepo
 | `Core/Profiles/ProfileParser.cs` | `Infrastructure/Profiles` | Split deserializer, validator, and mapper |
 | `Core/Profiles/ProfileCatalog.cs` | `Infrastructure/Profiles` | Implement application repository port |
 | ~~`Core/Graph/TaskGraph.cs`~~ | `Domain/Planning/TaskPlanner.cs` | Migrated: public graph replaced by immutable Plan |
-| `Core/Runs/EnvironmentInspector.cs` | `Application/Inspection` | Convert to use-case handler over runtime port |
+| ~~`Core/Runs/EnvironmentInspector.cs`~~ | `Application/Inspection/InspectEnvironmentHandler.cs` | Migrated use-case handler over the runtime port |
 | `Core/Runs/EnvironmentManager.cs` | `Application/Execution` | Replace facade with explicit apply/start handlers |
 | `Core/Runs/EnvironmentRun.cs` | `Application/Execution` | Rename to execution handle |
-| `Core/Runs/InspectReport.cs` | `Application/Inspection` | Keep as use-case result/read model |
+| ~~`Core/Runs/InspectReport.cs`~~ | `Application/Inspection/InspectReport.cs` | Migrated use-case result/read model |
 | `Core/Runs/RunReport.cs`, `StepReport.cs`, `TaskReport.cs` | `Domain/Execution` | Model immutable execution history |
 | ~~`Core/Runs/TaskComplianceEvaluator.cs`, `TaskComplianceState.cs`~~ | `Application/Inspection`, `Domain/Versions` | Migrated command-output interpretation and compliance rules |
 | ~~`Core/Runs/TaskExecutionState.cs`, `TaskOutcome.cs`~~ | `Domain/Execution` | Migrated stable lifecycle vocabulary |
 | `Core/Runs/TaskCapabilities.cs` | `Application/Queries` | Project capabilities from domain state |
-| `Core/Runs/TaskInspection.cs` | `Domain/Planning` observation | Feed immutable planning decisions |
+| ~~`Core/Runs/TaskInspection.cs`~~ | `Application/Inspection/TaskInspection.cs` | Migrated inspection read model |
 | `Core/Runs/WorkflowStateMachine.cs` | `Application/Execution` | Coordinate Activities using domain decisions |
 | `Core/Runs/WorkflowStateStore.cs` | `Application/Queries` | Project serialized immutable snapshots |
-| `Core/Runs/Workflow*.cs` snapshot/progress files | `Application/Queries` | Preserve client-facing read models |
+| `Core/Runs/Workflow*.cs` snapshot files | `Application/Queries` | Preserve client-facing read models |
+| ~~`Core/Runs/WorkflowProgress.cs`~~ | `Application/Execution/WorkflowProgress.cs` | Migrated shared runtime progress contract |
 | ~~`Core/Runtime/*.cs`~~ | `Application/Runtime` | Migrated; Application owns the runtime port and transport results |
 | ~~`Core/Workflows/TaskWorkflow*.cs`~~ | `Domain/Workflows` | Migrated state graph definitions, validation, transition facts, and decisions |
 | ~~`Core/Workflows/WorkflowActivity*.cs`~~ | split Domain/Application | Migrated: Domain keeps Activity definitions; Application executes them through a port |

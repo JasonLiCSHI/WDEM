@@ -30,7 +30,7 @@ Release-defined HTTPS Profile Source
 
 - `ProfileCatalog` is the external seam for remote configuration. Its public API is limited to `ListAsync` and `LoadAsync`; HTTPS enforcement, redirect validation, size limits, UTF-8 decoding, atomic caching, offline fallback, and ID validation remain internal.
 - `ProfileParser` converts versioned JSON into one domain model, so callers never handle JSON details.
-- Domain `TaskPlanner` encapsulates Required/Optional selection, dependency closure, deduplication, topological sorting, and cycle detection, and returns an immutable `Plan`. The transitional `ProfilePlanner` maps parsed Profiles into that domain interface.
+- Domain `TaskPlanner` encapsulates Required/Optional selection, dependency closure, deduplication, topological sorting, and cycle detection, and returns an immutable `Plan`. Application `CreatePlanHandler` maps a Domain `EnvironmentProfile` into that planning interface for both clients.
 - `EnvironmentManager.StartApply` compiles or selects a per-Task state graph and encapsulates graph execution, failure propagation, cancellation, and reporting.
 - Application's `ITaskRuntime` is the execution port. The current Windows adapter starts a Domain `CommandDefinition` as an executable plus argument array. Future script downloaders, elevation brokers, or remote executors can be introduced without teaching the DAG about specific products.
 
@@ -111,10 +111,12 @@ Task capability matrix:
 
 - `Wdem.Domain`: dependency-free business language and rules. Task and command definitions, version requirements, compliance, planning, stable execution state/outcomes, and workflow transition decisions live here.
 - `Wdem.Application`: use-case orchestration and ports; the Task Runtime boundary, Activity execution, and execution step results live here and the layer depends only on Domain.
-- `Wdem.Core`: temporary compatibility module for Profile Schema mapping, inspection, Workflow state, and reports that have not migrated yet.
+- `Wdem.Core`: temporary compatibility module for Profile Schema mapping and Workflow execution state that have not migrated yet.
 - `Wdem.Windows`: user settings, trust records, logs, the shared administrator requirement, Windows process execution, output forwarding, and process-tree cancellation.
 - `Wdem.Cli`: Profile selection, trust confirmation, complete plan preview, retries, and terminal output.
 - `Wdem.App`: installation-language-aware WPF workbench, unified button-state projection, Required/Optional sections, Task details, progress, cancellation, and logs.
+
+`Wdem.Bootstrapper` is the only composition root. It registers the Application planning and inspection handlers, Activity executor, Windows runtime, Profile catalog, settings, and session log with Autofac, then exposes only typed dependencies through `WdemSession`; neither client nor an inner layer receives the Autofac container.
 
 ## Release
 

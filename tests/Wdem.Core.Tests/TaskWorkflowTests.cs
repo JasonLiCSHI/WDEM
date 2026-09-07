@@ -1,5 +1,5 @@
+using Wdem.Application.Planning;
 using Wdem.Application.Workflows;
-using Wdem.Core.Planning;
 using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
 using Wdem.Core.Tests.TestDoubles;
@@ -16,7 +16,7 @@ public sealed class TaskWorkflowTests
   public async Task CustomWorkflow_ExecutesEntryResidenceAndExitActivitiesInOrder()
   {
     var profile = ProfileParser.Parse(ProfileJson);
-    var graph = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["custom"]);
+    var graph = new CreatePlanHandler().CreateForTasks(profile, rootTaskIds: ["custom"]);
     var executed = new List<string>();
     var updates = new List<WorkflowUpdate>();
     var workflow = new TaskWorkflowDefinition(
@@ -71,7 +71,7 @@ public sealed class TaskWorkflowTests
   public async Task CustomWorkflow_CanRouteActivityFailureToRecoveryState()
   {
     var profile = ProfileParser.Parse(ProfileJson);
-    var graph = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["custom"]);
+    var graph = new CreatePlanHandler().CreateForTasks(profile, rootTaskIds: ["custom"]);
     var workflow = new TaskWorkflowDefinition(
         "attempt",
         [
@@ -109,7 +109,7 @@ public sealed class TaskWorkflowTests
   public async Task CustomWorkflow_CancellationStopsBeforeExitAndDownstreamStates()
   {
     var profile = ProfileParser.Parse(ProfileJson);
-    var graph = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["custom"]);
+    var graph = new CreatePlanHandler().CreateForTasks(profile, rootTaskIds: ["custom"]);
     var executed = new List<string>();
     var blockingActivity = new BlockingActivity("wait");
     var workflow = new TaskWorkflowDefinition(
@@ -163,7 +163,7 @@ public sealed class TaskWorkflowTests
   public async Task CustomWorkflow_FailsWhenTransitionLimitIsExceeded()
   {
     var profile = ProfileParser.Parse(ProfileJson);
-    var graph = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["custom"]);
+    var graph = new CreatePlanHandler().CreateForTasks(profile, rootTaskIds: ["custom"]);
     var workflow = new TaskWorkflowDefinition(
         "loop",
         [
@@ -188,7 +188,7 @@ public sealed class TaskWorkflowTests
   public async Task SchemaVersionTwoWorkflow_DrivesDeclaredLifecycleCommands()
   {
     var profile = ProfileParser.Parse(DeclarativeWorkflowProfileJson);
-    var graph = ProfilePlanner.CreateForTasks(profile, rootTaskIds: ["custom"]);
+    var graph = new CreatePlanHandler().CreateForTasks(profile, rootTaskIds: ["custom"]);
     var runtime = new FakeRuntime()
         .WithDetect("custom", exitCode: 0, stdout: "custom version 2.5");
 

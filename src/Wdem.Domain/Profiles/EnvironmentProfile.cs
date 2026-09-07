@@ -1,6 +1,6 @@
 using Wdem.Domain.Tasks;
 
-namespace Wdem.Core.Profiles;
+namespace Wdem.Domain.Profiles;
 
 public sealed record EnvironmentProfile(
     string Id,

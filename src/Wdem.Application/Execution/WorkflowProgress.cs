@@ -2,9 +2,7 @@ using Wdem.Application.Runtime;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Workflows;
 
-namespace Wdem.Core.Runs;
-
-using Wdem.Core.Workflows;
+namespace Wdem.Application.Execution;
 
 public sealed record WorkflowProgress(
     string TaskId,
