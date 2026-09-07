@@ -33,6 +33,7 @@ public sealed class ArchitectureDependencyTests
 
     var offendingFiles = Directory
         .EnumerateFiles(directory, "*.cs", SearchOption.AllDirectories)
+        .Where(path => !IsBuildOutput(path))
         .Where(path => File.ReadAllText(path).Contains(forbiddenText, StringComparison.Ordinal))
         .Select(Path.GetFileName)
         .ToArray();
@@ -49,6 +50,11 @@ public sealed class ArchitectureDependencyTests
           .Where(value => value is not null)
           .Cast<string>()
           .ToArray();
+
+  private static bool IsBuildOutput(string path) =>
+      path.Split(Path.DirectorySeparatorChar).Any(segment =>
+          segment.Equals("bin", StringComparison.OrdinalIgnoreCase) ||
+          segment.Equals("obj", StringComparison.OrdinalIgnoreCase));
 
   private static string FindRepositoryRoot()
   {
