@@ -107,8 +107,19 @@ function Assert-Preflight {
 try {
     switch ($Action) {
         'Detect' {
-            $version = Get-InstalledVersion
-            Write-Output "Visual Studio Professional version $version"
+            try {
+                $version = Get-InstalledVersion
+                Write-Output "Visual Studio Professional version $version"
+            }
+            catch {
+                if ($_.Exception.Message -in @(
+                        'Visual Studio Locator (vswhere.exe) is not installed.',
+                        'Visual Studio Professional 2026 is not installed.')) {
+                    Write-Output $_.Exception.Message
+                    exit 3
+                }
+                throw
+            }
         }
         'Pre' {
             $configuration = Assert-Preflight

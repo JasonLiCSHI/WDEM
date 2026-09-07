@@ -89,7 +89,8 @@ Visual Studio, ReSharper, Git, and the .NET SDK are ordinary Profile Tasks. Doma
         "displayName": "Detect Git version",
         "executable": "git",
         "arguments": ["--version"],
-        "versionPattern": "git version (?<version>\\d+(?:\\.\\d+)+)"
+        "versionPattern": "git version (?<version>\\d+(?:\\.\\d+)+)",
+        "missingExitCodes": [3]
       },
       "pre": [
         {
@@ -150,6 +151,7 @@ Every remote Profile Source contains an `index.json` and one `<id>.json` file pe
 - `pre` runs before Apply; `post` runs after Apply and before Verify. Failure in any step fails the Task.
 - `source` is interpreted by the Task and may represent a WinGet ID, URL, file path, or enterprise source identifier.
 - `versionPattern` must expose a named `version` capture group.
+- `missingExitCodes` explicitly lists positive Detect exit codes that mean “not installed”; every other non-zero Detect result is an execution failure and blocks Apply.
 - Without a version requirement, compliance depends only on successful detection.
 
 ### 3.3 Schema v2 workflow rules
@@ -169,10 +171,10 @@ Every remote Profile Source contains an `index.json` and one `<id>.json` file pe
 3. Dependencies must verify successfully before downstream Tasks can run.
 4. Tasks without a dependency path between them may run concurrently; concurrency never changes the ordered Activities inside one Task workflow.
 5. A dependency cycle prevents the entire run.
-6. Detection failure and a missing Task are distinct results.
+6. Detection failure and a missing Task are distinct results. Only a Detect exit code declared in `missingExitCodes` means `Missing`; an undeclared non-zero code produces `DetectionFailed` and a `Blocked` Plan action.
 7. Inspect never invokes an `apply` command.
 8. Apply exit code zero means only that the Apply phase completed; the Task succeeds only when Verify satisfies the version requirement.
-9. Apply and retry must regenerate the plan and create fresh Task workflows at their declared initial states; the Schema v1 initial state is Detect.
+9. Apply and retry must re-inspect, regenerate an immutable Plan with `NoOp`, `Install`, `Upgrade`, or `Blocked` actions, and create fresh Task workflows at their declared initial states; the Schema v1 initial state is Detect.
 10. Starting one Task automatically includes and first executes any unsatisfied dependencies.
 11. Cancelling one Task terminates its active process tree. Dependents become `Blocked`, while unrelated Tasks may continue.
 12. Cancel All terminates every active process tree and prevents any waiting Task from starting.

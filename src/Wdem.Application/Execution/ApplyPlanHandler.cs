@@ -34,7 +34,8 @@ public sealed class ApplyPlanHandler(
 
     var workflows = CreateWorkflows(profile);
 
-    var plannedTaskIds = plan.Tasks.Select(task => task.Id.Value).ToArray();
+    var plannedTasks = plan.Tasks.ToArray();
+    var plannedTaskIds = plannedTasks.Select(task => task.Id.Value).ToArray();
     var perTaskCts = plannedTaskIds.ToDictionary(
         taskId => taskId,
         _ => new CancellationTokenSource(),
@@ -43,7 +44,7 @@ public sealed class ApplyPlanHandler(
     var state = new WorkflowStateStore(profile, plannedTaskIds, workflows, progress, updates);
     var machine = new WorkflowStateMachine(
         profile,
-        plannedTaskIds,
+        plannedTasks,
         runtime,
         activityExecutor,
         workflows,

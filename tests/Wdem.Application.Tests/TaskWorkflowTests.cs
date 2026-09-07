@@ -186,6 +186,23 @@ public sealed class TaskWorkflowTests
   }
 
   [Fact]
+  public async Task DefaultWorkflow_WhenDetectFailureIsUndeclared_DoesNotStartApply()
+  {
+    var profile = ProfileParser.Parse(ProfileJson.Replace(
+        ", \"missingExitCodes\": [1]",
+        string.Empty));
+    var plan = new CreatePlanHandler().CreateForTasks(profile, rootTaskIds: ["custom"]);
+    var runtime = new FakeRuntime().WithDetect("custom", exitCode: 1, stderr: "access denied");
+
+    var report = await CreateHandler(runtime).Start(Loaded(profile), plan).Completion;
+
+    Assert.Equal(TaskOutcome.Failed, report.Tasks["custom"].Outcome);
+    Assert.Collection(
+        runtime.Invocations,
+        invocation => Assert.Equal(("custom", "detect"), invocation));
+  }
+
+  [Fact]
   public async Task SchemaVersionTwoWorkflow_DrivesDeclaredLifecycleCommands()
   {
     var profile = ProfileParser.Parse(DeclarativeWorkflowProfileJson);
@@ -285,7 +302,7 @@ public sealed class TaskWorkflowTests
           "displayName": "Custom",
           "required": true,
           "version": ">= 2.0",
-          "detect": { "executable": "custom", "arguments": ["detect"] },
+          "detect": { "executable": "custom", "arguments": ["detect"], "missingExitCodes": [1] },
           "apply": { "executable": "custom", "arguments": ["apply"] }
         }
       }

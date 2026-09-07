@@ -32,6 +32,7 @@ public sealed class DefaultTaskWorkflowProvider : ITaskWorkflowProvider
         transitions:
         [
           TaskWorkflowTransition.WhenTaskSatisfied("satisfied"),
+          TaskWorkflowTransition.WhenActivitiesFailed("failed"),
           TaskWorkflowTransition.Always(afterDetect)
         ],
         displayName: "detect"));

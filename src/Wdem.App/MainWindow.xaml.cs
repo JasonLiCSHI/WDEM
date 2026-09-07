@@ -29,7 +29,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
   private IProfileRepository? _profileRepository;
   private LoadedProfile? _loadedProfile;
   private EnvironmentRun? _currentRun;
-  private Plan? _retryPlan;
+  private IReadOnlyList<string>? _retryTaskIds;
   private CancellationTokenSource? _inspectCancellation;
   private Task<InspectReport>? _inspectionTask;
   private long _operationGeneration;
@@ -263,15 +263,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
   private async void Inspect_Click(object sender, RoutedEventArgs e)
   {
     LogUserAction("inspect_profile", UserActionOutcome.Requested);
-    var outcome = await InspectAsync();
-    LogUserAction("inspect_profile", outcome);
+    var inspection = await InspectAsync();
+    LogUserAction("inspect_profile", inspection.Outcome);
   }
 
-  private async Task<UserActionOutcome> InspectAsync()
+  private async Task<InspectionAttempt> InspectAsync()
   {
     if (_loadedProfile is null || HasExclusiveActivity() || !_profileTrusted)
     {
-      return UserActionOutcome.Rejected;
+      return new InspectionAttempt(UserActionOutcome.Rejected, null);
     }
 
     _isInspecting = true;
@@ -287,7 +287,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
           CreateInspectionProgress(operationGeneration),
           _inspectCancellation.Token);
       var report = await _inspectionTask;
-
       foreach (var inspection in report.Tasks.Values)
       {
         var row = FindTask(inspection.TaskId);
@@ -300,6 +299,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
           ComplianceStatus.Satisfied => I18n.Get("SatisfiedStatus"),
           ComplianceStatus.UpgradeRequired => I18n.Get("UpgradeRequiredStatus"),
+          ComplianceStatus.DetectionFailed => I18n.Get("DetectionFailedStatus"),
           _ => I18n.Get("NotCompliantStatus")
         };
         row.VisualState = inspection.Compliance switch
@@ -316,18 +316,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
       var satisfied = report.Tasks.Values.Count(task => task.IsSatisfied);
       RunSummaryText.Text = I18n.Format("InspectCompleted", satisfied, report.Tasks.Count);
       AppendLog("inspect", RunSummaryText.Text, data: report);
-      return UserActionOutcome.Completed;
+      return new InspectionAttempt(UserActionOutcome.Completed, report);
     }
     catch (OperationCanceledException)
     {
       RunSummaryText.Text = I18n.Get("InspectCancelled");
       AppendLog("cancelled", RunSummaryText.Text);
-      return UserActionOutcome.Cancelled;
+      return new InspectionAttempt(UserActionOutcome.Cancelled, null);
     }
     catch (Exception exception)
     {
       ShowError(I18n.Get("InspectErrorTitle"), exception);
-      return UserActionOutcome.Failed;
+      return new InspectionAttempt(UserActionOutcome.Failed, null);
     }
     finally
     {
@@ -357,7 +357,23 @@ public partial class MainWindow : Window, INotifyPropertyChanged
           .Where(task => task.IsSelected)
           .Select(task => task.Id)
           .ToArray();
-      var plan = _createPlan.CreateForSelection(_loadedProfile.Profile, selected);
+      var inspection = await InspectAsync();
+      if (inspection.Report is null)
+      {
+        LogUserAction("start_selected_tasks", inspection.Outcome, requestedTaskIds);
+        return;
+      }
+
+      var plan = _createPlan.CreateForSelection(
+          _loadedProfile.Profile,
+          selected,
+          inspection.Report);
+      if (!ConfirmPlan(plan))
+      {
+        LogUserAction("start_selected_tasks", UserActionOutcome.Rejected, TaskIds(plan));
+        return;
+      }
+
       var report = await StartRunAsync(plan);
       LogUserAction(
           "start_selected_tasks",
@@ -385,7 +401,23 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     LogUserAction("start_task", UserActionOutcome.Requested, [row.Id]);
     try
     {
-      var plan = _createPlan.CreateForTasks(_loadedProfile.Profile, [row.Id]);
+      var inspection = await InspectAsync();
+      if (inspection.Report is null)
+      {
+        LogUserAction("start_task", inspection.Outcome, [row.Id]);
+        return;
+      }
+
+      var plan = _createPlan.CreateForTasks(
+          _loadedProfile.Profile,
+          [row.Id],
+          inspection.Report);
+      if (!ConfirmPlan(plan))
+      {
+        LogUserAction("start_task", UserActionOutcome.Rejected, TaskIds(plan));
+        return;
+      }
+
       var report = await StartRunAsync(plan);
       LogUserAction("start_task", ToUserActionOutcome(report), TaskIds(plan));
     }
@@ -441,7 +473,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
       RunSummaryText.Text = I18n.Format("RunCompleted", succeeded, report.Tasks.Count);
       var hasRecoverableFailure = report.Tasks.Values.Any(task =>
           task.Outcome is TaskOutcome.Failed or TaskOutcome.Blocked);
-      _retryPlan = hasRecoverableFailure ? plan : null;
+      _retryTaskIds = hasRecoverableFailure ? taskIds : null;
       AppendLog("run_summary", RunSummaryText.Text, data: report);
     }
     finally
@@ -473,18 +505,35 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
   private async void Retry_Click(object sender, RoutedEventArgs e)
   {
-    if (_retryPlan is null || HasExclusiveActivity() || !_profileTrusted)
+    if (_retryTaskIds is null || HasExclusiveActivity() || !_profileTrusted)
     {
-      if (_retryPlan is null)
+      if (_retryTaskIds is null)
       {
         MessageBox.Show(this, I18n.Get("NoRetryMessage"), I18n.Get("MessageTitle"));
       }
       return;
     }
 
-    var retryPlan = _retryPlan;
-    LogUserAction("retry_plan", UserActionOutcome.Requested, TaskIds(retryPlan));
+    var retryTaskIds = _retryTaskIds;
+    LogUserAction("retry_plan", UserActionOutcome.Requested, retryTaskIds);
     AppendLog("retry", I18n.Get("RetryStarted"));
+    var inspection = await InspectAsync();
+    if (inspection.Report is null)
+    {
+      LogUserAction("retry_plan", inspection.Outcome, retryTaskIds);
+      return;
+    }
+
+    var retryPlan = _createPlan.CreateForTasks(
+        _loadedProfile!.Profile,
+        retryTaskIds,
+        inspection.Report);
+    if (!ConfirmPlan(retryPlan))
+    {
+      LogUserAction("retry_plan", UserActionOutcome.Rejected, TaskIds(retryPlan));
+      return;
+    }
+
     var report = await StartRunAsync(retryPlan);
     LogUserAction("retry_plan", ToUserActionOutcome(report), TaskIds(retryPlan));
   }
@@ -647,7 +696,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     _loadedProfile = null;
     _profileTrusted = false;
-    _retryPlan = null;
+    _retryTaskIds = null;
     _operationGeneration++;
     RequiredTasks.Clear();
     OptionalTasks.Clear();
@@ -664,7 +713,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         HasCatalog: _profileRepository is not null,
         HasProfileChoice: ProfileComboBox.SelectedItem is not null,
         HasTrustedProfile: _loadedProfile is not null && _profileTrusted,
-        HasRetryPlan: _retryPlan is not null));
+        HasRetryPlan: _retryTaskIds is not null));
 
     foreach (var task in AllTasks)
     {
@@ -819,6 +868,38 @@ public partial class MainWindow : Window, INotifyPropertyChanged
   private static IReadOnlyList<string> TaskIds(Plan plan) =>
       plan.Tasks.Select(task => task.Id.Value).ToArray();
 
+  private bool ConfirmPlan(Plan plan)
+  {
+    if (_loadedProfile is null)
+    {
+      return false;
+    }
+
+    var lines = plan.Tasks.Select(plannedTask =>
+    {
+      var task = _loadedProfile.Profile.Tasks[plannedTask.Id.Value];
+      return $"• {task.DisplayName} — {FormatPlannedAction(plannedTask.Action)}";
+    });
+    var summary = string.Join(Environment.NewLine, lines);
+    AppendLog("plan", summary);
+    return MessageBox.Show(
+        this,
+        I18n.Format("PlanConfirmationMessage", summary),
+        I18n.Get("PlanConfirmationTitle"),
+        MessageBoxButton.YesNo,
+        MessageBoxImage.Question,
+        MessageBoxResult.No) == MessageBoxResult.Yes;
+  }
+
+  private static string FormatPlannedAction(PlannedTaskAction action) => action switch
+  {
+    PlannedTaskAction.NoOp => I18n.Get("PlanActionNoOp"),
+    PlannedTaskAction.Install => I18n.Get("PlanActionInstall"),
+    PlannedTaskAction.Upgrade => I18n.Get("PlanActionUpgrade"),
+    PlannedTaskAction.Blocked => I18n.Get("PlanActionBlocked"),
+    _ => action.ToString()
+  };
+
   private static bool IsActivityState(TaskExecutionState state) => state is
       TaskExecutionState.Detecting or
       TaskExecutionState.RunningPre or
@@ -854,4 +935,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
   private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
       PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+
+  private sealed record InspectionAttempt(
+      UserActionOutcome Outcome,
+      InspectReport? Report);
 }

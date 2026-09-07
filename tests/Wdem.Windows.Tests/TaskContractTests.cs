@@ -617,7 +617,7 @@ public sealed class TaskContractTests
 
       return Task.FromResult(invocation.Phase switch
       {
-        "detect" => new CommandResult(1, string.Empty, "not installed"),
+        "detect" => new CommandResult(3, string.Empty, "not installed"),
         "verify" when invocation.TaskId == "visual-studio-professional" =>
             new CommandResult(0, "Visual Studio Professional version 18.9.2", string.Empty),
         "verify" when invocation.TaskId == "resharper" =>

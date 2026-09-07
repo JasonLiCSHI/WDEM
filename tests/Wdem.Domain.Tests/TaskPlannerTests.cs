@@ -1,5 +1,6 @@
 using Wdem.Domain.Planning;
 using Wdem.Domain.Tasks;
+using Wdem.Domain.Versions;
 using Xunit;
 
 namespace Wdem.Domain.Tests;
@@ -58,6 +59,36 @@ public sealed class TaskPlannerTests
     Assert.Equal(["a", "z"], Values(plan));
   }
 
+  [Fact]
+  public void CreateForTasksProjectsComplianceIntoExecutionActions()
+  {
+    var tasks = Tasks(
+        RequiredWithCompliance("installed", ComplianceStatus.Satisfied),
+        RequiredWithCompliance("missing", ComplianceStatus.Missing),
+        RequiredWithCompliance("old", ComplianceStatus.UpgradeRequired));
+
+    var plan = TaskPlanner.CreateForTasks(tasks, tasks.Keys.ToArray());
+
+    Assert.Equal(PlannedTaskAction.NoOp, Find(plan, "installed").Action);
+    Assert.Equal(PlannedTaskAction.Install, Find(plan, "missing").Action);
+    Assert.Equal(PlannedTaskAction.Upgrade, Find(plan, "old").Action);
+  }
+
+  [Fact]
+  public void CreateForTasksBlocksDetectionFailuresAndTheirDependents()
+  {
+    var tasks = Tasks(
+        RequiredWithCompliance("broken", ComplianceStatus.DetectionFailed),
+        RequiredWithCompliance("dependent", ComplianceStatus.Missing, "broken"),
+        RequiredWithCompliance("independent", ComplianceStatus.Missing));
+
+    var plan = TaskPlanner.CreateForTasks(tasks, tasks.Keys.ToArray());
+
+    Assert.Equal(PlannedTaskAction.Blocked, Find(plan, "broken").Action);
+    Assert.Equal(PlannedTaskAction.Blocked, Find(plan, "dependent").Action);
+    Assert.Equal(PlannedTaskAction.Install, Find(plan, "independent").Action);
+  }
+
   private static IReadOnlyDictionary<TaskId, PlanningTask> Tasks(params PlanningTask[] tasks) =>
       tasks.ToDictionary(task => task.Id);
 
@@ -67,6 +98,16 @@ public sealed class TaskPlannerTests
           isRequired: true,
           dependencies.Select(TaskId.Parse).ToArray());
 
+  private static PlanningTask RequiredWithCompliance(
+      string id,
+      ComplianceStatus compliance,
+      params string[] dependencies) =>
+      new(
+          TaskId.Parse(id),
+          isRequired: true,
+          dependencies.Select(TaskId.Parse).ToArray(),
+          compliance);
+
   private static PlanningTask Optional(string id, params string[] dependencies) =>
       new(
           TaskId.Parse(id),
@@ -75,4 +116,7 @@ public sealed class TaskPlannerTests
 
   private static string[] Values(Plan plan) =>
       plan.Tasks.Select(task => task.Id.Value).ToArray();
+
+  private static PlannedTask Find(Plan plan, string id) =>
+      Assert.Single(plan.Tasks, task => task.Id.Value == id);
 }

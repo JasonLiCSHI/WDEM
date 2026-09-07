@@ -26,7 +26,8 @@
           "-Action",
           "Detect"
         ],
-        "versionPattern": "Visual Studio Professional version (?<version>\\d+(?:\\.\\d+)+)"
+        "versionPattern": "Visual Studio Professional version (?<version>\\d+(?:\\.\\d+)+)",
+        "missingExitCodes": [3]
       },
       "pre": [
         {
@@ -106,7 +107,8 @@
           "-Action",
           "Detect"
         ],
-        "versionPattern": "JetBrains ReSharper version (?<version>\\d+(?:\\.\\d+)+)"
+        "versionPattern": "JetBrains ReSharper version (?<version>\\d+(?:\\.\\d+)+)",
+        "missingExitCodes": [3]
       },
       "pre": [
         {

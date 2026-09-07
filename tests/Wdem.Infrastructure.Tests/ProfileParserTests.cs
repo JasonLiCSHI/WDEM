@@ -38,7 +38,8 @@ public sealed class ProfileParserTests
             "detect": {
               "executable": "vswhere.exe",
               "arguments": ["-latest"],
-              "versionPattern": "(?<version>\\d+(?:\\.\\d+)+)"
+              "versionPattern": "(?<version>\\d+(?:\\.\\d+)+)",
+              "missingExitCodes": [3, 3]
             },
             "pre": [
               {
@@ -76,6 +77,7 @@ public sealed class ProfileParserTests
     Assert.Equal(">= 18.3 < 19.0", task.VersionRequirement?.Expression);
     Assert.Equal("18.3.2", task.PreferredVersion);
     Assert.Equal("vswhere.exe", task.Detect.Executable);
+    Assert.Equal([3], task.Detect.MissingExitCodes);
     var pre = Assert.Single(task.Pre);
     Assert.Equal("powershell", pre.Executable);
     Assert.Equal("Prepare Visual Studio configuration", pre.DisplayName);
@@ -116,6 +118,20 @@ public sealed class ProfileParserTests
     var json = ValidProfile.Replace("(?<version>", "(?:");
 
     Assert.Throws<FormatException>(() => ProfileParser.Parse(json));
+  }
+
+  [Theory]
+  [InlineData(0)]
+  [InlineData(-1)]
+  public void Parse_WhenMissingExitCodeIsNotPositive_RejectsProfile(int exitCode)
+  {
+    var json = ValidProfile.Replace(
+        "\"versionPattern\": \"git version (?<version>\\\\d+(?:\\\\.\\\\d+)+)\"",
+        $"\"versionPattern\": \"git version (?<version>\\\\d+(?:\\\\.\\\\d+)+)\", \"missingExitCodes\": [{exitCode}]");
+
+    var exception = Assert.Throws<FormatException>(() => ProfileParser.Parse(json));
+
+    Assert.Contains("missingExitCodes", exception.Message);
   }
 
   [Fact]

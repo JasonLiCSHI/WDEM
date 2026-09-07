@@ -192,7 +192,8 @@ internal static class ProfileDocumentMapper
           DisplayName = activity.DisplayName,
           Executable = activity.Executable,
           Arguments = activity.Arguments,
-          VersionPattern = activity.VersionPattern
+          VersionPattern = activity.VersionPattern,
+          MissingExitCodes = activity.MissingExitCodes
         },
         field);
     return new CommandWorkflowActivity(id, phase, command, Optional(activity.DisplayName));
@@ -252,7 +253,23 @@ internal static class ProfileDocumentMapper
         executable,
         arguments,
         versionPattern,
-        Optional(command.DisplayName));
+        Optional(command.DisplayName),
+        MissingExitCodes(command.MissingExitCodes, field));
+  }
+
+  private static int[] MissingExitCodes(IReadOnlyList<int>? values, string field)
+  {
+    if (values is null)
+    {
+      return [];
+    }
+
+    if (values.Any(value => value <= 0))
+    {
+      throw new FormatException($"{field} missingExitCodes must contain only positive exit codes.");
+    }
+
+    return values.Distinct().ToArray();
   }
 
   private static string[] Strings(IReadOnlyList<string?>? values, string field)

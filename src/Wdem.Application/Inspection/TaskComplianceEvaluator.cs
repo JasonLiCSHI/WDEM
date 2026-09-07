@@ -22,7 +22,10 @@ public static class TaskComplianceEvaluator
     var detectedVersion = ExtractVersion(detectionCommand.VersionPattern, detectStep.Stdout);
     if (detectStep.ExitCode != 0)
     {
-      return new TaskComplianceEvaluation(ComplianceStatus.Missing, detectedVersion);
+      var status = detectionCommand.MissingExitCodes?.Contains(detectStep.ExitCode) == true
+          ? ComplianceStatus.Missing
+          : ComplianceStatus.DetectionFailed;
+      return new TaskComplianceEvaluation(status, detectedVersion);
     }
 
     if (task.VersionRequirement is null)

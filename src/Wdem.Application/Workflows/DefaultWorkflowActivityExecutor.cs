@@ -46,15 +46,20 @@ public sealed class DefaultWorkflowActivityExecutor : IWorkflowActivityExecutor
       RuntimeStateId = context.StateId,
       ActivityLocation = context.Location
     };
-    var isTaskSatisfied = TaskComplianceEvaluator.Evaluate(
+    var compliance = TaskComplianceEvaluator.Evaluate(
         context.Task,
         activity.Command,
-        step).State == ComplianceStatus.Satisfied;
-    var activityResult = result.ExitCode == 0
+        step).State;
+    var isDetection =
+        activity.Phase.Equals("detect", StringComparison.OrdinalIgnoreCase) ||
+        activity.Phase.Equals("verify", StringComparison.OrdinalIgnoreCase);
+    var activitySucceeded = result.ExitCode == 0 ||
+        (isDetection && compliance == ComplianceStatus.Missing);
+    var activityResult = activitySucceeded
         ? WorkflowActivityResult.Success(step)
         : WorkflowActivityResult.Failure(
             $"Activity '{activity.Id}' failed with exit code {result.ExitCode}.",
             step);
-    return activityResult with { IsTaskSatisfied = isTaskSatisfied };
+    return activityResult with { IsTaskSatisfied = compliance == ComplianceStatus.Satisfied };
   }
 }
