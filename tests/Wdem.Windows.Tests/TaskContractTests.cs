@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Wdem.Application.Execution;
 using Wdem.Application.Planning;
+using Wdem.Application.Profiles;
 using Wdem.Application.Runtime;
 using Wdem.Application.Workflows;
 using Wdem.Domain.Execution;
@@ -107,7 +108,7 @@ public sealed class TaskContractTests
     var plan = new CreatePlanHandler().CreateForTasks(profile, rootTaskIds: ["resharper"]);
     var runtime = new RepositoryContractRuntime();
 
-    var report = await CreateHandler(runtime).Start(profile, plan).Completion;
+    var report = await CreateHandler(runtime).Start(Loaded(profile), plan).Completion;
 
     Assert.Equal(
         ["visual-studio-professional", "resharper"],
@@ -141,7 +142,7 @@ public sealed class TaskContractTests
     var plan = new CreatePlanHandler().CreateForTasks(profile, rootTaskIds: ["resharper"]);
     var runtime = new RepositoryContractRuntime(failVisualStudioApply: true);
 
-    var report = await CreateHandler(runtime).Start(profile, plan).Completion;
+    var report = await CreateHandler(runtime).Start(Loaded(profile), plan).Completion;
 
     Assert.Equal(TaskOutcome.Failed, report.Tasks["visual-studio-professional"].Outcome);
     Assert.Equal(TaskOutcome.Blocked, report.Tasks["resharper"].Outcome);
@@ -457,7 +458,20 @@ public sealed class TaskContractTests
       new(
           runtime,
           DefaultWorkflowActivityExecutor.Instance,
-          DefaultTaskWorkflowProvider.Instance);
+          DefaultTaskWorkflowProvider.Instance,
+          new ProfileExecutionAuthorizer(new TrustedProfileStore()));
+
+  private static LoadedProfile Loaded(EnvironmentProfile profile) =>
+      new(profile, ProfileOrigin.Local, "repository-profile.json", "TEST");
+
+  private sealed class TrustedProfileStore : IProfileTrustStore
+  {
+    public bool IsTrusted(LoadedProfile profile) => true;
+
+    public void Trust(LoadedProfile profile)
+    {
+    }
+  }
 
   private static EnvironmentProfile LoadRepositoryProfile(string repositoryRoot) =>
       ProfileParser.Parse(File.ReadAllText(

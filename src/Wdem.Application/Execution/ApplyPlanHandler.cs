@@ -1,4 +1,5 @@
 using Wdem.Application.Runtime;
+using Wdem.Application.Profiles;
 using Wdem.Application.Workflows;
 using Wdem.Domain.Planning;
 using Wdem.Domain.Profiles;
@@ -9,7 +10,8 @@ namespace Wdem.Application.Execution;
 public sealed class ApplyPlanHandler(
     ITaskRuntime runtime,
     IWorkflowActivityExecutor activityExecutor,
-    ITaskWorkflowProvider workflowProvider)
+    ITaskWorkflowProvider workflowProvider,
+    ProfileExecutionAuthorizer authorizer)
 {
   public WorkflowSnapshot CreateReadySnapshot(EnvironmentProfile profile)
   {
@@ -19,14 +21,16 @@ public sealed class ApplyPlanHandler(
   }
 
   public EnvironmentRun Start(
-      EnvironmentProfile profile,
+      LoadedProfile loadedProfile,
       Plan plan,
       IProgress<WorkflowProgress>? progress = null,
       IProgress<WorkflowUpdate>? updates = null)
   {
-    ArgumentNullException.ThrowIfNull(profile);
+    ArgumentNullException.ThrowIfNull(loadedProfile);
     ArgumentNullException.ThrowIfNull(plan);
     ArgumentNullException.ThrowIfNull(runtime);
+    authorizer.EnsureTrusted(loadedProfile);
+    var profile = loadedProfile.Profile;
 
     var workflows = CreateWorkflows(profile);
 

@@ -43,6 +43,7 @@ internal sealed class WdemModule(WdemBootstrapperOptions options) : Module
     builder.RegisterInstance(DefaultTaskWorkflowProvider.Instance)
         .As<ITaskWorkflowProvider>()
         .SingleInstance();
+    builder.RegisterType<ProfileExecutionAuthorizer>().SingleInstance();
     builder.RegisterType<ApplyPlanHandler>().SingleInstance();
     builder.RegisterType<CreatePlanHandler>().SingleInstance();
     builder.RegisterType<InspectEnvironmentHandler>().SingleInstance();

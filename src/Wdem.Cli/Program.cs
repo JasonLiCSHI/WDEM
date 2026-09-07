@@ -203,7 +203,7 @@ public static class Program
     try
     {
       inspect = await inspectEnvironment.HandleAsync(
-          profile,
+          loaded,
           progress,
           inspectCancellation.Token);
     }
@@ -309,7 +309,7 @@ public static class Program
     }
 
     var report = await RunApplyWithRetriesAsync(
-        profile,
+        loaded,
         plan,
         applyPlan,
         progress,
@@ -332,13 +332,14 @@ public static class Program
   }
 
   private static async Task<RunReport> RunApplyWithRetriesAsync(
-      EnvironmentProfile profile,
+      LoadedProfile loadedProfile,
       Plan plan,
       ApplyPlanHandler applyPlan,
       IProgress<WorkflowProgress> progress,
       ISessionLog log,
       int retries)
   {
+    var profile = loadedProfile.Profile;
     var cancelRequested = false;
     for (var attempt = 0; ; attempt++)
     {
@@ -354,7 +355,7 @@ public static class Program
       }
 
       var run = applyPlan.Start(
-          profile,
+          loadedProfile,
           plan,
           progress);
       ConsoleCancelEventHandler cancelHandler = (_, e) =>

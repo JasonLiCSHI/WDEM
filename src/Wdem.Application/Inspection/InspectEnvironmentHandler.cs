@@ -1,4 +1,5 @@
 using Wdem.Application.Execution;
+using Wdem.Application.Profiles;
 using Wdem.Application.Runtime;
 using Wdem.Domain.Execution;
 using Wdem.Domain.Profiles;
@@ -6,14 +7,18 @@ using Wdem.Domain.Versions;
 
 namespace Wdem.Application.Inspection;
 
-public sealed class InspectEnvironmentHandler(ITaskRuntime runtime)
+public sealed class InspectEnvironmentHandler(
+    ITaskRuntime runtime,
+    ProfileExecutionAuthorizer authorizer)
 {
   public async Task<InspectReport> HandleAsync(
-      EnvironmentProfile profile,
+      LoadedProfile loadedProfile,
       IProgress<WorkflowProgress>? progress = null,
       CancellationToken cancellationToken = default)
   {
-    ArgumentNullException.ThrowIfNull(profile);
+    ArgumentNullException.ThrowIfNull(loadedProfile);
+    authorizer.EnsureTrusted(loadedProfile);
+    var profile = loadedProfile.Profile;
 
     var inspections = new Dictionary<string, TaskInspection>(StringComparer.Ordinal);
     foreach (var task in profile.Tasks.Values.OrderBy(value => value.Id, StringComparer.Ordinal))
