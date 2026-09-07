@@ -1,4 +1,4 @@
-namespace Wdem.Core.Profiles;
+namespace Wdem.Application.Profiles;
 
 public sealed record ProfileCatalogEntry(
     string Id,

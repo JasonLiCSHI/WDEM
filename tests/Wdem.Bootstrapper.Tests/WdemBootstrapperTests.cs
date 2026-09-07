@@ -16,7 +16,7 @@ public sealed class WdemBootstrapperTests : IDisposable
     using var session = CreateSession("shared");
 
     Assert.Same(session.Settings, session.Settings);
-    Assert.Same(session.ProfileCatalog, session.ProfileCatalog);
+    Assert.Same(session.ProfileRepository, session.ProfileRepository);
     Assert.Same(session.TaskRuntime, session.TaskRuntime);
     Assert.Same(session.WorkflowActivityExecutor, session.WorkflowActivityExecutor);
     Assert.Same(session.CreatePlan, session.CreatePlan);
@@ -31,7 +31,7 @@ public sealed class WdemBootstrapperTests : IDisposable
     using var second = CreateSession("second");
 
     Assert.NotSame(first.Settings, second.Settings);
-    Assert.NotSame(first.ProfileCatalog, second.ProfileCatalog);
+    Assert.NotSame(first.ProfileRepository, second.ProfileRepository);
     Assert.NotSame(first.TaskRuntime, second.TaskRuntime);
     Assert.NotSame(first.CreatePlan, second.CreatePlan);
     Assert.NotSame(first.InspectEnvironment, second.InspectEnvironment);

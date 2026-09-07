@@ -57,12 +57,12 @@ Ports are owned by the use case that needs them. Initial ports are `IProfileRepo
 | ~~`Core/Tasks/TaskDefinition.cs`~~ | `Domain/Tasks/TaskDefinition.cs` | Migrated immutable desired-state definition; it references only pure Domain workflow definitions |
 | ~~`Core/Tasks/CommandDefinition.cs`~~ | `Domain/Tasks/CommandDefinition.cs` | Migrated; keeps the executable plus argument-array invariant |
 | ~~`Core/Profiles/EnvironmentProfile.cs`~~ | `Domain/Profiles/EnvironmentProfile.cs` | Migrated immutable Profile aggregate; a later vocabulary-only rename is optional |
-| `Core/Profiles/ProfileSourceDefinition.cs` | `Domain/Profiles/ProfileSource.cs` | Move validated identity and URI value semantics |
-| `Core/Profiles/ProfileCatalogEntry.cs` | `Application/Profiles` read model | Move catalog projection out of Domain |
-| `Core/Profiles/LoadedProfile.cs` | `Application/Profiles` result | Keep origin/hash with load use case |
-| `Core/Profiles/ProfileOrigin.cs` | `Application/Profiles` result | Keep transport origin outside Domain |
-| `Core/Profiles/ProfileParser.cs` | `Infrastructure/Profiles` | Split deserializer, validator, and mapper |
-| `Core/Profiles/ProfileCatalog.cs` | `Infrastructure/Profiles` | Implement application repository port |
+| ~~`Core/Profiles/ProfileSourceDefinition.cs`~~ | `Domain/Profiles/ProfileSourceDefinition.cs` | Migrated validated identity and URI value semantics |
+| ~~`Core/Profiles/ProfileCatalogEntry.cs`~~ | `Application/Profiles/ProfileCatalogEntry.cs` | Migrated catalog projection out of Domain |
+| ~~`Core/Profiles/LoadedProfile.cs`~~ | `Application/Profiles/LoadedProfile.cs` | Migrated origin/hash load result |
+| ~~`Core/Profiles/ProfileOrigin.cs`~~ | `Application/Profiles/ProfileOrigin.cs` | Migrated transport origin outside Domain |
+| ~~`Core/Profiles/ProfileParser.cs`~~ | `Infrastructure/Profiles/ProfileParser.cs` | Migrated JSON adapter; deserializer/validator/mapper decomposition remains internal follow-up work |
+| ~~`Core/Profiles/ProfileCatalog.cs`~~ | `Infrastructure/Profiles/ProfileCatalog.cs` | Migrated implementation behind Application `IProfileRepository` |
 | ~~`Core/Graph/TaskGraph.cs`~~ | `Domain/Planning/TaskPlanner.cs` | Migrated: public graph replaced by immutable Plan |
 | ~~`Core/Runs/EnvironmentInspector.cs`~~ | `Application/Inspection/InspectEnvironmentHandler.cs` | Migrated use-case handler over the runtime port |
 | `Core/Runs/EnvironmentManager.cs` | `Application/Execution` | Replace facade with explicit apply/start handlers |

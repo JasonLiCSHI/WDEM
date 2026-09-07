@@ -1,9 +1,9 @@
 using Autofac;
 using Wdem.Application.Inspection;
 using Wdem.Application.Planning;
+using Wdem.Application.Profiles;
 using Wdem.Application.Runtime;
 using Wdem.Application.Workflows;
-using Wdem.Core.Profiles;
 using Wdem.Windows.Configuration;
 using Wdem.Windows.Logging;
 
@@ -27,7 +27,7 @@ public sealed class WdemSession : IDisposable
 
   public WdemUserSettingsStore Settings => Resolve<WdemUserSettingsStore>();
 
-  public ProfileCatalog ProfileCatalog => Resolve<ProfileCatalog>();
+  public IProfileRepository ProfileRepository => Resolve<IProfileRepository>();
 
   public ITaskRuntime TaskRuntime => Resolve<ITaskRuntime>();
 

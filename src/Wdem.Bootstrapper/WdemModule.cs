@@ -1,9 +1,10 @@
 using Autofac;
 using Wdem.Application.Inspection;
 using Wdem.Application.Planning;
+using Wdem.Application.Profiles;
 using Wdem.Application.Runtime;
 using Wdem.Application.Workflows;
-using Wdem.Core.Profiles;
+using Wdem.Infrastructure.Profiles;
 using Wdem.Windows.Configuration;
 using Wdem.Windows.Logging;
 using Wdem.Windows.Processes;
@@ -20,6 +21,7 @@ internal sealed class WdemModule(WdemBootstrapperOptions options) : Module
         new ProfileCatalog(
             context.Resolve<WdemUserSettingsStore>().ProfileSource,
             context.Resolve<WdemUserSettingsStore>().CacheDirectory))
+        .As<IProfileRepository>()
         .SingleInstance();
     builder.RegisterType<DefaultProcessRunner>()
         .As<IProcessRunner>()

@@ -1,10 +1,10 @@
 using Wdem.Application.Planning;
-using Wdem.Core.Profiles;
+using Wdem.Infrastructure.Profiles;
 using Xunit;
 
 namespace Wdem.Core.Tests;
 
-public sealed class ProfilePlannerCompatibilityTests
+public sealed class CreatePlanHandlerTests
 {
   [Fact]
   public void BuildForSelection_IncludesRequiredAndSelectedOptionalsAndDependencies()

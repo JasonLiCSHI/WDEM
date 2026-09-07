@@ -8,10 +8,10 @@ using System.Windows.Controls;
 using Wdem.Application.Execution;
 using Wdem.Application.Inspection;
 using Wdem.Application.Planning;
+using Wdem.Application.Profiles;
 using Wdem.Application.Runtime;
 using Wdem.Application.Workflows;
 using Wdem.Bootstrapper;
-using Wdem.Core.Profiles;
 using Wdem.Core.Runs;
 using Wdem.Domain.Planning;
 using Wdem.Domain.Execution;
@@ -31,7 +31,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
   private readonly InspectEnvironmentHandler _inspectEnvironment;
   private readonly JsonLineSessionLog _log;
   private WdemUserSettingsStore? _settings;
-  private ProfileCatalog? _catalog;
+  private IProfileRepository? _profileRepository;
   private LoadedProfile? _loadedProfile;
   private EnvironmentRun? _currentRun;
   private Plan? _retryPlan;
@@ -112,7 +112,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     _isCatalogLoading = true;
-    _catalog = null;
+    _profileRepository = null;
     Profiles.Clear();
     ClearLoadedProfile();
     ProfileSummaryText.Text = I18n.Get("ReadySummary");
@@ -124,8 +124,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
       _settings = _session.Settings;
       var source = _settings.ProfileSource;
-      _catalog = _session.ProfileCatalog;
-      var entries = await _catalog.ListAsync();
+      _profileRepository = _session.ProfileRepository;
+      var entries = await _profileRepository.ListAsync();
       foreach (var entry in entries)
       {
         Profiles.Add(entry);
@@ -137,7 +137,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
     catch (Exception exception)
     {
-      _catalog = null;
+      _profileRepository = null;
       Profiles.Clear();
       ClearLoadedProfile();
       ProfileSummaryText.Text = I18n.Get("CatalogErrorTitle");
@@ -158,7 +158,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
   private async Task LoadSelectedProfileAsync()
   {
-    if (_catalog is null || ProfileComboBox.SelectedItem is not ProfileCatalogEntry entry)
+    if (_profileRepository is null || ProfileComboBox.SelectedItem is not ProfileCatalogEntry entry)
     {
       MessageBox.Show(this, I18n.Get("SelectProfileMessage"), I18n.Get("MessageTitle"));
       return;
@@ -170,7 +170,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     var shouldInspect = false;
     try
     {
-      var loaded = await _catalog.LoadAsync(entry.Id);
+      var loaded = await _profileRepository.LoadAsync(entry.Id);
       _loadedProfile = loaded;
 
       foreach (var definition in loaded.Profile.Tasks.Values
@@ -663,7 +663,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         IsProfileLoading: _isProfileLoading,
         IsInspecting: _isInspecting,
         WorkflowState: workflow?.State,
-        HasCatalog: _catalog is not null,
+        HasCatalog: _profileRepository is not null,
         HasProfileChoice: ProfileComboBox.SelectedItem is not null,
         HasTrustedProfile: _loadedProfile is not null && _profileTrusted,
         HasRetryPlan: _retryPlan is not null));

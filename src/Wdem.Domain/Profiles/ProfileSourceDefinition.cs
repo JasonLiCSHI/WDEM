@@ -1,6 +1,6 @@
 using System.Text.RegularExpressions;
 
-namespace Wdem.Core.Profiles;
+namespace Wdem.Domain.Profiles;
 
 public sealed record ProfileSourceDefinition
 {

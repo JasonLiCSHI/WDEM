@@ -1,7 +1,8 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Wdem.Core.Profiles;
+using Wdem.Application.Profiles;
+using Wdem.Domain.Profiles;
 
 namespace Wdem.Windows.Configuration;
 
