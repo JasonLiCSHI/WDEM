@@ -77,7 +77,7 @@ The current engine is a deterministic dependency-aware DAG scheduler. Every Task
 
 ## Task-driven state and reactive UI
 
-The Domain owns workflow definitions, stable Task execution states, outcomes, Activity locations, graph validation, and transition predicates. Application owns Activity execution and converts Runtime results into Activity results. Application `WorkflowStateMachine` coordinates execution: for each DAG Task, it owns the current runtime state ID, enters that state, and only then invokes the Activity executor for its ordered Entry, Residence, and Exit Activities. Activity results are reduced to Domain workflow facts, evaluated by ordered Domain transitions, and the selected target becomes the next runtime state. The transition limit prevents accidental infinite cycles.
+The Domain owns workflow definitions, stable Task execution states, outcomes, Activity locations, graph validation, and transition predicates. Application separates three execution responsibilities: `WorkflowDagScheduler` schedules independent Tasks and gates dependents, `WorkflowStateMachine` advances one Task through its state graph, and `WorkflowActivityRunner` invokes ordered Entry, Residence, and Exit Activities. The state machine owns the current runtime state ID and enters a state before its Activities run. Activity results are reduced to Domain workflow facts, evaluated by ordered Domain transitions, and the selected target becomes the next runtime state. The transition limit prevents accidental infinite cycles.
 
 `DefaultTaskWorkflowProvider` compiles Schema v1 into the familiar path:
 
