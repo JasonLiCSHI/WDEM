@@ -17,6 +17,18 @@ internal sealed class WorkflowActivityRunner(
     WorkflowStateStore state,
     IDomainEventPublisher domainEvents)
 {
+  /// <summary>
+  /// Runs a sequence of workflow activities in order, stopping on first failure.
+  /// </summary>
+  /// <param name="task">The task definition being executed.</param>
+  /// <param name="runtimeState">The current workflow runtime state.</param>
+  /// <param name="activities">The sequence of activities to execute.</param>
+  /// <param name="location">The activity location (Entry/Residence/Exit).</param>
+  /// <param name="journal">The execution journal recording all activity results.</param>
+  /// <param name="results">Output list to record all activity results.</param>
+  /// <param name="cancellationToken">Token to stop execution if requested.</param>
+  /// <returns>True if all activities succeeded; false if any activity failed.</returns>
+  /// <exception cref="OperationCanceledException">Thrown if execution is cancelled.</exception>
   public async Task<bool> RunAsync(
       TaskDefinition task,
       TaskWorkflowState runtimeState,
@@ -61,8 +73,15 @@ internal sealed class WorkflowActivityRunner(
         result = await activityExecutor.ExecuteAsync(activity, context, cancellationToken)
             ?? throw new InvalidOperationException($"Activity '{activity.Id}' returned no result.");
       }
-      catch (Exception exception) when (exception is not OperationCanceledException)
+      catch (OperationCanceledException)
       {
+        // Cancellation is handled by the state machine; re-throw without modification.
+        throw;
+      }
+      catch (Exception exception)
+      {
+        // Log the activity failure and publish the event before re-throwing.
+        // This ensures diagnostics are recorded even when activity execution fails.
         domainEvents.Publish(new TaskWorkflowActivityCompleted(
             profileId,
             task.Id,
@@ -99,15 +118,27 @@ internal sealed class WorkflowActivityRunner(
   }
 }
 
+/// <summary>
+/// Records the journal of activities executed during a task's workflow.
+/// </summary>
 internal sealed class TaskWorkflowJournal
 {
   private readonly List<StepReport> _steps = [];
   private int _activityIndex;
 
+  /// <summary>Gets the immutable list of recorded steps.</summary>
   public IReadOnlyList<StepReport> Steps => _steps;
 
+  /// <summary>
+  /// Increments the activity counter and returns the new index.
+  /// </summary>
+  /// <returns>The 1-based activity index.</returns>
   public int BeginActivity() => ++_activityIndex;
 
+  /// <summary>
+  /// Records an activity result in the journal if it is not null.
+  /// </summary>
+  /// <param name="step">The step report to record, or null to skip recording.</param>
   public void Record(StepReport? step)
   {
     if (step is not null)
