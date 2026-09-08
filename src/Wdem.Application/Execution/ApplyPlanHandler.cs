@@ -44,19 +44,28 @@ public sealed class ApplyPlanHandler(
         StringComparer.Ordinal);
     var allCts = new CancellationTokenSource();
     var state = new WorkflowStateStore(profile, plannedTaskIds, workflows, progress, updates);
-    var machine = new WorkflowStateMachine(
-        profile,
-        plannedTasks,
+    var activityRunner = new WorkflowActivityRunner(
+        profile.Id,
         runtime,
         activityExecutor,
-        workflows,
-        perTaskCts,
+        state,
+        domainEvents);
+    var machine = new WorkflowStateMachine(
+        profile.Id,
+        activityRunner,
         state,
         domainEvents,
         allCts.Token);
+    var scheduler = new WorkflowDagScheduler(
+        profile,
+        plannedTasks,
+        workflows,
+        perTaskCts,
+        machine,
+        allCts.Token);
 
     return new EnvironmentRun(
-        machine.RunAsync(),
+        scheduler.RunAsync(),
         allCts,
         perTaskCts,
         state);
