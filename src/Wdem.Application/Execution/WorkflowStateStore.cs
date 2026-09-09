@@ -13,6 +13,19 @@ namespace Wdem.Application.Execution;
 /// </summary>
 internal sealed class WorkflowStateStore
 {
+  /// <summary>Constants for progress calculation.</summary>
+  private static class ProgressConstants
+  {
+    /// <summary>Minimum progress percentage.</summary>
+    public const int MinPercent = 0;
+
+    /// <summary>Maximum progress percentage before completion (100% means done).</summary>
+    public const int MaxPercentInProgress = 99;
+
+    /// <summary>Completion percentage.</summary>
+    public const int CompletePercent = 100;
+  }
+
   private readonly Lock _gate = new();
   private readonly Dictionary<string, TaskState> _tasks;
   private readonly IProgress<WorkflowProgress>? _progress;
@@ -63,6 +76,12 @@ internal sealed class WorkflowStateStore
     }
   }
 
+  /// <summary>
+  /// Creates a ready snapshot with all tasks in Ready state and capable of being started.
+  /// </summary>
+  /// <param name="profile">The environment profile.</param>
+  /// <param name="workflows">Workflow definitions for each task.</param>
+  /// <returns>A snapshot representing the ready state.</returns>
   public static WorkflowSnapshot CreateReadySnapshot(
       EnvironmentProfile profile,
       IReadOnlyDictionary<string, TaskWorkflowDefinition> workflows)
@@ -91,6 +110,11 @@ internal sealed class WorkflowStateStore
         new ReadOnlyDictionary<string, WorkflowTaskSnapshot>(tasks));
   }
 
+  /// <summary>
+  /// Transitions a task from Pending to Ready state.
+  /// </summary>
+  /// <param name="taskId">The task identifier.</param>
+  /// <returns>True if transition succeeded; false if task was being cancelled.</returns>
   public bool MakeReady(string taskId)
   {
     lock (_gate)
@@ -120,6 +144,14 @@ internal sealed class WorkflowStateStore
     return true;
   }
 
+  /// <summary>
+  /// Records that a task has entered a workflow state.
+  /// </summary>
+  /// <param name="taskId">The task identifier.</param>
+  /// <param name="runtimeStateId">The workflow runtime state identifier.</param>
+  /// <param name="taskState">The execution state to transition to.</param>
+  /// <param name="displayName">The display name of the state.</param>
+  /// <returns>True if transition succeeded; false if task was being cancelled.</returns>
   public bool EnterState(
       string taskId,
       string runtimeStateId,
@@ -153,6 +185,16 @@ internal sealed class WorkflowStateStore
     return true;
   }
 
+  /// <summary>
+  /// Records that a workflow activity is beginning execution.
+  /// </summary>
+  /// <param name="taskId">The task identifier.</param>
+  /// <param name="runtimeStateId">The workflow runtime state identifier.</param>
+  /// <param name="taskState">The execution state to transition to.</param>
+  /// <param name="activity">The activity being executed.</param>
+  /// <param name="location">The location within the workflow (Entry/Residence/Exit).</param>
+  /// <param name="activityIndex">The activity index within the sequence.</param>
+  /// <returns>True if transition succeeded; false if task was being cancelled.</returns>
   public bool BeginActivity(
       string taskId,
       string runtimeStateId,
@@ -174,14 +216,12 @@ internal sealed class WorkflowStateStore
             $"Task '{taskId}' is not residing in workflow state '{runtimeStateId}'.");
       }
 
-      var percent = current.ActivityCount == 0
-          ? 0
-          : Math.Clamp((activityIndex - 1) * 100 / current.ActivityCount, 0, 99);
+      var progressPercent = CalculateProgressPercent(activityIndex, current.ActivityCount);
       _tasks[taskId] = current with
       {
         State = taskState,
         Stage = activity.DisplayName,
-        Percent = percent,
+        Percent = progressPercent,
         ActivityId = activity.Id,
         ActivityLocation = location,
         ActivityIndex = activityIndex
@@ -193,6 +233,13 @@ internal sealed class WorkflowStateStore
     return true;
   }
 
+  /// <summary>
+  /// Completes a task with the specified outcome.
+  /// </summary>
+  /// <param name="taskId">The task identifier.</param>
+  /// <param name="outcome">The desired task outcome.</param>
+  /// <param name="runtimeStateId">Optional runtime state identifier at completion.</param>
+  /// <returns>The effective outcome applied to the task.</returns>
   public TaskOutcome CompleteTask(
       string taskId,
       TaskOutcome outcome,
@@ -210,21 +257,13 @@ internal sealed class WorkflowStateStore
       effectiveOutcome = current.State == TaskExecutionState.Cancelling
           ? TaskOutcome.Cancelled
           : outcome;
-      var terminalState = effectiveOutcome switch
-      {
-        TaskOutcome.Succeeded => TaskExecutionState.Succeeded,
-        TaskOutcome.NotRequired => TaskExecutionState.Satisfied,
-        TaskOutcome.Failed => TaskExecutionState.Failed,
-        TaskOutcome.Cancelled => TaskExecutionState.Cancelled,
-        TaskOutcome.Blocked => TaskExecutionState.Blocked,
-        _ => TaskExecutionState.NotSelected
-      };
+      var terminalState = MapOutcomeToTerminalState(effectiveOutcome);
       _tasks[taskId] = current with
       {
         State = terminalState,
         RuntimeStateId = runtimeStateId ?? current.RuntimeStateId,
         Stage = null,
-        Percent = 100,
+        Percent = ProgressConstants.CompletePercent,
         Outcome = effectiveOutcome,
         ActivityId = null,
         ActivityLocation = null,
@@ -238,6 +277,12 @@ internal sealed class WorkflowStateStore
     return effectiveOutcome;
   }
 
+  /// <summary>
+  /// Publishes activity output to observers.
+  /// </summary>
+  /// <param name="taskId">The task identifier.</param>
+  /// <param name="message">The output message.</param>
+  /// <param name="stream">The output stream (stdout or stderr).</param>
   public void PublishOutput(
       string taskId,
       string message,
@@ -256,6 +301,11 @@ internal sealed class WorkflowStateStore
     PublishPending();
   }
 
+  /// <summary>
+  /// Requests cancellation of a specific task.
+  /// </summary>
+  /// <param name="taskId">The task identifier.</param>
+  /// <returns>True if cancellation request succeeded; false if task cannot be cancelled.</returns>
   public bool RequestCancelTask(string taskId)
   {
     lock (_gate)
@@ -280,6 +330,10 @@ internal sealed class WorkflowStateStore
     return true;
   }
 
+  /// <summary>
+  /// Requests cancellation of all planned tasks.
+  /// </summary>
+  /// <returns>True if cancellation succeeded; false if workflow is not running.</returns>
   public bool RequestCancelAll()
   {
     lock (_gate)
@@ -311,6 +365,10 @@ internal sealed class WorkflowStateStore
     return true;
   }
 
+  /// <summary>
+  /// Advances the workflow state and creates a new snapshot.
+  /// </summary>
+  /// <param name="change">Optional progress change to publish.</param>
   private void AdvanceLocked(WorkflowProgress? change)
   {
     _revision++;
@@ -318,6 +376,10 @@ internal sealed class WorkflowStateStore
     _pendingPublications.Enqueue(new WorkflowUpdate(_snapshot, change));
   }
 
+  /// <summary>
+  /// Creates an immutable snapshot of the current workflow state.
+  /// </summary>
+  /// <returns>A snapshot of all task states.</returns>
   private WorkflowSnapshot CreateSnapshotLocked()
   {
     var tasks = _tasks.ToDictionary(
@@ -330,6 +392,12 @@ internal sealed class WorkflowStateStore
         new ReadOnlyDictionary<string, WorkflowTaskSnapshot>(tasks));
   }
 
+  /// <summary>
+  /// Creates a snapshot for a single task with its current state and capabilities.
+  /// </summary>
+  /// <param name="taskId">The task identifier.</param>
+  /// <param name="task">The task state record.</param>
+  /// <returns>A snapshot of the task's current state.</returns>
   private WorkflowTaskSnapshot CreateTaskSnapshotLocked(string taskId, TaskState task) =>
       new WorkflowTaskSnapshot(
           taskId,
@@ -340,19 +408,32 @@ internal sealed class WorkflowStateStore
           task.IsPlanned,
           task.ActivityIndex,
           task.ActivityCount,
-          new TaskCapabilities(
-              CanStart: _runState is WorkflowRunState.Ready or WorkflowRunState.Completed,
-              CanCancel: _runState == WorkflowRunState.Running &&
-                  task.IsPlanned &&
-                  IsCancellable(task),
-              CanSelect: (_runState is WorkflowRunState.Ready or WorkflowRunState.Completed) &&
-                  !task.Required))
+          CreateTaskCapabilities(task))
       {
         RuntimeStateId = task.RuntimeStateId,
         ActivityId = task.ActivityId,
         ActivityLocation = task.ActivityLocation
       };
 
+  /// <summary>
+  /// Determines what actions are available for a task in its current state.
+  /// </summary>
+  /// <param name="task">The task state record.</param>
+  /// <returns>The capabilities available for this task.</returns>
+  private TaskCapabilities CreateTaskCapabilities(TaskState task) =>
+      new TaskCapabilities(
+          CanStart: _runState is WorkflowRunState.Ready or WorkflowRunState.Completed,
+          CanCancel: _runState == WorkflowRunState.Running &&
+              task.IsPlanned &&
+              IsCancellable(task),
+          CanSelect: (_runState is WorkflowRunState.Ready or WorkflowRunState.Completed) &&
+              !task.Required);
+
+  /// <summary>
+  /// Creates a progress update for a task.
+  /// </summary>
+  /// <param name="taskId">The task identifier.</param>
+  /// <returns>A progress report for the task.</returns>
   private WorkflowProgress CreateProgressLocked(string taskId)
   {
     var task = GetTaskLocked(taskId);
@@ -369,6 +450,9 @@ internal sealed class WorkflowStateStore
     };
   }
 
+  /// <summary>
+  /// Checks if all planned tasks are complete and transitions workflow to Completed state.
+  /// </summary>
   private void CompleteWorkflowIfTerminalLocked()
   {
     if (_tasks.Values.Where(task => task.IsPlanned).All(task => task.IsCompleted))
@@ -377,11 +461,20 @@ internal sealed class WorkflowStateStore
     }
   }
 
+  /// <summary>
+  /// Retrieves a task's state, throwing if not found.
+  /// </summary>
+  /// <param name="taskId">The task identifier.</param>
+  /// <returns>The task's state record.</returns>
+  /// <exception cref="ArgumentException">Thrown when task is not found.</exception>
   private TaskState GetTaskLocked(string taskId) =>
       _tasks.TryGetValue(taskId, out var task)
           ? task
           : throw new ArgumentException($"Unknown task id '{taskId}'.", nameof(taskId));
 
+  /// <summary>
+  /// Publishes pending workflow updates to all observers.
+  /// </summary>
   private void PublishPending()
   {
     lock (_gate)
@@ -427,9 +520,43 @@ internal sealed class WorkflowStateStore
     }
   }
 
+  /// <summary>
+  /// Determines if a task can be cancelled.
+  /// </summary>
+  /// <param name="task">The task state record.</param>
+  /// <returns>True if the task is not completed and not already cancelling.</returns>
   private static bool IsCancellable(TaskState task) =>
       !task.IsCompleted && task.State != TaskExecutionState.Cancelling;
 
+  /// <summary>
+  /// Maps a task outcome to its corresponding terminal execution state.
+  /// </summary>
+  /// <param name="outcome">The task outcome.</param>
+  /// <returns>The corresponding terminal execution state.</returns>
+  private static TaskExecutionState MapOutcomeToTerminalState(TaskOutcome outcome) => outcome switch
+  {
+    TaskOutcome.Succeeded => TaskExecutionState.Succeeded,
+    TaskOutcome.NotRequired => TaskExecutionState.Satisfied,
+    TaskOutcome.Failed => TaskExecutionState.Failed,
+    TaskOutcome.Cancelled => TaskExecutionState.Cancelled,
+    TaskOutcome.Blocked => TaskExecutionState.Blocked,
+    _ => TaskExecutionState.NotSelected
+  };
+
+  /// <summary>
+  /// Calculates the progress percentage for an ongoing activity.
+  /// </summary>
+  /// <param name="activityIndex">The current activity index.</param>
+  /// <param name="activityCount">The total number of activities.</param>
+  /// <returns>The progress percentage, clamped between 0 and 99.</returns>
+  private static int CalculateProgressPercent(int activityIndex, int activityCount) =>
+      activityCount == 0
+          ? ProgressConstants.MinPercent
+          : Math.Clamp((activityIndex - 1) * 100 / activityCount, ProgressConstants.MinPercent, ProgressConstants.MaxPercentInProgress);
+
+  /// <summary>
+  /// Immutable record representing the runtime state of a single task.
+  /// </summary>
   private sealed record TaskState(
       bool Required,
       bool IsPlanned,
@@ -443,6 +570,7 @@ internal sealed class WorkflowStateStore
       int ActivityIndex,
       int ActivityCount)
   {
+    /// <summary>True if the task has finished execution (planned and has an outcome).</summary>
     public bool IsCompleted => !IsPlanned || Outcome is not null;
   }
 }
